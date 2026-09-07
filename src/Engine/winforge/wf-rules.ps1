@@ -96,6 +96,9 @@ function Select-WinForgeRecommended {
     #>
     param([ValidateSet('Tweaks', 'Jogos', 'All')][string]$Tab = 'All')
 
+    # o botão existe antes do diagnóstico terminar: sem regras rodadas não há nada para marcar
+    if (-not $sync.Recommended) { return 0 }
+
     $count = 0
     foreach ($key in @($sync.Recommended.Keys)) {
         $control = $sync[$key]

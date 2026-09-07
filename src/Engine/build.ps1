@@ -58,6 +58,7 @@ $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
 $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
+$recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
@@ -170,6 +171,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($driversBlock.T
 # ---------------------------------------------------------------- regras de recomendação (motor)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.TrimEnd() + "`n`n") "insert rules"
 
+# ---------------------------------------------------------------- recomendações na interface (contornos, dicas, job)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.TrimEnd() + "`n`n") "insert reco ui"
+
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
           $wfLogoPaths = Get-WinForgeLogoPaths
@@ -206,6 +210,183 @@ $src = Replace-Once $src @'
                         if ($entryInfo.Description) { $button.ToolTip = $entryInfo.Description }
                         $stackPanelContainer.Children.Add($button) | Out-Null
 '@ "button tooltip"
+
+# ---------------------------------------------------------------- linha da grade dentro de um Border (contorno das recomendações)
+# O contorno não pode ir no DockPanel/StackPanel da linha: a busca esconde esses painéis por
+# Visibility e a borda sumiria junto com o layout. O Border embrulha a linha, guarda a chave na Tag
+# (é assim que Update-WinForgeRecommendationVisuals reencontra a linha) e é ele quem a busca esconde.
+# A linha do Combobox fica de fora: nenhuma regra recomenda combo, e embrulhá-la só criaria um
+# Border sem uso para a busca desembrulhar.
+$src = Replace-Once $src @'
+                        $stackPanelContainer.Children.Add($dockPanel) | Out-Null
+'@ @'
+                        $wfRow = New-Object Windows.Controls.Border; $wfRow.BorderThickness = "0"; $wfRow.CornerRadius = "4"; $wfRow.Padding = "3,0"; $wfRow.Margin = "0,1"; $wfRow.Tag = $entryInfo.Name; $wfRow.Child = $dockPanel
+                        $stackPanelContainer.Children.Add($wfRow) | Out-Null
+'@ "row border toggle"
+
+$src = Replace-Once $src @'
+                        $stackPanelContainer.Children.Add($horizontalStackPanel) | Out-Null
+                        $sync[$entryInfo.Name] = $checkBox
+'@ @'
+                        $wfRow = New-Object Windows.Controls.Border; $wfRow.BorderThickness = "0"; $wfRow.CornerRadius = "4"; $wfRow.Padding = "3,0"; $wfRow.Margin = "0,1"; $wfRow.Tag = $entryInfo.Name; $wfRow.Child = $horizontalStackPanel
+                        $stackPanelContainer.Children.Add($wfRow) | Out-Null
+                        $sync[$entryInfo.Name] = $checkBox
+'@ "row border checkbox"
+
+# ---------------------------------------------------------------- busca: desembrulha o Border da linha
+# Find-TweaksByNameOrDescription reconhece a linha por tipo (DockPanel/StackPanel) e esconde o
+# próprio $item. Com o Border no meio, nenhum ramo casaria e a busca deixaria tudo visível: aqui
+# $item passa a ser o conteúdo (para o casamento) e $wfVisual o que some/aparece (o Border).
+$src = Replace-Once $src @'
+                            # Show all items in the category
+                            foreach ($item in $items) {
+                                if ($null -ne $item) {
+                                    # Check if it's a category label (first Label in the container)
+                                    if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                        $item.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                    elseif ($item -is [Windows.Controls.DockPanel] -or $item -is [Windows.Controls.StackPanel] -or $item.GetType().Name -eq "DockPanel" -or $item.GetType().Name -eq "StackPanel") {
+                                        # Show all checkbox containers
+                                        $item.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                }
+                            }
+'@ @'
+                            # Show all items in the category
+                            foreach ($item in $items) {
+                                if ($null -ne $item) {
+                                    # WinForge: a linha vem embrulhada num Border (contorno das recomendações)
+                                    $wfVisual = $item
+                                    if ($item -is [Windows.Controls.Border] -and $item.Child) { $item = $item.Child }
+                                    # Check if it's a category label (first Label in the container)
+                                    if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                        $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                    elseif ($item -is [Windows.Controls.DockPanel] -or $item -is [Windows.Controls.StackPanel] -or $item.GetType().Name -eq "DockPanel" -or $item.GetType().Name -eq "StackPanel") {
+                                        # Show all checkbox containers
+                                        $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                }
+                            }
+'@ "search reset unwrap"
+
+$src = Replace-Once $src @'
+                        foreach ($item in $items) {
+                            if ($null -eq $item) {
+                                continue
+                            }
+'@ @'
+                        foreach ($item in $items) {
+                            if ($null -eq $item) {
+                                continue
+                            }
+
+                            # WinForge: a linha vem embrulhada num Border (contorno das recomendações)
+                            $wfVisual = $item
+                            if ($item -is [Windows.Controls.Border] -and $item.Child) { $item = $item.Child }
+'@ "search loop unwrap"
+
+$src = Replace-Once $src @'
+                            if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                $categoryLabel = $item
+                                # Initially hide category label; show it only if matches found
+                                $item.Visibility = [Windows.Visibility]::Collapsed
+                            }
+'@ @'
+                            if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                $categoryLabel = $item
+                                # Initially hide category label; show it only if matches found
+                                $wfVisual.Visibility = [Windows.Visibility]::Collapsed
+                            }
+'@ "search label visibility"
+
+$src = Replace-Once $src @'
+                                    $contentMatch = $labelContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $labelToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $item.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $item.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ @'
+                                    $contentMatch = $labelContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $labelToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ "search dockpanel visibility"
+
+$src = Replace-Once $src @'
+                                    $contentMatch = $checkboxContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $checkboxToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $item.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $item.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ @'
+                                    $contentMatch = $checkboxContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $checkboxToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ "search stackpanel visibility"
+
+# ---------------------------------------------------------------- contornos ao montar a aba
+# A janela abre na aba Instalar: quando o diagnóstico termina, Tweaks e Jogos ainda não existem.
+# Pintar de novo no fim de cada montagem é o que garante contorno em aba aberta depois.
+$src = Replace-Once $src @'
+    # Sync freshly built controls to any selections already in $sync.selected* (import/preset).
+    Reset-WPFCheckBoxes -doToggles $true
+}
+'@ @'
+    # Sync freshly built controls to any selections already in $sync.selected* (import/preset).
+    Reset-WPFCheckBoxes -doToggles $true
+
+    # WinForge: contorno/dica das recomendações nos controles recém-criados
+    Update-WinForgeRecommendationVisuals | Out-Null
+}
+'@ "tab init reco visuals"
 
 # ---------------------------------------------------------------- filtro de compatibilidade nas seleções (presets/import)
 $src = Replace-Once $src @'
@@ -331,6 +512,8 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFGamesApplyButton" {Invoke-WPFtweaksbutton}
         "WPFGamesUndoButton" {Invoke-WPFundoall}
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
+        "WPFSelectRecommended" {Select-WinForgeRecommended -Tab "Tweaks" | Out-Null}
+        "WPFGamesSelectRecommended" {Select-WinForgeRecommended -Tab "Jogos" | Out-Null}
 '@.TrimEnd() "button switch"
 
 # ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
@@ -510,7 +693,14 @@ if ($SelfTest) {
         if (-not $r.Discouraged.Contains($wbCase[1])) { Write-Host "  [ERRO] regras ($($wbCase[0])): '$($wbCase[1])' deveria estar em Evitar" -ForegroundColor Red; $wbErrors++ }
         if ($r.Recommended.Contains($wbCase[1])) { Write-Host "  [ERRO] regras ($($wbCase[0])): '$($wbCase[1])' evitado mas ainda recomendado" -ForegroundColor Red; $wbErrors++ }
     }
+    # 'Finalizar tarefa' é recurso do Windows 11: no 10 a regra não pode disparar (a chave existe nas duas)
+    if ($wbSims['win10']) {
+        $wbW10 = Invoke-WinForgeRules -Profile $wbSims['win10']
+        if ($wbW10.Recommended.Contains('WPFTweaksEndTaskOnTaskbar')) { Write-Host "  [ERRO] regras (win10): 'WPFTweaksEndTaskOnTaskbar' não deveria ser recomendado" -ForegroundColor Red; $wbErrors++ }
+    }
     # por último o perfil real, para que $sync.Recommended fique com o desta máquina
+    # (Invoke-WinForgeRules sobrescreve $sync.Recommended: as simulações acima deixaram lixo lá)
+    $sync.Profile = $wbProfile
     $wbRules = Invoke-WinForgeRules -Profile $wbProfile
     Write-Host "  Regras: $($wbRules.Fired.Count) disparadas no perfil real -> $($wbRules.Recommended.Count) recomendados, $($wbRules.Discouraged.Count) evitados, $($wbRules.Infos.Count) infos"
     Write-Host "    disparadas : $($wbRules.Fired -join ', ')"
@@ -546,7 +736,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
@@ -572,6 +762,37 @@ if ($SelfTest) {
         foreach ($n in @($wbHidden) + @($wbHiddenAppx)) {
             if ($null -ne $sync[$n]) { Write-Host "  [ERRO] controle oculto '$n' foi criado mesmo assim" -ForegroundColor Red; $wbErrors++ }
         }
+        # Contornos: Update-WinForgeRecommendationVisuals roda no fim de cada montagem de aba, então
+        # o perfil real já tem de ter pintado alguma linha aqui (as regras rodaram antes do mount).
+        try {
+            $wbPintadas = @(@($sync.Recommended.Keys) + @($sync.Discouraged.Keys) | Sort-Object -Unique | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush })
+            if (@($sync.Recommended.Keys).Count -gt 0 -and $wbPintadas.Count -eq 0) { Write-Host "  [ERRO] contornos: nenhuma linha recebeu BorderBrush" -ForegroundColor Red; $wbErrors++ }
+            # idempotência: a segunda passada não pode empilhar prefixo nem perder a dica original
+            if ($wbPintadas.Count -gt 0) {
+                $wbTipAntes = [string]$wbPintadas[0].Tip.ToolTip
+                Update-WinForgeRecommendationVisuals | Out-Null
+                $wbTipDepois = [string]$wbPintadas[0].Tip.ToolTip
+                if ($wbTipAntes -ne $wbTipDepois) { Write-Host "  [ERRO] contornos: dica mudou na segunda passada (prefixo empilhado?)" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wbPintadas[0].Border.BorderBrush) { Write-Host "  [ERRO] contornos: BorderBrush perdido na segunda passada" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Contornos: $($wbPintadas.Count) linha(s) com contorno de recomendação"
+        } catch {
+            Write-Host "  [ERRO] contornos: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Busca com as linhas embrulhadas em Border: quem some/aparece é o Border, não o painel interno
+        try {
+            $sync.currentTab = "Tweaks"
+            $wbBordaCortana = (Get-WinForgeRecoRow -Key 'WPFTweaksWBCortana').Border
+            $wbBordaActivity = (Get-WinForgeRecoRow -Key 'WPFTweaksActivity').Border
+            Find-TweaksByNameOrDescription -SearchString 'Cortana'
+            if ($wbBordaCortana.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] busca 'Cortana': WPFTweaksWBCortana deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+            if ($wbBordaActivity.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] busca 'Cortana': WPFTweaksActivity deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+            Find-TweaksByNameOrDescription -SearchString ""
+            if ($wbBordaCortana.Visibility -ne [Windows.Visibility]::Visible -or $wbBordaActivity.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] busca vazia: as duas linhas deveriam voltar a aparecer" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Busca: filtro e reset OK com as linhas embrulhadas em Border"
+        } catch {
+            Write-Host "  [ERRO] busca: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
         try {
             Invoke-WPFPresets "Gamer" -checkboxfilterpattern "WPFTweak*"
             Write-Host "  Preset Gamer: $($sync.selectedTweaks.Count) tweaks selecionados -> $($sync.selectedTweaks -join ', ')"
@@ -586,8 +807,12 @@ if ($SelfTest) {
             $wbSelJogos  = Select-WinForgeRecommended -Tab "Jogos"
             $wbSelAll    = Select-WinForgeRecommended -Tab "All"
             if ($wbSelAll -ne ($wbSelTweaks + $wbSelJogos)) { Write-Host "  [ERRO] Select-WinForgeRecommended: All ($wbSelAll) != Tweaks ($wbSelTweaks) + Jogos ($wbSelJogos)" -ForegroundColor Red; $wbErrors++ }
+            if ($wbSelAll -le 0) { Write-Host "  [ERRO] Select-WinForgeRecommended: nenhuma caixa marcada no perfil real" -ForegroundColor Red; $wbErrors++ }
             foreach ($k in @($sync.Recommended.Keys)) {
-                if ($sync[$k] -is [System.Windows.Controls.CheckBox] -and -not $sync[$k].IsChecked) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não foi marcado" -ForegroundColor Red; $wbErrors++ }
+                if ($sync[$k] -isnot [System.Windows.Controls.CheckBox]) { continue }
+                if (-not $sync[$k].IsChecked) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não foi marcado" -ForegroundColor Red; $wbErrors++ }
+                # marcar dispara o handler Checked, que é quem alimenta $sync.selectedTweaks
+                if ($k -like 'WPFTweaks*' -and -not $sync.selectedTweaks.Contains($k)) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não entrou em selectedTweaks" -ForegroundColor Red; $wbErrors++ }
             }
             Write-Host "  Recomendados marcados: $wbSelAll (Tweaks $wbSelTweaks, Jogos $wbSelJogos) | selectedTweaks=$($sync.selectedTweaks.Count)"
         } catch {
@@ -650,6 +875,9 @@ $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windo
     # WinForge: avisa o launcher que a janela apareceu (fecha o splash)
     Send-WinForgeReady
 
+    # WinForge: diagnóstico do sistema em segundo plano (perfil + regras -> contornos e aba Diagnóstico)
+    $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{ Start-WinForgeProfileJob }) | Out-Null
+
     # WinForge: pergunta (opcional) sobre ponto de restauração depois que a janela aparece
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null
 '@.TrimEnd() "restore prompt hook"
@@ -689,6 +917,7 @@ $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
                                     <Button Name="WPFPresetWinForge" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Standard + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (WinForge)."/>
+                                    <Button Name="WPFSelectRecommended" Content=" Marcar recomendados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca os itens que o diagnóstico recomenda para este PC (contorno verde)."/>
 '@.TrimEnd() "xaml preset button"
 
 $src = Insert-After $src '                                    <Button Name="WPFDefaultAppxSelection" Content=" Default " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
