@@ -18,6 +18,10 @@ function Read-Lf([string]$path) {
 }
 
 function Replace-Once([string]$text, [string]$old, [string]$new, [string]$what) {
+    # $text vem de Read-Lf (só LF). As âncoras são here-strings deste arquivo, que o git entrega
+    # com CRLF quando core.autocrlf está ligado - sem normalizar, nenhuma âncora de várias linhas casa.
+    $old = $old -replace "`r`n", "`n"
+    $new = $new -replace "`r`n", "`n"
     $idx = $text.IndexOf($old, [StringComparison]::Ordinal)
     if ($idx -lt 0) { throw "Âncora não encontrada: $what" }
     $idx2 = $text.IndexOf($old, $idx + 1, [StringComparison]::Ordinal)
@@ -34,6 +38,9 @@ function Insert-After([string]$text, [string]$anchor, [string]$block, [string]$w
 }
 
 function Replace-Between([string]$text, [string]$startAnchor, [string]$endAnchor, [string]$new, [string]$what) {
+    $startAnchor = $startAnchor -replace "`r`n", "`n"
+    $endAnchor   = $endAnchor   -replace "`r`n", "`n"
+    $new         = $new         -replace "`r`n", "`n"
     $s = $text.IndexOf($startAnchor, [StringComparison]::Ordinal)
     if ($s -lt 0) { throw "Âncora inicial não encontrada: $what" }
     if ($text.IndexOf($startAnchor, $s + 1, [StringComparison]::Ordinal) -ge 0) { throw "Âncora inicial ambígua: $what" }
@@ -44,6 +51,7 @@ function Replace-Between([string]$text, [string]$startAnchor, [string]$endAnchor
 
 $src            = Read-Lf $Source
 $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
+$assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
@@ -124,6 +132,23 @@ $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawU
 # ---------------------------------------------------------------- funções e configs
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
+
+# ---------------------------------------------------------------- logo
+$src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
+
+# troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
+$src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
+          $wfLogoPaths = Get-WinForgeLogoPaths
+
+'@ "logo paths"
+
+$src = Replace-Once $src @'
+          $canvas.Children.Add($LogoPath1) | Out-Null
+          $canvas.Children.Add($LogoPath2) | Out-Null
+          $canvas.Children.Add($LogoPath3) | Out-Null
+'@ @'
+          foreach ($wfPath in $wfLogoPaths) { $canvas.Children.Add($wfPath) | Out-Null }
+'@ "logo add"
 
 # ---------------------------------------------------------------- filtro de compatibilidade na UI
 $src = Replace-Once $src @'
@@ -367,6 +392,10 @@ if ($SelfTest) {
     $wbHiddenAppx = @($sync.configs.appx.PSObject.Properties | Where-Object { -not (Test-WinUtilBoostEntryCompatible $_.Value) } | ForEach-Object { $_.Name })
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
+    # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbTweaksTab.PSObject.Properties).Count -ne 80) { Write-Host "  [ERRO] aba Tweaks: esperado 80 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     Write-Host "  Ocultos neste sistema (tweaks): $($wbHidden.Count) -> $($wbHidden -join ', ')"
     Write-Host "  Ocultos neste sistema (appx)  : $($wbHiddenAppx.Count) -> $($wbHiddenAppx -join ', ')"
     try {
@@ -394,6 +423,8 @@ if ($SelfTest) {
                 Write-Host "  [ERRO] montar aba $tab`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
             }
         }
+        $wbLogo = Invoke-WinForgeAssets -Type "logo" -Size 25
+        if ($null -eq $wbLogo -or @($wbLogo.Child.Children).Count -ne 4) { Write-Host "  [ERRO] logo: esperado 4 paths no canvas" -ForegroundColor Red; $wbErrors++ } else { Write-Host "  Logo: OK" }
         foreach ($n in 'WPFTweaksWBGameCS2','WPFTweaksWBGameDVR','WPFToggleWBHAGS','WPFTweaksWBPowerSettings','WPFPanelWBClearRam','WPFTweaksWBNvidiaShaderCache') {
             if ($null -eq $sync[$n]) { Write-Host "  [ERRO] controle '$n' não foi criado" -ForegroundColor Red; $wbErrors++ }
         }

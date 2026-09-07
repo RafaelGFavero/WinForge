@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256" role="img" aria-labelledby="wf-title">
+  <title id="wf-title">WinForge</title>
+  <path fill="#5B6470" d="M 6,56 L 94,56 L 94,70 L 62,70 L 62,80 L 78,92 L 22,92 L 38,80 L 38,70 L 18,70 L 6,61 Z"/>
+  <path fill="#3F4650" d="M 6,56 L 18,70 L 6,61 Z M 88,56 C 96,53 98,63 94,70 Z"/>
+  <path fill="#FF7A1A" d="M 14,8 L 28,8 L 35,30 L 41,15 L 51,15 L 57,30 L 64,8 L 78,8 L 62,50 L 51,50 L 46,33 L 41,50 L 30,50 Z"/>
+  <path fill="#FFB347" d="M 88,8 L 91,13 L 96,16 L 91,19 L 88,24 L 85,19 L 80,16 L 85,13 Z"/>
+</svg>
