@@ -52,6 +52,7 @@ function Replace-Between([string]$text, [string]$startAnchor, [string]$endAnchor
 $src            = Read-Lf $Source
 $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
 $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
+$launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
@@ -87,6 +88,10 @@ $src = Replace-Once $src @'
     Valida configurações e XAML e sai (não exige administrador).
 .PARAMETER NoElevation
     Abre a interface sem exigir administrador (só para testar a interface; os tweaks falham sem admin).
+.PARAMETER ReadyEvent
+    Nome do EventWaitHandle que o WinForge.exe cria para saber quando a janela apareceu (fecha o splash).
+.PARAMETER Console
+    Reservado para o launcher: mantém a janela de console visível.
 
 .NOTES
     Windows Boost 1.0.0
@@ -103,7 +108,9 @@ $src = Replace-Once $src @'
     [switch]$RestorePoint,
     [switch]$NoRestorePoint,
     [switch]$SelfTest,
-    [switch]$NoElevation
+    [switch]$NoElevation,
+    [string]$ReadyEvent,
+    [switch]$Console
 )
 '@ "param block"
 
@@ -123,6 +130,7 @@ $sync.ScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) 
 $sync.ForceRestorePoint = [bool]$RestorePoint
 $sync.NoRestorePointPrompt = [bool]$NoRestorePoint
 $sync.RestorePointCreated = $false
+$sync.ReadyEventName = $ReadyEvent
 '@ "sync init"
 
 $src = Replace-Once $src '$winutildir = "$env:LocalAppData\winutil"' '$winutildir = "$env:LocalAppData\WindowsBoost"' "winutildir"
@@ -135,6 +143,9 @@ $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "i
 
 # ---------------------------------------------------------------- logo
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
+
+# ---------------------------------------------------------------- integração com o launcher (WinForge.exe)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($launcherBlock.TrimEnd() + "`n`n") "insert launcher"
 
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
@@ -474,9 +485,26 @@ $sync["SponsorMenuItem"].Add_Click({
 
 $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{ Initialize-WinUtilTaskbarOverlayAssets -IncludeLogo $false -IncludeStatusAssets $true }) | Out-Null' @'
 
+    # WinForge: avisa o launcher que a janela apareceu (fecha o splash)
+    Send-WinForgeReady
+
     # Windows Boost: pergunta (opcional) sobre ponto de restauração depois que a janela aparece
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null
 '@.TrimEnd() "restore prompt hook"
+
+# ---------------------------------------------------------------- falha ao carregar o XAML: libera o launcher e sai com 2
+$src = Replace-Once $src @'
+    Write-Host "Quitting WinUtil..." -ForegroundColor Red
+    Close-WinUtilRunspacePool
+    [System.GC]::Collect()
+    exit 1
+'@ @'
+    Write-Host "Quitting WinUtil..." -ForegroundColor Red
+    Close-WinUtilRunspacePool
+    [System.GC]::Collect()
+    Send-WinForgeReady -Failed
+    exit 2
+'@ "xaml failure exit"
 
 $src = Replace-Once $src '    $winutilTextBlock.Text = "WinUtil"' '    $winutilTextBlock.Text = "Windows Boost"' "dialog logo text"
 
