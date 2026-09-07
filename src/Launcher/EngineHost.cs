@@ -31,6 +31,13 @@ namespace WinForge
             return Path.Combine(localAppData, "WinForge", "engine", version, "WinForge.ps1");
         }
 
+        /// <summary>
+        /// Comparação de hash com o arquivo em disco. ATENÇÃO: não é mais usada por
+        /// <see cref="EnsureEngine"/> e não serve como controle de segurança — um usuário comum
+        /// pode pré-plantar um WinForge.ps1 com o conteúdo (e portanto o hash) do motor embutido
+        /// mas com DACL própria, e depois trocar o conteúdo entre a conferência e a execução.
+        /// Continua aqui só como utilitário de diagnóstico.
+        /// </summary>
         public static bool NeedsExtract(string targetFile, string expectedHash)
         {
             if (!File.Exists(targetFile)) return true;
@@ -83,6 +90,33 @@ namespace WinForge
         }
 
         /// <summary>
+        /// ACL dos arquivos do motor, espelhando a da pasta: administradores e SYSTEM com controle
+        /// total, usuários só leem e executam, DACL protegida (não herda nada) e dono
+        /// BUILTIN\Administrators. Arquivos não propagam herança, então sem flags de herança.
+        /// </summary>
+        public static FileSecurity BuildFileSecurity()
+        {
+            return BuildFileSecurity(true);
+        }
+
+        internal static FileSecurity BuildFileSecurity(bool setOwner)
+        {
+            var security = new FileSecurity();
+            security.SetAccessRuleProtection(true, false);
+            if (setOwner) security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                FileSystemRights.FullControl, InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                FileSystemRights.FullControl, InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                FileSystemRights.ReadAndExecute, InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
+            return security;
+        }
+
+        /// <summary>
         /// Os três níveis que precisam da ACL protegida, do mais externo para o mais interno:
         /// %ProgramData%\WinForge, ...\engine e ...\engine\&lt;versão&gt;. Não basta proteger a base:
         /// como os usuários têm travessia nela, um atacante que pré-crie engine\&lt;versão&gt; com DACL
@@ -106,16 +140,17 @@ namespace WinForge
             var path = EnginePath(root, version);
             var dir = Path.GetDirectoryName(path);
 
-            var extracted = false;
-            if (NeedsExtract(path, hash))
-            {
-                File.WriteAllBytes(path, bytes);
-                File.WriteAllText(path + ".sha256", hash);
-                extracted = true;
-            }
+            // Recria os quatro arquivos em toda execução, sempre com a ACL protegida. O antigo
+            // atalho "hash bate, não extrai" era o furo: um usuário comum podia pré-plantar o
+            // WinForge.ps1 com exatamente o conteúdo embutido (hash idêntico) e DACL própria; o
+            // carimbo da pasta não toca em filhos com DACL protegida, a conferência de hash
+            // passava e o launcher executava um arquivo que o atacante ainda controlava. Custo de
+            // reescrever tudo: ~830 KB por execução.
+            WriteProtectedFile(path, bytes);
+            WriteProtectedFile(path + ".sha256", Encoding.UTF8.GetBytes(hash));
             // atribuição MIT sempre ao lado do motor (o diálogo de Créditos abre o NOTICE.txt)
-            ExtractResource(NoticeResourceName, Path.Combine(dir, "NOTICE.txt"), extracted);
-            ExtractResource(LicenseResourceName, Path.Combine(dir, "LICENSE.txt"), extracted);
+            WriteProtectedFile(Path.Combine(dir, "NOTICE.txt"), ReadEmbeddedResource(NoticeResourceName));
+            WriteProtectedFile(Path.Combine(dir, "LICENSE.txt"), ReadEmbeddedResource(LicenseResourceName));
             return path;
         }
 
@@ -135,8 +170,9 @@ namespace WinForge
             // de Directory.CreateDirectory(path, security) e InvalidOperationException vindo de
             // DirectoryInfo.SetAccessControl (UnauthorizedAccessException cobre
             // PrivilegeNotHeldException). Falha de E/S de verdade estoura de novo na 2ª tentativa.
-            // Recusa de link/junction não é problema de dono: estoura direto, sem log enganoso.
-            catch (Exception ex) when (!(ex is ReparsePointRejectedException)
+            // Recusa de alvo (link/junction, pasta no lugar do arquivo, arquivo que não pôde ser
+            // removido) não é problema de dono: estoura direto, sem log enganoso.
+            catch (Exception ex) when (!(ex is IUnsafeTargetRefusal)
                 && (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException))
             {
                 LogOwnerFailure(ex.Message);
@@ -146,17 +182,80 @@ namespace WinForge
         }
 
         /// <summary>
+        /// Escreve o arquivo já com a ACL protegida, com a mesma queda para "sem dono" da
+        /// <see cref="ProtectDirectory"/>: doar a posse ao grupo Administradores exige um token
+        /// elevado; sem ele, registra, repete sem dono e confere o dono efetivo.
+        /// </summary>
+        internal static void WriteProtectedFile(string path, byte[] content)
+        {
+            try
+            {
+                WriteProtectedFile(path, content, BuildFileSecurity(true));
+            }
+            catch (Exception ex) when (!(ex is IUnsafeTargetRefusal)
+                && (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException))
+            {
+                LogOwnerFailure(ex.Message);
+                WriteProtectedFile(path, content, BuildFileSecurity(false));
+                EnsureAcceptableOwner(new FileInfo(path).GetAccessControl(), path);
+            }
+        }
+
+        /// <summary>
+        /// Apaga o que estiver no caminho e cria o arquivo do zero com a ACL protegida. Recriar em
+        /// vez de sobrescrever é o ponto: <c>File.WriteAllBytes</c> num arquivo pré-plantado
+        /// mantém a DACL do atacante, e carimbar a ACL por cima de um arquivo alheio ainda deixa
+        /// o dono original com WRITE_DAC. Link, pasta no lugar do arquivo ou remoção que falha
+        /// são recusados fechado — nunca se escreve num alvo que não é nosso.
+        /// </summary>
+        internal static void WriteProtectedFile(string path, byte[] content, FileSecurity security)
+        {
+            var asDirectory = new DirectoryInfo(path);
+            if (asDirectory.Exists)
+            {
+                throw new UnsafeTargetException("Caminho " + path
+                    + ((asDirectory.Attributes & FileAttributes.ReparsePoint) != 0
+                        ? " é um link/junction; recusando por segurança."
+                        : " é uma pasta; recusando por segurança."));
+            }
+
+            var info = new FileInfo(path);
+            if (info.Exists)
+            {
+                if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new UnsafeTargetException("Arquivo " + path + " é um link; recusando por segurança.");
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+                {
+                    throw new FileReplaceRefusedException("Arquivo " + path
+                        + " não pôde ser substituído; recusando por segurança.", ex);
+                }
+            }
+
+            // CreateNew: se alguém recriar o arquivo entre o Delete e aqui, a criação falha em vez
+            // de aceitar o arquivo do atacante. A ACL vai junto na criação, sem janela aberta.
+            using (var stream = new FileStream(path, FileMode.CreateNew, FileSystemRights.Write,
+                FileShare.None, 4096, FileOptions.None, security))
+            {
+                stream.Write(content, 0, content.Length);
+            }
+        }
+
+        /// <summary>
         /// DACL protegida sobre dono alheio não é proteção nenhuma: o dono de um objeto mantém
         /// WRITE_DAC implícito e reescreve a ACL quando quiser. Se a posse não pôde ser assumida e
         /// o dono efetivo não é Administradores nem SYSTEM, recusa fechado em vez de seguir com a
         /// falsa sensação de pasta protegida.
         /// </summary>
-        internal static void EnsureAcceptableOwner(DirectorySecurity acl, string dir)
+        internal static void EnsureAcceptableOwner(FileSystemSecurity acl, string path)
         {
             var owner = acl.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
             if (owner != null && (owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)
                 || owner.IsWellKnown(WellKnownSidType.LocalSystemSid))) return;
-            throw new UnauthorizedAccessException("Pasta " + dir + " pertence a outro usuário ("
+            throw new UnauthorizedAccessException("Caminho " + path + " pertence a outro usuário ("
                 + owner + ") e o WinForge não conseguiu assumir a propriedade; recusando por segurança.");
         }
 
@@ -175,15 +274,25 @@ namespace WinForge
             if (!info.Exists) Directory.CreateDirectory(dir, security);
             info.Refresh();
             if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new ReparsePointRejectedException("Pasta " + dir + " é um link/junction; recusando por segurança.");
+                throw new UnsafeTargetException("Pasta " + dir + " é um link/junction; recusando por segurança.");
             info.SetAccessControl(security);
         }
 
-        /// <summary>Recusa de link/junction: é IOException para quem chama, mas não dispara a
-        /// segunda tentativa sem dono — o problema não é o dono.</summary>
-        private sealed class ReparsePointRejectedException : IOException
+        /// <summary>Marca as recusas de alvo: continuam sendo IOException/UnauthorizedAccessException
+        /// para quem chama, mas não disparam a segunda tentativa sem dono — o problema não é o dono.</summary>
+        private interface IUnsafeTargetRefusal { }
+
+        /// <summary>Alvo inaceitável (link/junction, ou pasta onde deveria haver arquivo).</summary>
+        private sealed class UnsafeTargetException : IOException, IUnsafeTargetRefusal
         {
-            public ReparsePointRejectedException(string message) : base(message) { }
+            public UnsafeTargetException(string message) : base(message) { }
+        }
+
+        /// <summary>Arquivo pré-existente que não pôde ser removido: sobrescrever manteria a DACL
+        /// e o dono do atacante, então recusa fechado.</summary>
+        private sealed class FileReplaceRefusedException : UnauthorizedAccessException, IUnsafeTargetRefusal
+        {
+            public FileReplaceRefusedException(string message, Exception inner) : base(message, inner) { }
         }
 
         private static void LogOwnerFailure(string message)
@@ -199,12 +308,6 @@ namespace WinForge
             }
             // log é acessório: nenhuma falha aqui pode impedir a 2ª tentativa sem dono.
             catch (Exception) { }
-        }
-
-        private static void ExtractResource(string resourceName, string targetFile, bool force)
-        {
-            if (!force && File.Exists(targetFile)) return;
-            File.WriteAllBytes(targetFile, ReadEmbeddedResource(resourceName));
         }
 
         public static string BuildArguments(string enginePath, string readyEvent, string[] passthrough, bool hideWindow)
