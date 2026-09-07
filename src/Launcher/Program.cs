@@ -45,6 +45,12 @@ namespace WinForge
                             // atribui já dentro do lock: se algo estourar antes de sair daqui, o
                             // catch de baixo ainda encontra o processo para matar
                             engine = EngineHost.Start(enginePath, readyName, args, hideWindow: !console && !selfTest);
+                            // Residual aceito: os 500 ms são heurística, não sincronização - não há
+                            // sinal de "o powershell.exe já abriu o script". Se uma máquina muito
+                            // lenta estourar esse prazo e um segundo launcher recriar o .ps1 no
+                            // intervalo, o pior caso é a PRIMEIRA instância não achar o arquivo e
+                            // sair com erro. Não é brecha de segurança: o arquivo recriado tem a
+                            // mesma ACL protegida e vem do mesmo executável assinado.
                             Thread.Sleep(500);
                             return engine;
                         });

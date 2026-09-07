@@ -16,6 +16,11 @@ jobs:
       - name: Engine
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File src\Engine\build.ps1
+      # docs\auditoria.md e gerado pelo build e commitado: se o build acabou de reescrever o arquivo,
+      # o que esta no repositorio estava velho.
+      - name: Auditoria atualizada
+        shell: powershell
+        run: git diff --exit-code -- docs/auditoria.md
       - name: SelfTest
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File dist\engine\WinForge.ps1 -SelfTest

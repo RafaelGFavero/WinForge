@@ -189,8 +189,11 @@ public class EngineHostTests
     public void ProtectDirectory_ForeignOwnerWithoutOwnerAssignment_Throws()
     {
         // DACL protegida sobre dono alheio não protege nada: o dono mantém WRITE_DAC implícito.
+        // SID fixo, não o do usuário do teste: rodando como SYSTEM ou como Administrators (CI
+        // elevado), WindowsIdentity.GetCurrent().User seria um dono aceitável e o teste passaria
+        // verde sem testar nada.
         var acl = EngineHost.BuildDirectorySecurity(false);
-        acl.SetOwner(WindowsIdentity.GetCurrent().User);
+        acl.SetOwner(new SecurityIdentifier("S-1-5-21-1-2-3-1001"));
 
         var ex = Assert.Throws<UnauthorizedAccessException>(
             () => EngineHost.EnsureAcceptableOwner(acl, @"C:\ProgramData\WinForge"));

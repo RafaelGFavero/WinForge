@@ -241,7 +241,7 @@ namespace WinForge
             catch (Exception ex) when (!(ex is IUnsafeTargetRefusal)
                 && (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException))
             {
-                LogOwnerFailure(ex.Message);
+                LogOwnerFailure(dir, ex.Message);
                 CreateOrProtect(dir, BuildDirectorySecurity(false));
                 EnsureAcceptableOwner(new DirectoryInfo(dir).GetAccessControl(), dir);
             }
@@ -261,7 +261,7 @@ namespace WinForge
             catch (Exception ex) when (!(ex is IUnsafeTargetRefusal)
                 && (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException))
             {
-                LogOwnerFailure(ex.Message);
+                LogOwnerFailure(path, ex.Message);
                 WriteProtectedFile(path, content, BuildFileSecurity(false));
                 EnsureAcceptableOwner(new FileInfo(path).GetAccessControl(), path);
             }
@@ -382,6 +382,12 @@ namespace WinForge
             info.Refresh();
             if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new UnsafeTargetException("Pasta " + dir + " é um link/junction; recusando por segurança.");
+            // Residual aceito: entre a checagem de reparse point acima e o SetAccessControl abaixo há
+            // uma janela em que a pasta poderia virar junction (TOCTOU por caminho). Ela só existe
+            // antes do primeiro carimbo bem-sucedido: depois disso os pais negam Delete a Users, e
+            // sem apagar a pasta não dá para pôr um link no lugar dela. Fechar de vez exigiria abrir
+            // um handle com FILE_FLAG_OPEN_REPARSE_POINT e aplicar a ACL por SetSecurityInfo(handle),
+            // fora do que System.Security.AccessControl expõe (P/Invoke).
             info.SetAccessControl(security);
         }
 
@@ -412,7 +418,7 @@ namespace WinForge
         /// de sistema para o launcher acrescentar texto onde não devia. O log de eventos não tem esse
         /// problema — o caminho é do sistema e o serviço faz a escrita.
         /// </summary>
-        private static void LogOwnerFailure(string message)
+        private static void LogOwnerFailure(string dir, string message)
         {
             try
             {
@@ -420,7 +426,12 @@ namespace WinForge
                 var flat = message.Replace('\r', ' ').Replace('\n', ' ').Trim();
                 // criar a origem exige elevação — que o launcher tem (requireAdministrator)
                 if (!EventLog.SourceExists(EventLogSource)) EventLog.CreateEventSource(EventLogSource, "Application");
-                EventLog.WriteEntry(EventLogSource, "owner not set: " + flat, EventLogEntryType.Warning, OwnerFailureEventId);
+                // O texto não afirma "falta de privilégio": o catch que chama aqui aceita qualquer
+                // IOException/InvalidOperationException, e disco cheio ou erro de E/S cairia no
+                // mesmo lugar. Diz o que se sabe - a 1ª tentativa falhou e vai haver uma 2ª.
+                EventLog.WriteEntry(EventLogSource,
+                    "Não foi possível definir o dono/ACL em " + dir + " na primeira tentativa (" + flat + "); tentando sem definir o dono.",
+                    EventLogEntryType.Warning, OwnerFailureEventId);
             }
             // log é acessório: nenhuma falha aqui pode impedir a 2ª tentativa sem dono.
             catch (Exception) { }
