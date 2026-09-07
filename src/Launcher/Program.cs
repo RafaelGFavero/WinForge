@@ -29,10 +29,25 @@ namespace WinForge
                 Process engine = null;
                 try
                 {
-                    var enginePath = EngineHost.EnsureEngine(version);
                     using (var ready = new EventWaitHandle(false, EventResetMode.ManualReset, readyName))
                     {
-                        engine = EngineHost.Start(enginePath, readyName, args, hideWindow: !console && !selfTest);
+                        // Extração e partida do motor sob o mesmo mutex: um segundo launcher não pode
+                        // apagar e recriar o .ps1 entre a extração e o Process.Start deste. Depois que
+                        // o powershell.exe já leu o script, soltar é seguro — ele carrega o arquivo
+                        // apontado por -File inteiro na análise inicial e fecha o handle antes de
+                        // executar, então a recriação seguinte não afeta quem já está rodando. Os
+                        // 500 ms cobrem a janela entre Process.Start retornar (processo criado) e o
+                        // powershell efetivamente abrir o arquivo; sem WaitForInputIdle, que só vale
+                        // para processos com fila de mensagens.
+                        engine = EngineHost.WithEngineLock(() =>
+                        {
+                            var enginePath = EngineHost.EnsureEngine(version);
+                            // atribui já dentro do lock: se algo estourar antes de sair daqui, o
+                            // catch de baixo ainda encontra o processo para matar
+                            engine = EngineHost.Start(enginePath, readyName, args, hideWindow: !console && !selfTest);
+                            Thread.Sleep(500);
+                            return engine;
+                        });
                         splash.Dispatcher.Invoke(() => splash.SetStatus("Carregando a interface..."));
                         var handles = new WaitHandle[] { ready, new ProcessWaitHandle(engine) };
                         int signaled = WaitHandle.WaitAny(handles, TimeSpan.FromSeconds(90));

@@ -1,11 +1,11 @@
 using System;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 
 namespace WinForge
 {
@@ -129,6 +129,72 @@ namespace WinForge
             return new[] { baseDir, engineDir, Path.Combine(engineDir, version) };
         }
 
+        /// <summary>Mutex de máquina que serializa a extração do motor entre launchers.</summary>
+        internal const string EngineLockName = @"Global\WinForge.EngineExtract";
+        private static readonly TimeSpan EngineLockTimeout = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// DACL do mutex: só Administradores e SYSTEM. O launcher sempre roda elevado
+        /// (requireAdministrator no manifesto), então ninguém legítimo fica de fora — e um usuário
+        /// comum não consegue criar/segurar o mutex antes para travar a extração (DoS) nem abandoná-lo
+        /// de propósito. Sem regra para Everyone: o nome é previsível e o objeto vive no namespace
+        /// global.
+        /// </summary>
+        internal static MutexSecurity BuildEngineLockSecurity()
+        {
+            var security = new MutexSecurity();
+            security.AddAccessRule(new MutexAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                MutexRights.FullControl, AccessControlType.Allow));
+            security.AddAccessRule(new MutexAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                MutexRights.FullControl, AccessControlType.Allow));
+            return security;
+        }
+
+        /// <summary>
+        /// Executa <paramref name="body"/> com o mutex de extração na mão. Dois launchers abertos ao
+        /// mesmo tempo, sem isto, apagam e recriam os mesmos arquivos: um aborta o outro com
+        /// violação de compartilhamento, ou pior, um deles dispara o powershell sobre um .ps1 que o
+        /// segundo acabou de apagar.
+        /// </summary>
+        internal static T WithEngineLock<T>(Func<T> body)
+        {
+            return WithEngineLock(EngineLockName, BuildEngineLockSecurity(), body);
+        }
+
+        internal static T WithEngineLock<T>(string name, MutexSecurity security, Func<T> body)
+        {
+            bool createdNew;
+            using (var mutex = new Mutex(false, name, out createdNew, security))
+            {
+                bool held = false;
+                try
+                {
+                    try
+                    {
+                        held = mutex.WaitOne(EngineLockTimeout, false);
+                    }
+                    // dono anterior morreu sem soltar: o mutex é nosso, e como cada arquivo é
+                    // reescrito do zero em toda execução não há estado meio-gravado a recuperar.
+                    catch (AbandonedMutexException)
+                    {
+                        held = true;
+                    }
+                    if (!held)
+                    {
+                        throw new TimeoutException("Outra instância do WinForge está preparando o motor "
+                            + "há mais de " + (int)EngineLockTimeout.TotalSeconds + " s; recusando por segurança.");
+                    }
+                    return body();
+                }
+                finally
+                {
+                    if (held) mutex.ReleaseMutex();
+                }
+            }
+        }
+
         public static string EnsureEngine(string version)
         {
             var bytes = ReadEmbeddedEngine();
@@ -202,13 +268,54 @@ namespace WinForge
         }
 
         /// <summary>
+        /// <see cref="WriteProtectedFileOnce"/> com repetição limitada para violação de
+        /// compartilhamento: recusar de primeira transformaria uma disputa passageira entre dois
+        /// launchers numa falha de inicialização.
+        /// </summary>
+        internal static void WriteProtectedFile(string path, byte[] content, FileSecurity security)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    WriteProtectedFileOnce(path, content, security);
+                    return;
+                }
+                // Arquivo momentaneamente em uso (outro launcher lendo/gravando, antivírus, o próprio
+                // powershell carregando o script) não é ataque: espera e tenta de novo. Só depois de
+                // esgotadas as tentativas a recusa vale. Qualquer outro erro estoura na hora.
+                catch (Exception ex) when (attempt < SharingRetries && IsSharingViolation(ex))
+                {
+                    Thread.Sleep(SharingRetryDelayMs);
+                }
+            }
+        }
+
+        private const int SharingRetries = 5;
+        private const int SharingRetryDelayMs = 200;
+        // HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION)
+        private const int SharingViolationHResult = unchecked((int)0x80070020);
+        private const int LockViolationHResult = unchecked((int)0x80070021);
+
+        /// <summary>
+        /// Violação de compartilhamento/bloqueio, tanto vinda direto do <c>CreateNew</c> quanto
+        /// embrulhada pela recusa do <c>File.Delete</c>. Ler o HRESULT em vez da mensagem: a
+        /// mensagem do Win32 é localizada.
+        /// </summary>
+        private static bool IsSharingViolation(Exception ex)
+        {
+            var io = ex as IOException ?? ex.InnerException as IOException;
+            return io != null && (io.HResult == SharingViolationHResult || io.HResult == LockViolationHResult);
+        }
+
+        /// <summary>
         /// Apaga o que estiver no caminho e cria o arquivo do zero com a ACL protegida. Recriar em
         /// vez de sobrescrever é o ponto: <c>File.WriteAllBytes</c> num arquivo pré-plantado
         /// mantém a DACL do atacante, e carimbar a ACL por cima de um arquivo alheio ainda deixa
         /// o dono original com WRITE_DAC. Link, pasta no lugar do arquivo ou remoção que falha
         /// são recusados fechado — nunca se escreve num alvo que não é nosso.
         /// </summary>
-        internal static void WriteProtectedFile(string path, byte[] content, FileSecurity security)
+        private static void WriteProtectedFileOnce(string path, byte[] content, FileSecurity security)
         {
             var asDirectory = new DirectoryInfo(path);
             if (asDirectory.Exists)
@@ -295,16 +402,25 @@ namespace WinForge
             public FileReplaceRefusedException(string message, Exception inner) : base(message, inner) { }
         }
 
+        internal const string EventLogSource = "WinForge";
+        internal const int OwnerFailureEventId = 1001;
+
+        /// <summary>
+        /// Registro no log de Aplicativo do Windows, não em arquivo. O log em arquivo anterior ficava
+        /// sob %LocalAppData%\WinForge e era escrito pelo processo elevado dentro de uma pasta que o
+        /// usuário comum controla: bastava plantar ali um hardlink/junction apontando para um arquivo
+        /// de sistema para o launcher acrescentar texto onde não devia. O log de eventos não tem esse
+        /// problema — o caminho é do sistema e o serviço faz a escrita.
+        /// </summary>
         private static void LogOwnerFailure(string message)
         {
             try
             {
-                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinForge");
-                Directory.CreateDirectory(dir);
                 // mensagens do Win32 vêm com quebra de linha no fim; uma ocorrência = uma linha
                 var flat = message.Replace('\r', ' ').Replace('\n', ' ').Trim();
-                File.AppendAllText(Path.Combine(dir, "launcher.log"),
-                    DateTime.Now.ToString("s", CultureInfo.InvariantCulture) + " owner not set: " + flat + Environment.NewLine);
+                // criar a origem exige elevação — que o launcher tem (requireAdministrator)
+                if (!EventLog.SourceExists(EventLogSource)) EventLog.CreateEventSource(EventLogSource, "Application");
+                EventLog.WriteEntry(EventLogSource, "owner not set: " + flat, EventLogEntryType.Warning, OwnerFailureEventId);
             }
             // log é acessório: nenhuma falha aqui pode impedir a 2ª tentativa sem dono.
             catch (Exception) { }

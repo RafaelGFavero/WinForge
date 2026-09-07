@@ -21,6 +21,10 @@
   desligada: só administradores e SYSTEM escrevem, usuários apenas leem. Antes a extração ia para
   `%LocalAppData%`, gravável pelo usuário — um processo sem privilégio podia trocar o `.ps1` entre
   a extração e a execução elevada. Os logs e backups do motor continuam em `%LocalAppData%\WinForge`.
+- Dois `WinForge.exe` abertos ao mesmo tempo não atrapalham mais um ao outro: a preparação do motor
+  é serializada por um mutex de máquina e um arquivo momentaneamente em uso é reesperado em vez de
+  abortar a inicialização. Falhas de propriedade na extração passam a ser registradas no log de
+  Aplicativo do Windows (origem `WinForge`), não mais em arquivo dentro de `%LocalAppData%`.
 - `NOTICE` e `LICENSE` embutidos no executável e extraídos junto do motor; o diálogo de Créditos
   ganhou um link que abre o `NOTICE.txt`.
 - Splash: o logo passa a usar o maior quadro do `.ico` em vez do de 16x16.

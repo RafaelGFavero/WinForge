@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using WinForge;
 using Xunit;
 
@@ -333,6 +334,97 @@ public class EngineHostTests
             }
 
             Assert.Equal(new byte[] { 0x41 }, File.ReadAllBytes(path));
+        }
+        finally { CleanupFile(path); }
+    }
+
+    [Fact]
+    public void BuildEngineLockSecurity_OnlyAdministratorsAndSystem()
+    {
+        // o launcher roda sempre elevado; deixar Users de fora impede que um usuário comum crie o
+        // mutex antes e trave (ou abandone de propósito) a extração do motor
+        var rules = EngineHost.BuildEngineLockSecurity()
+            .GetAccessRules(true, false, typeof(SecurityIdentifier))
+            .Cast<MutexAccessRule>()
+            .ToList();
+
+        Assert.Equal(2, rules.Count);
+        Assert.All(rules, r =>
+        {
+            Assert.Equal(AccessControlType.Allow, r.AccessControlType);
+            Assert.Equal(MutexRights.FullControl, r.MutexRights);
+        });
+        Assert.Equal(
+            new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)
+            }.OrderBy(s => s.Value).ToList(),
+            rules.Select(r => (SecurityIdentifier)r.IdentityReference).OrderBy(s => s.Value).ToList());
+
+        // namespace global: o mutex tem de valer entre sessões, não só dentro da do usuário
+        Assert.Equal(@"Global\WinForge.EngineExtract", EngineHost.EngineLockName);
+    }
+
+    [Fact]
+    public void WithEngineLock_TwoThreads_DoNotOverlap()
+    {
+        // dois launchers abertos juntos apagam e recriam os mesmos arquivos; o mutex tem de fazer
+        // um esperar o outro terminar por inteiro.
+        var name = @"Local\WinForgeTest_" + Guid.NewGuid().ToString("N");
+        var security = new MutexSecurity();
+        security.AddAccessRule(new MutexAccessRule(WindowsIdentity.GetCurrent().User,
+            MutexRights.FullControl, AccessControlType.Allow));
+
+        int inside = 0;
+        int overlaps = 0;
+        var bothStarted = new ManualResetEvent(false);
+        var entered = 0;
+
+        Action body = () => EngineHost.WithEngineLock(name, security, () =>
+        {
+            if (Interlocked.Increment(ref inside) > 1) Interlocked.Increment(ref overlaps);
+            // só solta quando as duas threads já pediram o lock: sem sobreposição real de tentativa
+            // o teste passaria mesmo sem mutex nenhum
+            if (Interlocked.Increment(ref entered) == 1) bothStarted.WaitOne(TimeSpan.FromSeconds(5));
+            Thread.Sleep(50);
+            Interlocked.Decrement(ref inside);
+            return 0;
+        });
+
+        var first = new Thread(new ThreadStart(body));
+        var second = new Thread(new ThreadStart(body));
+        first.Start();
+        second.Start();
+        // a segunda thread fica bloqueada no WaitOne do mutex; libera a primeira depois de dar tempo
+        Thread.Sleep(200);
+        bothStarted.Set();
+
+        Assert.True(first.Join(TimeSpan.FromSeconds(15)), "a primeira thread não terminou");
+        Assert.True(second.Join(TimeSpan.FromSeconds(15)), "a segunda thread não terminou");
+        Assert.Equal(0, overlaps);
+        Assert.Equal(2, entered);
+    }
+
+    [Fact]
+    public void WriteProtectedFile_SharingViolationThatClears_RetriesInsteadOfRefusing()
+    {
+        // outro launcher (ou o antivírus) segurando o arquivo por um instante não é ataque:
+        // recusar de primeira transformaria a disputa numa falha de inicialização.
+        var path = ScratchPath() + ".ps1";
+        try
+        {
+            var held = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            held.WriteByte(0x41);
+            held.Flush();
+            var releaser = new Thread(() => { Thread.Sleep(300); held.Dispose(); });
+            releaser.Start();
+
+            EngineHost.WriteProtectedFile(path, Encoding.ASCII.GetBytes("motor"), EngineHost.BuildFileSecurity(false));
+            releaser.Join(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(Encoding.ASCII.GetBytes("motor"), File.ReadAllBytes(path));
+            Assert.True(new FileInfo(path).GetAccessControl().AreAccessRulesProtected);
         }
         finally { CleanupFile(path); }
     }
