@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
@@ -55,11 +56,19 @@ namespace WinForge
         /// ACL da pasta base do motor: só administradores e SYSTEM escrevem; usuários apenas leem
         /// e executam. Impede que um usuário sem privilégio troque o .ps1 entre a extração e a
         /// execução elevada (TOCTOU). SIDs bem conhecidos, para não depender de nomes localizados.
+        /// O dono é BUILTIN\Administrators: o dono de um objeto mantém WRITE_DAC implícito e
+        /// poderia reescrever a DACL protegida depois da extração.
         /// </summary>
         public static DirectorySecurity BuildDirectorySecurity()
         {
+            return BuildDirectorySecurity(true);
+        }
+
+        private static DirectorySecurity BuildDirectorySecurity(bool setOwner)
+        {
             var security = new DirectorySecurity();
             security.SetAccessRuleProtection(true, false);
+            if (setOwner) security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
             const InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
             security.AddAccessRule(new FileSystemAccessRule(
                 new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
@@ -80,8 +89,7 @@ namespace WinForge
             // %ProgramData% em vez de %LocalAppData%: pasta protegida por ACL, já que o motor roda elevado.
             var root = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             var baseDir = Path.Combine(root, "WinForge");
-            var created = Directory.CreateDirectory(baseDir);
-            created.SetAccessControl(BuildDirectorySecurity());
+            ProtectBaseDirectory(baseDir);
 
             var path = EnginePath(root, version);
             var dir = Path.GetDirectoryName(path);
@@ -98,6 +106,56 @@ namespace WinForge
             ExtractResource(NoticeResourceName, Path.Combine(dir, "NOTICE.txt"), extracted);
             ExtractResource(LicenseResourceName, Path.Combine(dir, "LICENSE.txt"), extracted);
             return path;
+        }
+
+        /// <summary>
+        /// Cria a pasta base já com a ACL protegida (não existe janela entre criar e proteger) ou,
+        /// se ela já existe, reaplica a ACL. Doar a posse ao grupo Administradores exige
+        /// SeRestorePrivilege; se o token não tiver, registra e repete sem dono — a DACL
+        /// protegida continua obrigatória em qualquer caso.
+        /// </summary>
+        private static void ProtectBaseDirectory(string baseDir)
+        {
+            try
+            {
+                CreateOrProtect(baseDir, BuildDirectorySecurity(true));
+            }
+            // ERROR_INVALID_OWNER chega com tipos diferentes conforme o caminho: IOException vindo
+            // de Directory.CreateDirectory(path, security) e InvalidOperationException vindo de
+            // DirectoryInfo.SetAccessControl (UnauthorizedAccessException cobre
+            // PrivilegeNotHeldException). Falha de E/S de verdade estoura de novo na 2ª tentativa.
+            catch (Exception ex) when (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException)
+            {
+                LogOwnerFailure(ex.Message);
+                CreateOrProtect(baseDir, BuildDirectorySecurity(false));
+            }
+        }
+
+        private static void CreateOrProtect(string baseDir, DirectorySecurity security)
+        {
+            var info = new DirectoryInfo(baseDir);
+            if (info.Exists) { info.SetAccessControl(security); return; }
+            Directory.CreateDirectory(baseDir, security);
+            // Corrida: se outro processo criar a pasta entre o Exists e o CreateDirectory, o CLR
+            // trata ERROR_ALREADY_EXISTS como sucesso e ignora a DirectorySecurity — sobraria a
+            // pasta alheia, sem proteção. Confere e reaplica.
+            info.Refresh();
+            if (!info.GetAccessControl().AreAccessRulesProtected) info.SetAccessControl(security);
+        }
+
+        private static void LogOwnerFailure(string message)
+        {
+            try
+            {
+                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinForge");
+                Directory.CreateDirectory(dir);
+                // mensagens do Win32 vêm com quebra de linha no fim; uma ocorrência = uma linha
+                var flat = message.Replace('\r', ' ').Replace('\n', ' ').Trim();
+                File.AppendAllText(Path.Combine(dir, "launcher.log"),
+                    DateTime.Now.ToString("s", CultureInfo.InvariantCulture) + " owner not set: " + flat + Environment.NewLine);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         private static void ExtractResource(string resourceName, string targetFile, bool force)

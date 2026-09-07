@@ -67,6 +67,12 @@ public class EngineHostTests
         var security = EngineHost.BuildDirectorySecurity();
         Assert.True(security.AreAccessRulesProtected);
 
+        // dono = BUILTIN\Administrators: sem isso o criador da pasta mantém WRITE_DAC e pode
+        // reescrever a DACL protegida depois da extração.
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        Assert.NotNull(owner);
+        Assert.True(owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid));
+
         var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
             .Cast<FileSystemAccessRule>()
             .ToList();
