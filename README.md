@@ -116,6 +116,7 @@ docs/               changelog e documentação
 
 Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)).
 
+- Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
 - Detecção de hardware e drivers com recomendações específicas para a máquina.
 - Suporte a Windows Server, IIS e Active Directory.
 - Reparo de componentes do Windows (DISM/SFC e correção de repositório).

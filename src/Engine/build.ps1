@@ -652,18 +652,36 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
 }
 Write-Host "Sintaxe PowerShell: OK"
 
+# ---------------------------------------------------------------- teste de marca no motor gerado
+# Antes de gerar o doc: uma falha de marca no motor e sobre o produto e tem de aparecer primeiro.
+$brandTest = Join-Path $RepoRoot "tests\engine\Test-Brand.ps1"
+if (-not $SkipBrandTest) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $brandTest -File $outFile
+    if ($LASTEXITCODE -ne 0) { throw "Brand test falhou: $LASTEXITCODE ocorrência(s)." }
+}
+
 # ---------------------------------------------------------------- docs\auditoria.md (gerado)
 # Fonte única: config\wf-audit.ps1. Os nomes visíveis vêm dos blocos JSON do arquivo gerado
 # (tweaks da base + wbtweaks do WinForge) e da lista de jogos de config\wb-config.ps1.
+
+# Dot-source de arquivo NAO serve aqui: o PowerShell 5.1 decodifica um .ps1 sem BOM pela code page
+# ANSI, e config\wb-config.ps1 e UTF-8 sem BOM - "Ragnarök" chegaria como "RagnarÃ¶k" no doc.
+# Ler o texto em UTF-8 e executar um scriptblock mantem o encoding independente do BOM.
+function Get-ConfigScriptBlock([string]$relativePath) {
+    $full = Join-Path $PSScriptRoot $relativePath
+    $code = [System.IO.File]::ReadAllText($full, [System.Text.Encoding]::UTF8)
+    return [scriptblock]::Create($code)
+}
+
 function Get-WinForgeAuditData {
     $sync = @{}
-    . (Join-Path $PSScriptRoot "config\wf-audit.ps1")
+    . (Get-ConfigScriptBlock "config\wf-audit.ps1")
     return $sync
 }
 
 function Get-WinForgeConfigData {
     $sync = @{ configs = @{} }
-    . (Join-Path $PSScriptRoot "config\wb-config.ps1")
+    . (Get-ConfigScriptBlock "config\wb-config.ps1")
     return $sync
 }
 
@@ -683,6 +701,16 @@ function Format-MdCell([string]$s) {
     return ($s -replace '\|', '\|' -replace '\s+', ' ').Trim()
 }
 
+# Ordenacao ordinal (por ponto de codigo), nao a de Sort-Object, que depende da cultura da maquina:
+# o mesmo commit tem de gerar o mesmo arquivo em qualquer locale.
+function Sort-RowsByKeyOrdinal($rows) {
+    $items = [object[]]@($rows)
+    if ($items.Count -lt 2) { return $items }
+    $keys = [string[]]@($items | ForEach-Object { $_.Key })
+    [array]::Sort($keys, $items, [System.StringComparer]::Ordinal)
+    return $items
+}
+
 $auditSync  = Get-WinForgeAuditData
 $audit      = $auditSync.WinForgeAudit
 $configSync = Get-WinForgeConfigData
@@ -699,7 +727,9 @@ function Get-TweakEntry([string]$key) {
 # trava de digitação: toda chave da auditoria tem de casar com um tweak real; as 'Removido'
 # são o inverso - se ainda existirem na config, a remoção não aconteceu.
 $auditProblems = @()
-foreach ($key in @($audit.Keys | Sort-Object)) {
+$auditKeys = [string[]]@($audit.Keys)
+[array]::Sort($auditKeys, [System.StringComparer]::Ordinal)
+foreach ($key in $auditKeys) {
     $entry = Get-TweakEntry $key
     if ($audit[$key].Class -eq 'Removido') {
         if ($entry) { $auditProblems += "${key}: marcado como Removido mas ainda existe na config" }
@@ -722,9 +752,20 @@ foreach ($key in @($audit.Keys)) {
             else { $key }
     $auditRows += [pscustomobject]@{ Key = $key; Name = $name; Class = $a.Class; Reason = $a.Reason }
 }
-# prioridade de CPU por jogo (IFEO): geradas em tempo de execução, Seguro por definição
+# prioridade de CPU por jogo (IFEO): geradas em tempo de execução, Seguro por definição.
+# Se uma dessas chaves sintetizadas colidir com uma chave da auditoria (ou com outro jogo), o doc
+# teria duas linhas para a mesma chave, com classes possivelmente diferentes - falha alto.
+$gameKeysSeen = @{}
 foreach ($g in @($configSync.configs.wbgames)) {
-    $auditRows += [pscustomobject]@{ Key = "WPFTweaksWBGame$($g.Key)"; Name = $g.Name; Class = 'Seguro'; Reason = '' }
+    $gameKey = "WPFTweaksWBGame$($g.Key)"
+    if ($audit.ContainsKey($gameKey)) {
+        throw "Colisão de chave: '$gameKey' é gerada da lista de jogos e também existe em wf-audit.ps1."
+    }
+    if ($gameKeysSeen.ContainsKey($gameKey)) {
+        throw "Colisão de chave: '$gameKey' aparece mais de uma vez na lista de jogos."
+    }
+    $gameKeysSeen[$gameKey] = $true
+    $auditRows += [pscustomobject]@{ Key = $gameKey; Name = $g.Name; Class = 'Seguro'; Reason = '' }
 }
 
 $auditClasses = @(
@@ -758,7 +799,7 @@ Total: **$($counts['Seguro']) Seguro** · **$($counts['Cuidado']) Cuidado** · *
 [void]$md.Append(($mdHeader -replace "`r`n", "`n"))
 
 foreach ($c in $auditClasses) {
-    $rows = @($auditRows | Where-Object { $_.Class -eq $c.Name } | Sort-Object Key)
+    $rows = @(Sort-RowsByKeyOrdinal @($auditRows | Where-Object { $_.Class -eq $c.Name }))
     [void]$md.Append("`n## $($c.Title) ($($rows.Count))`n`n")
     if ($c.Name -eq 'Seguro') {
         [void]$md.Append("As $gamesCount chaves ``WPFTweaksWBGame*`` são a prioridade de CPU por jogo (IFEO): uma chave de`nregistro por executável, removida ao desfazer.`n`n")
@@ -778,8 +819,8 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $auditDoc) -Force | Out-N
 [System.IO.File]::WriteAllText($auditDoc, $md.ToString(), (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "Auditoria: $auditDoc ($($counts['Seguro']) Seguro, $($counts['Cuidado']) Cuidado, $($counts['Removido']) Removido)"
 
-# teste de marca: nenhuma referência ao projeto original pode sobrar no arquivo gerado
-if (-not $SkipBrandTest) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "tests\engine\Test-Brand.ps1") -File $outFile
-    if ($LASTEXITCODE -ne 0) { throw "Brand test falhou: $LASTEXITCODE ocorrência(s)." }
-}
+# O doc é um arquivo commitado: se qualquer fonte dele voltar a ser lida na code page errada,
+# o acento aparece corrompido no repositório. Aqui só o contador de mojibake faz sentido -
+# as marcas proibidas são sobre o motor, não sobre um texto em português.
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $brandTest -File $auditDoc -MojibakeOnly
+if ($LASTEXITCODE -ne 0) { throw "Mojibake em $auditDoc`: $LASTEXITCODE ocorrência(s)." }
