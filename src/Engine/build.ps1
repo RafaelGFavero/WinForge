@@ -703,12 +703,13 @@ function Format-MdCell([string]$s) {
 
 # Ordenacao ordinal (por ponto de codigo), nao a de Sort-Object, que depende da cultura da maquina:
 # o mesmo commit tem de gerar o mesmo arquivo em qualquer locale.
-function Sort-RowsByKeyOrdinal($rows) {
+# A sobrecarga Sort(keys, items, comparer) nao serve: sob o PowerShell 5.1 o segundo array chega
+# por copia e $items volta na ordem original. Comparacao in-place sobre o proprio array e o unico
+# jeito de o resultado sair ordenado; a virgula no return impede que o array seja desempacotado.
+function Sort-RowsByKeyOrdinal([object[]]$rows) {
     $items = [object[]]@($rows)
-    if ($items.Count -lt 2) { return $items }
-    $keys = [string[]]@($items | ForEach-Object { $_.Key })
-    [array]::Sort($keys, $items, [System.StringComparer]::Ordinal)
-    return $items
+    [array]::Sort($items, [System.Comparison[object]]{ param($a, $b) [System.StringComparer]::Ordinal.Compare([string]$a.Key, [string]$b.Key) })
+    return ,$items
 }
 
 $auditSync  = Get-WinForgeAuditData
@@ -798,8 +799,15 @@ Total: **$($counts['Seguro']) Seguro** · **$($counts['Cuidado']) Cuidado** · *
 "@
 [void]$md.Append(($mdHeader -replace "`r`n", "`n"))
 
+$emittedRows = 0
 foreach ($c in $auditClasses) {
-    $rows = @(Sort-RowsByKeyOrdinal @($auditRows | Where-Object { $_.Class -eq $c.Name }))
+    # sem @() em volta: a funcao ja devolve o array inteiro (return ,$items) e um @() extra o
+    # embrulharia num array de um elemento so - a tabela sairia com uma linha e todas as chaves.
+    $rows = Sort-RowsByKeyOrdinal @($auditRows | Where-Object { $_.Class -eq $c.Name })
+    if ($rows.Count -ne $counts[$c.Name]) {
+        throw "Tabela '$($c.Name)': $($rows.Count) linha(s) depois da ordenação, esperado $($counts[$c.Name])."
+    }
+    $emittedRows += $rows.Count
     [void]$md.Append("`n## $($c.Title) ($($rows.Count))`n`n")
     if ($c.Name -eq 'Seguro') {
         [void]$md.Append("As $gamesCount chaves ``WPFTweaksWBGame*`` são a prioridade de CPU por jogo (IFEO): uma chave de`nregistro por executável, removida ao desfazer.`n`n")
@@ -812,6 +820,11 @@ foreach ($c in $auditClasses) {
     foreach ($r in $rows) {
         [void]$md.Append("| ``$($r.Key)`` | $(Format-MdCell $r.Name) | $(Format-MdCell $r.Reason) |`n")
     }
+}
+# Contagem impressa e contagem escrita vêm de caminhos diferentes ($auditRows x tabelas geradas):
+# se a ordenação voltar a devolver o array embrulhado, o doc sai com 3 linhas e os totais certos.
+if ($emittedRows -ne $auditRows.Count) {
+    throw "Doc com $emittedRows linha(s) de tabela, esperado $($auditRows.Count)."
 }
 
 $auditDoc = Join-Path $RepoRoot "docs\auditoria.md"
