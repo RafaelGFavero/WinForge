@@ -1,0 +1,10 @@
+WinForge
+Copyright (c) 2026 Rafael Favero. Licensed under the MIT License (see LICENSE).
+
+This product includes software derived from WinUtil
+(https://github.com/ChrisTitusTech/winutil), Copyright (c) Chris Titus Tech,
+licensed under the MIT License. The upstream file is kept unmodified at
+src/Engine/base/winutil-26.08.19.ps1; all modifications are applied at build time.
+
+The gaming, GPU, service, power and maintenance optimizations were derived from the
+"Windows Boost - Essential" script collection and rewritten as reversible tweaks.

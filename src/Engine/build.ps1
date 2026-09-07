@@ -1,10 +1,14 @@
-# Build: gera WindowsBoost.ps1 a partir do winutil.ps1 + blocos do Windows Boost.
+# Build: gera dist\engine\WinForge.ps1 a partir do winutil.ps1 + blocos do WinForge.
 # Cada substituição é ancorada em texto único do original; falha alto se a âncora sumir ou for ambígua.
 param(
-    [string]$Source = (Join-Path $PSScriptRoot "winutil-26.08.19.ps1"),   # WinUtil original (release 26.08.19)
-    [string]$OutDir = (Split-Path -Parent $PSScriptRoot)                    # gera WindowsBoost.ps1 na pasta acima de src\
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
+    [switch]$SkipBrandTest
 )
 $ErrorActionPreference = 'Stop'
+$Source  = Join-Path $PSScriptRoot "base\winutil-26.08.19.ps1"
+$OutDir  = Join-Path $RepoRoot "dist\engine"
+$Version = ([xml](Get-Content (Join-Path $RepoRoot "version.props") -Raw)).Project.PropertyGroup.Version
+if (-not $Version) { throw "version.props sem <Version>" }
 
 function Read-Lf([string]$path) {
     $t = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
@@ -36,11 +40,11 @@ function Replace-Between([string]$text, [string]$startAnchor, [string]$endAnchor
     return $text.Substring(0, $s) + $new + $text.Substring($e)
 }
 
-$src = Read-Lf $Source
-$functionsBlock = Read-Lf (Join-Path $PSScriptRoot "wb-functions.ps1")
-$configBlock    = Read-Lf (Join-Path $PSScriptRoot "wb-config.ps1")
-$xamlNav        = Read-Lf (Join-Path $PSScriptRoot "wb-xaml-nav.xml")
-$xamlTab        = Read-Lf (Join-Path $PSScriptRoot "wb-xaml-tab.xml")
+$src            = Read-Lf $Source
+$functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
+$configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
+$xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
+$xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -100,10 +104,7 @@ $src = Replace-Once $src 'if (!([Security.Principal.WindowsPrincipal][Security.P
 $src = Replace-Once $src 'Write-Output "WinUtil needs to be run as Administrator. Attempting to relaunch."' 'Write-Output "O Windows Boost precisa ser executado como Administrador. Reabrindo com elevação..."' "msg admin"
 
 # ---------------------------------------------------------------- $sync inicial
-$src = Replace-Once $src '$sync.version = "26.08.19"' @'
-$sync.version = "1.0.0"
-$sync.baseVersion = "26.08.19"
-'@.TrimEnd() "version"
+$src = Replace-Once $src '$sync.version = "26.08.19"' ("`$sync.version = `"$Version`"`n`$sync.baseVersion = `"26.08.19`"") "version"
 
 $src = Insert-After $src '$sync.currentTab = "Install"' @'
 
@@ -471,7 +472,7 @@ $src = Insert-After $src '                                    <Button Name="WPFD
 
 # ---------------------------------------------------------------- saída
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-$outFile = Join-Path $OutDir "WindowsBoost.ps1"
+$outFile = Join-Path $OutDir "WinForge.ps1"
 $final = $src -replace "`n", "`r`n"
 [System.IO.File]::WriteAllText($outFile, $final, (New-Object System.Text.UTF8Encoding($true)))
 Write-Host "Gerado: $outFile ($([math]::Round((Get-Item $outFile).Length / 1KB)) KB, $(($final -split "`r`n").Count) linhas)"
