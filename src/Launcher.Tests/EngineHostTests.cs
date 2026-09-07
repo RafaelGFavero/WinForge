@@ -44,6 +44,13 @@ public class EngineHostTests
     }
 
     [Fact]
+    public void BuildArguments_ForwardsHardwareRender()
+    {
+        var args = EngineHost.BuildArguments(@"C:\e.ps1", "ev", new[] { "-HardwareRender" }, hideWindow: true);
+        Assert.Equal("-STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\e.ps1\" -ReadyEvent ev -HardwareRender", args);
+    }
+
+    [Fact]
     public void EnginePath_UsesVersionFolder()
     {
         Assert.Equal(@"C:\LAD\WinForge\engine\1.0.0\WinForge.ps1", EngineHost.EnginePath(@"C:\LAD", "1.0.0"));

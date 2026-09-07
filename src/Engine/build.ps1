@@ -92,6 +92,8 @@ $src = Replace-Once $src @'
     Nome do EventWaitHandle que o WinForge.exe cria para saber quando a janela apareceu (fecha o splash).
 .PARAMETER Console
     Reservado para o launcher: mantém a janela de console visível.
+.PARAMETER HardwareRender
+    Usa renderização WPF por hardware (padrão: software, mais compatível com drivers/overlays).
 
 .NOTES
     WinForge 1.0.0
@@ -110,7 +112,8 @@ $src = Replace-Once $src @'
     [switch]$SelfTest,
     [switch]$NoElevation,
     [string]$ReadyEvent,
-    [switch]$Console
+    [switch]$Console,
+    [switch]$HardwareRender
 )
 '@ "param block"
 
@@ -461,6 +464,25 @@ if ($SelfTest) {
 
 $sync.preferences.theme = "Auto"
 '@ "config merge + selftest"
+
+# ---------------------------------------------------------------- modo de renderização WPF (software por padrão)
+$src = Replace-Once $src @'
+[void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
+[xml]$XAML = $inputXML
+'@ @'
+[void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
+
+# WinForge: renderização por software por padrão (imune a hooks de D3D9/overlays/drivers quebrados em máquinas em reparo)
+if (-not $HardwareRender) {
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationcore')
+    [System.Windows.Media.RenderOptions]::ProcessRenderMode = [System.Windows.Interop.RenderMode]::SoftwareOnly
+    Write-WinUtilLog -Component "UI" -Message "Renderização WPF: software (use -HardwareRender para GPU)."
+} else {
+    Write-WinUtilLog -Component "UI" -Message "Renderização WPF: hardware."
+}
+
+[xml]$XAML = $inputXML
+'@ "render mode"
 
 # ---------------------------------------------------------------- export: comando copiado para a área de transferência
 $src = Replace-Once $src '"iex ""& { `$(irm https://christitus.com/win) } -Config ''$Config''""" | Set-Clipboard' '"& ''$(Join-Path $sync.ScriptRoot ''WinForge.ps1'')'' -Config ''$Config''" | Set-Clipboard' "export clipboard"
