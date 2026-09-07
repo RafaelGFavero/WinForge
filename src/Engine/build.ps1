@@ -652,6 +652,132 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
 }
 Write-Host "Sintaxe PowerShell: OK"
 
+# ---------------------------------------------------------------- docs\auditoria.md (gerado)
+# Fonte única: config\wf-audit.ps1. Os nomes visíveis vêm dos blocos JSON do arquivo gerado
+# (tweaks da base + wbtweaks do WinForge) e da lista de jogos de config\wb-config.ps1.
+function Get-WinForgeAuditData {
+    $sync = @{}
+    . (Join-Path $PSScriptRoot "config\wf-audit.ps1")
+    return $sync
+}
+
+function Get-WinForgeConfigData {
+    $sync = @{ configs = @{} }
+    . (Join-Path $PSScriptRoot "config\wb-config.ps1")
+    return $sync
+}
+
+function Get-JsonConfigBlock([string]$text, [string]$name) {
+    # o gerado traz: $sync.configs.<name> = @' ... '@ | ConvertFrom-Json
+    $start = "`$sync.configs.$name = @'`n"
+    $i = $text.IndexOf($start, [StringComparison]::Ordinal)
+    if ($i -lt 0) { throw "Bloco JSON '$name' não encontrado no arquivo gerado." }
+    $i += $start.Length
+    $e = $text.IndexOf("`n'@ | ConvertFrom-Json", $i, [StringComparison]::Ordinal)
+    if ($e -lt 0) { throw "Fim do bloco JSON '$name' não encontrado." }
+    return ($text.Substring($i, $e - $i) | ConvertFrom-Json)
+}
+
+function Format-MdCell([string]$s) {
+    if ([string]::IsNullOrWhiteSpace($s)) { return '—' }
+    return ($s -replace '\|', '\|' -replace '\s+', ' ').Trim()
+}
+
+$auditSync  = Get-WinForgeAuditData
+$audit      = $auditSync.WinForgeAudit
+$configSync = Get-WinForgeConfigData
+$jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'))
+
+function Get-TweakEntry([string]$key) {
+    foreach ($o in $jsonTweaks) {
+        $p = $o.PSObject.Properties[$key]
+        if ($p) { return $p.Value }
+    }
+    return $null
+}
+
+# trava de digitação: toda chave da auditoria tem de casar com um tweak real; as 'Removido'
+# são o inverso - se ainda existirem na config, a remoção não aconteceu.
+$auditProblems = @()
+foreach ($key in @($audit.Keys | Sort-Object)) {
+    $entry = Get-TweakEntry $key
+    if ($audit[$key].Class -eq 'Removido') {
+        if ($entry) { $auditProblems += "${key}: marcado como Removido mas ainda existe na config" }
+    } elseif (-not $entry) {
+        $auditProblems += "${key}: sem tweak correspondente nas configs (erro de digitação?)"
+    }
+}
+if ($auditProblems.Count -gt 0) {
+    $auditProblems | ForEach-Object { Write-Host "  [AUDITORIA] $_" -ForegroundColor Red }
+    throw "Auditoria inconsistente: $($auditProblems.Count) problema(s)."
+}
+
+$auditRows = @()
+foreach ($key in @($audit.Keys)) {
+    $a = $audit[$key]
+    $entry = Get-TweakEntry $key
+    $name = if ($a.Override -and $a.Override.ContainsKey('Content')) { $a.Override.Content }
+            elseif ($entry) { $entry.Content }
+            elseif ($a.Content) { $a.Content }
+            else { $key }
+    $auditRows += [pscustomobject]@{ Key = $key; Name = $name; Class = $a.Class; Reason = $a.Reason }
+}
+# prioridade de CPU por jogo (IFEO): geradas em tempo de execução, Seguro por definição
+foreach ($g in @($configSync.configs.wbgames)) {
+    $auditRows += [pscustomobject]@{ Key = "WPFTweaksWBGame$($g.Key)"; Name = $g.Name; Class = 'Seguro'; Reason = '' }
+}
+
+$auditClasses = @(
+    @{ Name = 'Seguro';   Title = 'Seguro' }
+    @{ Name = 'Cuidado';  Title = 'Cuidado' }
+    @{ Name = 'Removido'; Title = 'Removido' }
+)
+$counts = @{}
+foreach ($c in $auditClasses) { $counts[$c.Name] = @($auditRows | Where-Object { $_.Class -eq $c.Name }).Count }
+$gamesCount = @($configSync.configs.wbgames).Count
+$cautionCategory = ($auditSync.WinForgeCautionCategory -replace '^[a-z_]+__', '')
+
+$md = New-Object System.Text.StringBuilder
+$mdHeader = @"
+# Auditoria de risco
+
+> Arquivo gerado por ``src/Engine/build.ps1`` a partir de ``src/Engine/config/wf-audit.ps1``.
+> Não editar à mão: qualquer alteração é sobrescrita no próximo build.
+
+Todo tweak e toggle do WinForge tem uma classe de risco. A classe não é só documentação — o motor
+a aplica ao carregar as configurações:
+
+- **Seguro** — reversível, sem custo de segurança ou estabilidade; pode aparecer em preset.
+- **Cuidado** — tem um custo real; vive só na categoria "$cautionCategory", com o custo no início
+  da descrição, e nunca entra em preset.
+- **Removido** — saldo negativo; a entrada e qualquer referência a ela em preset somem.
+
+Total: **$($counts['Seguro']) Seguro** · **$($counts['Cuidado']) Cuidado** · **$($counts['Removido']) Removido**.
+
+"@
+[void]$md.Append(($mdHeader -replace "`r`n", "`n"))
+
+foreach ($c in $auditClasses) {
+    $rows = @($auditRows | Where-Object { $_.Class -eq $c.Name } | Sort-Object Key)
+    [void]$md.Append("`n## $($c.Title) ($($rows.Count))`n`n")
+    if ($c.Name -eq 'Seguro') {
+        [void]$md.Append("As $gamesCount chaves ``WPFTweaksWBGame*`` são a prioridade de CPU por jogo (IFEO): uma chave de`nregistro por executável, removida ao desfazer.`n`n")
+    } elseif ($c.Name -eq 'Cuidado') {
+        [void]$md.Append("O motivo abaixo é o mesmo texto que aparece como ``CUIDADO: ...`` no início da descrição do item`nna interface.`n`n")
+    } else {
+        [void]$md.Append("Estas entradas não existem no programa; ficam aqui para registrar por que saíram.`n`n")
+    }
+    [void]$md.Append("| Chave | Nome | Motivo |`n|---|---|---|`n")
+    foreach ($r in $rows) {
+        [void]$md.Append("| ``$($r.Key)`` | $(Format-MdCell $r.Name) | $(Format-MdCell $r.Reason) |`n")
+    }
+}
+
+$auditDoc = Join-Path $RepoRoot "docs\auditoria.md"
+New-Item -ItemType Directory -Path (Split-Path -Parent $auditDoc) -Force | Out-Null
+[System.IO.File]::WriteAllText($auditDoc, $md.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Auditoria: $auditDoc ($($counts['Seguro']) Seguro, $($counts['Cuidado']) Cuidado, $($counts['Removido']) Removido)"
+
 # teste de marca: nenhuma referência ao projeto original pode sobrar no arquivo gerado
 if (-not $SkipBrandTest) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "tests\engine\Test-Brand.ps1") -File $outFile

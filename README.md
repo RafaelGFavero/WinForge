@@ -55,6 +55,20 @@ Parâmetros de linha de comando:
 A janela se adapta ao sistema: no Windows 10, os itens que só existem no Windows 11 não são
 exibidos; os tweaks marcados para uma marca de GPU só aparecem se aquela GPU for detectada.
 
+## Classificação de risco
+
+Todo tweak e toggle passou por uma auditoria e carrega uma de três classes:
+
+- **Seguro** — reversível, sem custo de segurança ou estabilidade. É o que os presets marcam.
+- **Cuidado** — funciona, mas cobra um preço (segurança, compatibilidade ou um recurso que deixa
+  de existir). Fica só na categoria **Avançado (CUIDADO)**, com o custo escrito no começo da
+  descrição, e **nunca entra em preset**: para aplicar um desses, você precisa marcá-lo à mão.
+- **Removido** — o saldo era negativo. A entrada simplesmente não existe no programa.
+
+A tabela completa, com o motivo de cada item de risco, está em
+[`docs/auditoria.md`](docs/auditoria.md) — gerada pelo build a partir da mesma fonte que o
+programa usa, então documentação e comportamento não têm como divergir.
+
 ## Renderização
 
 A interface usa renderização por software por padrão — é mais compatível com drivers antigos,
@@ -100,7 +114,8 @@ docs/               changelog e documentação
 
 ## Roadmap
 
-- Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
+Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)).
+
 - Detecção de hardware e drivers com recomendações específicas para a máquina.
 - Suporte a Windows Server, IIS e Active Directory.
 - Reparo de componentes do Windows (DISM/SFC e correção de repositório).

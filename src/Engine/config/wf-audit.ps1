@@ -92,9 +92,13 @@ $sync.WinForgeAudit = @{
     'WPFTweaksWBCortana'                         = @{ Class = 'Seguro';  Reason = '' }
     'WPFTweaksWBSearchSuggestions'               = @{ Class = 'Seguro';  Reason = '' }
     'WPFTweaksWBPrefetch'                        = @{ Class = 'Cuidado'; Reason = 'em HDD deixa o sistema mais lento; só faz sentido em SSD' }
-    'WPFTweaksWBSmartScreen'                     = @{ Class = 'Removido'; Reason = 'reduz a segurança sem ganho de desempenho (SmartScreen e marca de origem de downloads)' }
+    # 'Content' das entradas Removido: elas não existem mais em nenhuma config, então o nome
+    # visível para docs/auditoria.md só pode vir daqui.
+    'WPFTweaksWBSmartScreen'                     = @{ Class = 'Removido'; Reason = 'reduz a segurança sem ganho de desempenho (SmartScreen e marca de origem de downloads)'
+                                                      Content = 'SmartScreen do Explorer e bloqueio de downloads - Desativar' }
     'WPFTweaksWBIndexing'                        = @{ Class = 'Cuidado'; Reason = 'a pesquisa do menu Iniciar, do Explorador e do Outlook fica lenta ou incompleta' }
-    'WPFTweaksWBServicesAggressive'              = @{ Class = 'Removido'; Reason = 'pacote que desliga impressão, Bluetooth, RDP, Windows Hello e teclado touch de uma vez; substituído por 5 itens separados' }
+    'WPFTweaksWBServicesAggressive'              = @{ Class = 'Removido'; Reason = 'pacote que desliga impressão, Bluetooth, RDP, Windows Hello e teclado touch de uma vez; substituído por 5 itens separados'
+                                                      Content = 'Serviços - Desativar (agressivo: impressão, Bluetooth, RDP, Windows Hello, teclado touch)' }
     'WPFTweaksWBVBS'                             = @{ Class = 'Cuidado'; Reason = 'reduz a segurança contra malware de kernel (VBS/HVCI); ganho de FPS em alguns jogos; exige reinício' }
     'WPFTweaksWBHypervisorOff'                   = @{ Class = 'Cuidado'; Reason = 'quebra WSL2, Hyper-V, Windows Sandbox, WSA e emuladores baseados em Hyper-V; exige reinício' }
     'WPFToggleWBTransparency'                    = @{ Class = 'Seguro';  Reason = '' }

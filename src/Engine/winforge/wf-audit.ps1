@@ -24,7 +24,7 @@ function Initialize-WinForgeAudit {
         if ($a.Class -eq 'Removido') {
             if ($prop) { $sync.configs.tweaks.PSObject.Properties.Remove($key) }
             foreach ($p in $sync.configs.preset.PSObject.Properties) { $p.Value = @($p.Value | Where-Object { $_ -ne $key }) }
-            $report.Add([pscustomobject]@{ Key = $key; Content = $(if ($prop) { $prop.Value.Content } else { $key }); Class = 'Removido'; Reason = $a.Reason; Category = '' })
+            $report.Add([pscustomobject]@{ Key = $key; Content = $(if ($prop) { $prop.Value.Content } elseif ($a.Content) { $a.Content } else { $key }); Class = 'Removido'; Reason = $a.Reason; Category = '' })
             continue
         }
         if (-not $prop) { continue }   # entrada só existe depois dos serviços separados, ou foi filtrada
