@@ -34,7 +34,7 @@ function Get-WinForgeVendorKey {
     $t = "$Provider $Device"
     switch -Regex ($t) {
         'NVIDIA'            { 'nvidia';   break }
-        'AMD|Radeon|ATI '   { 'amd';      break }
+        'AMD|Advanced Micro Devices|Radeon|ATI ' { 'amd'; break }
         'Intel'             { 'intel';    break }
         'Realtek'           { 'realtek';  break }
         'Qualcomm|Atheros'  { 'qualcomm'; break }
@@ -125,16 +125,21 @@ function Get-WinForgeSystemProfile {
         $cs = Get-CimInstance Win32_ComputerSystem
         $enc = Get-CimInstance Win32_SystemEnclosure
         $chassis = @($enc.ChassisTypes)
-        $laptopTypes = 8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32
+        $laptopTypes = 8, 9, 10, 11, 12, 14, 30, 31, 32
+        # HypervisorPresent NÃO serve para detectar VM: ele fica ligado em máquina física com
+        # Hyper-V, WSL2, Sandbox, Credential Guard ou VBS. A virtualização é decidida pela
+        # assinatura do fabricante/modelo; HypervisorPresent vai junto, como campo separado.
+        $vmSignature = 'VMware|VirtualBox|innotek|KVM|QEMU|Virtual Machine|Hyper-V|Xen|Parallels|Bochs|BHYVE'
         $p.Machine = [ordered]@{
-            Manufacturer = $cs.Manufacturer
-            Model        = $cs.Model
-            IsVirtual    = [bool]$cs.HypervisorPresent -or ($cs.Model -match 'Virtual|VMware|VirtualBox|KVM|QEMU|Hyper-V')
-            IsLaptop     = (@($chassis | Where-Object { $_ -in $laptopTypes }).Count -gt 0) -or [bool](Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
-            ChassisTypes = $chassis
-            SecureBoot   = $null
-            TpmVersion   = $null
-            BitLocker    = $null
+            Manufacturer      = $cs.Manufacturer
+            Model             = $cs.Model
+            IsVirtual         = ("$($cs.Manufacturer) $($cs.Model)" -match $vmSignature)
+            HypervisorPresent = [bool]$cs.HypervisorPresent
+            IsLaptop          = (@($chassis | Where-Object { $_ -in $laptopTypes }).Count -gt 0) -or [bool](Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
+            ChassisTypes      = $chassis
+            SecureBoot        = $null
+            TpmVersion        = $null
+            BitLocker         = $null
         }
         # os três abaixo dependem de elevação/firmware: sem admin ficam $null, e isso é esperado
         try { $p.Machine.SecureBoot = [bool](Confirm-SecureBootUEFI -ErrorAction Stop) } catch { $p.Machine.SecureBoot = $null }
@@ -204,18 +209,22 @@ function Get-WinForgeSystemProfile {
     # ---- Armazenamento
     try {
         $disks = @(Get-PhysicalDisk)
+        # Muito driver NVMe reporta MediaType 'Unspecified'. Tratar NVMe como SSD evita concluir
+        # "não é SSD, logo é HDD" numa máquina que só tem NVMe.
+        $isSsdDisk = { param($d) ([string]$d.MediaType -eq 'SSD') -or ([string]$d.MediaType -eq 'Unspecified' -and [string]$d.BusType -eq 'NVMe') }
         $p.Storage = [ordered]@{
             Disks = @($disks | ForEach-Object {
                 [ordered]@{
-                    Name   = $_.FriendlyName
-                    Media  = [string]$_.MediaType
-                    Bus    = [string]$_.BusType
-                    Health = [string]$_.HealthStatus
-                    SizeGB = [math]::Round($_.Size / 1GB)
+                    Name            = $_.FriendlyName
+                    Media           = [string]$_.MediaType
+                    MediaNormalized = $(if (& $isSsdDisk $_) { 'SSD' } else { [string]$_.MediaType })
+                    Bus             = [string]$_.BusType
+                    Health          = [string]$_.HealthStatus
+                    SizeGB          = [math]::Round($_.Size / 1GB)
                 }
             })
             HasHDD           = (@($disks | Where-Object MediaType -eq 'HDD').Count -gt 0)
-            HasSSD           = (@($disks | Where-Object MediaType -in 'SSD').Count -gt 0)
+            HasSSD           = (@($disks | Where-Object { & $isSsdDisk $_ }).Count -gt 0)
             SystemDriveMedia = $null
             Volumes = @(Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveType -eq 'Fixed' } | ForEach-Object {
                 [ordered]@{
@@ -228,14 +237,16 @@ function Get-WinForgeSystemProfile {
         }
         try {
             $sysDisk = Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':') | Get-Disk | Get-PhysicalDisk
-            $p.Storage.SystemDriveMedia = [string]$sysDisk.MediaType
+            $p.Storage.SystemDriveMedia = $(if (& $isSsdDisk $sysDisk) { 'SSD' } else { [string]$sysDisk.MediaType })
         } catch { }
     } catch { $p.Errors += "Storage: $($_.Exception.Message)" }
 
     # ---- Rede: adaptador ativo preferindo cabo (802.3) e maior velocidade
     try {
+        # LinkSpeed é string ("1 Gbps", "100 Mbps") e ordena errado; ReceiveLinkSpeed é numérico (bps)
         $a = Get-NetAdapter | Where-Object Status -eq 'Up' |
-            Sort-Object -Property @{ Expression = { $_.MediaType -eq '802.3' }; Descending = $true }, LinkSpeed -Descending |
+            Sort-Object -Property @{ Expression = { $_.MediaType -eq '802.3' }; Descending = $true },
+                                   @{ Expression = { [uint64]$_.ReceiveLinkSpeed }; Descending = $true } |
             Select-Object -First 1
         $dns = @((Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Select-Object -First 1).ServerAddresses)
         $p.Network = [ordered]@{
@@ -250,11 +261,21 @@ function Get-WinForgeSystemProfile {
 
     # ---- Energia
     try {
-        # powercfg pode devolver linha em branco junto: só a primeira linha com conteúdo interessa
-        $schemeLine = @(powercfg /getactivescheme) | Where-Object { $_ } | Select-Object -First 1
-        $scheme = [string]($schemeLine -replace '.*:\s*', '')
+        # powercfg pode devolver linha em branco junto: só a primeira linha com conteúdo interessa.
+        # A linha tem a forma "GUID da Configuração de Energia: <guid>  (<nome>)" - o GUID e o nome
+        # ficam em campos separados, porque o texto antes deles muda com o idioma do Windows.
+        $schemeLine = [string](@(powercfg /getactivescheme) | Where-Object { $_ } | Select-Object -First 1)
+        $schemeGuid = $null
+        $schemeName = $null
+        if ($schemeLine -match '([0-9a-f-]{36})\s*\((.+)\)') {
+            $schemeGuid = $Matches[1]
+            $schemeName = $Matches[2].Trim()
+        } else {
+            $schemeName = ([string]($schemeLine -replace '.*:\s*', '')).Trim()
+        }
         $p.Power = [ordered]@{
-            ActiveScheme       = $scheme.Trim()
+            ActiveScheme       = $schemeName
+            ActiveSchemeGuid   = $schemeGuid
             OnBattery          = $(try { (Get-CimInstance Win32_Battery -ErrorAction Stop | Select-Object -First 1).BatteryStatus -eq 1 } catch { $false })
             HibernationEnabled = [bool](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -ErrorAction SilentlyContinue).HibernateEnabled
         }
@@ -291,28 +312,36 @@ function Get-WinForgeSimulatedProfile {
     #>
     param([Parameter(Mandatory)][ValidateSet('laptop', 'vm', 'server-iis', 'hdd', 'win10')][string]$Name)
     $base = Get-WinForgeSystemProfile -SkipNetwork
+    # Cada área pode ter vindo $null (coleta falhou). A simulação não pode explodir por causa disso:
+    # sobrescreve o que existe e ignora o resto - o SelfTest já acusa a área faltando em separado.
     switch ($Name) {
         'laptop' {
-            $base.Machine.IsLaptop = $true
-            $base.Power.OnBattery = $true
+            if ($base.Machine) { $base.Machine.IsLaptop = $true }
+            if ($base.Power)   { $base.Power.OnBattery = $true }
         }
         'vm' {
-            $base.Machine.IsVirtual = $true
+            if ($base.Machine) { $base.Machine.IsVirtual = $true }
             $base.GPU = @([ordered]@{ Name = 'Microsoft Basic Display'; Vendor = 'other'; VRAMGB = $null; DriverVersion = '10.0'; DriverDate = ''; MarketingVersion = $null; Latest = $null; LatestDate = $null; LatestStatus = 'n/a' })
         }
         'server-iis' {
-            $base.OS.IsServer = $true
-            $base.OS.ProductType = 3
-            $base.Roles.IIS = $true
+            if ($base.OS) {
+                $base.OS.IsServer = $true
+                $base.OS.ProductType = 3
+            }
+            if ($base.Roles) { $base.Roles.IIS = $true }
         }
         'hdd' {
-            $base.Storage.HasHDD = $true
-            $base.Storage.HasSSD = $false
-            $base.Storage.SystemDriveMedia = 'HDD'
+            if ($base.Storage) {
+                $base.Storage.HasHDD = $true
+                $base.Storage.HasSSD = $false
+                $base.Storage.SystemDriveMedia = 'HDD'
+            }
         }
         'win10' {
-            $base.OS.IsWin11 = $false
-            $base.OS.Build = 19045
+            if ($base.OS) {
+                $base.OS.IsWin11 = $false
+                $base.OS.Build = 19045
+            }
         }
     }
     $base.Simulated = $Name
