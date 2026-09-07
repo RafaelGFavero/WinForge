@@ -1,4 +1,4 @@
-# Build: gera dist\engine\WinForge.ps1 a partir do winutil.ps1 + blocos do WinForge.
+﻿# Build: gera dist\engine\WinForge.ps1 a partir do winutil.ps1 + blocos do WinForge.
 # Cada substituição é ancorada em texto único do original; falha alto se a âncora sumir ou for ambígua.
 param(
     # raiz do repositório: onde ficam version.props e dist\

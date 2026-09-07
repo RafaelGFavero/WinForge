@@ -1,4 +1,4 @@
-# Verifica que o arquivo gerado nao contem referencias de marca do projeto original.
+﻿# Verifica que o arquivo gerado nao contem referencias de marca do projeto original.
 # Sai com o numero de ocorrencias proibidas (limitado a 255, pois o exit code do Windows e um byte).
 param([Parameter(Mandatory)][string]$File)
 $forbidden = '(?i)christitus|chris\s*titus|\bCTT\b|sponsor|winutil'
