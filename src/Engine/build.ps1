@@ -1,10 +1,12 @@
 # Build: gera dist\engine\WinForge.ps1 a partir do winutil.ps1 + blocos do WinForge.
 # Cada substituição é ancorada em texto único do original; falha alto se a âncora sumir ou for ambígua.
 param(
+    # raiz do repositório: onde ficam version.props e dist\
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [switch]$SkipBrandTest
 )
 $ErrorActionPreference = 'Stop'
+# WinUtil original (nunca editar à mão)
 $Source  = Join-Path $PSScriptRoot "base\winutil-26.08.19.ps1"
 $OutDir  = Join-Path $RepoRoot "dist\engine"
 $Version = ([xml](Get-Content (Join-Path $RepoRoot "version.props") -Raw)).Project.PropertyGroup.Version
@@ -418,7 +420,7 @@ $sync.preferences.theme = "Auto"
 '@ "config merge + selftest"
 
 # ---------------------------------------------------------------- export: comando copiado para a área de transferência
-$src = Replace-Once $src '"iex ""& { `$(irm https://christitus.com/win) } -Config ''$Config''""" | Set-Clipboard' '"& ''$(Join-Path $sync.ScriptRoot ''WindowsBoost.ps1'')'' -Config ''$Config''" | Set-Clipboard' "export clipboard"
+$src = Replace-Once $src '"iex ""& { `$(irm https://christitus.com/win) } -Config ''$Config''""" | Set-Clipboard' '"& ''$(Join-Path $sync.ScriptRoot ''WinForge.ps1'')'' -Config ''$Config''" | Set-Clipboard' "export clipboard"
 
 # ---------------------------------------------------------------- título da janela, sobre, créditos, pergunta do ponto de restauração
 $src = Replace-Once $src '$sync["Form"].title = $sync["Form"].title + " " + $sync.version' '$sync["Form"].title = $sync["Form"].title + " " + $sync.version + "  -  " + $sync.OSName + " " + $sync.OSDisplayVersion' "form title"
