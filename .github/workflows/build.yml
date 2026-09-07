@@ -1,0 +1,39 @@
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - name: Engine
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File src\Engine\build.ps1
+      - name: SelfTest
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File dist\engine\WinForge.ps1 -SelfTest
+      - name: Launcher tests
+        run: dotnet test src\Launcher.Tests\Launcher.Tests.csproj -c Release -nologo
+      - name: Launcher
+        run: dotnet build src\Launcher\WinForge.csproj -c Release -nologo
+      - name: Package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item src\Launcher\bin\Release\net48\WinForge.exe dist\
+          $v = ([xml](Get-Content version.props)).Project.PropertyGroup.Version
+          Compress-Archive -Path dist\WinForge.exe, README.md, LICENSE, NOTICE -DestinationPath "dist\WinForge-$v.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with: { name: WinForge, path: dist/* }
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/WinForge.exe
+            dist/WinForge-*.zip

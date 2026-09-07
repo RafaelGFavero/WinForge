@@ -1,7 +1,7 @@
 #region ===== WinForge - configurações adicionais =====
 
 # Entradas do WinUtil que só fazem sentido no Windows 11 (ficam ocultas no Windows 10)
-$sync.WinBoostWin11OnlyTweaks = @(
+$sync.WinForgeWin11OnlyTweaks = @(
     "WPFTweaksWidget",                  # Widgets da barra de tarefas
     "WPFTweaksRevertStartMenu",         # Layout antigo do menu Iniciar (25H2)
     "WPFTweaksRightClickMenu",          # Menu de contexto clássico
@@ -11,7 +11,7 @@ $sync.WinBoostWin11OnlyTweaks = @(
     "WPFToggleStartMenuRecommendations",# Recomendações do menu Iniciar
     "WPFToggleHideSettingsHome"         # Página inicial de Configurações
 )
-$sync.WinBoostWin11OnlyAppx = @(
+$sync.WinForgeWin11OnlyAppx = @(
     "WPFAppxClipchamp_Clipchamp",
     "WPFAppxMicrosoft_WindowsDevHome",
     "WPFAppxMicrosoft_WindowsCrossDevice",

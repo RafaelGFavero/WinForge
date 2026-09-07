@@ -91,7 +91,7 @@ $src = Replace-Once $src @'
 .PARAMETER ReadyEvent
     Nome do EventWaitHandle que o WinForge.exe cria para saber quando a janela apareceu (fecha o splash).
 .PARAMETER Console
-    Reservado para o launcher: mantém a janela de console visível.
+    Reservado para o launcher (WinForge.exe): mantém o console visível; sem efeito ao rodar o .ps1 diretamente.
 .PARAMETER HardwareRender
     Usa renderização WPF por hardware (padrão: software, mais compatível com drivers/overlays).
 

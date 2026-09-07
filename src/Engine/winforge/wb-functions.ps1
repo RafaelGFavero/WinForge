@@ -103,12 +103,12 @@ function Initialize-WinUtilBoostConfigs {
           - adiciona os tweaks, botões, presets e a lista de jogos (IFEO) do WinForge
     #>
 
-    foreach ($k in $sync.WinBoostWin11OnlyTweaks) {
+    foreach ($k in $sync.WinForgeWin11OnlyTweaks) {
         if ($sync.configs.tweaks.PSObject.Properties[$k]) {
             $sync.configs.tweaks.$k | Add-Member -NotePropertyName os -NotePropertyValue "win11" -Force
         }
     }
-    foreach ($k in $sync.WinBoostWin11OnlyAppx) {
+    foreach ($k in $sync.WinForgeWin11OnlyAppx) {
         if ($sync.configs.appx.PSObject.Properties[$k]) {
             $sync.configs.appx.$k | Add-Member -NotePropertyName os -NotePropertyValue "win11" -Force
         }
