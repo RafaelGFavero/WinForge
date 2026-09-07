@@ -64,7 +64,7 @@ namespace WinForge
             return BuildDirectorySecurity(true);
         }
 
-        private static DirectorySecurity BuildDirectorySecurity(bool setOwner)
+        internal static DirectorySecurity BuildDirectorySecurity(bool setOwner)
         {
             var security = new DirectorySecurity();
             security.SetAccessRuleProtection(true, false);
@@ -124,23 +124,39 @@ namespace WinForge
             // de Directory.CreateDirectory(path, security) e InvalidOperationException vindo de
             // DirectoryInfo.SetAccessControl (UnauthorizedAccessException cobre
             // PrivilegeNotHeldException). Falha de E/S de verdade estoura de novo na 2ª tentativa.
-            catch (Exception ex) when (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException)
+            // Recusa de link/junction não é problema de dono: estoura direto, sem log enganoso.
+            catch (Exception ex) when (!(ex is ReparsePointRejectedException)
+                && (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException))
             {
                 LogOwnerFailure(ex.Message);
                 CreateOrProtect(baseDir, BuildDirectorySecurity(false));
             }
         }
 
-        private static void CreateOrProtect(string baseDir, DirectorySecurity security)
+        /// <summary>
+        /// Cria a pasta com a ACL protegida quando ela não existe e, em qualquer caso, carimba a
+        /// ACL por cima. Carimbar sempre é o ponto: se um atacante pré-cria
+        /// %ProgramData%\WinForge com DACL protegida dando FullControl a ele mesmo,
+        /// Directory.CreateDirectory(path, security) devolve sucesso sem aplicar nada e qualquer
+        /// verificação de "já está protegida" passaria batido. Custo: uma escrita de ACL por
+        /// execução. Junction/symlink é recusado antes do carimbo — a ACL iria parar no alvo
+        /// escolhido pelo atacante.
+        /// </summary>
+        internal static void CreateOrProtect(string baseDir, DirectorySecurity security)
         {
             var info = new DirectoryInfo(baseDir);
-            if (info.Exists) { info.SetAccessControl(security); return; }
-            Directory.CreateDirectory(baseDir, security);
-            // Corrida: se outro processo criar a pasta entre o Exists e o CreateDirectory, o CLR
-            // trata ERROR_ALREADY_EXISTS como sucesso e ignora a DirectorySecurity — sobraria a
-            // pasta alheia, sem proteção. Confere e reaplica.
+            if (!info.Exists) Directory.CreateDirectory(baseDir, security);
             info.Refresh();
-            if (!info.GetAccessControl().AreAccessRulesProtected) info.SetAccessControl(security);
+            if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new ReparsePointRejectedException("Pasta " + baseDir + " é um link/junction; recusando por segurança.");
+            info.SetAccessControl(security);
+        }
+
+        /// <summary>Recusa de link/junction: é IOException para quem chama, mas não dispara a
+        /// segunda tentativa sem dono — o problema não é o dono.</summary>
+        private sealed class ReparsePointRejectedException : IOException
+        {
+            public ReparsePointRejectedException(string message) : base(message) { }
         }
 
         private static void LogOwnerFailure(string message)
@@ -154,8 +170,8 @@ namespace WinForge
                 File.AppendAllText(Path.Combine(dir, "launcher.log"),
                     DateTime.Now.ToString("s", CultureInfo.InvariantCulture) + " owner not set: " + flat + Environment.NewLine);
             }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
+            // log é acessório: nenhuma falha aqui pode impedir a 2ª tentativa sem dono.
+            catch (Exception) { }
         }
 
         private static void ExtractResource(string resourceName, string targetFile, bool force)
