@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0 (2026-09-07)
+
+- Auditoria de risco de todos os tweaks e toggles, com três classes (Seguro, Cuidado, Removido)
+  aplicadas pelo motor ao carregar as configurações: itens `Cuidado` vão para a categoria
+  "Avançado (CUIDADO)", ganham o custo no início da descrição e saem de todos os presets. A tabela
+  completa é gerada pelo build em `docs/auditoria.md`, a partir da mesma fonte que o programa lê.
+- Removidos por saldo negativo: o desligamento do SmartScreen (e da marca de origem de downloads)
+  e o pacote agressivo de serviços, que desligava impressão, Bluetooth, RDP, Windows Hello e
+  teclado touch de uma vez só.
+- O pacote agressivo virou cinco itens de serviço separados (Spooler, Bluetooth, Área de Trabalho
+  Remota, biometria/Windows Hello e teclado virtual), cada um classificado como `Cuidado` e
+  aplicável isoladamente.
+- Limpeza de Disco: o `StartComponentCleanup` do DISM roda sem `/ResetBase`, preservando a
+  possibilidade de desinstalar atualizações do Windows.
+- Desativar o BitLocker passou a ser `Cuidado`, na categoria "Avançado (CUIDADO)": descriptografar
+  a unidade do sistema custa a proteção contra acesso físico e demora muito em discos grandes.
+- Launcher: a pasta em `%ProgramData%\WinForge` é criada com dono Administrators e ACL aplicada em
+  todos os níveis; os arquivos do motor são recriados protegidos a cada execução; um mutex global
+  serializa instâncias simultâneas, com novas tentativas quando o arquivo está momentaneamente em
+  uso (violação de compartilhamento); e falhas de propriedade vão para o log de eventos do Windows
+  (origem `WinForge`), não mais para um arquivo dentro de `%LocalAppData%`.
+
 ## 1.0.0 (2026-09-07)
 
 - Launcher próprio `WinForge.exe` (C# net48): splash, elevação de administrador e hospedagem do

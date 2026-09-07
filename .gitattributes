@@ -1,4 +1,8 @@
 * text=auto
 
+# gerado por src/Engine/build.ps1 sempre com LF: sem isto o checkout traria CRLF
+# e o primeiro build depois do clone reescreveria o arquivo inteiro.
+docs/auditoria.md text eol=lf
+
 *.ico binary
 *.png binary

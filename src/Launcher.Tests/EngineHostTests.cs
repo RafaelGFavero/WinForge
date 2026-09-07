@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using WinForge;
 using Xunit;
 
@@ -67,6 +69,12 @@ public class EngineHostTests
         var security = EngineHost.BuildDirectorySecurity();
         Assert.True(security.AreAccessRulesProtected);
 
+        // dono = BUILTIN\Administrators: sem isso o criador da pasta mantém WRITE_DAC e pode
+        // reescrever a DACL protegida depois da extração.
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        Assert.NotNull(owner);
+        Assert.True(owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid));
+
         var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
             .Cast<FileSystemAccessRule>()
             .ToList();
@@ -87,6 +95,419 @@ public class EngineHostTests
         Assert.Equal(FileSystemRights.ReadAndExecute, userRights & FileSystemRights.ReadAndExecute);
         Assert.Equal((FileSystemRights)0, userRights & FileSystemRights.Write);
         Assert.Equal((FileSystemRights)0, userRights & FileSystemRights.Delete);
+    }
+
+    [Fact]
+    public void CreateOrProtect_NewDirectory_HasOurDacl()
+    {
+        var path = ScratchPath();
+        try
+        {
+            // sem dono: o teste não roda elevado, e doar a posse ao grupo Administradores exigiria
+            // SeRestorePrivilege. A DACL é a mesma nos dois casos.
+            EngineHost.CreateOrProtect(path, EngineHost.BuildDirectorySecurity(false));
+
+            var acl = new DirectoryInfo(path).GetAccessControl();
+            Assert.True(acl.AreAccessRulesProtected);
+            Assert.Equal(ExpectedSids(), SidsOf(acl));
+        }
+        finally { Cleanup(path); }
+    }
+
+    [Fact]
+    public void CreateOrProtect_ExistingHostileProtectedDacl_IsReplaced()
+    {
+        var path = ScratchPath();
+        var me = WindowsIdentity.GetCurrent().User;
+        try
+        {
+            // atacante pré-cria a pasta com DACL protegida dando FullControl só a ele: o
+            // CreateDirectory(path, security) devolveria sucesso sem aplicar nada.
+            var hostile = new DirectorySecurity();
+            hostile.SetAccessRuleProtection(true, false);
+            hostile.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            Directory.CreateDirectory(path, hostile);
+            Assert.Contains(me, SidsOf(new DirectoryInfo(path).GetAccessControl()));
+
+            EngineHost.CreateOrProtect(path, EngineHost.BuildDirectorySecurity(false));
+
+            var acl = new DirectoryInfo(path).GetAccessControl();
+            Assert.True(acl.AreAccessRulesProtected);
+            Assert.DoesNotContain(me, SidsOf(acl));
+            Assert.Equal(ExpectedSids(), SidsOf(acl));
+        }
+        finally { Cleanup(path); }
+    }
+
+    [Fact]
+    public void CreateOrProtect_ReparsePoint_Throws()
+    {
+        var target = ScratchPath();
+        var link = ScratchPath();
+        try
+        {
+            Directory.CreateDirectory(target);
+            Mklink(link, target);
+            Assert.True((new DirectoryInfo(link).Attributes & FileAttributes.ReparsePoint) != 0);
+
+            // carimbar a ACL num junction escreveria no alvo escolhido pelo atacante
+            Assert.ThrowsAny<IOException>(
+                () => EngineHost.CreateOrProtect(link, EngineHost.BuildDirectorySecurity(false)));
+
+            // o alvo continua intocado (nada de DACL protegida vazando para lá)
+            Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected);
+        }
+        finally
+        {
+            // Delete não recursivo: remove o junction, não o conteúdo do alvo
+            try { if (Directory.Exists(link)) Directory.Delete(link); } catch (Exception) { }
+            Cleanup(target);
+        }
+    }
+
+    [Fact]
+    public void EnsureEngineDirectories_ProtectsEveryLevel()
+    {
+        // proteger só a base não basta: os usuários têm travessia nela e um atacante que pré-crie
+        // engine\<versão> continua dono da pasta onde o .ps1 é extraído.
+        var chain = EngineHost.ProtectedDirectoryChain(@"C:\ProgramData", "1.0.0");
+
+        Assert.Equal(new[]
+        {
+            @"C:\ProgramData\WinForge",
+            @"C:\ProgramData\WinForge\engine",
+            @"C:\ProgramData\WinForge\engine\1.0.0"
+        }, chain);
+
+        // o último nível é exatamente a pasta onde EnsureEngine escreve o motor
+        Assert.Equal(Path.GetDirectoryName(EngineHost.EnginePath(@"C:\ProgramData", "1.0.0")), chain[chain.Length - 1]);
+    }
+
+    [Fact]
+    public void ProtectDirectory_ForeignOwnerWithoutOwnerAssignment_Throws()
+    {
+        // DACL protegida sobre dono alheio não protege nada: o dono mantém WRITE_DAC implícito.
+        // SID fixo, não o do usuário do teste: rodando como SYSTEM ou como Administrators (CI
+        // elevado), WindowsIdentity.GetCurrent().User seria um dono aceitável e o teste passaria
+        // verde sem testar nada.
+        var acl = EngineHost.BuildDirectorySecurity(false);
+        acl.SetOwner(new SecurityIdentifier("S-1-5-21-1-2-3-1001"));
+
+        var ex = Assert.Throws<UnauthorizedAccessException>(
+            () => EngineHost.EnsureAcceptableOwner(acl, @"C:\ProgramData\WinForge"));
+        Assert.Contains(@"C:\ProgramData\WinForge", ex.Message);
+    }
+
+    [Fact]
+    public void ProtectDirectory_WellKnownOwner_DoesNotThrow()
+    {
+        var admins = EngineHost.BuildDirectorySecurity(false);
+        admins.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+        EngineHost.EnsureAcceptableOwner(admins, @"C:\ProgramData\WinForge");
+
+        var system = EngineHost.BuildDirectorySecurity(false);
+        system.SetOwner(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null));
+        EngineHost.EnsureAcceptableOwner(system, @"C:\ProgramData\WinForge");
+    }
+
+    [Fact]
+    public void BuildFileSecurity_ProtectedWithThreeWellKnownRulesAndNoInheritance()
+    {
+        var security = EngineHost.BuildFileSecurity();
+        Assert.True(security.AreAccessRulesProtected);
+
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        Assert.NotNull(owner);
+        Assert.True(owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid));
+
+        var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToList();
+        Assert.Equal(3, rules.Count);
+        // arquivo não propaga herança: qualquer flag aqui seria rejeitada pelo Win32
+        Assert.All(rules, r =>
+        {
+            Assert.Equal(AccessControlType.Allow, r.AccessControlType);
+            Assert.Equal(InheritanceFlags.None, r.InheritanceFlags);
+            Assert.Equal(PropagationFlags.None, r.PropagationFlags);
+        });
+
+        Assert.Equal(FileSystemRights.FullControl, RightsFor(rules, WellKnownSidType.BuiltinAdministratorsSid));
+        Assert.Equal(FileSystemRights.FullControl, RightsFor(rules, WellKnownSidType.LocalSystemSid));
+        var userRights = RightsFor(rules, WellKnownSidType.BuiltinUsersSid);
+        Assert.Equal(FileSystemRights.ReadAndExecute, userRights & FileSystemRights.ReadAndExecute);
+        Assert.Equal((FileSystemRights)0, userRights & FileSystemRights.Write);
+        Assert.Equal((FileSystemRights)0, userRights & FileSystemRights.Delete);
+    }
+
+    [Fact]
+    public void WriteProtectedFile_NewFile_HasProtectedDacl()
+    {
+        var path = ScratchPath() + ".ps1";
+        try
+        {
+            // sem dono: o teste não roda elevado. A DACL é a mesma nos dois casos.
+            EngineHost.WriteProtectedFile(path, Encoding.ASCII.GetBytes("motor"), EngineHost.BuildFileSecurity(false));
+
+            Assert.Equal(Encoding.ASCII.GetBytes("motor"), File.ReadAllBytes(path));
+            var acl = new FileInfo(path).GetAccessControl();
+            Assert.True(acl.AreAccessRulesProtected);
+            Assert.Equal(ExpectedSids(), SidsOf(acl));
+        }
+        finally { CleanupFile(path); }
+    }
+
+    [Fact]
+    public void WriteProtectedFile_ExistingHostileFile_IsReplaced()
+    {
+        var path = ScratchPath() + ".ps1";
+        var me = WindowsIdentity.GetCurrent().User;
+        try
+        {
+            // atacante pré-planta o .ps1 com o conteúdo (e o hash) do motor embutido, mas com DACL
+            // protegida própria: o carimbo da pasta não toca em filhos e a conferência de hash passa.
+            var hostile = new FileSecurity();
+            hostile.SetAccessRuleProtection(true, false);
+            hostile.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.FullControl, AccessControlType.Allow));
+            using (var s = new FileStream(path, FileMode.CreateNew, FileSystemRights.Write,
+                FileShare.None, 4096, FileOptions.None, hostile))
+            {
+                var planted = Encoding.ASCII.GetBytes("plantado");
+                s.Write(planted, 0, planted.Length);
+            }
+            Assert.Contains(me, SidsOf(new FileInfo(path).GetAccessControl()));
+
+            EngineHost.WriteProtectedFile(path, Encoding.ASCII.GetBytes("motor"), EngineHost.BuildFileSecurity(false));
+
+            Assert.Equal(Encoding.ASCII.GetBytes("motor"), File.ReadAllBytes(path));
+            var acl = new FileInfo(path).GetAccessControl();
+            Assert.True(acl.AreAccessRulesProtected);
+            Assert.DoesNotContain(me, SidsOf(acl));
+            Assert.Equal(ExpectedSids(), SidsOf(acl));
+        }
+        finally { CleanupFile(path); }
+    }
+
+    [Fact]
+    public void WriteProtectedFile_DirectoryOrJunctionAtPath_Throws()
+    {
+        var asDirectory = ScratchPath();
+        var target = ScratchPath();
+        var junction = ScratchPath();
+        try
+        {
+            // pasta no lugar do arquivo: escrever ali é impossível, mas a recusa tem de ser explícita
+            Directory.CreateDirectory(asDirectory);
+            Assert.ThrowsAny<IOException>(() => EngineHost.WriteProtectedFile(
+                asDirectory, Encoding.ASCII.GetBytes("motor"), EngineHost.BuildFileSecurity(false)));
+
+            // junction no lugar do arquivo: escrever ali iria parar no alvo escolhido pelo atacante
+            Directory.CreateDirectory(target);
+            Mklink(junction, target);
+            Assert.ThrowsAny<IOException>(() => EngineHost.WriteProtectedFile(
+                junction, Encoding.ASCII.GetBytes("motor"), EngineHost.BuildFileSecurity(false)));
+            Assert.Empty(Directory.GetFileSystemEntries(target));
+        }
+        finally
+        {
+            try { if (Directory.Exists(junction)) Directory.Delete(junction); } catch (Exception) { }
+            Cleanup(target);
+            Cleanup(asDirectory);
+        }
+    }
+
+    [Fact]
+    public void WriteProtectedFile_ExistingFileThatCannotBeDeleted_RefusesInsteadOfOverwriting()
+    {
+        var path = ScratchPath() + ".ps1";
+        try
+        {
+            // sobrescrever um arquivo alheio manteria a DACL e o dono dele; se não dá para apagar,
+            // recusa fechado em vez de executar algo que o atacante ainda controla.
+            using (var held = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                held.WriteByte(0x41);
+                held.Flush();
+
+                var ex = Assert.ThrowsAny<UnauthorizedAccessException>(() => EngineHost.WriteProtectedFile(
+                    path, Encoding.ASCII.GetBytes("motor"), EngineHost.BuildFileSecurity(false)));
+                Assert.Contains(path, ex.Message);
+            }
+
+            Assert.Equal(new byte[] { 0x41 }, File.ReadAllBytes(path));
+        }
+        finally { CleanupFile(path); }
+    }
+
+    [Fact]
+    public void BuildEngineLockSecurity_OnlyAdministratorsAndSystem()
+    {
+        // o launcher roda sempre elevado; deixar Users de fora impede que um usuário comum crie o
+        // mutex antes e trave (ou abandone de propósito) a extração do motor
+        var rules = EngineHost.BuildEngineLockSecurity()
+            .GetAccessRules(true, false, typeof(SecurityIdentifier))
+            .Cast<MutexAccessRule>()
+            .ToList();
+
+        Assert.Equal(2, rules.Count);
+        Assert.All(rules, r =>
+        {
+            Assert.Equal(AccessControlType.Allow, r.AccessControlType);
+            Assert.Equal(MutexRights.FullControl, r.MutexRights);
+        });
+        Assert.Equal(
+            new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)
+            }.OrderBy(s => s.Value).ToList(),
+            rules.Select(r => (SecurityIdentifier)r.IdentityReference).OrderBy(s => s.Value).ToList());
+
+        // namespace global: o mutex tem de valer entre sessões, não só dentro da do usuário
+        Assert.Equal(@"Global\WinForge.EngineExtract", EngineHost.EngineLockName);
+    }
+
+    [Fact]
+    public void WithEngineLock_TwoThreads_DoNotOverlap()
+    {
+        // dois launchers abertos juntos apagam e recriam os mesmos arquivos; o mutex tem de fazer
+        // um esperar o outro terminar por inteiro.
+        var name = @"Local\WinForgeTest_" + Guid.NewGuid().ToString("N");
+        var security = new MutexSecurity();
+        security.AddAccessRule(new MutexAccessRule(WindowsIdentity.GetCurrent().User,
+            MutexRights.FullControl, AccessControlType.Allow));
+
+        int inside = 0;
+        int overlaps = 0;
+        var bothStarted = new ManualResetEvent(false);
+        var entered = 0;
+
+        Action body = () => EngineHost.WithEngineLock(name, security, () =>
+        {
+            if (Interlocked.Increment(ref inside) > 1) Interlocked.Increment(ref overlaps);
+            // só solta quando as duas threads já pediram o lock: sem sobreposição real de tentativa
+            // o teste passaria mesmo sem mutex nenhum
+            if (Interlocked.Increment(ref entered) == 1) bothStarted.WaitOne(TimeSpan.FromSeconds(5));
+            Thread.Sleep(50);
+            Interlocked.Decrement(ref inside);
+            return 0;
+        });
+
+        var first = new Thread(new ThreadStart(body));
+        var second = new Thread(new ThreadStart(body));
+        first.Start();
+        second.Start();
+        // a segunda thread fica bloqueada no WaitOne do mutex; libera a primeira depois de dar tempo
+        Thread.Sleep(200);
+        bothStarted.Set();
+
+        Assert.True(first.Join(TimeSpan.FromSeconds(15)), "a primeira thread não terminou");
+        Assert.True(second.Join(TimeSpan.FromSeconds(15)), "a segunda thread não terminou");
+        Assert.Equal(0, overlaps);
+        Assert.Equal(2, entered);
+    }
+
+    [Fact]
+    public void WriteProtectedFile_SharingViolationThatClears_RetriesInsteadOfRefusing()
+    {
+        // outro launcher (ou o antivírus) segurando o arquivo por um instante não é ataque:
+        // recusar de primeira transformaria a disputa numa falha de inicialização.
+        var path = ScratchPath() + ".ps1";
+        try
+        {
+            var held = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            held.WriteByte(0x41);
+            held.Flush();
+            var releaser = new Thread(() => { Thread.Sleep(300); held.Dispose(); });
+            releaser.Start();
+
+            EngineHost.WriteProtectedFile(path, Encoding.ASCII.GetBytes("motor"), EngineHost.BuildFileSecurity(false));
+            releaser.Join(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(Encoding.ASCII.GetBytes("motor"), File.ReadAllBytes(path));
+            Assert.True(new FileInfo(path).GetAccessControl().AreAccessRulesProtected);
+        }
+        finally { CleanupFile(path); }
+    }
+
+    private static void Mklink(string link, string target)
+    {
+        var psi = new ProcessStartInfo("cmd.exe", "/c mklink /J \"" + link + "\" \"" + target + "\"")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        using (var p = Process.Start(psi))
+        {
+            var output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            Assert.True(p.ExitCode == 0 && Directory.Exists(link), "mklink /J falhou: " + output);
+        }
+    }
+
+    private static string ScratchPath()
+    {
+        return Path.Combine(Path.GetTempPath(), "WinForgeTest_" + Guid.NewGuid().ToString("N"));
+    }
+
+    private static List<SecurityIdentifier> ExpectedSids()
+    {
+        return new List<SecurityIdentifier>
+        {
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null)
+        }.OrderBy(s => s.Value).ToList();
+    }
+
+    private static List<SecurityIdentifier> SidsOf(FileSystemSecurity acl)
+    {
+        return acl.GetAccessRules(true, false, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Select(r => (SecurityIdentifier)r.IdentityReference)
+            .Distinct()
+            .OrderBy(s => s.Value)
+            .ToList();
+    }
+
+    /// <summary>A DACL protegida dá só leitura aos usuários; devolve o controle antes de apagar.</summary>
+    private static void Cleanup(string path)
+    {
+        if (!Directory.Exists(path)) return;
+        try
+        {
+            var info = new DirectoryInfo(path);
+            var acl = info.GetAccessControl();
+            acl.SetAccessRuleProtection(false, true);
+            acl.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User,
+                FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            info.SetAccessControl(acl);
+        }
+        catch (Exception) { }
+        // limpeza nunca pode mascarar a falha de uma asserção
+        try { Directory.Delete(path, true); } catch (Exception) { }
+    }
+
+    /// <summary>Mesma ideia para arquivos: o criador é o dono, então sempre pode reabrir a DACL.</summary>
+    private static void CleanupFile(string path)
+    {
+        if (!File.Exists(path)) return;
+        try
+        {
+            var info = new FileInfo(path);
+            var acl = info.GetAccessControl();
+            acl.SetAccessRuleProtection(false, true);
+            acl.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User,
+                FileSystemRights.FullControl, AccessControlType.Allow));
+            info.SetAccessControl(acl);
+        }
+        catch (Exception) { }
+        try { File.Delete(path); } catch (Exception) { }
     }
 
     private static FileSystemRights RightsFor(IEnumerable<FileSystemAccessRule> rules, WellKnownSidType sidType)

@@ -54,6 +54,8 @@ $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
 $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
+$auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
+$auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 
@@ -143,12 +145,16 @@ $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawU
 # ---------------------------------------------------------------- funções e configs
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
+$src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 
 # ---------------------------------------------------------------- logo
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
 
 # ---------------------------------------------------------------- integração com o launcher (WinForge.exe)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($launcherBlock.TrimEnd() + "`n`n") "insert launcher"
+
+# ---------------------------------------------------------------- auditoria de risco (aplicação)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($auditBlock.TrimEnd() + "`n`n") "insert audit functions"
 
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
@@ -313,6 +319,19 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
 '@.TrimEnd() "button switch"
 
+# ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
+# A auditoria pode esvaziar um preset (todos os itens viraram Cuidado/Removido). Sem esta guarda,
+# Update-WinUtilSelections receberia $null no parâmetro obrigatório [string[]]$flatJson e lançaria erro.
+$src = Replace-Once $src @'
+    if ($preset) {
+        Update-WinUtilSelections -flatJson $CheckBoxesToCheck
+    }
+'@ @'
+    if ($preset -and @($CheckBoxesToCheck).Count -gt 0) {
+        Update-WinUtilSelections -flatJson $CheckBoxesToCheck
+    }
+'@ "preset vazio"
+
 # ---------------------------------------------------------------- ponto de restauração: não duplicar na mesma sessão
 $src = Insert-After $src @'
   $tweaksToRun = @($Tweaks | Where-Object { $_ -ne $restorePointTweak })
@@ -367,6 +386,9 @@ $sync.configs.appx.PSObject.Properties | ForEach-Object {
 # WinForge: mescla tweaks/botões/presets/jogos e marca recursos só do Windows 11
 Initialize-WinUtilBoostConfigs
 
+# WinForge: aplica a classificação de risco (Seguro/Cuidado/Removido) em tweaks e presets
+Initialize-WinForgeAudit
+
 if ($SelfTest) {
     Write-Host "== WinForge SelfTest =="
     $wbErrors = 0
@@ -409,8 +431,36 @@ if ($SelfTest) {
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
     if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
-    if (@($wbTweaksTab.PSObject.Properties).Count -ne 80) { Write-Host "  [ERRO] aba Tweaks: esperado 80 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
+    # Auditoria de risco
+    $wbUnclassified = @(); $wbPresetViolations = @()
+    foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
+        $e = $t.Value
+        if ($e.Type -in @('Button','Combobox','Note','ToggleButton')) { continue }
+        if (-not $e.PSObject.Properties['risk']) { $wbUnclassified += $t.Name }
+        if ($e.risk -eq 'cuidado' -and $e.category -ne 'zz__Avançado (CUIDADO)') { Write-Host "  [ERRO] $($t.Name): Cuidado fora da categoria CUIDADO ($($e.category))" -ForegroundColor Red; $wbErrors++ }
+        if ($e.risk -eq 'cuidado' -and $e.Description -notlike 'CUIDADO: *') { Write-Host "  [ERRO] $($t.Name): descrição de Cuidado sem prefixo" -ForegroundColor Red; $wbErrors++ }
+    }
+    if ($wbUnclassified.Count) { Write-Host "  [ERRO] tweaks sem classe de risco: $($wbUnclassified -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    foreach ($p in $sync.configs.preset.PSObject.Properties) {
+        foreach ($k in @($p.Value)) {
+            $e = $sync.configs.tweaks.$k
+            if ($null -eq $e) { continue }   # appx/apps keys
+            if ($e.risk -ne 'seguro') { $wbPresetViolations += "$($p.Name):$k" }
+        }
+    }
+    if ($wbPresetViolations.Count) { Write-Host "  [ERRO] presets com itens não-Seguro: $($wbPresetViolations -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    # a auditoria remove itens dos presets; um preset vazio depende da guarda em Invoke-WPFPresets para não estourar
+    foreach ($p in $sync.configs.preset.PSObject.Properties) {
+        if (@($p.Value).Count -eq 0) { Write-Host "  [ERRO] preset vazio: $($p.Name)" -ForegroundColor Red; $wbErrors++ }
+    }
+    foreach ($k in @($sync.WinForgeAudit.Keys | Where-Object { $sync.WinForgeAudit[$_].Class -eq 'Removido' })) {
+        if ($sync.configs.tweaks.PSObject.Properties[$k]) { Write-Host "  [ERRO] $k deveria ter sido removido" -ForegroundColor Red; $wbErrors++ }
+    }
+    $wbCuidado = @($sync.configs.tweaks.PSObject.Properties | Where-Object { $_.Value.risk -eq 'cuidado' }).Count
+    $wbSeguro  = @($sync.configs.tweaks.PSObject.Properties | Where-Object { $_.Value.risk -eq 'seguro' }).Count
+    Write-Host "  Auditoria: $wbSeguro Seguro, $wbCuidado Cuidado, $(@($sync.WinForgeAudit.Keys | Where-Object { $sync.WinForgeAudit[$_].Class -eq 'Removido' }).Count) Removido"
     Write-Host "  Ocultos neste sistema (tweaks): $($wbHidden.Count) -> $($wbHidden -join ', ')"
     Write-Host "  Ocultos neste sistema (appx)  : $($wbHiddenAppx.Count) -> $($wbHiddenAppx -join ', ')"
     try {
@@ -602,8 +652,207 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
 }
 Write-Host "Sintaxe PowerShell: OK"
 
-# teste de marca: nenhuma referência ao projeto original pode sobrar no arquivo gerado
+# ---------------------------------------------------------------- teste de marca no motor gerado
+# Antes de gerar o doc: uma falha de marca no motor e sobre o produto e tem de aparecer primeiro.
+$brandTest = Join-Path $RepoRoot "tests\engine\Test-Brand.ps1"
 if (-not $SkipBrandTest) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "tests\engine\Test-Brand.ps1") -File $outFile
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $brandTest -File $outFile
     if ($LASTEXITCODE -ne 0) { throw "Brand test falhou: $LASTEXITCODE ocorrência(s)." }
 }
+
+# ---------------------------------------------------------------- docs\auditoria.md (gerado)
+# Fonte única: config\wf-audit.ps1. Os nomes visíveis vêm dos blocos JSON do arquivo gerado
+# (tweaks da base + wbtweaks do WinForge) e da lista de jogos de config\wb-config.ps1.
+
+# Dot-source de arquivo NAO serve aqui: o PowerShell 5.1 decodifica um .ps1 sem BOM pela code page
+# ANSI, e config\wb-config.ps1 e UTF-8 sem BOM - "Ragnarök" chegaria como "RagnarÃ¶k" no doc.
+# Ler o texto em UTF-8 e executar um scriptblock mantem o encoding independente do BOM.
+function Get-ConfigScriptBlock([string]$relativePath) {
+    $full = Join-Path $PSScriptRoot $relativePath
+    $code = [System.IO.File]::ReadAllText($full, [System.Text.Encoding]::UTF8)
+    return [scriptblock]::Create($code)
+}
+
+function Get-WinForgeAuditData {
+    $sync = @{}
+    . (Get-ConfigScriptBlock "config\wf-audit.ps1")
+    return $sync
+}
+
+function Get-WinForgeConfigData {
+    $sync = @{ configs = @{} }
+    . (Get-ConfigScriptBlock "config\wb-config.ps1")
+    return $sync
+}
+
+function Get-JsonConfigBlock([string]$text, [string]$name) {
+    # o gerado traz: $sync.configs.<name> = @' ... '@ | ConvertFrom-Json
+    $start = "`$sync.configs.$name = @'`n"
+    $i = $text.IndexOf($start, [StringComparison]::Ordinal)
+    if ($i -lt 0) { throw "Bloco JSON '$name' não encontrado no arquivo gerado." }
+    $i += $start.Length
+    $e = $text.IndexOf("`n'@ | ConvertFrom-Json", $i, [StringComparison]::Ordinal)
+    if ($e -lt 0) { throw "Fim do bloco JSON '$name' não encontrado." }
+    return ($text.Substring($i, $e - $i) | ConvertFrom-Json)
+}
+
+function Format-MdCell([string]$s) {
+    if ([string]::IsNullOrWhiteSpace($s)) { return '—' }
+    return ($s -replace '\|', '\|' -replace '\s+', ' ').Trim()
+}
+
+# Ordenacao ordinal (por ponto de codigo), nao a de Sort-Object, que depende da cultura da maquina:
+# o mesmo commit tem de gerar o mesmo arquivo em qualquer locale.
+# A sobrecarga Sort(keys, items, comparer) nao serve: sob o PowerShell 5.1 o segundo array chega
+# por copia e $items volta na ordem original. Comparacao in-place sobre o proprio array e o unico
+# jeito de o resultado sair ordenado; a virgula no return impede que o array seja desempacotado.
+function Sort-RowsByKeyOrdinal([object[]]$rows) {
+    $items = [object[]]@($rows)
+    [array]::Sort($items, [System.Comparison[object]]{ param($a, $b) [System.StringComparer]::Ordinal.Compare([string]$a.Key, [string]$b.Key) })
+    return ,$items
+}
+
+$auditSync  = Get-WinForgeAuditData
+$audit      = $auditSync.WinForgeAudit
+$configSync = Get-WinForgeConfigData
+$jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'))
+
+function Get-TweakEntry([string]$key) {
+    foreach ($o in $jsonTweaks) {
+        $p = $o.PSObject.Properties[$key]
+        if ($p) { return $p.Value }
+    }
+    return $null
+}
+
+# trava de digitação: toda chave da auditoria tem de casar com um tweak real; as 'Removido'
+# são o inverso - se ainda existirem na config, a remoção não aconteceu.
+$auditProblems = @()
+$auditKeys = [string[]]@($audit.Keys)
+[array]::Sort($auditKeys, [System.StringComparer]::Ordinal)
+foreach ($key in $auditKeys) {
+    $entry = Get-TweakEntry $key
+    if ($audit[$key].Class -eq 'Removido') {
+        if ($entry) { $auditProblems += "${key}: marcado como Removido mas ainda existe na config" }
+    } elseif (-not $entry) {
+        $auditProblems += "${key}: sem tweak correspondente nas configs (erro de digitação?)"
+    }
+}
+if ($auditProblems.Count -gt 0) {
+    $auditProblems | ForEach-Object { Write-Host "  [AUDITORIA] $_" -ForegroundColor Red }
+    throw "Auditoria inconsistente: $($auditProblems.Count) problema(s)."
+}
+
+$auditRows = @()
+foreach ($key in @($audit.Keys)) {
+    $a = $audit[$key]
+    $entry = Get-TweakEntry $key
+    $name = if ($a.Override -and $a.Override.ContainsKey('Content')) { $a.Override.Content }
+            elseif ($entry) { $entry.Content }
+            elseif ($a.Content) { $a.Content }
+            else { $key }
+    $auditRows += [pscustomobject]@{ Key = $key; Name = $name; Class = $a.Class; Reason = $a.Reason }
+}
+# prioridade de CPU por jogo (IFEO): geradas em tempo de execução, Seguro por definição.
+# Se uma dessas chaves sintetizadas colidir com uma chave da auditoria (ou com outro jogo), o doc
+# teria duas linhas para a mesma chave, com classes possivelmente diferentes - falha alto.
+$gameKeysSeen = @{}
+foreach ($g in @($configSync.configs.wbgames)) {
+    $gameKey = "WPFTweaksWBGame$($g.Key)"
+    if ($audit.ContainsKey($gameKey)) {
+        throw "Colisão de chave: '$gameKey' é gerada da lista de jogos e também existe em wf-audit.ps1."
+    }
+    if ($gameKeysSeen.ContainsKey($gameKey)) {
+        throw "Colisão de chave: '$gameKey' aparece mais de uma vez na lista de jogos."
+    }
+    $gameKeysSeen[$gameKey] = $true
+    $auditRows += [pscustomobject]@{ Key = $gameKey; Name = $g.Name; Class = 'Seguro'; Reason = '' }
+}
+
+# Cobertura no sentido inverso da trava de digitação acima: lá toda chave da auditoria tem de existir
+# na config; aqui todo tweak classificável da config tem de estar na auditoria ou ser um jogo. Sem
+# isto, uma entrada nova entra no programa sem classe e some do doc - o -SelfTest só pegaria depois,
+# no motor montado. Os tipos ignorados são os mesmos do -SelfTest: não são itens de risco.
+$uncovered = @()
+foreach ($o in $jsonTweaks) {
+    foreach ($p in $o.PSObject.Properties) {
+        if ($p.Value.Type -in @('Button', 'Combobox', 'Note', 'ToggleButton')) { continue }
+        if ($audit.ContainsKey($p.Name) -or $gameKeysSeen.ContainsKey($p.Name)) { continue }
+        $uncovered += $p.Name
+    }
+}
+if ($uncovered.Count -gt 0) {
+    [array]::Sort($uncovered, [System.StringComparer]::Ordinal)
+    throw "Tweak sem classificação na auditoria: $($uncovered -join ', ')"
+}
+
+$auditClasses = @(
+    @{ Name = 'Seguro';   Title = 'Seguro' }
+    @{ Name = 'Cuidado';  Title = 'Cuidado' }
+    @{ Name = 'Removido'; Title = 'Removido' }
+)
+$counts = @{}
+foreach ($c in $auditClasses) { $counts[$c.Name] = @($auditRows | Where-Object { $_.Class -eq $c.Name }).Count }
+$gamesCount = @($configSync.configs.wbgames).Count
+$cautionCategory = ($auditSync.WinForgeCautionCategory -replace '^[a-z_]+__', '')
+
+$md = New-Object System.Text.StringBuilder
+$mdHeader = @"
+# Auditoria de risco
+
+> Arquivo gerado por ``src/Engine/build.ps1`` a partir de ``src/Engine/config/wf-audit.ps1``.
+> Não editar à mão: qualquer alteração é sobrescrita no próximo build.
+
+Todo tweak e toggle do WinForge tem uma classe de risco. A classe não é só documentação — o motor
+a aplica ao carregar as configurações:
+
+- **Seguro** — reversível, sem custo de segurança ou estabilidade; pode aparecer em preset.
+- **Cuidado** — tem um custo real; vive só na categoria "$cautionCategory", com o custo no início
+  da descrição, e nunca entra em preset.
+- **Removido** — saldo negativo; a entrada e qualquer referência a ela em preset somem.
+
+Total: **$($counts['Seguro']) Seguro** · **$($counts['Cuidado']) Cuidado** · **$($counts['Removido']) Removido**.
+
+"@
+[void]$md.Append(($mdHeader -replace "`r`n", "`n"))
+
+$emittedRows = 0
+foreach ($c in $auditClasses) {
+    # sem @() em volta: a funcao ja devolve o array inteiro (return ,$items) e um @() extra o
+    # embrulharia num array de um elemento so - a tabela sairia com uma linha e todas as chaves.
+    $rows = Sort-RowsByKeyOrdinal @($auditRows | Where-Object { $_.Class -eq $c.Name })
+    if ($rows.Count -ne $counts[$c.Name]) {
+        throw "Tabela '$($c.Name)': $($rows.Count) linha(s) depois da ordenação, esperado $($counts[$c.Name])."
+    }
+    $emittedRows += $rows.Count
+    [void]$md.Append("`n## $($c.Title) ($($rows.Count))`n`n")
+    if ($c.Name -eq 'Seguro') {
+        # '<Jogo>' e não o glob 'WPFTweaksWBGame*': o glob também casaria com WPFTweaksWBGameDVR,
+        # que é o toggle do Game DVR e está na auditoria, não na lista de jogos - $gamesCount não o conta.
+        [void]$md.Append("As chaves ``WPFTweaksWBGame<Jogo>`` ($gamesCount entradas, contadas a partir da lista de jogos) são a`nprioridade de CPU por jogo (IFEO): uma chave de registro por executável, removida ao desfazer.`n`n")
+    } elseif ($c.Name -eq 'Cuidado') {
+        [void]$md.Append("O motivo abaixo é o mesmo texto que aparece como ``CUIDADO: ...`` no início da descrição do item`nna interface.`n`n")
+    } else {
+        [void]$md.Append("Estas entradas não existem no programa; ficam aqui para registrar por que saíram.`n`n")
+    }
+    [void]$md.Append("| Chave | Nome | Motivo |`n|---|---|---|`n")
+    foreach ($r in $rows) {
+        [void]$md.Append("| ``$($r.Key)`` | $(Format-MdCell $r.Name) | $(Format-MdCell $r.Reason) |`n")
+    }
+}
+# Contagem impressa e contagem escrita vêm de caminhos diferentes ($auditRows x tabelas geradas):
+# se a ordenação voltar a devolver o array embrulhado, o doc sai com 3 linhas e os totais certos.
+if ($emittedRows -ne $auditRows.Count) {
+    throw "Doc com $emittedRows linha(s) de tabela, esperado $($auditRows.Count)."
+}
+
+$auditDoc = Join-Path $RepoRoot "docs\auditoria.md"
+New-Item -ItemType Directory -Path (Split-Path -Parent $auditDoc) -Force | Out-Null
+[System.IO.File]::WriteAllText($auditDoc, $md.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Auditoria: $auditDoc ($($counts['Seguro']) Seguro, $($counts['Cuidado']) Cuidado, $($counts['Removido']) Removido)"
+
+# O doc é um arquivo commitado: se qualquer fonte dele voltar a ser lida na code page errada,
+# o acento aparece corrompido no repositório. Aqui só o contador de mojibake faz sentido -
+# as marcas proibidas são sobre o motor, não sobre um texto em português.
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $brandTest -File $auditDoc -MojibakeOnly
+if ($LASTEXITCODE -ne 0) { throw "Mojibake em $auditDoc`: $LASTEXITCODE ocorrência(s)." }
