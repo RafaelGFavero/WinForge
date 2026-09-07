@@ -96,11 +96,11 @@ $src = Replace-Once $src @'
     Usa renderização WPF por hardware (padrão: software, mais compatível com drivers/overlays).
 
 .NOTES
-    WinForge 1.0.0
+    WinForge __VERSION__
     Autor          : Rafael Favero
     Base           : versão 26.08.19 do projeto original (MIT) - ver NOTICE
 #>
-'@ "cabeçalho"
+'@.Replace('__VERSION__', $Version) "cabeçalho"
 
 $src = Replace-Once $src @'
     [switch]$Offline
@@ -531,6 +531,9 @@ $src = Replace-Once $src @'
 
 $src = Replace-Once $src '    $winutilTextBlock.Text = "WinUtil"' '    $winutilTextBlock.Text = "WinForge"' "dialog logo text"
 
+# links file:// nos diálogos (NOTICE.txt dos Créditos): abre pelo caminho local, sem %20 na URL
+$src = Replace-Once $src 'Start-Process $eventSender.NavigateUri.AbsoluteUri' 'if ($eventSender.NavigateUri.IsFile) { Start-Process $eventSender.NavigateUri.LocalPath } else { Start-Process $eventSender.NavigateUri.AbsoluteUri }' "dialog file link"
+
 # ---------------------------------------------------------------- XAML
 $src = Replace-Once $src '        Title="WinUtil">' '        Title="WinForge">' "xaml title"
 $src = Replace-Once $src 'Header="Sponsors" Name="SponsorMenuItem"' 'Header="Créditos" Name="SponsorMenuItem"' "xaml sponsors"
@@ -575,9 +578,13 @@ $src = $src -replace 'CTT logo preset:', 'logo preset:'
 $src = $src -replace "Chris Titus Tech's Windows Utility", 'WinForge'
 
 # ---------------------------------------------------------------- rename global WinUtil -> WinForge (funções, variáveis, strings, pastas)
-$src = $src -replace 'WinUtil', 'WinForge'
-$src = $src -replace 'Winutil', 'WinForge'
-$src = $src -replace 'winutil', 'winforge'
+# -creplace (sensível a maiúsculas): com -replace, o primeiro padrão comeria todas as grafias e
+# produziria "WinForgeity" (de WinUtility) e "$WinForgedir" (de $winutildir).
+$src = $src -creplace 'WinUtility', 'WinForge'   # clr-namespace do XAML
+$src = $src -creplace 'WinUtil',    'WinForge'
+$src = $src -creplace 'Winutil',    'WinForge'
+$src = $src -creplace 'winutil',    'winforge'
+$src = $src -replace  'winutil',    'winforge'   # rede de segurança para qualquer outra grafia
 
 # ---------------------------------------------------------------- saída
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
