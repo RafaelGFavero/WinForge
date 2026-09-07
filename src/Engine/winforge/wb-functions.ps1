@@ -1,0 +1,538 @@
+#region ===== Windows Boost - funções adicionais =====
+# Todas as funções levam "WinUtilBoost" no nome para serem importadas automaticamente
+# nos runspaces (Initialize-WinUtilRunspacePool importa tudo que casa com 'winutil|WPF').
+
+function Get-WinUtilBoostSystemInfo {
+    <#
+    .SYNOPSIS
+        Detecta a versão do Windows (10/11) e os fabricantes de GPU presentes.
+        Usado para ocultar recursos que não se aplicam ao sistema atual.
+    #>
+    $build = [System.Environment]::OSVersion.Version.Build
+    if ($env:WINBOOST_SIMULATE_BUILD) { $build = [int]$env:WINBOOST_SIMULATE_BUILD }   # só para testes (ex.: 19045 = Windows 10 22H2)
+    $sync.OSBuild = $build
+    $sync.IsWin11 = ($build -ge 22000)
+    $sync.OSName = if ($sync.IsWin11) { "Windows 11" } else { "Windows 10" }
+    try {
+        $sync.OSDisplayVersion = [string](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).DisplayVersion
+    } catch {
+        $sync.OSDisplayVersion = ""
+    }
+
+    $vendors = [System.Collections.Generic.List[string]]::new()
+    $names = [System.Collections.Generic.List[string]]::new()
+    try {
+        Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object {
+            $n = [string]$_.Name
+            if ([string]::IsNullOrWhiteSpace($n)) { return }
+            $names.Add($n)
+            if ($n -match 'NVIDIA|GeForce|Quadro') { if (-not $vendors.Contains('nvidia')) { $vendors.Add('nvidia') } }
+            if ($n -match 'AMD|Radeon|ATI ')      { if (-not $vendors.Contains('amd'))    { $vendors.Add('amd') } }
+            if ($n -match 'Intel')                { if (-not $vendors.Contains('intel'))  { $vendors.Add('intel') } }
+        }
+    } catch {
+        Write-Warning "Não foi possível detectar a GPU: $($_.Exception.Message)"
+    }
+    $sync.GPUVendors = $vendors
+    $sync.GPUNames = $names
+}
+
+function Test-WinUtilBoostEntryCompatible {
+    <#
+    .SYNOPSIS
+        Retorna $true se a entrada (tweak/feature/appx) se aplica ao sistema atual.
+        Campos opcionais na entrada:
+          "os"  : "win11" ou "win10"  -> só aparece nessa versão
+          "gpu" : "nvidia" | "amd" | "intel" (ou lista) -> só aparece se a GPU foi detectada
+    #>
+    param($Entry)
+
+    if ($null -eq $Entry) { return $true }
+
+    $os = $null
+    $gpu = $null
+    if ($Entry.PSObject.Properties['os'])  { $os = [string]$Entry.os }
+    if ($Entry.PSObject.Properties['gpu']) { $gpu = $Entry.gpu }
+
+    if (-not [string]::IsNullOrWhiteSpace($os)) {
+        switch ($os.ToLower()) {
+            'win11' { if (-not $sync.IsWin11) { return $false } }
+            'win10' { if ($sync.IsWin11) { return $false } }
+        }
+    }
+
+    if ($gpu) {
+        $wanted = @($gpu | ForEach-Object { ([string]$_).ToLower() })
+        $have = @($sync.GPUVendors)
+        if ($have.Count -eq 0) { return $true }   # sem detecção: mostra tudo
+        $ok = $false
+        foreach ($w in $wanted) { if ($have -contains $w) { $ok = $true } }
+        if (-not $ok) { return $false }
+    }
+
+    return $true
+}
+
+function Get-WinUtilBoostConfigSubset {
+    <#
+    .SYNOPSIS
+        Retorna um PSCustomObject só com as entradas cuja propriedade 'tab' é igual a -Tab
+        (ou diferente, quando -Exclude). Usado para separar a aba "Jogos" da aba "Tweaks".
+    #>
+    param(
+        [Parameter(Mandatory)]$Config,
+        [string]$Tab,
+        [switch]$Exclude
+    )
+    $out = [PSCustomObject]@{}
+    foreach ($p in $Config.PSObject.Properties) {
+        $entryTab = ""
+        if ($p.Value -and $p.Value.PSObject.Properties['tab']) { $entryTab = [string]$p.Value.tab }
+        $match = ($entryTab -eq $Tab)
+        if ($Exclude) { $match = -not $match }
+        if ($match) { $out | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+    }
+    return $out
+}
+
+function Initialize-WinUtilBoostConfigs {
+    <#
+    .SYNOPSIS
+        Mescla as configurações do Windows Boost nas do WinUtil:
+          - marca entradas do WinUtil que só existem no Windows 11
+          - adiciona os tweaks, botões, presets e a lista de jogos (IFEO) do Windows Boost
+    #>
+
+    foreach ($k in $sync.WinBoostWin11OnlyTweaks) {
+        if ($sync.configs.tweaks.PSObject.Properties[$k]) {
+            $sync.configs.tweaks.$k | Add-Member -NotePropertyName os -NotePropertyValue "win11" -Force
+        }
+    }
+    foreach ($k in $sync.WinBoostWin11OnlyAppx) {
+        if ($sync.configs.appx.PSObject.Properties[$k]) {
+            $sync.configs.appx.$k | Add-Member -NotePropertyName os -NotePropertyValue "win11" -Force
+        }
+    }
+
+    foreach ($p in $sync.configs.wbtweaks.PSObject.Properties) {
+        $sync.configs.tweaks | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+
+    foreach ($g in $sync.configs.wbgames) {
+        $regs = @()
+        foreach ($exe in $g.Exes) {
+            $regs += [PSCustomObject]@{
+                Path          = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$exe\PerfOptions"
+                Name          = "CpuPriorityClass"
+                Value         = "3"
+                Type          = "DWord"
+                OriginalValue = "<RemoveEntry>"
+            }
+        }
+        $entry = [PSCustomObject]@{
+            Content     = $g.Name
+            Description = "Prioridade de CPU ALTA para: $($g.Exes -join ', ') (IFEO\PerfOptions CpuPriorityClass=3). O Windows passa a iniciar o processo com prioridade Alta. Marque + 'Desfazer selecionados' para remover."
+            category    = "Prioridade de CPU por jogo (IFEO)"
+            panel       = "1"
+            tab         = "Jogos"
+            registry    = $regs
+        }
+        $sync.configs.tweaks | Add-Member -NotePropertyName "WPFTweaksWBGame$($g.Key)" -NotePropertyValue $entry -Force
+    }
+
+    foreach ($p in $sync.configs.wbfeatures.PSObject.Properties) {
+        $sync.configs.feature | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+
+    foreach ($p in $sync.configs.wbpresets.PSObject.Properties) {
+        $sync.configs.preset | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+}
+
+function Invoke-WinUtilBoostRestorePointPrompt {
+    <#
+    .SYNOPSIS
+        Pergunta (uma vez, ao abrir) se o usuário quer criar um ponto de restauração.
+        -RestorePoint   : cria sem perguntar
+        -NoRestorePoint : não pergunta nem cria
+    #>
+    if ($sync.NoRestorePointPrompt) {
+        Write-WinUtilLog -Component "Boost" -Message "Pergunta de ponto de restauração ignorada (-NoRestorePoint)."
+        return
+    }
+
+    $create = $false
+    if ($sync.ForceRestorePoint) {
+        $create = $true
+    } else {
+        $msg = "Deseja criar um Ponto de Restauração do Sistema antes de começar?`n`n" +
+               "Recomendado: permite voltar o Windows ao estado atual caso alguma otimização cause problema.`n`n" +
+               "Sim  = criar agora (leva de 30 segundos a alguns minutos; a janela pode ficar sem resposta nesse tempo)`n" +
+               "Não  = continuar sem criar. Você ainda pode criar depois em:`n" +
+               "         Config > Windows Boost - Manutenção > 'Ponto de restauração - Criar agora'`n" +
+               "         ou marcando 'Restore Point - Create' na aba Tweaks."
+        $result = [System.Windows.MessageBox]::Show($sync.Form, $msg, "Windows Boost - Ponto de Restauração",
+            [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+        $create = ($result -eq [System.Windows.MessageBoxResult]::Yes)
+    }
+
+    if ($create) {
+        Invoke-WinUtilBoostCreateRestorePoint
+    } else {
+        Write-WinUtilLog -Component "Boost" -Message "Usuário optou por não criar ponto de restauração no início."
+    }
+}
+
+function Invoke-WinUtilBoostCreateRestorePoint {
+    <#
+    .SYNOPSIS
+        Cria um ponto de restauração agora (síncrono, como o WinUtil faz no botão Run Tweaks).
+    #>
+    if ($sync.ProcessRunning) {
+        [System.Windows.MessageBox]::Show("Aguarde o processo atual terminar.", "Windows Boost", "OK", "Warning") | Out-Null
+        return
+    }
+    $sync.ProcessRunning = $true
+    try {
+        Set-WinUtilTaskbaritem -state "Indeterminate" -overlay "logo"
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Criando ponto de restauração do sistema... a janela pode ficar sem resposta por até alguns minutos." -Percent 0
+        if ($sync.Form -and $sync.Form.Dispatcher) {
+            # força a barra de progresso a ser desenhada antes do trabalho síncrono
+            $sync.Form.Dispatcher.Invoke([action]{}, [System.Windows.Threading.DispatcherPriority]::Render) | Out-Null
+        }
+        Write-WinUtilLog -Component "Boost" -Message "Criando ponto de restauração."
+
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore" -Name "SystemRestorePointCreationFrequency" -Value 0 -Type DWord -Force -ErrorAction Stop
+        Enable-ComputerRestore -Drive $env:SystemDrive -ErrorAction SilentlyContinue
+        Checkpoint-Computer -Description "Windows Boost $(Get-Date -Format 'dd/MM/yyyy HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+
+        $sync.RestorePointCreated = $true
+        Write-WinUtilLog -Component "Boost" -Message "Ponto de restauração criado com sucesso."
+        Write-Host "Ponto de restauração criado com sucesso." -ForegroundColor Green
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Ponto de restauração criado com sucesso." -Percent 100
+        Set-WinUtilTaskbaritem -state "None" -overlay "checkmark"
+    } catch {
+        $err = $_.Exception.Message
+        Write-Warning "Falha ao criar ponto de restauração: $err"
+        Write-WinUtilLog -Level "ERROR" -Component "Boost" -Message "Falha ao criar ponto de restauração: $err"
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Falha ao criar ponto de restauração: $err" -Percent 100
+        Set-WinUtilTaskbaritem -state "Error" -overlay "warning"
+        [System.Windows.MessageBox]::Show("Não foi possível criar o ponto de restauração:`n$err`n`nVerifique se a Proteção do Sistema está ativada (Win+R > sysdm.cpl > aba Proteção do Sistema).", "Windows Boost", "OK", "Warning") | Out-Null
+    } finally {
+        $sync.ProcessRunning = $false
+    }
+}
+
+function Start-WinUtilBoostJob {
+    <#
+    .SYNOPSIS
+        Executa um bloco de trabalho em runspace com indicador de progresso e ícone na barra de tarefas.
+        O bloco deve retornar uma string de resumo (opcional).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][scriptblock]$Work
+    )
+    if ($sync.ProcessRunning) {
+        [System.Windows.MessageBox]::Show("Aguarde o processo atual terminar.", "Windows Boost", "OK", "Warning") | Out-Null
+        return
+    }
+    $sync.ProcessRunning = $true
+    Set-WinUtilTaskbaritem -state "Indeterminate" -overlay "logo"
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "$Label..." -Percent 0
+    Write-WinUtilLog -Component "Boost" -Message "Iniciando: $Label"
+
+    Invoke-WPFRunspace -ParameterList @(("work", $Work.ToString()), ("label", $Label)) -ScriptBlock {
+        param($work, $label)
+        try {
+            $summary = & ([scriptblock]::Create($work))
+            $summaryText = ($summary | Where-Object { $_ -is [string] } | Select-Object -Last 1)
+            Write-WinUtilLog -Component "Boost" -Message "Concluído: $label. $summaryText"
+            Write-Host "$label - concluído. $summaryText" -ForegroundColor Green
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "$label - concluído. $summaryText" -Percent 100
+            Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "None" -overlay "checkmark" }
+        } catch {
+            $err = $_.Exception.Message
+            Write-Warning "$label falhou: $err"
+            Write-WinUtilLog -Level "ERROR" -Component "Boost" -Message "$label falhou: $err"
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "$label - erro: $err" -Percent 100
+            Invoke-WPFUIThread -ScriptBlock { Set-WinUtilTaskbaritem -state "Error" -overlay "warning" }
+        } finally {
+            $sync.ProcessRunning = $false
+        }
+    } | Out-Null
+}
+
+function Invoke-WinUtilBoostRegistryBackup {
+    <#
+    .SYNOPSIS
+        Exporta as chaves HKLM, HKCU, HKCR, HKU e HKCC para arquivos .reg (igual ao 'Fazer backup do Windows.bat').
+    #>
+    Start-WinUtilBoostJob -Label "Backup do Registro" -Work {
+        $folder = Join-Path $sync.winutildir ("Backup_Regedit\" + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+        $hives = @('HKLM', 'HKCU', 'HKCR', 'HKU', 'HKCC')
+        $i = 0
+        foreach ($h in $hives) {
+            $i++
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Backup do Registro: exportando $h ($i de $($hives.Count))... isso pode demorar alguns minutos" -Percent ([int](($i - 1) / $hives.Count * 100))
+            $out = Join-Path $folder "$h.reg"
+            Write-Host "reg export $h -> $out"
+            & reg.exe export $h "$out" /y | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning "reg export $h retornou código $LASTEXITCODE" }
+        }
+        $size = (Get-ChildItem -Path $folder -File | Measure-Object -Property Length -Sum).Sum
+        Start-Process explorer.exe -ArgumentList "`"$folder`""
+        "Salvo em $folder ($([math]::Round($size / 1MB)) MB)."
+    }
+}
+
+function Invoke-WinUtilBoostClearStandbyList {
+    <#
+    .SYNOPSIS
+        Limpa a Standby List e a Modified List da memória (mesmo efeito do EmptyStandbyList.exe / ISLC),
+        sem depender de executável externo. Usa NtSetSystemInformation(SystemMemoryListInformation).
+    #>
+    $csharp = @"
+using System;
+using System.Runtime.InteropServices;
+public static class WinUtilBoostMemory {
+    [StructLayout(LayoutKind.Sequential)] public struct LUID { public uint LowPart; public int HighPart; }
+    [StructLayout(LayoutKind.Sequential)] public struct TOKEN_PRIVILEGES { public int PrivilegeCount; public LUID Luid; public int Attributes; }
+    [DllImport("ntdll.dll")] static extern int NtSetSystemInformation(int infoClass, ref int info, int length);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool LookupPrivilegeValue(string system, string name, out LUID luid);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TOKEN_PRIVILEGES newState, int bufferLength, IntPtr previousState, IntPtr returnLength);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    const int SystemMemoryListInformation = 80;
+    static void EnablePrivilege(string name) {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x0028, out token)) throw new System.ComponentModel.Win32Exception();
+        try {
+            TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES();
+            tp.PrivilegeCount = 1;
+            tp.Attributes = 0x00000002;
+            if (!LookupPrivilegeValue(null, name, out tp.Luid)) throw new System.ComponentModel.Win32Exception();
+            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception();
+            int err = Marshal.GetLastWin32Error();
+            if (err != 0) throw new System.ComponentModel.Win32Exception(err);
+        } finally { CloseHandle(token); }
+    }
+    // 2 = MemoryEmptyWorkingSets, 3 = MemoryFlushModifiedList, 4 = MemoryPurgeStandbyList, 5 = MemoryPurgeLowPriorityStandbyList
+    public static int Run(int command) {
+        EnablePrivilege("SeProfileSingleProcessPrivilege");
+        EnablePrivilege("SeIncreaseQuotaPrivilege");
+        int cmd = command;
+        return NtSetSystemInformation(SystemMemoryListInformation, ref cmd, 4);
+    }
+}
+"@
+    try {
+        if (-not ("WinUtilBoostMemory" -as [type])) {
+            Add-Type -TypeDefinition $csharp -ErrorAction Stop
+        }
+        $os = Get-CimInstance Win32_OperatingSystem
+        $before = [double]$os.FreePhysicalMemory
+        $total = [double]$os.TotalVisibleMemorySize
+
+        $r = [WinUtilBoostMemory]::Run(3)   # Modified List
+        if ($r -ne 0) { throw ("NtSetSystemInformation(FlushModifiedList) retornou 0x{0:X8}" -f $r) }
+        $r = [WinUtilBoostMemory]::Run(4)   # Standby List
+        if ($r -ne 0) { throw ("NtSetSystemInformation(PurgeStandbyList) retornou 0x{0:X8}" -f $r) }
+
+        Start-Sleep -Milliseconds 700
+        $after = [double](Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory
+        $freedMB = [math]::Round(($after - $before) / 1024)
+        if ($freedMB -lt 0) { $freedMB = 0 }
+        $msg = "Standby List e Modified List limpas.`n`nMemória livre antes: $([math]::Round($before/1024)) MB`nMemória livre agora: $([math]::Round($after/1024)) MB (de $([math]::Round($total/1024)) MB)`nLiberado: ~$freedMB MB"
+        Write-Host $msg -ForegroundColor Green
+        Write-WinUtilLog -Component "Boost" -Message ("Cache de RAM limpo: ~{0} MB liberados." -f $freedMB)
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Cache de RAM limpo: ~$freedMB MB liberados (livre agora: $([math]::Round($after/1024)) MB)." -Percent 100
+        [System.Windows.MessageBox]::Show($msg, "Windows Boost - Limpar cache de RAM", "OK", "Information") | Out-Null
+    } catch {
+        $err = $_.Exception.Message
+        Write-Warning "Falha ao limpar cache de RAM: $err"
+        Write-WinUtilLog -Level "ERROR" -Component "Boost" -Message "Falha ao limpar cache de RAM: $err"
+        [System.Windows.MessageBox]::Show("Falha ao limpar cache de RAM:`n$err", "Windows Boost", "OK", "Warning") | Out-Null
+    }
+}
+
+function Invoke-WinUtilBoostOptimizeVolumes {
+    <#
+    .SYNOPSIS
+        Otimiza todas as unidades fixas: TRIM em SSD, desfragmentação em HDD (Optimize-Volume escolhe pelo tipo de mídia).
+        Substitui os atalhos 'HDD.exe' e 'LIMPAR SSD.exe' do repositório original.
+    #>
+    Start-WinUtilBoostJob -Label "Otimização de unidades" -Work {
+        $vols = @(Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveType -eq 'Fixed' -and $_.FileSystem -match 'NTFS|ReFS' } | Sort-Object DriveLetter)
+        if ($vols.Count -eq 0) { throw "Nenhuma unidade fixa NTFS/ReFS encontrada." }
+        $i = 0
+        foreach ($v in $vols) {
+            $i++
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Otimizando unidade $($v.DriveLetter): ($i de $($vols.Count))... (TRIM em SSD / desfragmentação em HDD)" -Percent ([int](($i - 1) / $vols.Count * 100))
+            Write-Host "== Optimize-Volume $($v.DriveLetter): =="
+            Optimize-Volume -DriveLetter $v.DriveLetter -Verbose -ErrorAction Continue 4>&1 | ForEach-Object { Write-Host "  $_" }
+        }
+        "$($vols.Count) unidade(s) otimizada(s): $(($vols | ForEach-Object { "$($_.DriveLetter):" }) -join ' ')"
+    }
+}
+
+function Invoke-WinUtilBoostFullCleanup {
+    <#
+    .SYNOPSIS
+        Limpeza completa (versão revisada do 'Limpeza Completa PC.bat'):
+        Temp do usuário e do Windows, itens recentes, cache do Windows Update, DNS, WER, cache de shaders DirectX e Lixeira.
+    #>
+    Start-WinUtilBoostJob -Label "Limpeza completa" -Work {
+        $script:freed = [long]0
+
+        function Remove-WinUtilBoostContents([string]$path, [bool]$recurse = $true) {
+            if (-not (Test-Path -LiteralPath $path)) { return }
+            $items = if ($recurse) { Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue } else { Get-ChildItem -LiteralPath $path -File -Force -ErrorAction SilentlyContinue }
+            foreach ($it in $items) {
+                $size = 0
+                try {
+                    if ($it.PSIsContainer) { $size = (Get-ChildItem -LiteralPath $it.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum }
+                    else { $size = $it.Length }
+                } catch { }
+                try {
+                    Remove-Item -LiteralPath $it.FullName -Recurse -Force -ErrorAction Stop
+                    $script:freed += [long]$size
+                } catch { }   # arquivos em uso são ignorados
+            }
+        }
+
+        $steps = @(
+            @{ Label = "Temp do usuário";            Path = $env:TEMP;                                         Recurse = $true },
+            @{ Label = "Temp do Windows";            Path = "$env:windir\Temp";                                Recurse = $true },
+            @{ Label = "Itens recentes";             Path = "$env:APPDATA\Microsoft\Windows\Recent";           Recurse = $false },
+            @{ Label = "Cache de internet (legado)"; Path = "$env:LOCALAPPDATA\Microsoft\Windows\INetCache";   Recurse = $true },
+            @{ Label = "Cache de shaders DirectX";   Path = "$env:LOCALAPPDATA\D3DSCache";                     Recurse = $true },
+            @{ Label = "Despejos de falhas";         Path = "$env:LOCALAPPDATA\CrashDumps";                    Recurse = $true },
+            @{ Label = "Relatórios de erro (WER)";   Path = "$env:ProgramData\Microsoft\Windows\WER\ReportQueue";   Recurse = $true },
+            @{ Label = "Relatórios de erro (WER)";   Path = "$env:ProgramData\Microsoft\Windows\WER\ReportArchive"; Recurse = $true }
+        )
+        $total = $steps.Count + 3
+        $i = 0
+        foreach ($s in $steps) {
+            $i++
+            Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Limpeza completa: $($s.Label)..." -Percent ([int]($i / $total * 100))
+            Write-Host "Limpando: $($s.Label) ($($s.Path))"
+            Remove-WinUtilBoostContents -path $s.Path -recurse $s.Recurse
+        }
+
+        $i++
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Limpeza completa: cache do Windows Update (SoftwareDistribution\Download)..." -Percent ([int]($i / $total * 100))
+        Write-Host "Limpando: cache do Windows Update"
+        Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+        Stop-Service -Name bits -Force -ErrorAction SilentlyContinue
+        Remove-WinUtilBoostContents -path "$env:windir\SoftwareDistribution\Download" -recurse $true
+        Start-Service -Name bits -ErrorAction SilentlyContinue
+        Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+
+        $i++
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Limpeza completa: cache DNS..." -Percent ([int]($i / $total * 100))
+        ipconfig /flushdns | Out-Null
+
+        $i++
+        Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Limpeza completa: Lixeira..." -Percent ([int]($i / $total * 100))
+        try { Clear-RecycleBin -Force -ErrorAction Stop } catch { }
+
+        "Liberados ~$([math]::Round($script:freed / 1MB)) MB (arquivos em uso foram ignorados)."
+    }
+}
+
+function Invoke-WinUtilBoostClearShaderCache {
+    <#
+    .SYNOPSIS
+        Limpa o cache de shaders (NVIDIA DXCache/GLCache/OptixCache, AMD DxCache/GLCache/VkCache, Intel, DirectX D3DSCache).
+        Os jogos recompilam os shaders na próxima execução (pode haver stutter inicial).
+    #>
+    $dirs = @(
+        "$env:LOCALAPPDATA\NVIDIA\DXCache",
+        "$env:LOCALAPPDATA\NVIDIA\GLCache",
+        "$env:LOCALAPPDATA\NVIDIA\OptixCache",
+        "$env:LOCALAPPDATA\NVIDIA Corporation\NV_Cache",
+        "$env:PROGRAMDATA\NVIDIA Corporation\NV_Cache",
+        "$env:LOCALAPPDATA\AMD\DxCache",
+        "$env:LOCALAPPDATA\AMD\DxcCache",
+        "$env:LOCALAPPDATA\AMD\GLCache",
+        "$env:LOCALAPPDATA\AMD\VkCache",
+        "$env:LOCALAPPDATA\Intel\ShaderCache",
+        "$env:LOCALAPPDATA\D3DSCache"
+    )
+    $freed = [long]0
+    $found = 0
+    foreach ($d in $dirs) {
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        $found++
+        Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            $size = 0
+            try {
+                if ($_.PSIsContainer) { $size = (Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum } else { $size = $_.Length }
+            } catch { }
+            try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop; $freed += [long]$size } catch { }
+        }
+    }
+    $msg = "Cache de shaders limpo em $found pasta(s). Liberados ~$([math]::Round($freed / 1MB)) MB.`n`nOs jogos vão recompilar os shaders na próxima execução (pode ter stutter no começo)."
+    Write-Host $msg -ForegroundColor Green
+    Write-WinUtilLog -Component "Boost" -Message "Shader cache limpo: ~$([math]::Round($freed / 1MB)) MB em $found pasta(s)."
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Cache de shaders limpo: ~$([math]::Round($freed / 1MB)) MB liberados." -Percent 100
+    [System.Windows.MessageBox]::Show($msg, "Windows Boost - Shader Cache", "OK", "Information") | Out-Null
+}
+
+function Invoke-WinUtilBoostOpenTool {
+    <#
+    .SYNOPSIS
+        Abre um utilitário externo da pasta 'Apps' (ao lado do script). Se não existir, oferece abrir a página oficial.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Pattern,
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $appsDir = Join-Path $sync.ScriptRoot 'Apps'
+    $exe = $null
+    if (Test-Path -LiteralPath $appsDir) {
+        $exe = Get-ChildItem -Path $appsDir -Filter $Pattern -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    if ($exe) {
+        Write-WinUtilLog -Component "Boost" -Message "Abrindo ferramenta externa: $($exe.FullName)"
+        Start-Process -FilePath $exe.FullName -WorkingDirectory $appsDir
+    } else {
+        $r = [System.Windows.MessageBox]::Show("$Name não foi encontrado na pasta 'Apps' ao lado do WindowsBoost.ps1`n($appsDir)`n`nAbrir a página oficial de download?", "Windows Boost", "YesNo", "Question")
+        if ($r -eq [System.Windows.MessageBoxResult]::Yes) { Start-Process $Url }
+    }
+}
+
+function Show-WinUtilBoostAbout {
+    $gpu = if ($sync.GPUNames -and $sync.GPUNames.Count -gt 0) { $sync.GPUNames -join ', ' } else { 'não detectada' }
+    $msg = @"
+Windows Boost $($sync.version)
+Ferramenta de otimização para Windows 10 e 11.
+
+Sistema : $($sync.OSName) $($sync.OSDisplayVersion) (build $($sync.OSBuild))
+GPU     : $gpu
+Logs    : $($sync.logPath)
+
+Base    : <a href="https://github.com/ChrisTitusTech/winutil">Chris Titus Tech WinUtil $($sync.baseVersion)</a> (licença MIT)
+Extras  : scripts do repositório 'Windows Boost - Essential' reescritos como tweaks reversíveis
+          (aba Tweaks, aba Jogos e Config > Windows Boost - Manutenção)
+"@
+    Show-CustomDialog -Title "Sobre o Windows Boost" -Message $msg
+}
+
+function Show-WinUtilBoostCredits {
+    $msg = @"
+Windows Boost é construído sobre o <a href="https://github.com/ChrisTitusTech/winutil">WinUtil</a> de Chris Titus Tech (@ChrisTitusTech),
+com UI de @MyDrift-user e @Marterich e runspaces de @DeveloperDurp - licença MIT.
+
+As otimizações de jogos, GPU, serviços, energia e limpeza vêm do repositório
+'Windows Boost - Essential' e foram revisadas para terem 'Desfazer' e detecção de estado.
+
+Documentação dos tweaks originais: <a href="https://winutil.christitus.com/">winutil.christitus.com</a>
+"@
+    Show-CustomDialog -Title "Créditos" -Message $msg
+}
+#endregion
