@@ -1,7 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 
 namespace WinForge
@@ -9,6 +11,8 @@ namespace WinForge
     public static class EngineHost
     {
         public const string ResourceName = "WinForge.Engine";
+        public const string NoticeResourceName = "WinForge.NOTICE";
+        public const string LicenseResourceName = "WinForge.LICENSE";
 
         public static string ComputeSha256(byte[] data)
         {
@@ -33,27 +37,73 @@ namespace WinForge
             return !string.Equals(current, expectedHash, StringComparison.OrdinalIgnoreCase);
         }
 
-        public static byte[] ReadEmbeddedEngine()
+        public static byte[] ReadEmbeddedResource(string resourceName)
         {
-            using (var s = typeof(EngineHost).Assembly.GetManifestResourceStream(ResourceName))
+            using (var s = typeof(EngineHost).Assembly.GetManifestResourceStream(resourceName))
             {
-                if (s == null) throw new InvalidOperationException("Recurso do engine não encontrado no executável.");
+                if (s == null) throw new InvalidOperationException("Recurso '" + resourceName + "' não encontrado no executável.");
                 using (var ms = new MemoryStream()) { s.CopyTo(ms); return ms.ToArray(); }
             }
+        }
+
+        public static byte[] ReadEmbeddedEngine()
+        {
+            return ReadEmbeddedResource(ResourceName);
+        }
+
+        /// <summary>
+        /// ACL da pasta base do motor: só administradores e SYSTEM escrevem; usuários apenas leem
+        /// e executam. Impede que um usuário sem privilégio troque o .ps1 entre a extração e a
+        /// execução elevada (TOCTOU). SIDs bem conhecidos, para não depender de nomes localizados.
+        /// </summary>
+        public static DirectorySecurity BuildDirectorySecurity()
+        {
+            var security = new DirectorySecurity();
+            security.SetAccessRuleProtection(true, false);
+            const InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                FileSystemRights.ReadAndExecute, inherit, PropagationFlags.None, AccessControlType.Allow));
+            return security;
         }
 
         public static string EnsureEngine(string version)
         {
             var bytes = ReadEmbeddedEngine();
             var hash = ComputeSha256(bytes);
-            var path = EnginePath(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), version);
+            // %ProgramData% em vez de %LocalAppData%: pasta protegida por ACL, já que o motor roda elevado.
+            var root = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            var baseDir = Path.Combine(root, "WinForge");
+            var created = Directory.CreateDirectory(baseDir);
+            created.SetAccessControl(BuildDirectorySecurity());
+
+            var path = EnginePath(root, version);
+            var dir = Path.GetDirectoryName(path);
+            Directory.CreateDirectory(dir);
+
+            var extracted = false;
             if (NeedsExtract(path, hash))
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
                 File.WriteAllBytes(path, bytes);
                 File.WriteAllText(path + ".sha256", hash);
+                extracted = true;
             }
+            // atribuição MIT sempre ao lado do motor (o diálogo de Créditos abre o NOTICE.txt)
+            ExtractResource(NoticeResourceName, Path.Combine(dir, "NOTICE.txt"), extracted);
+            ExtractResource(LicenseResourceName, Path.Combine(dir, "LICENSE.txt"), extracted);
             return path;
+        }
+
+        private static void ExtractResource(string resourceName, string targetFile, bool force)
+        {
+            if (!force && File.Exists(targetFile)) return;
+            File.WriteAllBytes(targetFile, ReadEmbeddedResource(resourceName));
         }
 
         public static string BuildArguments(string enginePath, string readyEvent, string[] passthrough, bool hideWindow)

@@ -20,6 +20,8 @@
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="..\..\dist\engine\WinForge.ps1" Link="Resources\WinForge.ps1" LogicalName="WinForge.Engine" />
+    <EmbeddedResource Include="..\..\NOTICE" Link="Resources\NOTICE" LogicalName="WinForge.NOTICE" />
+    <EmbeddedResource Include="..\..\LICENSE" Link="Resources\LICENSE" LogicalName="WinForge.LICENSE" />
     <Resource Include="..\..\assets\winforge.ico" Link="winforge.ico" />
   </ItemGroup>
   <ItemGroup>

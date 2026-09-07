@@ -1,5 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using WinForge;
 using Xunit;
@@ -53,6 +57,41 @@ public class EngineHostTests
     [Fact]
     public void EnginePath_UsesVersionFolder()
     {
-        Assert.Equal(@"C:\LAD\WinForge\engine\1.0.0\WinForge.ps1", EngineHost.EnginePath(@"C:\LAD", "1.0.0"));
+        // a raiz passada por EnsureEngine é %ProgramData% (pasta protegida por ACL)
+        Assert.Equal(@"C:\ProgramData\WinForge\engine\1.0.0\WinForge.ps1", EngineHost.EnginePath(@"C:\ProgramData", "1.0.0"));
+    }
+
+    [Fact]
+    public void BuildDirectorySecurity_ProtectedWithThreeWellKnownRules()
+    {
+        var security = EngineHost.BuildDirectorySecurity();
+        Assert.True(security.AreAccessRulesProtected);
+
+        var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToList();
+        Assert.Equal(3, rules.Count);
+
+        const InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        Assert.All(rules, r =>
+        {
+            Assert.Equal(AccessControlType.Allow, r.AccessControlType);
+            Assert.Equal(inherit, r.InheritanceFlags);
+            Assert.Equal(PropagationFlags.None, r.PropagationFlags);
+        });
+
+        Assert.Equal(FileSystemRights.FullControl, RightsFor(rules, WellKnownSidType.BuiltinAdministratorsSid));
+        Assert.Equal(FileSystemRights.FullControl, RightsFor(rules, WellKnownSidType.LocalSystemSid));
+        // o CLR acrescenta Synchronize a ReadAndExecute; o que importa é ler sim, escrever não
+        var userRights = RightsFor(rules, WellKnownSidType.BuiltinUsersSid);
+        Assert.Equal(FileSystemRights.ReadAndExecute, userRights & FileSystemRights.ReadAndExecute);
+        Assert.Equal((FileSystemRights)0, userRights & FileSystemRights.Write);
+        Assert.Equal((FileSystemRights)0, userRights & FileSystemRights.Delete);
+    }
+
+    private static FileSystemRights RightsFor(IEnumerable<FileSystemAccessRule> rules, WellKnownSidType sidType)
+    {
+        var sid = new SecurityIdentifier(sidType, null);
+        return rules.Single(r => r.IdentityReference.Equals(sid)).FileSystemRights;
     }
 }

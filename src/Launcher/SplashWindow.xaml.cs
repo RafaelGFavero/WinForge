@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Interop;
@@ -25,7 +26,10 @@ namespace WinForge
         {
             try
             {
-                return BitmapFrame.Create(new Uri("pack://application:,,,/WinForge;component/winforge.ico"));
+                // o .ico tem vários tamanhos; BitmapFrame.Create devolveria o primeiro quadro (16x16)
+                var uri = new Uri("pack://application:,,,/WinForge;component/winforge.ico");
+                var decoder = new IconBitmapDecoder(uri, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                return decoder.Frames.OrderByDescending(f => f.PixelWidth).First();
             }
             catch
             {

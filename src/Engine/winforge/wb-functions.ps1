@@ -524,9 +524,18 @@ Extras  : scripts do repositório 'Windows Boost - Essential' reescritos como tw
 }
 
 function Show-WinUtilBoostCredits {
+    # o launcher extrai o NOTICE.txt ao lado do motor; se o motor rodar solto, só cita o arquivo
+    $noticePath = Join-Path $sync.ScriptRoot 'NOTICE.txt'
+    if (Test-Path -LiteralPath $noticePath -PathType Leaf) {
+        $noticeLine = '<a href="' + ([uri]$noticePath).AbsoluteUri + '">Abrir NOTICE (atribuições e licença MIT)</a>'
+    } else {
+        $noticeLine = "O arquivo NOTICE.txt acompanha o WinForge.exe / o pacote zip."
+    }
     $msg = @"
 WinForge é construído sobre um utilitário de código aberto sob licença MIT.
 A atribuição completa aos autores originais está no arquivo NOTICE distribuído junto.
+
+$noticeLine
 
 As otimizações de jogos, GPU, serviços, energia e limpeza vêm do repositório
 'Windows Boost - Essential' e foram revisadas para terem 'Desfazer' e detecção de estado.

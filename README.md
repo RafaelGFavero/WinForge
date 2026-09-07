@@ -25,6 +25,11 @@ Baixe na página de [releases](https://github.com/rafaelfavero/WinForge/releases
    voltar atrás pelo próprio Windows, ou pule se preferir usar só o Desfazer da ferramenta.
 3. Marque o que quer aplicar e clique em aplicar. Cada tweak tem seu Desfazer.
 
+Na primeira execução o `WinForge.exe` extrai o motor em `%ProgramData%\WinForge\engine\<versão>\`,
+junto com o `NOTICE.txt` e o `LICENSE.txt`. Essa pasta é gravável só por administradores e pelo
+SYSTEM — o motor roda elevado e não pode ficar em um diretório que qualquer usuário altere. Os
+logs e os backups de registro continuam em `%LocalAppData%\WinForge`.
+
 Parâmetros de linha de comando:
 
 | Parâmetro | O que faz |

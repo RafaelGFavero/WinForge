@@ -17,3 +17,10 @@
 - `-SelfTest` no motor: valida configurações, XAML, montagem das abas e presets sem abrir a janela.
   Rodando `dist\engine\WinForge.ps1` diretamente não exige administrador; pelo `WinForge.exe` a
   elevação continua sendo pedida.
+- O motor é extraído em `%ProgramData%\WinForge\engine\<versão>\`, com a herança de permissões
+  desligada: só administradores e SYSTEM escrevem, usuários apenas leem. Antes a extração ia para
+  `%LocalAppData%`, gravável pelo usuário — um processo sem privilégio podia trocar o `.ps1` entre
+  a extração e a execução elevada. Os logs e backups do motor continuam em `%LocalAppData%\WinForge`.
+- `NOTICE` e `LICENSE` embutidos no executável e extraídos junto do motor; o diálogo de Créditos
+  ganhou um link que abre o `NOTICE.txt`.
+- Splash: o logo passa a usar o maior quadro do `.ico` em vez do de 16x16.
