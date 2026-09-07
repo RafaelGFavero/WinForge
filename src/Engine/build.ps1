@@ -319,6 +319,19 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
 '@.TrimEnd() "button switch"
 
+# ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
+# A auditoria pode esvaziar um preset (todos os itens viraram Cuidado/Removido). Sem esta guarda,
+# Update-WinUtilSelections receberia $null no parâmetro obrigatório [string[]]$flatJson e lançaria erro.
+$src = Replace-Once $src @'
+    if ($preset) {
+        Update-WinUtilSelections -flatJson $CheckBoxesToCheck
+    }
+'@ @'
+    if ($preset -and @($CheckBoxesToCheck).Count -gt 0) {
+        Update-WinUtilSelections -flatJson $CheckBoxesToCheck
+    }
+'@ "preset vazio"
+
 # ---------------------------------------------------------------- ponto de restauração: não duplicar na mesma sessão
 $src = Insert-After $src @'
   $tweaksToRun = @($Tweaks | Where-Object { $_ -ne $restorePointTweak })
@@ -418,7 +431,7 @@ if ($SelfTest) {
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
     if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
-    if (@($wbTweaksTab.PSObject.Properties).Count -ne 78) { Write-Host "  [ERRO] aba Tweaks: esperado 78 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
@@ -438,6 +451,10 @@ if ($SelfTest) {
         }
     }
     if ($wbPresetViolations.Count) { Write-Host "  [ERRO] presets com itens não-Seguro: $($wbPresetViolations -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    # a auditoria remove itens dos presets; um preset vazio depende da guarda em Invoke-WPFPresets para não estourar
+    foreach ($p in $sync.configs.preset.PSObject.Properties) {
+        if (@($p.Value).Count -eq 0) { Write-Host "  [ERRO] preset vazio: $($p.Name)" -ForegroundColor Red; $wbErrors++ }
+    }
     foreach ($k in @($sync.WinForgeAudit.Keys | Where-Object { $sync.WinForgeAudit[$_].Class -eq 'Removido' })) {
         if ($sync.configs.tweaks.PSObject.Properties[$k]) { Write-Host "  [ERRO] $k deveria ter sido removido" -ForegroundColor Red; $wbErrors++ }
     }

@@ -110,49 +110,71 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBPrefetch": {
     "Content": "Prefetch / Superfetch - Desativar (apenas para SSD)",
     "Description": "Desliga o Prefetcher e o Superfetch/SysMain no registro. Só faz sentido em SSD; em HDD deixa o sistema mais lento. Desfazer restaura o padrão (3). Origem: 'Desabilitar Prefetch e Superfetch.reg' (o arquivo original estava em formato inválido e não funcionava).",
-    "category": "zz__WinForge - Avançado (CUIDADO)",
+    "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "registry": [
       { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management\\PrefetchParameters", "Name": "EnablePrefetcher", "Value": "0", "Type": "DWord", "OriginalValue": "3" },
       { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management\\PrefetchParameters", "Name": "EnableSuperfetch", "Value": "0", "Type": "DWord", "OriginalValue": "<RemoveEntry>" }
     ]
   },
-  "WPFTweaksWBSmartScreen": {
-    "Content": "SmartScreen do Explorer e bloqueio de downloads - Desativar",
-    "Description": "REDUZ A SEGURANÇA. Desliga o SmartScreen para arquivos executados pelo Explorer e para de marcar downloads como 'vindos da internet' (sem o aviso 'Desbloquear'). Use só se souber o que está fazendo. Origem: 'Desabilitar SmartSceen e Downloads Blocks.reg'.",
-    "category": "zz__WinForge - Avançado (CUIDADO)",
-    "panel": "1",
-    "registry": [
-      { "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer",           "Name": "SmartScreenEnabled",  "Value": "Off", "Type": "String", "OriginalValue": "Warn" },
-      { "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Attachments", "Name": "SaveZoneInformation", "Value": "1",   "Type": "DWord",  "OriginalValue": "<RemoveEntry>" }
-    ]
-  },
   "WPFTweaksWBIndexing": {
     "Content": "Indexação (Windows Search) - Desativar serviço",
     "Description": "Desliga o serviço WSearch. Libera disco/CPU em segundo plano, mas a pesquisa do menu Iniciar/Explorador e do Outlook fica bem mais lenta. Origem: 'Desativar indexação.bat'.",
-    "category": "zz__WinForge - Avançado (CUIDADO)",
+    "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "service": [
       { "Name": "WSearch", "StartupType": "Disabled", "OriginalType": "Automatic" }
     ]
   },
-  "WPFTweaksWBServicesAggressive": {
-    "Content": "Serviços - Desativar (agressivo: impressão, Bluetooth, RDP, Windows Hello, teclado touch)",
-    "Description": "Desativa Spooler (impressoras!), bthserv (Bluetooth!), TermService (Área de Trabalho Remota), WbioSrvc (Windows Hello biometria) e TabletInputService (teclado virtual/caneta). Só para PCs de jogo sem impressora/Bluetooth. Windows Update e relógio ficaram de fora de propósito (use a aba Updates). Origem: 'Desativar seviços.bat'.",
-    "category": "zz__WinForge - Avançado (CUIDADO)",
+  "WPFTweaksWBSvcSpooler": {
+    "Content": "Serviço de impressão (Spooler) - Desativar",
+    "Description": "Desativa o Spooler de Impressão. Origem: 'Desativar seviços.bat'.",
+    "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "service": [
-      { "Name": "Spooler",            "StartupType": "Disabled", "OriginalType": "Automatic" },
-      { "Name": "bthserv",            "StartupType": "Disabled", "OriginalType": "Manual" },
-      { "Name": "TermService",        "StartupType": "Disabled", "OriginalType": "Manual" },
-      { "Name": "WbioSrvc",           "StartupType": "Disabled", "OriginalType": "Manual" },
+      { "Name": "Spooler", "StartupType": "Disabled", "OriginalType": "Automatic" }
+    ]
+  },
+  "WPFTweaksWBSvcBluetooth": {
+    "Content": "Bluetooth (bthserv) - Desativar",
+    "Description": "Desativa o serviço de suporte a Bluetooth. Origem: 'Desativar seviços.bat'.",
+    "category": "zz__Avançado (CUIDADO)",
+    "panel": "1",
+    "service": [
+      { "Name": "bthserv", "StartupType": "Disabled", "OriginalType": "Manual" }
+    ]
+  },
+  "WPFTweaksWBSvcRdp": {
+    "Content": "Área de Trabalho Remota (TermService) - Desativar",
+    "Description": "Desativa o serviço de Área de Trabalho Remota. Origem: 'Desativar seviços.bat'.",
+    "category": "zz__Avançado (CUIDADO)",
+    "panel": "1",
+    "service": [
+      { "Name": "TermService", "StartupType": "Disabled", "OriginalType": "Manual" }
+    ]
+  },
+  "WPFTweaksWBSvcHello": {
+    "Content": "Biometria / Windows Hello (WbioSrvc) - Desativar",
+    "Description": "Desativa o serviço de biometria. Origem: 'Desativar seviços.bat'.",
+    "category": "zz__Avançado (CUIDADO)",
+    "panel": "1",
+    "service": [
+      { "Name": "WbioSrvc", "StartupType": "Disabled", "OriginalType": "Manual" }
+    ]
+  },
+  "WPFTweaksWBSvcTouchKeyboard": {
+    "Content": "Teclado virtual e caneta (TabletInputService) - Desativar",
+    "Description": "Desativa o teclado na tela e o painel de caneta. Origem: 'Desativar seviços.bat'.",
+    "category": "zz__Avançado (CUIDADO)",
+    "panel": "1",
+    "service": [
       { "Name": "TabletInputService", "StartupType": "Disabled", "OriginalType": "Manual" }
     ]
   },
   "WPFTweaksWBVBS": {
     "Content": "VBS / Isolamento de Núcleo (HVCI) - Desativar",
     "Description": "Desliga a Segurança Baseada em Virtualização e a Integridade de Memória. Ganho de 5-15% de FPS em alguns jogos, mas REDUZ A SEGURANÇA contra malware de kernel. Exige reinício. Desfazer reativa. Origem: 'Desativar VBS (Isolamento de núcleo).bat' (a parte do hypervisor está em item separado).",
-    "category": "zz__WinForge - Avançado (CUIDADO)",
+    "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "registry": [
       { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity", "Name": "Enabled",                           "Value": "0", "Type": "DWord", "OriginalValue": "1" },
@@ -162,7 +184,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBHypervisorOff": {
     "Content": "Hypervisor (Hyper-V) - Desativar no boot",
     "Description": "bcdedit /set hypervisorlaunchtype off. QUEBRA WSL2, Hyper-V, Windows Sandbox, WSA e emuladores que usam Hyper-V (BlueStacks em modo Hyper-V). Exige reinício. Desfazer volta para 'auto'. Origem: 'Desativar o Hyper-V.bat' e 'Desativar VBS.bat'.",
-    "category": "zz__WinForge - Avançado (CUIDADO)",
+    "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "InvokeScript": [ "bcdedit /set hypervisorlaunchtype off" ],
     "UndoScript":   [ "bcdedit /set hypervisorlaunchtype auto" ]

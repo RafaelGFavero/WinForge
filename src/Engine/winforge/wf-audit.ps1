@@ -9,6 +9,15 @@ function Initialize-WinForgeAudit {
     $caution = $sync.WinForgeCautionCategory
     $report = [System.Collections.Generic.List[object]]::new()
 
+    # a categoria "avançada" da base perde os itens de risco (viraram Cuidado): o que sobra é Seguro.
+    # 'y__' ordena antes de 'zz__', então a ordem final é Essential -> WinForge -> Avançado -> Avançado (CUIDADO).
+    # Feito ANTES da classificação para que o relatório registre a categoria final de cada entrada.
+    foreach ($p in $sync.configs.tweaks.PSObject.Properties) {
+        if ($p.Value.category -eq 'z__Advanced Tweaks - CAUTION') {
+            $p.Value | Add-Member -NotePropertyName category -NotePropertyValue 'y__Avançado' -Force
+        }
+    }
+
     foreach ($key in @($audit.Keys)) {
         $a = $audit[$key]
         $prop = $sync.configs.tweaks.PSObject.Properties[$key]
@@ -37,15 +46,7 @@ function Initialize-WinForgeAudit {
         }
     }
 
-    # a categoria "avançada" da base perde os itens de risco (viraram Cuidado): o que sobra é Seguro.
-    # 'y__' ordena antes de 'zz__', então a ordem final é Essential -> WinForge -> Avançado -> Avançado (CUIDADO).
-    foreach ($p in $sync.configs.tweaks.PSObject.Properties) {
-        if ($p.Value.category -eq 'z__Advanced Tweaks - CAUTION') {
-            $p.Value | Add-Member -NotePropertyName category -NotePropertyValue 'y__Avançado' -Force
-        }
-    }
-
-    $sync.WinForgeAuditReport = $report
+    $sync.WinForgeAuditReport = @($report | Sort-Object Class, Key)
     Write-WinForgeLog -Component "Audit" -Message ("Auditoria aplicada: {0} classificados, {1} removidos." -f $report.Count, @($report | Where-Object Class -eq 'Removido').Count)
 }
 #endregion
