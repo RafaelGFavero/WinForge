@@ -21,7 +21,7 @@ namespace WinForge
 
             bool console = args.Any(a => string.Equals(a, "-Console", StringComparison.OrdinalIgnoreCase));
             bool selfTest = args.Any(a => string.Equals(a, "-SelfTest", StringComparison.OrdinalIgnoreCase));
-            string readyName = "WinForge.Ready." + Process.GetCurrentProcess().Id;
+            string readyName = "WinForge.Ready." + Process.GetCurrentProcess().Id + "." + Guid.NewGuid().ToString("N");
             int exitCode = 1;
 
             Task.Run(() =>
@@ -41,7 +41,11 @@ namespace WinForge
                             if (engine.HasExited && engine.ExitCode != 0)
                                 splash.Dispatcher.Invoke(() => MessageBox.Show("O motor do WinForge terminou com erro (código " + engine.ExitCode + ").\nLog: %LocalAppData%\\WinForge\\logs", "WinForge", MessageBoxButton.OK, MessageBoxImage.Error));
                             else if (signaled == WaitHandle.WaitTimeout)
+                            {
                                 splash.Dispatcher.Invoke(() => MessageBox.Show("O motor do WinForge não respondeu em 90 s. Execute WinForge.exe -Console para ver detalhes.", "WinForge", MessageBoxButton.OK, MessageBoxImage.Warning));
+                                // sem resposta do motor: encerra o par para não deixar um processo sem janela rodando
+                                try { engine.Kill(); } catch { }
+                            }
                         }
                     }
                     splash.Dispatcher.Invoke(splash.Close);
@@ -49,6 +53,11 @@ namespace WinForge
                 }
                 catch (Exception ex)
                 {
+                    // não deixa o motor órfão se o launcher falhar depois de iniciá-lo
+                    if (engine != null)
+                    {
+                        try { if (!engine.HasExited) engine.Kill(); } catch { }
+                    }
                     splash.Dispatcher.Invoke(() => { MessageBox.Show("Falha ao iniciar o WinForge:\n" + ex.Message, "WinForge", MessageBoxButton.OK, MessageBoxImage.Error); splash.Close(); });
                 }
                 finally { app.Dispatcher.Invoke(app.Shutdown); }
