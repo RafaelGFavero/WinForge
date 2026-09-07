@@ -63,7 +63,7 @@ $src = Replace-Once $src @'
     Windows Boost - ferramenta de otimização para Windows 10 e 11.
 
 .DESCRIPTION
-    Construída sobre o WinUtil de Chris Titus Tech (versão 26.08.19, licença MIT), com:
+    Construída sobre um utilitário de código aberto (base 26.08.19, licença MIT - ver NOTICE), com:
       - pergunta opcional de Ponto de Restauração ao abrir (-RestorePoint / -NoRestorePoint)
       - recursos exclusivos do Windows 11 ocultos automaticamente no Windows 10
       - aba "Jogos" (prioridade de CPU por jogo, GameDVR, MMCSS, GPU NVIDIA/AMD/Intel)
@@ -82,8 +82,8 @@ $src = Replace-Once $src @'
 
 .NOTES
     Windows Boost 1.0.0
-    Base           : Chris Titus @christitustech - WinUtil 26.08.19 (https://github.com/ChrisTitusTech/winutil)
-    Runspace Author: @DeveloperDurp
+    Autor          : Rafael Favero
+    Base           : versão 26.08.19 do projeto original (MIT) - ver NOTICE
 #>
 '@ "cabeçalho"
 
@@ -302,7 +302,7 @@ Write-Host @"
    \ V  V / | | | | | (_| | (_) \ V  V /\__ \ | |_) | (_) | (_) \__ \ |_
     \_/\_/  |_|_| |_|\__,_|\___/ \_/\_/ |___/ |____/ \___/ \___/|___/\__|
 
-  Windows Boost $($sync.version)  -  base: WinUtil $($sync.baseVersion) (Chris Titus Tech, MIT)
+  Windows Boost $($sync.version)  -  base: $($sync.baseVersion) (MIT, ver NOTICE)
   Sistema: $($sync.OSName) $($sync.OSDisplayVersion) (build $($sync.OSBuild))
   GPU    : $wbGpuText
   Log    : $($sync.logPath)
@@ -452,7 +452,7 @@ $src = Replace-Once $src '    $winutilTextBlock.Text = "WinUtil"' '    $winutilT
 # ---------------------------------------------------------------- XAML
 $src = Replace-Once $src '        Title="WinUtil">' '        Title="Windows Boost">' "xaml title"
 $src = Replace-Once $src 'Header="Sponsors" Name="SponsorMenuItem"' 'Header="Créditos" Name="SponsorMenuItem"' "xaml sponsors"
-$src = Replace-Once $src 'Header="Documentation" Name="DocumentationMenuItem"' 'Header="Documentação (WinUtil)" Name="DocumentationMenuItem"' "xaml docs"
+$src = Replace-Once $src 'Header="Documentation" Name="DocumentationMenuItem"' 'Header="Documentação" Name="DocumentationMenuItem"' "xaml docs"
 $src = Replace-Once $src 'Header="About" Name="AboutMenuItem"' 'Header="Sobre" Name="AboutMenuItem"' "xaml about"
 
 $src = Insert-Before $src @'
@@ -464,13 +464,38 @@ $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
-                                    <Button Name="WPFPresetWindowsBoost" Content=" Windows Boost " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Standard do WinUtil + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (Windows Boost)."/>
+                                    <Button Name="WPFPresetWindowsBoost" Content=" Windows Boost " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Standard + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (Windows Boost)."/>
 '@.TrimEnd() "xaml preset button"
 
 $src = Insert-After $src '                                    <Button Name="WPFDefaultAppxSelection" Content=" Default " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
                                     <Button Name="WPFAppxWindowsBoostSelection" Content=" Windows Boost " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Seleção equivalente ao 'REMOVA TUDO DE UMA VEZ SÓ' do Windows Boost (sem a Microsoft Store)."/>
 '@.TrimEnd() "xaml appx preset button"
+
+# ---------------------------------------------------------------- remoção de referências ao projeto original (antes do rename global)
+# 1) links de documentação nas configs JSON (o glifo "(?)" some junto)
+$src = [regex]::Replace($src, ',\n\s*"link": "https://winutil\.christitus\.com[^"]*"', '')
+$src = [regex]::Replace($src, '\n\s*"link": "https://winutil\.christitus\.com[^"]*",', "`n")
+# 2) menu Documentação -> README do WinForge
+$src = Replace-Once $src 'Start-Process "https://winutil.christitus.com/"' 'Start-Process "https://github.com/rafaelfavero/WinForge#readme"' "docs url"
+# 3) relaunch sem arquivo (irm do repositório original) -> mensagem
+$src = Replace-Once $src '"&([ScriptBlock]::Create((irm https://github.com/ChrisTitusTech/winutil/releases/latest/download/winutil.ps1))) $($argList -join '' '')"' '"Write-Host ''Execute o WinForge a partir do arquivo WinForge.exe ou WinForge.ps1.''"' "relaunch url"
+# 4) função de sponsors (o único chamador está no bloco de créditos, já substituído acima)
+$src = Replace-Between $src 'Function Invoke-WinUtilSponsors {' 'function Invoke-WinUtilSSHServer {' '' "remove sponsors fn"
+$src = $src -replace 'SponsorMenuItem', 'CreditsMenuItem'
+# 5) perfil PowerShell do projeto original: entradas da aba Config
+$src = [regex]::Replace($src, '(?s)\s*"WPFWinUtilInstallPSProfile": \{.*?\n  \},', '')
+$src = [regex]::Replace($src, '(?s)\s*"WPFWinUtilUninstallPSProfile": \{.*?\n  \},', '')
+$src = Replace-Once $src 'wt new-tab pwsh -NoExit -Command "irm https://github.com/ChrisTitusTech/powershell-profile/raw/main/setup.ps1 | iex"' 'Write-Host "Recurso removido no WinForge."' "profile installer"
+$src = Replace-Once $src '    Write-Host "Successfully uninstalled CTT PowerShell Profile." -ForegroundColor Green' '    Write-Host "Recurso removido no WinForge." -ForegroundColor Yellow' "profile uninstall msg"
+# 6) comentários/strings soltas
+$src = $src -replace 'CTT logo preset:', 'logo preset:'
+$src = $src -replace "Chris Titus Tech's Windows Utility", 'WinForge'
+
+# ---------------------------------------------------------------- rename global WinUtil -> WinForge (funções, variáveis, strings, pastas)
+$src = $src -replace 'WinUtil', 'WinForge'
+$src = $src -replace 'Winutil', 'WinForge'
+$src = $src -replace 'winutil', 'winforge'
 
 # ---------------------------------------------------------------- saída
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -487,3 +512,9 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
     throw "Erros de sintaxe no arquivo gerado."
 }
 Write-Host "Sintaxe PowerShell: OK"
+
+# teste de marca: nenhuma referência ao projeto original pode sobrar no arquivo gerado
+if (-not $SkipBrandTest) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "tests\engine\Test-Brand.ps1") -File $outFile
+    if ($LASTEXITCODE -ne 0) { throw "Brand test falhou: $LASTEXITCODE ocorrência(s)." }
+}

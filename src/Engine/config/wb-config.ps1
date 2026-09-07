@@ -486,7 +486,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolAppsFolder": {
     "Content": "Abrir pasta 'Apps' (utilitários externos)",
-    "Description": "Cria (se preciso) e abre a pasta Apps ao lado do WindowsBoost.ps1. Coloque ali os executáveis (ISLC, MSI_util, DnsJumper, Firemin) para os botões acima abrirem direto.",
+    "Description": "Cria (se preciso) e abre a pasta Apps ao lado do WinForge.ps1. Coloque ali os executáveis (ISLC, MSI_util, DnsJumper, Firemin) para os botões acima abrirem direto.",
     "category": "Windows Boost - Ferramentas externas",
     "panel": "2",
     "Type": "Button",

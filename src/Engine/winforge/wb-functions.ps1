@@ -501,7 +501,7 @@ function Invoke-WinUtilBoostOpenTool {
         Write-WinUtilLog -Component "Boost" -Message "Abrindo ferramenta externa: $($exe.FullName)"
         Start-Process -FilePath $exe.FullName -WorkingDirectory $appsDir
     } else {
-        $r = [System.Windows.MessageBox]::Show("$Name não foi encontrado na pasta 'Apps' ao lado do WindowsBoost.ps1`n($appsDir)`n`nAbrir a página oficial de download?", "Windows Boost", "YesNo", "Question")
+        $r = [System.Windows.MessageBox]::Show("$Name não foi encontrado na pasta 'Apps' ao lado do WinForge.ps1`n($appsDir)`n`nAbrir a página oficial de download?", "Windows Boost", "YesNo", "Question")
         if ($r -eq [System.Windows.MessageBoxResult]::Yes) { Start-Process $Url }
     }
 }
@@ -516,7 +516,7 @@ Sistema : $($sync.OSName) $($sync.OSDisplayVersion) (build $($sync.OSBuild))
 GPU     : $gpu
 Logs    : $($sync.logPath)
 
-Base    : <a href="https://github.com/ChrisTitusTech/winutil">Chris Titus Tech WinUtil $($sync.baseVersion)</a> (licença MIT)
+Base    : projeto original $($sync.baseVersion) (licença MIT) - ver arquivo NOTICE
 Extras  : scripts do repositório 'Windows Boost - Essential' reescritos como tweaks reversíveis
           (aba Tweaks, aba Jogos e Config > Windows Boost - Manutenção)
 "@
@@ -525,13 +525,11 @@ Extras  : scripts do repositório 'Windows Boost - Essential' reescritos como tw
 
 function Show-WinUtilBoostCredits {
     $msg = @"
-Windows Boost é construído sobre o <a href="https://github.com/ChrisTitusTech/winutil">WinUtil</a> de Chris Titus Tech (@ChrisTitusTech),
-com UI de @MyDrift-user e @Marterich e runspaces de @DeveloperDurp - licença MIT.
+Windows Boost é construído sobre um utilitário de código aberto sob licença MIT.
+A atribuição completa aos autores originais está no arquivo NOTICE distribuído junto.
 
 As otimizações de jogos, GPU, serviços, energia e limpeza vêm do repositório
 'Windows Boost - Essential' e foram revisadas para terem 'Desfazer' e detecção de estado.
-
-Documentação dos tweaks originais: <a href="https://winutil.christitus.com/">winutil.christitus.com</a>
 "@
     Show-CustomDialog -Title "Créditos" -Message $msg
 }
