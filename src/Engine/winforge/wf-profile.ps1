@@ -348,6 +348,4 @@ function Get-WinForgeSimulatedProfile {
     return $base
 }
 
-function Update-WinForgeProfileDriverStatus { param($Profile) }
-# substituída na Task 2 (wf-drivers.ps1)
 #endregion
