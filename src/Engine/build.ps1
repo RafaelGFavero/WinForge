@@ -769,6 +769,23 @@ foreach ($g in @($configSync.configs.wbgames)) {
     $auditRows += [pscustomobject]@{ Key = $gameKey; Name = $g.Name; Class = 'Seguro'; Reason = '' }
 }
 
+# Cobertura no sentido inverso da trava de digitação acima: lá toda chave da auditoria tem de existir
+# na config; aqui todo tweak classificável da config tem de estar na auditoria ou ser um jogo. Sem
+# isto, uma entrada nova entra no programa sem classe e some do doc - o -SelfTest só pegaria depois,
+# no motor montado. Os tipos ignorados são os mesmos do -SelfTest: não são itens de risco.
+$uncovered = @()
+foreach ($o in $jsonTweaks) {
+    foreach ($p in $o.PSObject.Properties) {
+        if ($p.Value.Type -in @('Button', 'Combobox', 'Note', 'ToggleButton')) { continue }
+        if ($audit.ContainsKey($p.Name) -or $gameKeysSeen.ContainsKey($p.Name)) { continue }
+        $uncovered += $p.Name
+    }
+}
+if ($uncovered.Count -gt 0) {
+    [array]::Sort($uncovered, [System.StringComparer]::Ordinal)
+    throw "Tweak sem classificação na auditoria: $($uncovered -join ', ')"
+}
+
 $auditClasses = @(
     @{ Name = 'Seguro';   Title = 'Seguro' }
     @{ Name = 'Cuidado';  Title = 'Cuidado' }
@@ -810,7 +827,9 @@ foreach ($c in $auditClasses) {
     $emittedRows += $rows.Count
     [void]$md.Append("`n## $($c.Title) ($($rows.Count))`n`n")
     if ($c.Name -eq 'Seguro') {
-        [void]$md.Append("As $gamesCount chaves ``WPFTweaksWBGame*`` são a prioridade de CPU por jogo (IFEO): uma chave de`nregistro por executável, removida ao desfazer.`n`n")
+        # '<Jogo>' e não o glob 'WPFTweaksWBGame*': o glob também casaria com WPFTweaksWBGameDVR,
+        # que é o toggle do Game DVR e está na auditoria, não na lista de jogos - $gamesCount não o conta.
+        [void]$md.Append("As chaves ``WPFTweaksWBGame<Jogo>`` ($gamesCount entradas, contadas a partir da lista de jogos) são a`nprioridade de CPU por jogo (IFEO): uma chave de registro por executável, removida ao desfazer.`n`n")
     } elseif ($c.Name -eq 'Cuidado') {
         [void]$md.Append("O motivo abaixo é o mesmo texto que aparece como ``CUIDADO: ...`` no início da descrição do item`nna interface.`n`n")
     } else {

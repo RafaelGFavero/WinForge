@@ -15,8 +15,8 @@ Total: **130 Seguro** · **27 Cuidado** · **2 Removido**.
 
 ## Seguro (130)
 
-As 68 chaves `WPFTweaksWBGame*` são a prioridade de CPU por jogo (IFEO): uma chave de
-registro por executável, removida ao desfazer.
+As chaves `WPFTweaksWBGame<Jogo>` (68 entradas, contadas a partir da lista de jogos) são a
+prioridade de CPU por jogo (IFEO): uma chave de registro por executável, removida ao desfazer.
 
 | Chave | Nome | Motivo |
 |---|---|---|

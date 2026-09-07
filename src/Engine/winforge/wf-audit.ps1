@@ -3,7 +3,8 @@ function Initialize-WinForgeAudit {
     <#
     .SYNOPSIS
         Aplica a classificação de risco: remove entradas 'Removido', move 'Cuidado' para a categoria CUIDADO
-        com o custo na descrição, marca 'risk' em todas e limpa presets. Jogos (WPFTweaksWBGame*) são Seguro.
+        com o custo na descrição, marca 'risk' em todas e limpa presets. As chaves de jogo geradas da
+        lista $sync.configs.wbgames (WPFTweaksWBGame<Jogo>) são Seguro.
     #>
     $audit = $sync.WinForgeAudit
     $caution = $sync.WinForgeCautionCategory
@@ -39,9 +40,15 @@ function Initialize-WinForgeAudit {
         $report.Add([pscustomobject]@{ Key = $key; Content = $e.Content; Class = $a.Class; Reason = $a.Reason; Category = $e.category })
     }
 
-    # prioridade de CPU por jogo (IFEO): reversível, sem custo - Seguro por padrão
+    # prioridade de CPU por jogo (IFEO): reversível, sem custo - Seguro por padrão.
+    # Conjunto EXATO derivado da lista de jogos, não o glob 'WPFTweaksWBGame*': o glob também casaria
+    # com WPFTweaksWBGameDVR e com qualquer chave futura de nome parecido, dando a elas um 'seguro'
+    # silencioso. Fora desse conjunto, quem não estiver na auditoria fica sem classe - e o -SelfTest
+    # reprova ("tweaks sem classe de risco").
+    $gameKeys = @{}
+    foreach ($g in @($sync.configs.wbgames)) { $gameKeys["WPFTweaksWBGame$($g.Key)"] = $true }
     foreach ($p in $sync.configs.tweaks.PSObject.Properties) {
-        if ($p.Name -like 'WPFTweaksWBGame*' -and -not $p.Value.PSObject.Properties['risk']) {
+        if ($gameKeys.ContainsKey($p.Name) -and -not $p.Value.PSObject.Properties['risk']) {
             $p.Value | Add-Member -NotePropertyName risk -NotePropertyValue 'seguro' -Force
         }
     }
