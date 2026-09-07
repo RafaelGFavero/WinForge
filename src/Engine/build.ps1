@@ -54,6 +54,8 @@ $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
 $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
+$auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
+$auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 
@@ -143,12 +145,16 @@ $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawU
 # ---------------------------------------------------------------- funções e configs
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
+$src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 
 # ---------------------------------------------------------------- logo
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
 
 # ---------------------------------------------------------------- integração com o launcher (WinForge.exe)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($launcherBlock.TrimEnd() + "`n`n") "insert launcher"
+
+# ---------------------------------------------------------------- auditoria de risco (aplicação)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($auditBlock.TrimEnd() + "`n`n") "insert audit functions"
 
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
@@ -367,6 +373,9 @@ $sync.configs.appx.PSObject.Properties | ForEach-Object {
 # WinForge: mescla tweaks/botões/presets/jogos e marca recursos só do Windows 11
 Initialize-WinUtilBoostConfigs
 
+# WinForge: aplica a classificação de risco (Seguro/Cuidado/Removido) em tweaks e presets
+Initialize-WinForgeAudit
+
 if ($SelfTest) {
     Write-Host "== WinForge SelfTest =="
     $wbErrors = 0
@@ -409,8 +418,32 @@ if ($SelfTest) {
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
     if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
-    if (@($wbTweaksTab.PSObject.Properties).Count -ne 80) { Write-Host "  [ERRO] aba Tweaks: esperado 80 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbTweaksTab.PSObject.Properties).Count -ne 78) { Write-Host "  [ERRO] aba Tweaks: esperado 78 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
+    # Auditoria de risco
+    $wbUnclassified = @(); $wbPresetViolations = @()
+    foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
+        $e = $t.Value
+        if ($e.Type -in @('Button','Combobox','Note','ToggleButton')) { continue }
+        if (-not $e.PSObject.Properties['risk']) { $wbUnclassified += $t.Name }
+        if ($e.risk -eq 'cuidado' -and $e.category -ne 'zz__Avançado (CUIDADO)') { Write-Host "  [ERRO] $($t.Name): Cuidado fora da categoria CUIDADO ($($e.category))" -ForegroundColor Red; $wbErrors++ }
+        if ($e.risk -eq 'cuidado' -and $e.Description -notlike 'CUIDADO: *') { Write-Host "  [ERRO] $($t.Name): descrição de Cuidado sem prefixo" -ForegroundColor Red; $wbErrors++ }
+    }
+    if ($wbUnclassified.Count) { Write-Host "  [ERRO] tweaks sem classe de risco: $($wbUnclassified -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    foreach ($p in $sync.configs.preset.PSObject.Properties) {
+        foreach ($k in @($p.Value)) {
+            $e = $sync.configs.tweaks.$k
+            if ($null -eq $e) { continue }   # appx/apps keys
+            if ($e.risk -ne 'seguro') { $wbPresetViolations += "$($p.Name):$k" }
+        }
+    }
+    if ($wbPresetViolations.Count) { Write-Host "  [ERRO] presets com itens não-Seguro: $($wbPresetViolations -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    foreach ($k in @($sync.WinForgeAudit.Keys | Where-Object { $sync.WinForgeAudit[$_].Class -eq 'Removido' })) {
+        if ($sync.configs.tweaks.PSObject.Properties[$k]) { Write-Host "  [ERRO] $k deveria ter sido removido" -ForegroundColor Red; $wbErrors++ }
+    }
+    $wbCuidado = @($sync.configs.tweaks.PSObject.Properties | Where-Object { $_.Value.risk -eq 'cuidado' }).Count
+    $wbSeguro  = @($sync.configs.tweaks.PSObject.Properties | Where-Object { $_.Value.risk -eq 'seguro' }).Count
+    Write-Host "  Auditoria: $wbSeguro Seguro, $wbCuidado Cuidado, $(@($sync.WinForgeAudit.Keys | Where-Object { $sync.WinForgeAudit[$_].Class -eq 'Removido' }).Count) Removido"
     Write-Host "  Ocultos neste sistema (tweaks): $($wbHidden.Count) -> $($wbHidden -join ', ')"
     Write-Host "  Ocultos neste sistema (appx)  : $($wbHiddenAppx.Count) -> $($wbHiddenAppx -join ', ')"
     try {
