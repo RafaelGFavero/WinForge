@@ -141,10 +141,91 @@ $sync.ForceRestorePoint = [bool]$RestorePoint
 $sync.NoRestorePointPrompt = [bool]$NoRestorePoint
 $sync.RestorePointCreated = $false
 $sync.ReadyEventName = $ReadyEvent
+# runspace que roda o script principal: Write-WinForgeLog usa isto para saber quem pode escrever
+# no console (o transcript só captura o que sai desta runspace)
+$sync.MainRunspaceId = [runspace]::DefaultRunspace.Id
 '@ "sync init"
 
 $src = Replace-Once $src '$winutildir = "$env:LocalAppData\winutil"' '$winutildir = "$env:LocalAppData\WinForge"' "winutildir"
 $src = Replace-Once $src '$sync.logPath = "$logdir\winutil_$dateTime.log"' '$sync.logPath = "$logdir\WinForge_$dateTime.log"' "logPath"
+
+# O transcript mantém o arquivo aberto em modo exclusivo enquanto roda: ninguém mais consegue
+# anexar nele, nem o próprio processo. Como as threads do pool de runspaces (e os callbacks do
+# Dispatcher disparados de dentro delas) NÃO são capturadas pelo transcript, o log da sessão
+# precisa ser um arquivo separado - senão as entradas dessas threads se perdem.
+$src = Replace-Once $src @'
+$sync.transcriptPath = $sync.logPath
+Start-Transcript -Path $sync.logPath -Append -NoClobber | Out-Null
+'@ @'
+$sync.transcriptPath = "$logdir\WinForge_$dateTime.console.log"
+Start-Transcript -Path $sync.transcriptPath -Append -NoClobber | Out-Null
+'@ "transcript separado do log"
+
+# Toda entrada do log vai para o arquivo, venha de onde vier (runspace do pool, callback do
+# Dispatcher ou a runspace principal). O Write-Host continua só na runspace principal: é o que põe
+# a linha no console e no transcript - e é de onde o -SelfTest captura o log com 6>&1.
+$src = Replace-Once $src @'
+        if (-not [string]::IsNullOrWhiteSpace($transcriptPath) -and $logPath -eq $transcriptPath) {
+            Write-Host $line
+            return
+        }
+
+        try {
+            Add-Content -Path $logPath -Value $line -Encoding UTF8 -ErrorAction Stop
+        } catch [System.IO.IOException] {
+            Write-Host $line
+        }
+'@ @'
+        if (-not [string]::IsNullOrWhiteSpace($transcriptPath) -and $logPath -eq $transcriptPath) {
+            # nunca acontece no WinForge (o transcript tem arquivo próprio); rede de segurança para
+            # o caso de $logPath cair no transcript por falta de outro caminho
+            Write-Host $line
+            return
+        }
+
+        # Só a runspace principal escreve no console: o transcript não captura o que sai de uma
+        # thread do pool de runspaces nem de um callback do Dispatcher disparado de dentro dela.
+        $wfOnMainRunspace = $false
+        try {
+            if ($null -ne $sync -and $sync.ContainsKey("MainRunspaceId") -and $null -ne [runspace]::DefaultRunspace) {
+                $wfOnMainRunspace = ([runspace]::DefaultRunspace.Id -eq $sync.MainRunspaceId)
+            }
+        } catch {
+            $wfOnMainRunspace = $false
+        }
+        if ($null -ne $sync -and $sync.ContainsKey("ForceFileLog") -and $sync.ForceFileLog) {
+            $wfOnMainRunspace = $false
+        }
+
+        # Duas runspaces podem anexar ao mesmo tempo: mutex nomeado por processo serializa a escrita.
+        # Nada aqui pode estourar - uma falha de log não pode derrubar quem chamou.
+        $wfMutex = $null
+        try {
+            if ($null -ne $sync) {
+                if ($null -eq $sync.LogMutex) {
+                    try { $sync.LogMutex = New-Object System.Threading.Mutex($false, "Local\WinForge.Log.$PID") } catch { $sync.LogMutex = $null }
+                }
+                $wfMutex = $sync.LogMutex
+            }
+        } catch {
+            $wfMutex = $null
+        }
+
+        $wfHeld = $false
+        try {
+            if ($null -ne $wfMutex) {
+                try { $wfHeld = $wfMutex.WaitOne(2000) } catch [System.Threading.AbandonedMutexException] { $wfHeld = $true }
+            }
+            [System.IO.File]::AppendAllText($logPath, $line + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+        } catch {
+        } finally {
+            if ($wfHeld) { try { $wfMutex.ReleaseMutex() } catch { } }
+        }
+
+        if ($wfOnMainRunspace) {
+            Write-Host $line
+        }
+'@ "log de runspace no arquivo"
 $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawUI.WindowTitle = "WinForge"' "window title console"
 
 # ---------------------------------------------------------------- funções e configs
@@ -854,6 +935,25 @@ if ($SelfTest) {
             Write-Host "  Job de diagnóstico: OK | barra: $($sync.ProfileJobLabel)"
         } catch {
             Write-Host "  [ERRO] job de diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # O job real roda em uma runspace do pool, e o transcript não captura nada do que sai de lá.
+        # Esta sonda é a prova de que uma entrada escrita de dentro do pool chega ao arquivo do log.
+        try {
+            $wfOpenedPool = $false
+            if (-not $sync.runspace) { Initialize-WinForgeRunspacePool | Out-Null; $wfOpenedPool = $true }
+            $null = Invoke-WPFRunspace -ScriptBlock { Write-WinForgeLog -Component "Probe" -Message "runspace-log-probe" }
+            $wfProbeOk = $false
+            $wfDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $wfDeadline) {
+                Start-Sleep -Milliseconds 200
+                try { $wfTail = @(Get-Content -Path $sync.logPath -Tail 50 -ErrorAction Stop) } catch { $wfTail = @() }
+                if ($wfTail -match 'runspace-log-probe') { $wfProbeOk = $true; break }
+            }
+            if ($wfOpenedPool) { Close-WinForgeRunspacePool }
+            if ($wfProbeOk) { Write-Host "  Log de runspace: OK" }
+            else { Write-Host "  [ERRO] log de runspace não chegou ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        } catch {
+            Write-Host "  [ERRO] log de runspace: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
     } catch {
         Write-Host "  [ERRO] XAML: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
