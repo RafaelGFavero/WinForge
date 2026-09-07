@@ -1,4 +1,4 @@
-#region ===== Windows Boost - funções adicionais =====
+#region ===== WinForge - funções adicionais =====
 # Todas as funções levam "WinUtilBoost" no nome para serem importadas automaticamente
 # nos runspaces (Initialize-WinUtilRunspacePool importa tudo que casa com 'winutil|WPF').
 
@@ -9,7 +9,7 @@ function Get-WinUtilBoostSystemInfo {
         Usado para ocultar recursos que não se aplicam ao sistema atual.
     #>
     $build = [System.Environment]::OSVersion.Version.Build
-    if ($env:WINBOOST_SIMULATE_BUILD) { $build = [int]$env:WINBOOST_SIMULATE_BUILD }   # só para testes (ex.: 19045 = Windows 10 22H2)
+    if ($env:WINFORGE_SIMULATE_BUILD) { $build = [int]$env:WINFORGE_SIMULATE_BUILD }   # só para testes (ex.: 19045 = Windows 10 22H2)
     $sync.OSBuild = $build
     $sync.IsWin11 = ($build -ge 22000)
     $sync.OSName = if ($sync.IsWin11) { "Windows 11" } else { "Windows 10" }
@@ -98,9 +98,9 @@ function Get-WinUtilBoostConfigSubset {
 function Initialize-WinUtilBoostConfigs {
     <#
     .SYNOPSIS
-        Mescla as configurações do Windows Boost nas do WinUtil:
+        Mescla as configurações do WinForge nas da base:
           - marca entradas do WinUtil que só existem no Windows 11
-          - adiciona os tweaks, botões, presets e a lista de jogos (IFEO) do Windows Boost
+          - adiciona os tweaks, botões, presets e a lista de jogos (IFEO) do WinForge
     #>
 
     foreach ($k in $sync.WinBoostWin11OnlyTweaks) {
@@ -169,9 +169,9 @@ function Invoke-WinUtilBoostRestorePointPrompt {
                "Recomendado: permite voltar o Windows ao estado atual caso alguma otimização cause problema.`n`n" +
                "Sim  = criar agora (leva de 30 segundos a alguns minutos; a janela pode ficar sem resposta nesse tempo)`n" +
                "Não  = continuar sem criar. Você ainda pode criar depois em:`n" +
-               "         Config > Windows Boost - Manutenção > 'Ponto de restauração - Criar agora'`n" +
+               "         Config > WinForge - Manutenção > 'Ponto de restauração - Criar agora'`n" +
                "         ou marcando 'Restore Point - Create' na aba Tweaks."
-        $result = [System.Windows.MessageBox]::Show($sync.Form, $msg, "Windows Boost - Ponto de Restauração",
+        $result = [System.Windows.MessageBox]::Show($sync.Form, $msg, "WinForge - Ponto de Restauração",
             [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
         $create = ($result -eq [System.Windows.MessageBoxResult]::Yes)
     }
@@ -189,7 +189,7 @@ function Invoke-WinUtilBoostCreateRestorePoint {
         Cria um ponto de restauração agora (síncrono, como o WinUtil faz no botão Run Tweaks).
     #>
     if ($sync.ProcessRunning) {
-        [System.Windows.MessageBox]::Show("Aguarde o processo atual terminar.", "Windows Boost", "OK", "Warning") | Out-Null
+        [System.Windows.MessageBox]::Show("Aguarde o processo atual terminar.", "WinForge", "OK", "Warning") | Out-Null
         return
     }
     $sync.ProcessRunning = $true
@@ -204,7 +204,7 @@ function Invoke-WinUtilBoostCreateRestorePoint {
 
         Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore" -Name "SystemRestorePointCreationFrequency" -Value 0 -Type DWord -Force -ErrorAction Stop
         Enable-ComputerRestore -Drive $env:SystemDrive -ErrorAction SilentlyContinue
-        Checkpoint-Computer -Description "Windows Boost $(Get-Date -Format 'dd/MM/yyyy HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+        Checkpoint-Computer -Description "WinForge $(Get-Date -Format 'dd/MM/yyyy HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
 
         $sync.RestorePointCreated = $true
         Write-WinUtilLog -Component "Boost" -Message "Ponto de restauração criado com sucesso."
@@ -217,7 +217,7 @@ function Invoke-WinUtilBoostCreateRestorePoint {
         Write-WinUtilLog -Level "ERROR" -Component "Boost" -Message "Falha ao criar ponto de restauração: $err"
         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Falha ao criar ponto de restauração: $err" -Percent 100
         Set-WinUtilTaskbaritem -state "Error" -overlay "warning"
-        [System.Windows.MessageBox]::Show("Não foi possível criar o ponto de restauração:`n$err`n`nVerifique se a Proteção do Sistema está ativada (Win+R > sysdm.cpl > aba Proteção do Sistema).", "Windows Boost", "OK", "Warning") | Out-Null
+        [System.Windows.MessageBox]::Show("Não foi possível criar o ponto de restauração:`n$err`n`nVerifique se a Proteção do Sistema está ativada (Win+R > sysdm.cpl > aba Proteção do Sistema).", "WinForge", "OK", "Warning") | Out-Null
     } finally {
         $sync.ProcessRunning = $false
     }
@@ -234,7 +234,7 @@ function Start-WinUtilBoostJob {
         [Parameter(Mandatory)][scriptblock]$Work
     )
     if ($sync.ProcessRunning) {
-        [System.Windows.MessageBox]::Show("Aguarde o processo atual terminar.", "Windows Boost", "OK", "Warning") | Out-Null
+        [System.Windows.MessageBox]::Show("Aguarde o processo atual terminar.", "WinForge", "OK", "Warning") | Out-Null
         return
     }
     $sync.ProcessRunning = $true
@@ -349,12 +349,12 @@ public static class WinUtilBoostMemory {
         Write-Host $msg -ForegroundColor Green
         Write-WinUtilLog -Component "Boost" -Message ("Cache de RAM limpo: ~{0} MB liberados." -f $freedMB)
         Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Cache de RAM limpo: ~$freedMB MB liberados (livre agora: $([math]::Round($after/1024)) MB)." -Percent 100
-        [System.Windows.MessageBox]::Show($msg, "Windows Boost - Limpar cache de RAM", "OK", "Information") | Out-Null
+        [System.Windows.MessageBox]::Show($msg, "WinForge - Limpar cache de RAM", "OK", "Information") | Out-Null
     } catch {
         $err = $_.Exception.Message
         Write-Warning "Falha ao limpar cache de RAM: $err"
         Write-WinUtilLog -Level "ERROR" -Component "Boost" -Message "Falha ao limpar cache de RAM: $err"
-        [System.Windows.MessageBox]::Show("Falha ao limpar cache de RAM:`n$err", "Windows Boost", "OK", "Warning") | Out-Null
+        [System.Windows.MessageBox]::Show("Falha ao limpar cache de RAM:`n$err", "WinForge", "OK", "Warning") | Out-Null
     }
 }
 
@@ -479,7 +479,7 @@ function Invoke-WinUtilBoostClearShaderCache {
     Write-Host $msg -ForegroundColor Green
     Write-WinUtilLog -Component "Boost" -Message "Shader cache limpo: ~$([math]::Round($freed / 1MB)) MB em $found pasta(s)."
     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Cache de shaders limpo: ~$([math]::Round($freed / 1MB)) MB liberados." -Percent 100
-    [System.Windows.MessageBox]::Show($msg, "Windows Boost - Shader Cache", "OK", "Information") | Out-Null
+    [System.Windows.MessageBox]::Show($msg, "WinForge - Shader Cache", "OK", "Information") | Out-Null
 }
 
 function Invoke-WinUtilBoostOpenTool {
@@ -501,7 +501,7 @@ function Invoke-WinUtilBoostOpenTool {
         Write-WinUtilLog -Component "Boost" -Message "Abrindo ferramenta externa: $($exe.FullName)"
         Start-Process -FilePath $exe.FullName -WorkingDirectory $appsDir
     } else {
-        $r = [System.Windows.MessageBox]::Show("$Name não foi encontrado na pasta 'Apps' ao lado do WinForge.ps1`n($appsDir)`n`nAbrir a página oficial de download?", "Windows Boost", "YesNo", "Question")
+        $r = [System.Windows.MessageBox]::Show("$Name não foi encontrado na pasta 'Apps' ao lado do WinForge.ps1`n($appsDir)`n`nAbrir a página oficial de download?", "WinForge", "YesNo", "Question")
         if ($r -eq [System.Windows.MessageBoxResult]::Yes) { Start-Process $Url }
     }
 }
@@ -509,7 +509,7 @@ function Invoke-WinUtilBoostOpenTool {
 function Show-WinUtilBoostAbout {
     $gpu = if ($sync.GPUNames -and $sync.GPUNames.Count -gt 0) { $sync.GPUNames -join ', ' } else { 'não detectada' }
     $msg = @"
-Windows Boost $($sync.version)
+WinForge $($sync.version)
 Ferramenta de otimização para Windows 10 e 11.
 
 Sistema : $($sync.OSName) $($sync.OSDisplayVersion) (build $($sync.OSBuild))
@@ -518,14 +518,14 @@ Logs    : $($sync.logPath)
 
 Base    : projeto original $($sync.baseVersion) (licença MIT) - ver arquivo NOTICE
 Extras  : scripts do repositório 'Windows Boost - Essential' reescritos como tweaks reversíveis
-          (aba Tweaks, aba Jogos e Config > Windows Boost - Manutenção)
+          (aba Tweaks, aba Jogos e Config > WinForge - Manutenção)
 "@
-    Show-CustomDialog -Title "Sobre o Windows Boost" -Message $msg
+    Show-CustomDialog -Title "Sobre o WinForge" -Message $msg
 }
 
 function Show-WinUtilBoostCredits {
     $msg = @"
-Windows Boost é construído sobre um utilitário de código aberto sob licença MIT.
+WinForge é construído sobre um utilitário de código aberto sob licença MIT.
 A atribuição completa aos autores originais está no arquivo NOTICE distribuído junto.
 
 As otimizações de jogos, GPU, serviços, energia e limpeza vêm do repositório

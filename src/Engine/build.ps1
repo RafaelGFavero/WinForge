@@ -69,7 +69,7 @@ $src = Replace-Once $src @'
 '@ @'
 <#
 .SYNOPSIS
-    Windows Boost - ferramenta de otimização para Windows 10 e 11.
+    WinForge - ferramenta de otimização para Windows 10 e 11.
 
 .DESCRIPTION
     Construída sobre um utilitário de código aberto (base 26.08.19, licença MIT - ver NOTICE), com:
@@ -94,7 +94,7 @@ $src = Replace-Once $src @'
     Reservado para o launcher: mantém a janela de console visível.
 
 .NOTES
-    Windows Boost 1.0.0
+    WinForge 1.0.0
     Autor          : Rafael Favero
     Base           : versão 26.08.19 do projeto original (MIT) - ver NOTICE
 #>
@@ -114,18 +114,18 @@ $src = Replace-Once $src @'
 )
 '@ "param block"
 
-$src = Replace-Once $src 'Write-Host "WinUtil is unable to run on your system. PowerShell execution is restricted by security policies." -ForegroundColor Red' 'Write-Host "O Windows Boost não pode rodar neste sistema: a execução do PowerShell está restrita por política de segurança (Constrained Language Mode)." -ForegroundColor Red' "msg language mode"
+$src = Replace-Once $src 'Write-Host "WinUtil is unable to run on your system. PowerShell execution is restricted by security policies." -ForegroundColor Red' 'Write-Host "O WinForge não pode rodar neste sistema: a execução do PowerShell está restrita por política de segurança (Constrained Language Mode)." -ForegroundColor Red' "msg language mode"
 
 $src = Replace-Once $src 'if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {' 'if (-not $SelfTest -and -not $NoElevation -and !([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {' "admin check"
 
-$src = Replace-Once $src 'Write-Output "WinUtil needs to be run as Administrator. Attempting to relaunch."' 'Write-Output "O Windows Boost precisa ser executado como Administrador. Reabrindo com elevação..."' "msg admin"
+$src = Replace-Once $src 'Write-Output "WinUtil needs to be run as Administrator. Attempting to relaunch."' 'Write-Output "O WinForge precisa ser executado como Administrador. Reabrindo com elevação..."' "msg admin"
 
 # ---------------------------------------------------------------- $sync inicial
 $src = Replace-Once $src '$sync.version = "26.08.19"' ("`$sync.version = `"$Version`"`n`$sync.baseVersion = `"26.08.19`"") "version"
 
 $src = Insert-After $src '$sync.currentTab = "Install"' @'
 
-# Windows Boost
+# WinForge
 $sync.ScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
 $sync.ForceRestorePoint = [bool]$RestorePoint
 $sync.NoRestorePointPrompt = [bool]$NoRestorePoint
@@ -133,9 +133,9 @@ $sync.RestorePointCreated = $false
 $sync.ReadyEventName = $ReadyEvent
 '@ "sync init"
 
-$src = Replace-Once $src '$winutildir = "$env:LocalAppData\winutil"' '$winutildir = "$env:LocalAppData\WindowsBoost"' "winutildir"
-$src = Replace-Once $src '$sync.logPath = "$logdir\winutil_$dateTime.log"' '$sync.logPath = "$logdir\WindowsBoost_$dateTime.log"' "logPath"
-$src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawUI.WindowTitle = "Windows Boost"' "window title console"
+$src = Replace-Once $src '$winutildir = "$env:LocalAppData\winutil"' '$winutildir = "$env:LocalAppData\WinForge"' "winutildir"
+$src = Replace-Once $src '$sync.logPath = "$logdir\winutil_$dateTime.log"' '$sync.logPath = "$logdir\WinForge_$dateTime.log"' "logPath"
+$src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawUI.WindowTitle = "WinForge"' "window title console"
 
 # ---------------------------------------------------------------- funções e configs
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
@@ -170,7 +170,7 @@ $src = Replace-Once $src @'
     foreach ($entry in $configHashtable.Keys) {
         $entryInfo = $configHashtable[$entry]
 
-        # Windows Boost: oculta entradas que não se aplicam a este Windows (10/11) ou à GPU detectada
+        # WinForge: oculta entradas que não se aplicam a este Windows (10/11) ou à GPU detectada
         if (-not (Test-WinUtilBoostEntryCompatible $entryInfo)) { continue }
 
 '@ "UI compat filter"
@@ -189,7 +189,7 @@ $src = Replace-Once $src @'
         $nextSelections[$listName].Add($cbkey)
     }
 '@ @'
-        # Windows Boost: ignora seleções que não se aplicam a este Windows/GPU (ex.: tweaks só do Windows 11 rodando no 10)
+        # WinForge: ignora seleções que não se aplicam a este Windows/GPU (ex.: tweaks só do Windows 11 rodando no 10)
         $selectionEntry = switch ($listName) {
             'selectedTweaks'   { $sync.configs.tweaks.$cbkey }
             'selectedToggles'  { $sync.configs.tweaks.$cbkey }
@@ -279,7 +279,7 @@ $src = Replace-Once $src @'
 
 $src = Replace-Once $src '            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab' @'
             "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
-            "J" { Invoke-WPFButton "WPFTab7BT"; $keyEventArgs.Handled = $true } # Windows Boost: aba Jogos
+            "J" { Invoke-WPFButton "WPFTab7BT"; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
 '@.TrimEnd() "alt+j"
 
 # ---------------------------------------------------------------- botões: lookup em tweaks + novos casos
@@ -292,7 +292,7 @@ $src = Replace-Once $src @'
     if ($sync.configs.feature.$Button) {
         $buttonConfig = $sync.configs.feature.$Button
     } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button") {
-        # Windows Boost: botões definidos na config de tweaks (aba Jogos)
+        # WinForge: botões definidos na config de tweaks (aba Jogos)
         $buttonConfig = $sync.configs.tweaks.$Button
     }
     if ($buttonConfig) {
@@ -301,13 +301,13 @@ $src = Replace-Once $src @'
 
 $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -checkboxfilterpattern "WPFTweak*"}' @'
 
-        "WPFPresetWindowsBoost" {Invoke-WPFPresets "WindowsBoost" -checkboxfilterpattern "WPFTweak*"}
+        "WPFPresetWinForge" {Invoke-WPFPresets "WinForge" -checkboxfilterpattern "WPFTweak*"}
         "WPFPresetGamer" {Invoke-WPFPresets "Gamer" -checkboxfilterpattern "WPFTweak*"}
         "WPFClearGamesSelection" {Invoke-WPFPresets -imported $true -checkboxfilterpattern "WPFTweak*"}
         "WPFGetInstalledGames" {Invoke-WPFGetInstalled -CheckBox "tweaks"}
         "WPFGamesApplyButton" {Invoke-WPFtweaksbutton}
         "WPFGamesUndoButton" {Invoke-WPFundoall}
-        "WPFAppxWindowsBoostSelection" {Invoke-WPFPresets "AppxWindowsBoost" -checkboxfilterpattern "WPFAppx*"}
+        "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
 '@.TrimEnd() "button switch"
 
 # ---------------------------------------------------------------- ponto de restauração: não duplicar na mesma sessão
@@ -332,13 +332,14 @@ Get-WinUtilBoostSystemInfo
 $wbGpuText = if ($sync.GPUNames -and $sync.GPUNames.Count -gt 0) { $sync.GPUNames -join ' | ' } else { 'não detectada' }
 Write-Host @"
 
- __        ___           _                     ____                  _
- \ \      / (_)_ __   __| | _____      _____  | __ )  ___   ___  ___| |_
-  \ \ /\ / /| | '_ \ / _`` |/ _ \ \ /\ / / __| |  _ \ / _ \ / _ \/ __| __|
-   \ V  V / | | | | | (_| | (_) \ V  V /\__ \ | |_) | (_) | (_) \__ \ |_
-    \_/\_/  |_|_| |_|\__,_|\___/ \_/\_/ |___/ |____/ \___/ \___/|___/\__|
+__        __ _         _____
+\ \      / /(_) _ __  |  ___|  ___   _ __   __ _   ___
+ \ \ /\ / / | || '_ \ | |_    / _ \ | '__| / _`` | / _ \
+  \ V  V /  | || | | ||  _|  | (_) || |   | (_| ||  __/
+   \_/\_/   |_||_| |_||_|     \___/ |_|    \__, | \___|
+                                           |___/
 
-  Windows Boost $($sync.version)  -  base: $($sync.baseVersion) (MIT, ver NOTICE)
+  WinForge $($sync.version)  -  base: $($sync.baseVersion) (MIT, ver NOTICE)
   Sistema: $($sync.OSName) $($sync.OSDisplayVersion) (build $($sync.OSBuild))
   GPU    : $wbGpuText
   Log    : $($sync.logPath)
@@ -360,11 +361,11 @@ $sync.configs.appx.PSObject.Properties | ForEach-Object {
     $sync.configs.appxHashtable[$_.Name] = $_.Value
 }
 
-# Windows Boost: mescla tweaks/botões/presets/jogos e marca recursos só do Windows 11
+# WinForge: mescla tweaks/botões/presets/jogos e marca recursos só do Windows 11
 Initialize-WinUtilBoostConfigs
 
 if ($SelfTest) {
-    Write-Host "== Windows Boost SelfTest =="
+    Write-Host "== WinForge SelfTest =="
     $wbErrors = 0
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
         foreach ($k in @($p.Value)) {
@@ -416,7 +417,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWindowsBoost','WPFPresetGamer','WPFAppxWindowsBoostSelection','WPFGamesApplyButton','WPFGamesUndoButton') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
@@ -445,8 +446,8 @@ if ($SelfTest) {
         try {
             Invoke-WPFPresets "Gamer" -checkboxfilterpattern "WPFTweak*"
             Write-Host "  Preset Gamer: $($sync.selectedTweaks.Count) tweaks selecionados -> $($sync.selectedTweaks -join ', ')"
-            Invoke-WPFPresets "AppxWindowsBoost" -checkboxfilterpattern "WPFAppx*"
-            Write-Host "  Preset AppxWindowsBoost: $($sync.selectedAppx.Count) pacotes selecionados"
+            Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"
+            Write-Host "  Preset AppxWinForge: $($sync.selectedAppx.Count) pacotes selecionados"
         } catch {
             Write-Host "  [ERRO] presets: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
@@ -488,7 +489,7 @@ $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windo
     # WinForge: avisa o launcher que a janela apareceu (fecha o splash)
     Send-WinForgeReady
 
-    # Windows Boost: pergunta (opcional) sobre ponto de restauração depois que a janela aparece
+    # WinForge: pergunta (opcional) sobre ponto de restauração depois que a janela aparece
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null
 '@.TrimEnd() "restore prompt hook"
 
@@ -506,10 +507,10 @@ $src = Replace-Once $src @'
     exit 2
 '@ "xaml failure exit"
 
-$src = Replace-Once $src '    $winutilTextBlock.Text = "WinUtil"' '    $winutilTextBlock.Text = "Windows Boost"' "dialog logo text"
+$src = Replace-Once $src '    $winutilTextBlock.Text = "WinUtil"' '    $winutilTextBlock.Text = "WinForge"' "dialog logo text"
 
 # ---------------------------------------------------------------- XAML
-$src = Replace-Once $src '        Title="WinUtil">' '        Title="Windows Boost">' "xaml title"
+$src = Replace-Once $src '        Title="WinUtil">' '        Title="WinForge">' "xaml title"
 $src = Replace-Once $src 'Header="Sponsors" Name="SponsorMenuItem"' 'Header="Créditos" Name="SponsorMenuItem"' "xaml sponsors"
 $src = Replace-Once $src 'Header="Documentation" Name="DocumentationMenuItem"' 'Header="Documentação" Name="DocumentationMenuItem"' "xaml docs"
 $src = Replace-Once $src 'Header="About" Name="AboutMenuItem"' 'Header="Sobre" Name="AboutMenuItem"' "xaml about"
@@ -523,12 +524,12 @@ $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
-                                    <Button Name="WPFPresetWindowsBoost" Content=" Windows Boost " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Standard + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (Windows Boost)."/>
+                                    <Button Name="WPFPresetWinForge" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Standard + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (WinForge)."/>
 '@.TrimEnd() "xaml preset button"
 
 $src = Insert-After $src '                                    <Button Name="WPFDefaultAppxSelection" Content=" Default " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
-                                    <Button Name="WPFAppxWindowsBoostSelection" Content=" Windows Boost " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Seleção equivalente ao 'REMOVA TUDO DE UMA VEZ SÓ' do Windows Boost (sem a Microsoft Store)."/>
+                                    <Button Name="WPFAppxWinForgeSelection" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Seleção equivalente ao 'REMOVA TUDO DE UMA VEZ SÓ' do Windows Boost (sem a Microsoft Store)."/>
 '@.TrimEnd() "xaml appx preset button"
 
 # ---------------------------------------------------------------- remoção de referências ao projeto original (antes do rename global)

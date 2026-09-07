@@ -1,4 +1,4 @@
-#region ===== Windows Boost - configurações adicionais =====
+#region ===== WinForge - configurações adicionais =====
 
 # Entradas do WinUtil que só fazem sentido no Windows 11 (ficam ocultas no Windows 10)
 $sync.WinBoostWin11OnlyTweaks = @(
@@ -20,7 +20,7 @@ $sync.WinBoostWin11OnlyAppx = @(
 )
 
 # ---------------------------------------------------------------------------
-# Tweaks do Windows Boost (mesclados em $sync.configs.tweaks)
+# Tweaks do WinForge (mesclados em $sync.configs.tweaks)
 #   panel 1 = checkboxes | panel 2 = toggles/botões | tab "Jogos" = aba Jogos
 #   os/gpu  = filtro de compatibilidade (ver Test-WinUtilBoostEntryCompatible)
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBPowerSettings": {
     "Content": "Energia - Sem suspensão USB, sem throttle e CPU em 100% na tomada",
     "Description": "No plano de energia ATUAL: desativa 'Suspensão seletiva de USB' (tomada e bateria) e 'USB 3 Link Power Management', desativa 'Estados de throttle do processador' e define 'Estado mínimo do processador' = 100% quando na tomada. Reduz latência e micro-travamentos; aumenta consumo e temperatura em ocioso. Desfazer restaura os padrões do plano Equilibrado. Origem: 'Ajustes de energia.reg' (revisado; os limiares de ocioso do .reg original foram descartados por reduzirem desempenho).",
-    "category": "Windows Boost - Desempenho",
+    "category": "WinForge - Desempenho",
     "panel": "1",
     "InvokeScript": [
       "powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb50f7e1e2 0; powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb50f7e1e2 0; powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 d4e98f31-5ffe-4ce1-be31-1b38b384c009 0; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb 0; powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 100; powercfg /setactive SCHEME_CURRENT"
@@ -41,7 +41,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBNtfsLastAccess": {
     "Content": "NTFS - Não gravar 'último acesso' (abrir pastas/arquivos mais rápido)",
     "Description": "Impede o NTFS de gravar a data de último acesso a cada leitura de arquivo, reduzindo escritas em disco (fsutil behavior set disablelastaccess 1). Desfazer volta ao padrão gerenciado pelo sistema. Origem: 'Aumentar velocidade ao abrir pastas e arquivos.reg' e 'Aumentar Prioridade da GPU.reg' (os dois faziam exatamente isto).",
-    "category": "Windows Boost - Desempenho",
+    "category": "WinForge - Desempenho",
     "panel": "1",
     "registry": [
       { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem", "Name": "NtfsDisableLastAccessUpdate", "Value": "1", "Type": "DWord", "OriginalValue": "2147483650" }
@@ -52,7 +52,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBServicesSafe": {
     "Content": "Serviços dispensáveis - Desativar (seleção segura)",
     "Description": "Desativa: Windows Insider (wisvc), Política de Diagnóstico (DPS), Demonstração de Loja (RetailDemo), Fax, Assistente de Compatibilidade (PcaSvc), Configuração de Área de Trabalho Remota (SessionEnv) e Registro Remoto. Nada que afete impressão, Bluetooth, Windows Hello, teclado touch ou Windows Update. Serviços já alterados manualmente são mantidos. Origem: 'Desativar seviços.bat' (só a parte segura; o resto está em 'Avançado').",
-    "category": "Windows Boost - Desempenho",
+    "category": "WinForge - Desempenho",
     "panel": "1",
     "service": [
       { "Name": "wisvc",          "StartupType": "Disabled", "OriginalType": "Manual" },
@@ -67,7 +67,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBAds": {
     "Content": "Anúncios e sugestões do Windows - Desativar",
     "Description": "Desliga sugestões de apps no menu Iniciar, dicas, apps instalados silenciosamente, conteúdo promocional na tela de bloqueio/Configurações (ContentDeliveryManager). Origem: 'Desativar Anúncios e sugestões.bat' + opção 22 do iGust Debloater.",
-    "category": "Windows Boost - Privacidade e Interface",
+    "category": "WinForge - Privacidade e Interface",
     "panel": "1",
     "registry": [
       { "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SystemPaneSuggestionsEnabled",    "Value": "0", "Type": "DWord", "OriginalValue": "1" },
@@ -87,7 +87,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBCortana": {
     "Content": "Cortana - Desativar",
     "Description": "Bloqueia a Cortana por política (AllowCortana=0) e desliga a integração dela na pesquisa. Para remover o app, use a aba AppX. Origem: 'Desativar Cortana.bat' + 'Desativar Bing Search.bat'.",
-    "category": "Windows Boost - Privacidade e Interface",
+    "category": "WinForge - Privacidade e Interface",
     "panel": "1",
     "registry": [
       { "Path": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\Windows Search",        "Name": "AllowCortana",   "Value": "0", "Type": "DWord", "OriginalValue": "<RemoveEntry>" },
@@ -98,7 +98,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBSearchSuggestions": {
     "Content": "Pesquisa - Sem histórico, sem sugestões da web e sem conteúdo da nuvem",
     "Description": "Desliga o histórico de pesquisa do dispositivo, as sugestões/resultados da web na caixa de pesquisa (DisableSearchBoxSuggestions) e a pesquisa de conteúdo na nuvem (conta Microsoft/corporativa). Origem: 'Desativar Sugestões de Pesquisa.bat' (revisado: a chave original era inócua).",
-    "category": "Windows Boost - Privacidade e Interface",
+    "category": "WinForge - Privacidade e Interface",
     "panel": "1",
     "registry": [
       { "Path": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\SearchSettings", "Name": "IsDeviceSearchHistoryEnabled", "Value": "0", "Type": "DWord", "OriginalValue": "1" },
@@ -110,7 +110,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBPrefetch": {
     "Content": "Prefetch / Superfetch - Desativar (apenas para SSD)",
     "Description": "Desliga o Prefetcher e o Superfetch/SysMain no registro. Só faz sentido em SSD; em HDD deixa o sistema mais lento. Desfazer restaura o padrão (3). Origem: 'Desabilitar Prefetch e Superfetch.reg' (o arquivo original estava em formato inválido e não funcionava).",
-    "category": "zz__Windows Boost - Avançado (CUIDADO)",
+    "category": "zz__WinForge - Avançado (CUIDADO)",
     "panel": "1",
     "registry": [
       { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management\\PrefetchParameters", "Name": "EnablePrefetcher", "Value": "0", "Type": "DWord", "OriginalValue": "3" },
@@ -120,7 +120,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBSmartScreen": {
     "Content": "SmartScreen do Explorer e bloqueio de downloads - Desativar",
     "Description": "REDUZ A SEGURANÇA. Desliga o SmartScreen para arquivos executados pelo Explorer e para de marcar downloads como 'vindos da internet' (sem o aviso 'Desbloquear'). Use só se souber o que está fazendo. Origem: 'Desabilitar SmartSceen e Downloads Blocks.reg'.",
-    "category": "zz__Windows Boost - Avançado (CUIDADO)",
+    "category": "zz__WinForge - Avançado (CUIDADO)",
     "panel": "1",
     "registry": [
       { "Path": "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer",           "Name": "SmartScreenEnabled",  "Value": "Off", "Type": "String", "OriginalValue": "Warn" },
@@ -130,7 +130,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBIndexing": {
     "Content": "Indexação (Windows Search) - Desativar serviço",
     "Description": "Desliga o serviço WSearch. Libera disco/CPU em segundo plano, mas a pesquisa do menu Iniciar/Explorador e do Outlook fica bem mais lenta. Origem: 'Desativar indexação.bat'.",
-    "category": "zz__Windows Boost - Avançado (CUIDADO)",
+    "category": "zz__WinForge - Avançado (CUIDADO)",
     "panel": "1",
     "service": [
       { "Name": "WSearch", "StartupType": "Disabled", "OriginalType": "Automatic" }
@@ -139,7 +139,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBServicesAggressive": {
     "Content": "Serviços - Desativar (agressivo: impressão, Bluetooth, RDP, Windows Hello, teclado touch)",
     "Description": "Desativa Spooler (impressoras!), bthserv (Bluetooth!), TermService (Área de Trabalho Remota), WbioSrvc (Windows Hello biometria) e TabletInputService (teclado virtual/caneta). Só para PCs de jogo sem impressora/Bluetooth. Windows Update e relógio ficaram de fora de propósito (use a aba Updates). Origem: 'Desativar seviços.bat'.",
-    "category": "zz__Windows Boost - Avançado (CUIDADO)",
+    "category": "zz__WinForge - Avançado (CUIDADO)",
     "panel": "1",
     "service": [
       { "Name": "Spooler",            "StartupType": "Disabled", "OriginalType": "Automatic" },
@@ -152,7 +152,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBVBS": {
     "Content": "VBS / Isolamento de Núcleo (HVCI) - Desativar",
     "Description": "Desliga a Segurança Baseada em Virtualização e a Integridade de Memória. Ganho de 5-15% de FPS em alguns jogos, mas REDUZ A SEGURANÇA contra malware de kernel. Exige reinício. Desfazer reativa. Origem: 'Desativar VBS (Isolamento de núcleo).bat' (a parte do hypervisor está em item separado).",
-    "category": "zz__Windows Boost - Avançado (CUIDADO)",
+    "category": "zz__WinForge - Avançado (CUIDADO)",
     "panel": "1",
     "registry": [
       { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity", "Name": "Enabled",                           "Value": "0", "Type": "DWord", "OriginalValue": "1" },
@@ -162,7 +162,7 @@ $sync.configs.wbtweaks = @'
   "WPFTweaksWBHypervisorOff": {
     "Content": "Hypervisor (Hyper-V) - Desativar no boot",
     "Description": "bcdedit /set hypervisorlaunchtype off. QUEBRA WSL2, Hyper-V, Windows Sandbox, WSA e emuladores que usam Hyper-V (BlueStacks em modo Hyper-V). Exige reinício. Desfazer volta para 'auto'. Origem: 'Desativar o Hyper-V.bat' e 'Desativar VBS.bat'.",
-    "category": "zz__Windows Boost - Avançado (CUIDADO)",
+    "category": "zz__WinForge - Avançado (CUIDADO)",
     "panel": "1",
     "InvokeScript": [ "bcdedit /set hypervisorlaunchtype off" ],
     "UndoScript":   [ "bcdedit /set hypervisorlaunchtype auto" ]
@@ -170,7 +170,7 @@ $sync.configs.wbtweaks = @'
   "WPFToggleWBTransparency": {
     "Content": "Transparência do Windows (efeitos de vidro)",
     "Description": "Liga/desliga os efeitos de transparência da barra de tarefas, menu Iniciar e Configurações. Desligar economiza GPU em máquinas fracas. Origem: 'Desativar Transparência do Windows.bat'.",
-    "category": "Windows Boost - Preferências",
+    "category": "WinForge - Preferências",
     "panel": "2",
     "Type": "Toggle",
     "registry": [
@@ -180,7 +180,7 @@ $sync.configs.wbtweaks = @'
   "WPFToggleWBHAGS": {
     "Content": "HAGS - Agendamento de GPU acelerado por hardware",
     "Description": "Liga/desliga o Hardware-Accelerated GPU Scheduling (HwSchMode 2/1). Exige reinício. Em alguns jogos/drivers desligar reduz stutter; em outros ligar melhora latência - teste. Origem: 'Desativar HGS.reg' / 'Desativar Hardware Accelerated GPU Scheduling.reg'.",
-    "category": "Windows Boost - Preferências",
+    "category": "WinForge - Preferências",
     "panel": "2",
     "Type": "Toggle",
     "registry": [
@@ -397,7 +397,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBRestorePoint": {
     "Content": "Ponto de restauração - Criar agora",
     "Description": "Cria um ponto de restauração do sistema (o mesmo que a pergunta feita ao abrir a ferramenta).",
-    "category": "Windows Boost - Manutenção",
+    "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -405,8 +405,8 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBRegistryBackup": {
     "Content": "Backup do Registro - Exportar HKLM/HKCU/HKCR/HKU/HKCC",
-    "Description": "Exporta as 5 chaves raiz para arquivos .reg em %LocalAppData%\\WindowsBoost\\Backup_Regedit\\<data>. Demora alguns minutos e ocupa centenas de MB. Origem: 'Fazer backup do Windows.bat'.",
-    "category": "Windows Boost - Manutenção",
+    "Description": "Exporta as 5 chaves raiz para arquivos .reg em %LocalAppData%\\WinForge\\Backup_Regedit\\<data>. Demora alguns minutos e ocupa centenas de MB. Origem: 'Fazer backup do Windows.bat'.",
+    "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -415,7 +415,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBClearRam": {
     "Content": "Limpar cache de RAM (Standby List)",
     "Description": "Esvazia a Standby List e a Modified List, igual ao EmptyStandbyList.exe/ISLC, sem executável externo. Útil quando jogos ficam com stutter por RAM 'em cache'. Origem: 'Limpar CACHE Memória RAM.bat'.",
-    "category": "Windows Boost - Manutenção",
+    "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -424,7 +424,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBFullCleanup": {
     "Content": "Limpeza completa (Temp, Recentes, Windows Update, DNS, Lixeira)",
     "Description": "Apaga temporários do usuário e do Windows, itens recentes, cache do Windows Update, cache de internet legado, cache de shaders DirectX, relatórios de erro, limpa o DNS e esvazia a Lixeira. Origem: 'Limpeza Completa PC.bat' (revisado).",
-    "category": "Windows Boost - Manutenção",
+    "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -433,7 +433,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBOptimizeVolumes": {
     "Content": "Otimizar unidades (TRIM em SSD / desfragmentar HDD)",
     "Description": "Roda Optimize-Volume em todas as unidades fixas; o Windows escolhe TRIM para SSD e desfragmentação para HDD. Substitui os atalhos 'HDD.exe' e 'LIMPAR SSD.exe'.",
-    "category": "Windows Boost - Manutenção",
+    "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -442,7 +442,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBShaderCache": {
     "Content": "Limpar Shader Cache (NVIDIA / AMD / Intel / DirectX)",
     "Description": "Apaga os caches de shaders de todos os fabricantes e do DirectX. Origem: 'Limpar Shader Cache NVIDIA.bat' (estendido).",
-    "category": "Windows Boost - Manutenção",
+    "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -451,7 +451,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBToolISLC": {
     "Content": "ISLC - Intelligent Standby List Cleaner",
     "Description": "Abre o ISLC da pasta 'Apps' (ao lado do script) ou a página oficial da Wagnardsoft.",
-    "category": "Windows Boost - Ferramentas externas",
+    "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -460,7 +460,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBToolMSI": {
     "Content": "MSI Utility v3 (modo MSI para GPU/placas)",
     "Description": "Abre o MSI_util da pasta 'Apps' ou o tópico oficial no fórum Guru3D.",
-    "category": "Windows Boost - Ferramentas externas",
+    "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -469,7 +469,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBToolDnsJumper": {
     "Content": "DNS Jumper (teste e troca de DNS)",
     "Description": "Abre o DnsJumper da pasta 'Apps' ou a página oficial da Sordum. A aba Tweaks também tem um seletor de DNS (Cloudflare, Google, etc.).",
-    "category": "Windows Boost - Ferramentas externas",
+    "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -478,7 +478,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBToolFiremin": {
     "Content": "Firemin (reduz RAM do Firefox)",
     "Description": "Abre o instalador do Firemin da pasta 'Apps' ou a página oficial da Rizonesoft.",
-    "category": "Windows Boost - Ferramentas externas",
+    "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -487,7 +487,7 @@ $sync.configs.wbfeatures = @'
   "WPFPanelWBToolAppsFolder": {
     "Content": "Abrir pasta 'Apps' (utilitários externos)",
     "Description": "Cria (se preciso) e abre a pasta Apps ao lado do WinForge.ps1. Coloque ali os executáveis (ISLC, MSI_util, DnsJumper, Firemin) para os botões acima abrirem direto.",
-    "category": "Windows Boost - Ferramentas externas",
+    "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
     "ButtonWidth": "350",
@@ -501,7 +501,7 @@ $sync.configs.wbfeatures = @'
 # ---------------------------------------------------------------------------
 $sync.configs.wbpresets = @'
 {
-  "WindowsBoost": [
+  "WinForge": [
     "WPFTweaksRestorePoint",
     "WPFTweaksActivity",
     "WPFTweaksConsumerFeatures",
@@ -549,7 +549,7 @@ $sync.configs.wbpresets = @'
     "WPFTweaksWBNvidiaTelemetry",
     "WPFTweaksWBAmdTelemetry"
   ],
-  "AppxWindowsBoost": [
+  "AppxWinForge": [
     "WPFAppxMicrosoft_WindowsFeedbackHub",
     "WPFAppxMicrosoft_GetHelp",
     "WPFAppxMicrosoft_MicrosoftOfficeHub",
