@@ -79,13 +79,23 @@ function Update-WinForgeRecommendationVisuals {
         $row.Tip.ToolTip = $orig[$key]
     }
 
+    # Antes do primeiro diagnóstico as duas listas são $null: a janela abre e monta a aba Instalar
+    # muito antes de o job terminar. @($null).Keys devolve uma chave nula, e indexar o plano com ela
+    # estoura ("não é possível indexar em uma matriz nula") - daí as guardas. Sem regras não há o que
+    # pintar, só o que despintar (o laço acima).
     # 'Evitar' depois de 'Recomendar': se uma chave estiver nas duas listas, quem fica é o laranja
     $plan = [ordered]@{}
-    foreach ($key in @($sync.Recommended.Keys)) {
-        $plan[$key] = @{ Hex = "#2E7D32"; Prefix = "✔ Recomendado: "; Reason = [string]$sync.Recommended[$key] }
+    if ($sync.Recommended) {
+        foreach ($key in @($sync.Recommended.Keys)) {
+            if (-not $key) { continue }
+            $plan[$key] = @{ Hex = "#2E7D32"; Prefix = "✔ Recomendado: "; Reason = [string]$sync.Recommended[$key] }
+        }
     }
-    foreach ($key in @($sync.Discouraged.Keys)) {
-        $plan[$key] = @{ Hex = "#EF6C00"; Prefix = "⚠ Não recomendado neste sistema: "; Reason = [string]$sync.Discouraged[$key] }
+    if ($sync.Discouraged) {
+        foreach ($key in @($sync.Discouraged.Keys)) {
+            if (-not $key) { continue }
+            $plan[$key] = @{ Hex = "#EF6C00"; Prefix = "⚠ Não recomendado neste sistema: "; Reason = [string]$sync.Discouraged[$key] }
+        }
     }
 
     $brushes = @{}
@@ -107,8 +117,33 @@ function Update-WinForgeRecommendationVisuals {
         $painted++
     }
 
-    Write-WinForgeLog -Component "Rules" -Message "Contornos de recomendação aplicados: $painted linha(s)."
+    # Só registra quando o número muda: esta função roda no fim de cada montagem de aba e a cada
+    # diagnóstico, e cinco linhas iguais no log só atrapalham quem lê depois.
+    if ($painted -ne $sync.LastOutlineCount) {
+        Write-WinForgeLog -Component "Rules" -Message "Contornos de recomendação aplicados: $painted linha(s)."
+        $sync.LastOutlineCount = $painted
+    }
     return $painted
+}
+
+function Set-WinForgeProfileProgress {
+    <#
+    .SYNOPSIS
+        Escreve na barra de progresso da janela em nome do diagnóstico, se ela ainda for dele.
+    .DESCRIPTION
+        A barra é uma só para tweaks, AppX, Win11 Creator e diagnóstico. Enquanto um desses trabalhos
+        estiver rodando ($sync.ProcessRunning), o diagnóstico fica calado: perder o texto dele é bem
+        melhor que apagar o texto do trabalho que o usuário mandou fazer e está olhando.
+        O rótulo escrito fica em $sync.ProfileJobLabel, para quem precisar saber o que está na barra.
+    .OUTPUTS
+        $true se escreveu, $false se cedeu a vez.
+    #>
+    param([string]$Label, [int]$Percent)
+
+    if ($sync.ProcessRunning) { return $false }
+    $sync.ProfileJobLabel = $Label
+    Set-WinForgeTweaksProgressIndicator -Visible $true -Label $Label -Percent $Percent
+    return $true
 }
 
 function Start-WinForgeProfileJob {
@@ -121,10 +156,17 @@ function Start-WinForgeProfileJob {
         travaria a interface se rodasse na thread dela. Um diagnóstico por vez - o segundo pedido é
         ignorado, porque dois deles gravando $sync.Recommended ao mesmo tempo deixariam os contornos
         e a aba de diagnóstico discordando entre si.
+        Começo e fim vão para o log ("Diagnóstico iniciado (job)." / "Diagnóstico pronto: ..."): sem
+        isso não há como saber, depois, se o caminho do runspace chegou a rodar na janela real.
     .PARAMETER Force
         Roda mesmo com outro diagnóstico em andamento (usado pelo botão "Atualizar diagnóstico").
+    .PARAMETER Synchronous
+        Roda o mesmo corpo na thread atual, sem runspace (é assim que o -SelfTest exercita este
+        caminho: sem janela mostrada não há Add_ContentRendered para disparar o job).
+    .PARAMETER SkipNetwork
+        Não consulta a internet atrás de driver mais novo (repassado a Get-WinForgeSystemProfile).
     #>
-    param([switch]$Force)
+    param([switch]$Force, [switch]$Synchronous, [switch]$SkipNetwork)
 
     if ($sync.ProfileJobRunning -and -not $Force) {
         Write-WinForgeLog -Component "Profile" -Message "Diagnóstico já em andamento; pedido ignorado."
@@ -132,30 +174,40 @@ function Start-WinForgeProfileJob {
     }
     $sync.ProfileJobRunning = $true
 
-    Invoke-WPFRunspace -ScriptBlock {
+    # o corpo é um só: o runspace recebe o texto dele, o modo síncrono o executa aqui mesmo
+    $wfBody = {
+        param($wfSkipNetwork)
         try {
-            Set-WinForgeTweaksProgressIndicator -Visible $true -Label "Coletando informações do sistema..." -Percent 0
-            $sync.Profile = Get-WinForgeSystemProfile
-            Set-WinForgeTweaksProgressIndicator -Visible $true -Label "Avaliando recomendações..." -Percent 70
-            $null = Invoke-WinForgeRules -Profile $sync.Profile
+            Write-WinForgeLog -Component "Profile" -Message "Diagnóstico iniciado (job)."
+            $null = Set-WinForgeProfileProgress -Label "Coletando informações do sistema..." -Percent 0
+            $sync.Profile = if ($wfSkipNetwork) { Get-WinForgeSystemProfile -SkipNetwork } else { Get-WinForgeSystemProfile }
+            $null = Set-WinForgeProfileProgress -Label "Avaliando recomendações..." -Percent 70
+            $wfRules = Invoke-WinForgeRules -Profile $sync.Profile
 
             Invoke-WPFUIThread {
-                Update-WinForgeRecommendationVisuals
+                Update-WinForgeRecommendationVisuals | Out-Null
                 if (Get-Command Update-WinForgeDiagnosticsTab -ErrorAction SilentlyContinue) { Update-WinForgeDiagnosticsTab }
             }
 
-            $done = "Diagnóstico pronto: {0} recomendações, {1} a evitar" -f @($sync.Recommended.Keys).Count, @($sync.Discouraged.Keys).Count
-            Set-WinForgeTweaksProgressIndicator -Visible $true -Label $done -Percent 100
-            Write-WinForgeLog -Component "Profile" -Message $done
-            Start-Sleep -Seconds 4
-            Set-WinForgeTweaksProgressIndicator -Visible $false -Label "" -Percent 0
+            $wfDone = "Diagnóstico pronto: {0} recomendações, {1} a evitar, {2} infos, {3} erros de coleta." -f $wfRules.Recommended.Count, $wfRules.Discouraged.Count, $wfRules.Infos.Count, @($sync.Profile.Errors).Count
+            # a barra fica no 100% com o resumo, sem esconder depois: um Start-Sleep aqui só serviria
+            # para, quatro segundos mais tarde, apagar o texto de outro trabalho que tivesse começado
+            $null = Set-WinForgeProfileProgress -Label $wfDone -Percent 100
+            Write-WinForgeLog -Component "Profile" -Message $wfDone
         } catch {
             # a barra fica visível com o erro: o usuário precisa saber que não há recomendação nenhuma
-            Set-WinForgeTweaksProgressIndicator -Visible $true -Label "Diagnóstico falhou: $($_.Exception.Message)" -Percent 0
+            $null = Set-WinForgeProfileProgress -Label "Diagnóstico falhou: $($_.Exception.Message)" -Percent 0
             Write-WinForgeLog -Component "Profile" -Level "ERROR" -Message "Diagnóstico falhou: $($_.Exception.Message)"
         } finally {
             $sync.ProfileJobRunning = $false
         }
-    } | Out-Null
+    }
+
+    if ($Synchronous) {
+        & $wfBody $SkipNetwork.IsPresent
+        return
+    }
+
+    Invoke-WPFRunspace -ScriptBlock $wfBody -ArgumentList $SkipNetwork.IsPresent | Out-Null
 }
 #endregion

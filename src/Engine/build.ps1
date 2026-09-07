@@ -743,6 +743,20 @@ if ($SelfTest) {
         $sync["Form"] = $wbWindow
         $wbXaml.SelectNodes("//*[@Name]") | ForEach-Object { $sync["$($_.Name)"] = $sync["Form"].FindName($_.Name) }
         $sync.InitializedTabs = @{}
+        # Antes do diagnóstico terminar, $sync.Recommended/$sync.Discouraged são nulos - é o estado
+        # real da janela recém-aberta. Enumerar .Keys de $null dava uma chave nula e uma exceção por
+        # montagem de aba ("não é possível indexar em uma matriz nula"), com zero contornos.
+        try {
+            $sync.Recommended = $null
+            $sync.Discouraged = $null
+            $wbSemRegras = Update-WinForgeRecommendationVisuals
+            if ($wbSemRegras -ne 0) { Write-Host "  [ERRO] contornos sem diagnóstico: esperado 0, veio $wbSemRegras" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Contornos sem diagnóstico: OK (0 linha(s), sem exceção)"
+        } catch {
+            Write-Host "  [ERRO] contornos sem diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            $null = Invoke-WinForgeRules -Profile $wbProfile   # devolve $sync.Recommended ao perfil real
+        }
         foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX') {
             try {
                 Initialize-WinUtilTabContent -TabName $tab
@@ -817,6 +831,29 @@ if ($SelfTest) {
             Write-Host "  Recomendados marcados: $wbSelAll (Tweaks $wbSelTweaks, Jogos $wbSelJogos) | selectedTweaks=$($sync.selectedTweaks.Count)"
         } catch {
             Write-Host "  [ERRO] Select-WinForgeRecommended: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Job de diagnóstico: mesmo corpo que roda na janela real, aqui na thread atual (sem janela
+        # mostrada não há Add_ContentRendered). Write-WinForgeLog vai para o host quando o log é o
+        # próprio transcript, então o 6>&1 é o que captura as linhas do log para conferir.
+        try {
+            $sync.Profile = $null
+            $sync.ProfileJobRunning = $false
+            $wbJobLog = (Start-WinForgeProfileJob -Synchronous -SkipNetwork 6>&1 | Out-String -Width 500)
+            Write-Host $wbJobLog.TrimEnd()
+            if ($null -eq $sync.Profile) { Write-Host "  [ERRO] job: `$sync.Profile continuou nulo" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.ProfileJobRunning) { Write-Host "  [ERRO] job: ProfileJobRunning ficou ligado no fim" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobLog -notmatch 'Diagnóstico iniciado \(job\)') { Write-Host "  [ERRO] job: log sem 'Diagnóstico iniciado'" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobLog -notmatch 'Diagnóstico pronto') { Write-Host "  [ERRO] job: log sem 'Diagnóstico pronto'" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobLog -match 'Diagnóstico falhou') { Write-Host "  [ERRO] job: o diagnóstico falhou" -ForegroundColor Red; $wbErrors++ }
+            # a barra é compartilhada: com outro trabalho rodando o diagnóstico não pode escrever nela
+            $sync.ProcessRunning = $true
+            $wbLabelAntes = $sync.ProfileJobLabel
+            if ((Set-WinForgeProfileProgress -Label "não deveria aparecer" -Percent 50) -ne $false) { Write-Host "  [ERRO] job: escreveu na barra com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.ProfileJobLabel -ne $wbLabelAntes) { Write-Host "  [ERRO] job: rótulo da barra mudou com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            $sync.ProcessRunning = $false
+            Write-Host "  Job de diagnóstico: OK | barra: $($sync.ProfileJobLabel)"
+        } catch {
+            Write-Host "  [ERRO] job de diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
     } catch {
         Write-Host "  [ERRO] XAML: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
