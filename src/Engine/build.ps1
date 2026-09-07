@@ -562,7 +562,7 @@ $src = Insert-After $src '                                    <Button Name="WPFD
 $src = [regex]::Replace($src, ',\n\s*"link": "https://winutil\.christitus\.com[^"]*"', '')
 $src = [regex]::Replace($src, '\n\s*"link": "https://winutil\.christitus\.com[^"]*",', "`n")
 # 2) menu Documentação -> README do WinForge
-$src = Replace-Once $src 'Start-Process "https://winutil.christitus.com/"' 'Start-Process "https://github.com/rafaelfavero/WinForge#readme"' "docs url"
+$src = Replace-Once $src 'Start-Process "https://winutil.christitus.com/"' 'Start-Process "https://github.com/RafaelGFavero/WinForge#readme"' "docs url"
 # 3) relaunch sem arquivo (irm do repositório original) -> mensagem
 $src = Replace-Once $src '"&([ScriptBlock]::Create((irm https://github.com/ChrisTitusTech/winutil/releases/latest/download/winutil.ps1))) $($argList -join '' '')"' '"Write-Host ''Execute o WinForge a partir do arquivo WinForge.exe ou WinForge.ps1.''"' "relaunch url"
 # 4) função de sponsors (o único chamador está no bloco de créditos, já substituído acima)

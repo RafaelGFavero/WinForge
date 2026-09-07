@@ -2,7 +2,7 @@
 
 # WinForge
 
-![build](https://github.com/rafaelfavero/WinForge/actions/workflows/build.yml/badge.svg)
+![build](https://github.com/RafaelGFavero/WinForge/actions/workflows/build.yml/badge.svg)
 
 Utilitário de otimização e reparo para Windows 10, 11 e Server. Reúne em uma única janela os
 ajustes de desempenho, privacidade, jogos e manutenção que normalmente exigiriam dezenas de
@@ -13,7 +13,7 @@ de placa que você tem.
 
 ## Download
 
-Baixe na página de [releases](https://github.com/rafaelfavero/WinForge/releases):
+Baixe na página de [releases](https://github.com/RafaelGFavero/WinForge/releases):
 
 - `WinForge.exe` — o programa inteiro em um único arquivo, sem instalação.
 - `WinForge-<versão>.zip` — o mesmo executável junto com `README.md`, `LICENSE` e `NOTICE`.
