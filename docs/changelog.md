@@ -14,4 +14,6 @@
 - Nova aba "Jogos": prioridade de CPU por jogo (IFEO), GameDVR, MMCSS, HAGS e shader cache.
 - Filtro de compatibilidade: entradas exclusivas do Windows 11 ficam ocultas no Windows 10 e
   tweaks de GPU só aparecem para a marca de placa detectada.
-- `-SelfTest`: valida configurações, XAML, montagem das abas e presets sem exigir administrador.
+- `-SelfTest` no motor: valida configurações, XAML, montagem das abas e presets sem abrir a janela.
+  Rodando `dist\engine\WinForge.ps1` diretamente não exige administrador; pelo `WinForge.exe` a
+  elevação continua sendo pedida.

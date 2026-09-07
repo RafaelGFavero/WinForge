@@ -33,7 +33,7 @@ Parâmetros de linha de comando:
 | `-NoRestorePoint` | Não pergunta nem cria ponto de restauração. |
 | `-Console` | Mantém a janela de console visível (útil para ver erros). |
 | `-HardwareRender` | Usa renderização WPF por hardware em vez do padrão por software. |
-| `-SelfTest` | Valida configurações e XAML, imprime o resultado e sai. Não exige administrador. |
+| `-SelfTest` | Valida configurações, XAML e montagem das abas sem abrir a janela (rodando o `dist\engine\WinForge.ps1` diretamente não exige administrador; pelo `.exe` pede elevação). |
 
 ## O que tem
 
