@@ -82,18 +82,29 @@ namespace WinForge
             return security;
         }
 
+        /// <summary>
+        /// Os três níveis que precisam da ACL protegida, do mais externo para o mais interno:
+        /// %ProgramData%\WinForge, ...\engine e ...\engine\&lt;versão&gt;. Não basta proteger a base:
+        /// como os usuários têm travessia nela, um atacante que pré-crie engine\&lt;versão&gt; com DACL
+        /// própria continua dono da pasta onde o .ps1 é extraído.
+        /// </summary>
+        internal static string[] ProtectedDirectoryChain(string root, string version)
+        {
+            var baseDir = Path.Combine(root, "WinForge");
+            var engineDir = Path.Combine(baseDir, "engine");
+            return new[] { baseDir, engineDir, Path.Combine(engineDir, version) };
+        }
+
         public static string EnsureEngine(string version)
         {
             var bytes = ReadEmbeddedEngine();
             var hash = ComputeSha256(bytes);
             // %ProgramData% em vez de %LocalAppData%: pasta protegida por ACL, já que o motor roda elevado.
             var root = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            var baseDir = Path.Combine(root, "WinForge");
-            ProtectBaseDirectory(baseDir);
+            foreach (var level in ProtectedDirectoryChain(root, version)) ProtectDirectory(level);
 
             var path = EnginePath(root, version);
             var dir = Path.GetDirectoryName(path);
-            Directory.CreateDirectory(dir);
 
             var extracted = false;
             if (NeedsExtract(path, hash))
@@ -109,16 +120,16 @@ namespace WinForge
         }
 
         /// <summary>
-        /// Cria a pasta base já com a ACL protegida (não existe janela entre criar e proteger) ou,
+        /// Cria a pasta já com a ACL protegida (não existe janela entre criar e proteger) ou,
         /// se ela já existe, reaplica a ACL. Doar a posse ao grupo Administradores exige
         /// SeRestorePrivilege; se o token não tiver, registra e repete sem dono — a DACL
-        /// protegida continua obrigatória em qualquer caso.
+        /// protegida continua obrigatória em qualquer caso — e depois confere o dono efetivo.
         /// </summary>
-        private static void ProtectBaseDirectory(string baseDir)
+        internal static void ProtectDirectory(string dir)
         {
             try
             {
-                CreateOrProtect(baseDir, BuildDirectorySecurity(true));
+                CreateOrProtect(dir, BuildDirectorySecurity(true));
             }
             // ERROR_INVALID_OWNER chega com tipos diferentes conforme o caminho: IOException vindo
             // de Directory.CreateDirectory(path, security) e InvalidOperationException vindo de
@@ -129,8 +140,24 @@ namespace WinForge
                 && (ex is IOException || ex is InvalidOperationException || ex is UnauthorizedAccessException))
             {
                 LogOwnerFailure(ex.Message);
-                CreateOrProtect(baseDir, BuildDirectorySecurity(false));
+                CreateOrProtect(dir, BuildDirectorySecurity(false));
+                EnsureAcceptableOwner(new DirectoryInfo(dir).GetAccessControl(), dir);
             }
+        }
+
+        /// <summary>
+        /// DACL protegida sobre dono alheio não é proteção nenhuma: o dono de um objeto mantém
+        /// WRITE_DAC implícito e reescreve a ACL quando quiser. Se a posse não pôde ser assumida e
+        /// o dono efetivo não é Administradores nem SYSTEM, recusa fechado em vez de seguir com a
+        /// falsa sensação de pasta protegida.
+        /// </summary>
+        internal static void EnsureAcceptableOwner(DirectorySecurity acl, string dir)
+        {
+            var owner = acl.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            if (owner != null && (owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)
+                || owner.IsWellKnown(WellKnownSidType.LocalSystemSid))) return;
+            throw new UnauthorizedAccessException("Pasta " + dir + " pertence a outro usuário ("
+                + owner + ") e o WinForge não conseguiu assumir a propriedade; recusando por segurança.");
         }
 
         /// <summary>
@@ -142,13 +169,13 @@ namespace WinForge
         /// execução. Junction/symlink é recusado antes do carimbo — a ACL iria parar no alvo
         /// escolhido pelo atacante.
         /// </summary>
-        internal static void CreateOrProtect(string baseDir, DirectorySecurity security)
+        internal static void CreateOrProtect(string dir, DirectorySecurity security)
         {
-            var info = new DirectoryInfo(baseDir);
-            if (!info.Exists) Directory.CreateDirectory(baseDir, security);
+            var info = new DirectoryInfo(dir);
+            if (!info.Exists) Directory.CreateDirectory(dir, security);
             info.Refresh();
             if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new ReparsePointRejectedException("Pasta " + baseDir + " é um link/junction; recusando por segurança.");
+                throw new ReparsePointRejectedException("Pasta " + dir + " é um link/junction; recusando por segurança.");
             info.SetAccessControl(security);
         }
 

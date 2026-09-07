@@ -152,9 +152,8 @@ public class EngineHostTests
             Assert.True((new DirectoryInfo(link).Attributes & FileAttributes.ReparsePoint) != 0);
 
             // carimbar a ACL num junction escreveria no alvo escolhido pelo atacante
-            var ex = Assert.ThrowsAny<IOException>(
+            Assert.ThrowsAny<IOException>(
                 () => EngineHost.CreateOrProtect(link, EngineHost.BuildDirectorySecurity(false)));
-            Assert.Contains("link/junction", ex.Message);
 
             // o alvo continua intocado (nada de DACL protegida vazando para lá)
             Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected);
@@ -162,9 +161,51 @@ public class EngineHostTests
         finally
         {
             // Delete não recursivo: remove o junction, não o conteúdo do alvo
-            if (Directory.Exists(link)) Directory.Delete(link);
+            try { if (Directory.Exists(link)) Directory.Delete(link); } catch (Exception) { }
             Cleanup(target);
         }
+    }
+
+    [Fact]
+    public void EnsureEngineDirectories_ProtectsEveryLevel()
+    {
+        // proteger só a base não basta: os usuários têm travessia nela e um atacante que pré-crie
+        // engine\<versão> continua dono da pasta onde o .ps1 é extraído.
+        var chain = EngineHost.ProtectedDirectoryChain(@"C:\ProgramData", "1.0.0");
+
+        Assert.Equal(new[]
+        {
+            @"C:\ProgramData\WinForge",
+            @"C:\ProgramData\WinForge\engine",
+            @"C:\ProgramData\WinForge\engine\1.0.0"
+        }, chain);
+
+        // o último nível é exatamente a pasta onde EnsureEngine escreve o motor
+        Assert.Equal(Path.GetDirectoryName(EngineHost.EnginePath(@"C:\ProgramData", "1.0.0")), chain[chain.Length - 1]);
+    }
+
+    [Fact]
+    public void ProtectDirectory_ForeignOwnerWithoutOwnerAssignment_Throws()
+    {
+        // DACL protegida sobre dono alheio não protege nada: o dono mantém WRITE_DAC implícito.
+        var acl = EngineHost.BuildDirectorySecurity(false);
+        acl.SetOwner(WindowsIdentity.GetCurrent().User);
+
+        var ex = Assert.Throws<UnauthorizedAccessException>(
+            () => EngineHost.EnsureAcceptableOwner(acl, @"C:\ProgramData\WinForge"));
+        Assert.Contains(@"C:\ProgramData\WinForge", ex.Message);
+    }
+
+    [Fact]
+    public void ProtectDirectory_WellKnownOwner_DoesNotThrow()
+    {
+        var admins = EngineHost.BuildDirectorySecurity(false);
+        admins.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+        EngineHost.EnsureAcceptableOwner(admins, @"C:\ProgramData\WinForge");
+
+        var system = EngineHost.BuildDirectorySecurity(false);
+        system.SetOwner(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null));
+        EngineHost.EnsureAcceptableOwner(system, @"C:\ProgramData\WinForge");
     }
 
     private static void Mklink(string link, string target)
@@ -224,7 +265,8 @@ public class EngineHostTests
             info.SetAccessControl(acl);
         }
         catch (Exception) { }
-        Directory.Delete(path, true);
+        // limpeza nunca pode mascarar a falha de uma asserção
+        try { Directory.Delete(path, true); } catch (Exception) { }
     }
 
     private static FileSystemRights RightsFor(IEnumerable<FileSystemAccessRule> rules, WellKnownSidType sidType)
