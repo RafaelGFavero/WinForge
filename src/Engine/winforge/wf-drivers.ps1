@@ -138,6 +138,10 @@ function Get-WinForgeNvidiaLatestDriver {
     )
     $result = [ordered]@{ Version = $null; ReleaseDate = $null; Url = $null; Status = 'indisponível' }
 
+    # Placa que não é NVIDIA nunca vai estar no catálogo: sai antes de qualquer requisição, senão
+    # uma Intel/AMD com número parecido ('Radeon RX 7800') geraria uma consulta inútil de 5 s.
+    if ($GpuName -notmatch '(?i)NVIDIA|GeForce|Quadro|RTX|GTX') { $result.Status = 'não encontrado'; return $result }
+
     $token = Get-WinForgeNvidiaSeriesToken $GpuName
     $model = ConvertTo-WinForgeNvidiaModelName $GpuName
     if (-not $token -or -not $model) { $result.Status = 'não encontrado'; return $result }
@@ -266,7 +270,10 @@ function Update-WinForgeProfileDriverStatus {
                 $nvidiaBehind = $true
                 $nvidiaLatest = $latest.Version
             }
-        } catch { }
+        } catch {
+            # versão em formato inesperado dos dois lados: não dá para dizer que está em dia
+            $gpu.LatestStatus = 'indisponível'
+        }
     }
 
     foreach ($drv in @($Profile.Drivers)) {
@@ -299,11 +306,16 @@ function Search-WinForgeWindowsUpdateDrivers {
         return @(foreach ($u in $found.Updates) {
             $date = ''
             try { if ($u.DriverVerDate) { $date = ([datetime]$u.DriverVerDate).ToString('yyyy-MM-dd') } } catch { }
+            # A API do Windows Update não expõe a versão do driver em campo próprio (DriverVerDate é
+            # data, não versão): o número só existe no fim do título ("... - 32.0.15.6636").
+            # Sem esse número no título, Version fica $null - melhor vazio do que uma data disfarçada.
+            $version = $null
+            if ([string]$u.Title -match '(\d+(?:\.\d+){2,3})\s*$') { $version = $Matches[1] }
             [pscustomobject]@{
                 Title    = [string]$u.Title
                 Driver   = [string]$u.DriverModel
                 Provider = [string]$u.DriverProvider
-                Version  = [string]$u.DriverVerDate
+                Version  = $version
                 Date     = $date
                 KB       = (@($u.KBArticleIDs) -join ',')
             }
