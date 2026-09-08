@@ -59,10 +59,13 @@ $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
+$diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
+$xamlDiagNav    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-nav.xml")
+$xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -254,6 +257,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.Tri
 
 # ---------------------------------------------------------------- recomendações na interface (contornos, dicas, job)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.TrimEnd() + "`n`n") "insert reco ui"
+
+# ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
 
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
@@ -513,6 +519,9 @@ $src = Replace-Once $src @'
         "Jogos" {
             Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos") -targetGridName "gamespanel" -columncount 2
         }
+        "Diagnostico" {
+            Initialize-WinForgeDiagnosticsTab
+        }
 '@ "tab init"
 
 $src = Replace-Once $src @'
@@ -565,6 +574,7 @@ $src = Replace-Once $src @'
 $src = Replace-Once $src '            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab' @'
             "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
             "J" { Invoke-WPFButton "WPFTab7BT"; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
+            "D" { Invoke-WPFButton "WPFTab8BT"; $keyEventArgs.Handled = $true } # WinForge: aba Diagnóstico
 '@.TrimEnd() "alt+j"
 
 # ---------------------------------------------------------------- botões: lookup em tweaks + novos casos
@@ -595,6 +605,16 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
         "WPFSelectRecommended" {Select-WinForgeRecommended -Tab "Tweaks" | Out-Null}
         "WPFGamesSelectRecommended" {Select-WinForgeRecommended -Tab "Jogos" | Out-Null}
+        "WPFDiagRefresh" {Start-WinForgeProfileJob -Force}
+        "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
+        "WPFDiagExport" {
+            $wfRelatorio = Export-WinForgeDiagnosticsReport
+            if (-not $wfRelatorio) { [System.Windows.MessageBox]::Show("O diagnóstico ainda não terminou. Tente de novo em alguns segundos.", "WinForge", "OK", "Warning") | Out-Null }
+        }
+        "WPFDiagSelectRecommended" {
+            $wfMarcados = Select-WinForgeRecommended -Tab "All"
+            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas Tweaks e Jogos.", "WinForge", "OK", "Information") | Out-Null
+        }
 '@.TrimEnd() "button switch"
 
 # ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
@@ -817,7 +837,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
@@ -838,16 +858,43 @@ if ($SelfTest) {
         } finally {
             $null = Invoke-WinForgeRules -Profile $wbProfile   # devolve $sync.Recommended ao perfil real
         }
-        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX') {
+        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico') {
             try {
                 Initialize-WinUtilTabContent -TabName $tab
-                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } }
+                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } 'Diagnostico' { 'WPFDiagCards' } }
                 $grid = $wbWindow.FindName($panel)
                 $cbs = @($sync.Keys | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
                 Write-Host "  Aba $tab montada: $($grid.Children.Count) coluna(s), $cbs checkboxes/toggles no total até agora"
             } catch {
                 Write-Host "  [ERRO] montar aba $tab`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
             }
+        }
+        # Aba Diagnóstico: cartões, tabela de drivers, lista de recomendações e relatório HTML.
+        # A contagem esperada de recomendações é recalculada aqui a partir de $sync.Recommended/
+        # Discouraged - repetir a conta da UI não provaria nada.
+        try {
+            $wfCards = $sync.WPFDiagCards.Children.Count
+            if ($wfCards -lt 8) { Write-Host "  [ERRO] Diagnóstico: esperado ao menos 8 cartões, veio $wfCards" -ForegroundColor Red; $wbErrors++ }
+            $wfDrvUI = $sync.WPFDiagDrivers.Items.Count
+            $wfDrvPerfil = @($sync.Profile.Drivers).Count
+            if ($wfDrvUI -ne $wfDrvPerfil) { Write-Host "  [ERRO] Diagnóstico: tabela com $wfDrvUI driver(s), perfil com $wfDrvPerfil" -ForegroundColor Red; $wbErrors++ }
+            $wfRecEsperado = @(@($sync.Recommended.Keys) + @($sync.Discouraged.Keys) | Where-Object { $_ -and $sync.configs.tweaks.PSObject.Properties[$_] }).Count
+            if ($sync.WPFDiagRecs.Items.Count -ne $wfRecEsperado) { Write-Host "  [ERRO] Diagnóstico: $($sync.WPFDiagRecs.Items.Count) recomendação(ões) na lista, esperado $wfRecEsperado" -ForegroundColor Red; $wbErrors++ }
+            $wfRelPath = Join-Path $env:TEMP "winforge-diag-selftest.html"
+            $wfRel = Export-WinForgeDiagnosticsReport -Path $wfRelPath -NoOpen
+            if (-not $wfRel -or -not (Test-Path $wfRel)) {
+                Write-Host "  [ERRO] Diagnóstico: relatório HTML não foi gerado" -ForegroundColor Red; $wbErrors++
+            } else {
+                $wfRelTam = (Get-Item $wfRel).Length
+                $wfRelHtml = [System.IO.File]::ReadAllText($wfRel, [System.Text.Encoding]::UTF8)
+                if ($wfRelTam -lt 5KB) { Write-Host "  [ERRO] Diagnóstico: relatório com $wfRelTam byte(s), esperado mais de 5 KB" -ForegroundColor Red; $wbErrors++ }
+                $wfCpuHtml = [System.Net.WebUtility]::HtmlEncode([string]$sync.Profile.CPU.Name)
+                if (-not $wfRelHtml.Contains($wfCpuHtml)) { Write-Host "  [ERRO] Diagnóstico: relatório sem o nome da CPU ('$wfCpuHtml')" -ForegroundColor Red; $wbErrors++ }
+                Write-Host "  Aba Diagnóstico: $wfCards cartões, $wfDrvUI drivers, $($sync.WPFDiagRecs.Items.Count) recomendações | relatório $([math]::Round($wfRelTam / 1KB)) KB"
+                if (-not $env:WINFORGE_KEEP_REPORT) { Remove-Item -Path $wfRel -Force -ErrorAction SilentlyContinue }
+            }
+        } catch {
+            Write-Host "  [ERRO] aba Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         $wbLogo = Invoke-WinForgeAssets -Type "logo" -Size 25
         if ($null -eq $wbLogo -or @($wbLogo.Child.Children).Count -ne 4) { Write-Host "  [ERRO] logo: esperado 4 paths no canvas" -ForegroundColor Red; $wbErrors++ } else { Write-Host "  Logo: OK" }
@@ -1049,7 +1096,19 @@ $src = Insert-Before $src @'
                     Background="{DynamicResource ButtonConfigBackgroundColor}"
 '@ $xamlNav "xaml nav button"
 
+# Depois do de Jogos e na mesma âncora: o bloco inserido por último fica mais perto dela, então o
+# botão do Diagnóstico aparece à direita do de Jogos na barra de navegação.
+$src = Insert-Before $src @'
+                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
+                    Background="{DynamicResource ButtonConfigBackgroundColor}"
+'@ $xamlDiagNav "xaml diag nav button"
+
 $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
+
+# Precisa vir DEPOIS do insert da aba Jogos: Invoke-WPFTab mapeia WPFTab<N>BT para Items[N-1], então
+# o TabItem do Diagnóstico (WPFTab8) tem de ser o oitavo do TabControl - e, na mesma âncora, quem
+# insere por último fica mais perto dela, ou seja, depois de Jogos.
+$src = Insert-Before $src "        </TabControl>`n" $xamlDiagTab "xaml diag tab"
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
