@@ -308,12 +308,19 @@ function Update-WinForgeDiagnosticsTab {
         Redesenha a aba Diagnóstico a partir de $sync.Profile, $sync.Recommended, $sync.Discouraged
         e $sync.RuleInfos.
     .DESCRIPTION
-        Tem de rodar na thread da interface (quem chama de dentro do job usa Invoke-WPFUIThread).
-        Antes de a aba ser montada, $sync.WPFDiagCards é nulo e a função não faz nada: o diagnóstico
-        pode terminar com a janela ainda na aba Instalar, e Initialize-WinForgeDiagnosticsTab
-        redesenha tudo quando a aba nascer.
+        Tem de rodar na thread da interface (quem chama de dentro do job usa Invoke-WPFUIThread) e,
+        por causa dos pipelines daqui, num scriptblock da runspace principal - veja o comentário em
+        Start-WinForgeProfileJob.
+        Rodar com a aba fechada é normal e seguro: os controles nascem com o XAML, não com a montagem
+        da aba, e o diagnóstico costuma terminar com a janela ainda na aba Instalar. Quem abre a aba
+        depois cai em Initialize-WinForgeDiagnosticsTab, que liga os hyperlinks e redesenha.
     #>
-    if ($null -eq $sync -or $null -eq $sync.WPFDiagCards) { return }
+    # Todos os controles da aba nascem com o XAML, muito antes de a aba ser aberta: a guarda pega a
+    # janela que ainda não carregou (e o -SelfTest antes de $sync.Form existir), não a aba fechada.
+    if ($null -eq $sync) { return }
+    foreach ($wfCtl in @('WPFDiagCards', 'WPFDiagRecs', 'WPFDiagInfos', 'WPFDiagDrivers', 'WPFDiagStatus')) {
+        if ($null -eq $sync[$wfCtl]) { return }
+    }
 
     $p = $sync.Profile
     if ($null -eq $p) {
@@ -421,10 +428,21 @@ function Invoke-WinForgeDriverUpdateSearch {
     }
     Write-WinForgeLog -Component "Diag" -Message "Busca de drivers no Windows Update iniciada."
 
+    # Criado aqui, na runspace principal (esta função roda no clique do botão): um scriptblock feito
+    # dentro do corpo do job pertenceria à runspace do pool e travaria no primeiro pipeline quando o
+    # Dispatcher o executasse - o mesmo laço descrito em Start-WinForgeProfileJob.
+    $sync.WinForgeWUUiRefresh = {
+        try {
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+        } catch {
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Windows Update: falha ao atualizar a tabela -> $($_.Exception.Message)"
+        }
+    }
+
     $wfBody = {
         try {
             $sync.DiagWUResults = @(Search-WinForgeWindowsUpdateDrivers)
-            Invoke-WPFUIThread { Update-WinForgeDiagnosticsWindowsUpdateGrid }
+            Invoke-WPFUIThread $sync.WinForgeWUUiRefresh
             $wfMsg = if ($sync.LastWUError) {
                 "Windows Update: a consulta falhou -> $($sync.LastWUError)"
             } else {
@@ -444,7 +462,17 @@ function Invoke-WinForgeDriverUpdateSearch {
         }
     }
 
-    Invoke-WPFRunspace -ScriptBlock $wfBody | Out-Null
+    # Se o despacho falhar (pool fechado, sem thread livre), quem zera a trava é este catch: sem ele
+    # $sync.DiagWUSearchRunning ficaria ligado para sempre e o botão nunca mais responderia.
+    try {
+        Invoke-WPFRunspace -ScriptBlock $wfBody | Out-Null
+    } catch {
+        $sync.DiagWUSearchRunning = $false
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Busca no Windows Update não pôde começar: $($_.Exception.Message)"
+        if (-not $sync.ProcessRunning) {
+            Set-WinForgeTweaksProgressIndicator -Visible $true -Label "Busca no Windows Update não pôde começar: $($_.Exception.Message)" -Percent 0
+        }
+    }
 }
 
 function Initialize-WinForgeDiagnosticsTab {

@@ -837,7 +837,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
@@ -857,6 +857,20 @@ if ($SelfTest) {
             Write-Host "  [ERRO] contornos sem diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         } finally {
             $null = Invoke-WinForgeRules -Profile $wbProfile   # devolve $sync.Recommended ao perfil real
+        }
+        # Ordem da janela real: o diagnóstico termina com a janela ainda na aba Instalar, ou seja,
+        # ANTES de a aba Diagnóstico existir de fato. O job tem de chegar ao fim assim mesmo - foi
+        # justamente aqui que ele morria calado, sem 'pronto' e sem 'falhou'.
+        try {
+            $sync.Profile = $null
+            $sync.ProfileJobRunning = $false
+            $wbJobAntes = (Start-WinForgeProfileJob -Synchronous -SkipNetwork 6>&1 | Out-String -Width 500)
+            if ($wbJobAntes -notmatch 'Diagnóstico pronto') { Write-Host "  [ERRO] job antes das abas: log sem 'Diagnóstico pronto'" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobAntes -match 'Diagnóstico falhou|falha ao atualizar a interface') { Write-Host "  [ERRO] job antes das abas: $($wbJobAntes.Trim())" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.ProfileJobRunning) { Write-Host "  [ERRO] job antes das abas: ProfileJobRunning ficou ligado" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Job de diagnóstico antes das abas: OK ($($sync.WPFDiagCards.Children.Count) cartões já desenhados)"
+        } catch {
+            Write-Host "  [ERRO] job antes das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico') {
             try {
@@ -1001,6 +1015,43 @@ if ($SelfTest) {
             else { Write-Host "  [ERRO] log de runspace não chegou ao arquivo" -ForegroundColor Red; $wbErrors++ }
         } catch {
             Write-Host "  [ERRO] log de runspace: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # O diagnóstico DE VERDADE (sem -Synchronous): o corpo vai para uma runspace do pool e pede a
+        # atualização da janela pelo Dispatcher, atravessando a fronteira entre as duas runspaces.
+        # É o único ponto do SelfTest que exercita esse caminho - e era exatamente ali que o job
+        # morria calado, porque o Dispatcher executa o pedido na runspace de quem criou o scriptblock:
+        # criado dentro do job, ele trava no primeiro pipeline (a runspace do pool está parada em
+        # Dispatcher.Invoke esperando o callback, e o callback espera a runspace).
+        # Aviso: se a regressão voltar, este teste não acusa erro - ele TRAVA junto, porque quem fica
+        # preso dentro do callback é esta mesma thread. SelfTest que não termina aqui é o sintoma.
+        try {
+            $wfOpenedPool2 = $false
+            if (-not $sync.runspace) { Initialize-WinForgeRunspacePool | Out-Null; $wfOpenedPool2 = $true }
+            $sync.Profile = $null
+            $sync.ProfileJobRunning = $false
+            $sync.ProfileJobLabel = $null
+            $sync.WPFDiagStatus.Text = ''
+            $sync.WPFDiagCards.Children.Clear()
+            Start-WinForgeProfileJob -Force -SkipNetwork
+            # Sem bombear a fila do Dispatcher aqui, o pedido da outra runspace nunca seria atendido:
+            # esta thread criou a janela, mas no SelfTest não roda laço de mensagens nenhum.
+            $wfUiDeadline = (Get-Date).AddSeconds(90)
+            while ($sync.ProfileJobRunning -and (Get-Date) -lt $wfUiDeadline) {
+                $sync.Form.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{})
+                Start-Sleep -Milliseconds 100
+            }
+            if ($wfOpenedPool2) { Close-WinForgeRunspacePool }
+            if ($sync.ProfileJobRunning) {
+                Write-Host "  [ERRO] job na runspace do pool: não terminou em 90 s" -ForegroundColor Red; $wbErrors++
+            } elseif ([string]$sync.ProfileJobLabel -notmatch 'Diagnóstico pronto') {
+                Write-Host "  [ERRO] job na runspace do pool: terminou sem 'Diagnóstico pronto' (barra = '$($sync.ProfileJobLabel)')" -ForegroundColor Red; $wbErrors++
+            } elseif ($sync.WPFDiagStatus.Text -notmatch '^Diagnóstico de') {
+                Write-Host "  [ERRO] job na runspace do pool: a aba não foi redesenhada (status = '$($sync.WPFDiagStatus.Text)')" -ForegroundColor Red; $wbErrors++
+            } else {
+                Write-Host "  Job na runspace do pool: OK ($($sync.WPFDiagCards.Children.Count) cartões redesenhados pela thread da janela)"
+            }
+        } catch {
+            Write-Host "  [ERRO] job na runspace do pool: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
     } catch {
         Write-Host "  [ERRO] XAML: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++

@@ -174,6 +174,27 @@ function Start-WinForgeProfileJob {
     }
     $sync.ProfileJobRunning = $true
 
+    # O QUE ATUALIZA A JANELA PRECISA NASCER AQUI, e não dentro do corpo do job.
+    # Um scriptblock guarda a runspace em que foi criado. O Dispatcher executa o do job na thread da
+    # janela, mas ainda na runspace do pool - e essa runspace está parada em Dispatcher.Invoke,
+    # esperando o callback terminar. Enquanto o callback só chama funções e mexe em propriedades,
+    # tudo corre na própria thread e ninguém percebe; no primeiro pipeline (um Where-Object basta)
+    # o motor precisa da runspace, que nunca fica livre - as duas threads travam para sempre, sem
+    # exceção e sem linha no log. Foi assim que o diagnóstico morreu calado na janela real.
+    # Esta função é chamada da thread da janela (ContentRendered, botão Atualizar, -SelfTest), então
+    # o scriptblock criado aqui pertence à runspace principal, cuja pipeline roda nessa mesma thread:
+    # aninhar nela é o que todo handler de clique já faz, e pipeline volta a ser permitido.
+    $sync.WinForgeProfileUiRefresh = {
+        # Nada pode escapar: exceção aqui volta pelo Dispatcher para o job, e o job morreria antes
+        # de escrever a linha final - exatamente o silêncio que este bloco existe para evitar.
+        try {
+            Update-WinForgeRecommendationVisuals | Out-Null
+            if (Get-Command Update-WinForgeDiagnosticsTab -ErrorAction SilentlyContinue) { Update-WinForgeDiagnosticsTab }
+        } catch {
+            Write-WinForgeLog -Component "Profile" -Level "ERROR" -Message "Diagnóstico: falha ao atualizar a interface -> $($_.Exception.Message)"
+        }
+    }
+
     # o corpo é um só: o runspace recebe o texto dele, o modo síncrono o executa aqui mesmo
     $wfBody = {
         param($wfSkipNetwork)
@@ -184,10 +205,7 @@ function Start-WinForgeProfileJob {
             $null = Set-WinForgeProfileProgress -Label "Avaliando recomendações..." -Percent 70
             $wfRules = Invoke-WinForgeRules -Profile $sync.Profile
 
-            Invoke-WPFUIThread {
-                Update-WinForgeRecommendationVisuals | Out-Null
-                if (Get-Command Update-WinForgeDiagnosticsTab -ErrorAction SilentlyContinue) { Update-WinForgeDiagnosticsTab }
-            }
+            Invoke-WPFUIThread $sync.WinForgeProfileUiRefresh
 
             $wfDone = "Diagnóstico pronto: {0} recomendações, {1} a evitar, {2} infos, {3} erros de coleta." -f $wfRules.Recommended.Count, $wfRules.Discouraged.Count, $wfRules.Infos.Count, @($sync.Profile.Errors).Count
             # a barra fica no 100% com o resumo, sem esconder depois: um Start-Sleep aqui só serviria
