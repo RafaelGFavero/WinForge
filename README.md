@@ -73,8 +73,10 @@ Com esse perfil, um conjunto de regras avalia cada item e desenha um contorno na
   é o host.
 
 O motivo completo aparece na dica ao passar o mouse sobre a linha. Nenhuma recomendação marca nada
-sozinha: quem marca é o botão **Marcar todos os recomendados**, na aba Diagnóstico, e você continua
-podendo desmarcar item por item.
+sozinha: quem marca é você, por um dos botões — **Marcar recomendados**, nas abas Tweaks e Jogos,
+marca o que é daquela aba; **Marcar todos os recomendados**, na aba Diagnóstico, marca as duas de
+uma vez. Nos três casos dá para desmarcar item por item antes de aplicar. Os toggles ficam de fora:
+eles aplicam o tweak no instante em que são ligados, e recomendação não muda o sistema.
 
 A aba **Diagnóstico** (`Alt+D`) reúne isso em nove cartões — Sistema, Máquina, Processador,
 Memória, Placa de vídeo, Armazenamento, Rede, Energia, e Segurança e estado —, a lista das
@@ -95,7 +97,13 @@ Intel, a tabela leva à página de download da marca.
 lista do Windows Update é informativa, os links abrem no seu navegador, e a decisão de instalar
 qualquer coisa continua sendo sua.
 
-Cada etapa do diagnóstico vai para o log da sessão, em `%LocalAppData%\WinForge\logs`.
+O relatório HTML descreve a máquina inteira: nome do computador, fabricante e modelo, modelos dos
+discos, servidores DNS e o estado de BitLocker, Secure Boot e TPM. O arquivo fica em
+`%LocalAppData%\WinForge\reports` e não sai da máquina sozinho — só vale saber o que vai junto
+antes de mandá-lo para outra pessoa.
+
+Cada etapa do diagnóstico vai para o log da sessão, em `%LocalAppData%\WinForge\logs`. Ao abrir, o
+WinForge mantém ali as 30 sessões mais recentes e apaga as anteriores.
 
 ## Classificação de risco
 
