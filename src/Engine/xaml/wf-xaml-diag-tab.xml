@@ -1,0 +1,111 @@
+            <TabItem Header="Diagnostico" Visibility="Collapsed" Name="WPFTab8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Background="{DynamicResource MainBackgroundColor}" BorderBrush="{DynamicResource BorderColor}" BorderThickness="1" CornerRadius="5" HorizontalAlignment="Stretch" Padding="10" Margin="5">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                            <Button Name="WPFDiagRefresh" Content="Atualizar diagnóstico" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Coleta o perfil do sistema de novo e reavalia as recomendações."/>
+                            <Button Name="WPFDiagWUDrivers" Content="Buscar drivers no Windows Update" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Pergunta ao Windows Update quais drivers ele tem para este computador (pode levar até um minuto)."/>
+                            <Button Name="WPFDiagExport" Content="Exportar relatório HTML" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Gera um relatório HTML com tudo desta aba e abre no navegador."/>
+                            <Button Name="WPFDiagSelectRecommended" Content="Marcar todos os recomendados" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca nas abas Tweaks e Jogos os itens recomendados para este PC."/>
+                        </WrapPanel>
+                    </Border>
+
+                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="{DynamicResource TabContentMargin}">
+                        <StackPanel Background="Transparent" Margin="5">
+                            <TextBlock Name="WPFDiagStatus" Text="Coletando informações do sistema..." TextWrapping="Wrap" Margin="5,0,5,5"
+                                       FontSize="{DynamicResource FontSize}" Foreground="{DynamicResource MainForegroundColor}"/>
+
+                            <WrapPanel Name="WPFDiagCards" Orientation="Horizontal" HorizontalAlignment="Left"/>
+
+                            <TextBlock Name="WPFDiagInfos" Text="" TextWrapping="Wrap" Margin="10,10,5,0" Visibility="Collapsed"
+                                       FontSize="{DynamicResource FontSize}" Foreground="{DynamicResource MainForegroundColor}"/>
+
+                            <TextBlock Text="Recomendações para este computador" Margin="10,15,5,5"
+                                       FontSize="{DynamicResource HeaderFontSize}" FontFamily="{DynamicResource HeaderFontFamily}" Foreground="{DynamicResource LabelboxForegroundColor}"/>
+                            <ItemsControl Name="WPFDiagRecs" Margin="10,0,5,0"/>
+
+                            <TextBlock Text="Drivers instalados" Margin="10,15,5,5"
+                                       FontSize="{DynamicResource HeaderFontSize}" FontFamily="{DynamicResource HeaderFontFamily}" Foreground="{DynamicResource LabelboxForegroundColor}"/>
+                            <DataGrid Name="WPFDiagDrivers" Margin="10,0,5,0" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal" SelectionMode="Single" HorizontalAlignment="Stretch"
+                                      ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                      Background="{DynamicResource MainBackgroundColor}" RowBackground="{DynamicResource MainBackgroundColor}"
+                                      Foreground="{DynamicResource MainForegroundColor}" BorderBrush="{DynamicResource BorderColor}"
+                                      HorizontalGridLinesBrush="{DynamicResource BorderColor}" BorderThickness="1"
+                                      FontSize="{DynamicResource FontSize}">
+                                <DataGrid.Resources>
+                                    <Style TargetType="DataGridCell">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                        <Setter Property="BorderThickness" Value="0"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+                                    </Style>
+                                    <Style TargetType="DataGridColumnHeader">
+                                        <Setter Property="Background" Value="{DynamicResource MainBackgroundColor}"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource LabelboxForegroundColor}"/>
+                                        <Setter Property="FontWeight" Value="Bold"/>
+                                        <Setter Property="Padding" Value="6,4"/>
+                                    </Style>
+                                </DataGrid.Resources>
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Dispositivo" Binding="{Binding Device}" Width="*" MinWidth="180"/>
+                                    <DataGridTextColumn Header="Classe" Binding="{Binding Class}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Versão" Binding="{Binding Version}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Data" Binding="{Binding Date}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Fornecedor" Binding="{Binding Provider}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Status" Binding="{Binding StatusText}" Width="Auto">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Margin" Value="4,2"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Status}" Value="atualizar">
+                                                        <Setter Property="Foreground" Value="#EF6C00"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Status}" Value="verificar">
+                                                        <Setter Property="Foreground" Value="#F9A825"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridHyperlinkColumn Header="Fabricante" Binding="{Binding Url}" ContentBinding="{Binding UrlLabel}" Width="Auto"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+
+                            <TextBlock Name="WPFDiagWULabel" Text="Drivers oferecidos pelo Windows Update" Margin="10,15,5,5" Visibility="Collapsed"
+                                       FontSize="{DynamicResource HeaderFontSize}" FontFamily="{DynamicResource HeaderFontFamily}" Foreground="{DynamicResource LabelboxForegroundColor}"/>
+                            <DataGrid Name="WPFDiagWU" Margin="10,0,5,10" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" Visibility="Collapsed"
+                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal" SelectionMode="Single" HorizontalAlignment="Stretch"
+                                      ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                      Background="{DynamicResource MainBackgroundColor}" RowBackground="{DynamicResource MainBackgroundColor}"
+                                      Foreground="{DynamicResource MainForegroundColor}" BorderBrush="{DynamicResource BorderColor}"
+                                      HorizontalGridLinesBrush="{DynamicResource BorderColor}" BorderThickness="1"
+                                      FontSize="{DynamicResource FontSize}">
+                                <DataGrid.Resources>
+                                    <Style TargetType="DataGridCell">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                        <Setter Property="BorderThickness" Value="0"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+                                    </Style>
+                                    <Style TargetType="DataGridColumnHeader">
+                                        <Setter Property="Background" Value="{DynamicResource MainBackgroundColor}"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource LabelboxForegroundColor}"/>
+                                        <Setter Property="FontWeight" Value="Bold"/>
+                                        <Setter Property="Padding" Value="6,4"/>
+                                    </Style>
+                                </DataGrid.Resources>
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Atualização" Binding="{Binding Title}" Width="*" MinWidth="180"/>
+                                    <DataGridTextColumn Header="Driver" Binding="{Binding Driver}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Fornecedor" Binding="{Binding Provider}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Versão" Binding="{Binding Version}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Data" Binding="{Binding Date}" Width="Auto"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </TabItem>

@@ -51,9 +51,59 @@ Parâmetros de linha de comando:
 - **Updates** — política de atualizações do Windows (padrão, adiada ou desligada).
 - **Win11 Creator** — criação de mídia de instalação do Windows 11.
 - **AppX** — remoção de aplicativos pré-instalados.
+- **Diagnóstico** — o que foi detectado na máquina, as recomendações e os drivers instalados.
 
 A janela se adapta ao sistema: no Windows 10, os itens que só existem no Windows 11 não são
 exibidos; os tweaks marcados para uma marca de GPU só aparecem se aquela GPU for detectada.
+
+## Diagnóstico e recomendações
+
+Ao abrir a janela, o WinForge levanta o perfil da máquina em segundo plano (uma barra de progresso
+mostra o andamento): versão e edição do Windows, papéis de servidor como IIS e Active Directory,
+se é notebook, desktop ou máquina virtual, processador, memória, placas de vídeo, tipo de disco
+(SSD ou HDD), rede, plano de energia e o inventário de drivers com versão e data.
+
+Com esse perfil, um conjunto de regras avalia cada item e desenha um contorno na linha:
+
+- **Verde**, `✔ Recomendado: <motivo>` — faz sentido nesta máquina. Exemplo: em desktop na tomada,
+  desligar a hibernação e o plano de energia sem suspensão de USB ficam verdes.
+- **Laranja**, `⚠ Não recomendado neste sistema: <motivo>` — não faz. Esses mesmos dois itens ficam
+  laranja em notebook, onde gastam bateria; desativar o Prefetch/Superfetch fica laranja quando há
+  HDD na máquina; e em máquina virtual timer, HAGS, VBS e energia ficam laranja porque quem decide
+  é o host.
+
+O motivo completo aparece na dica ao passar o mouse sobre a linha. Nenhuma recomendação marca nada
+sozinha: quem marca é você, por um dos botões — **Marcar recomendados**, nas abas Tweaks e Jogos,
+marca o que é daquela aba; **Marcar todos os recomendados**, na aba Diagnóstico, marca as duas de
+uma vez. Nos três casos dá para desmarcar item por item antes de aplicar. Os toggles ficam de fora:
+eles aplicam o tweak no instante em que são ligados, e recomendação não muda o sistema.
+
+A aba **Diagnóstico** (`Alt+D`) reúne isso em nove cartões — Sistema, Máquina, Processador,
+Memória, Placa de vídeo, Armazenamento, Rede, Energia, e Segurança e estado —, a lista das
+recomendações com seus motivos e a tabela dos drivers instalados. Os botões:
+
+| Botão | O que faz |
+|---|---|
+| Atualizar diagnóstico | Coleta o perfil de novo e reavalia as recomendações. |
+| Buscar drivers no Windows Update | Pergunta ao Windows Update quais drivers ele tem para este computador (pode levar até um minuto). |
+| Exportar relatório HTML | Gera um relatório HTML com tudo desta aba e abre no navegador. |
+| Marcar todos os recomendados | Marca nas abas Tweaks e Jogos os itens recomendados para este PC. |
+
+Para placas NVIDIA, a versão instalada é comparada com a mais recente do catálogo do fabricante
+(consulta ao site da NVIDIA, guardada por 24 horas em `%LocalAppData%\WinForge\cache`); para AMD e
+Intel, a tabela leva à página de download da marca.
+
+**O WinForge não baixa nem instala driver nenhum.** Tudo o que a aba faz é olhar e comparar: a
+lista do Windows Update é informativa, os links abrem no seu navegador, e a decisão de instalar
+qualquer coisa continua sendo sua.
+
+O relatório HTML descreve a máquina inteira: nome do computador, fabricante e modelo, modelos dos
+discos, servidores DNS e o estado de BitLocker, Secure Boot e TPM. O arquivo fica em
+`%LocalAppData%\WinForge\reports` e não sai da máquina sozinho — só vale saber o que vai junto
+antes de mandá-lo para outra pessoa.
+
+Cada etapa do diagnóstico vai para o log da sessão, em `%LocalAppData%\WinForge\logs`. Ao abrir, o
+WinForge mantém ali as 30 sessões mais recentes e apaga as anteriores.
 
 ## Classificação de risco
 
@@ -114,11 +164,12 @@ docs/               changelog e documentação
 
 ## Roadmap
 
-Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)).
+Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)) e a
+detecção de hardware, drivers e papéis de servidor, com as recomendações da aba Diagnóstico.
 
 - Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
-- Detecção de hardware e drivers com recomendações específicas para a máquina.
-- Suporte a Windows Server, IIS e Active Directory.
+- Tweaks próprios de Windows Server, IIS e Active Directory — hoje os papéis são detectados e
+  entram nas recomendações, mas não há ajustes específicos para eles.
 - Reparo de componentes do Windows (DISM/SFC e correção de repositório).
 
 ## Licença

@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.0 (2026-09-09)
+
+- Nova aba "Diagnóstico" (`Alt+D`): nove cartões com o que foi detectado — Sistema, Máquina,
+  Processador, Memória, Placa de vídeo, Armazenamento, Rede, Energia, e Segurança e estado —,
+  a lista das recomendações com o motivo de cada uma e a tabela dos drivers instalados.
+- Detecção do computador: versão e edição do Windows, papéis de servidor (IIS, Active Directory),
+  notebook, desktop ou máquina virtual, processador, memória, placas de vídeo, tipo de disco (SSD
+  ou HDD), rede, plano de energia e o inventário de drivers com versão e data.
+- Recomendações em cada linha de tweak e de recurso, por 15 regras aplicadas ao que foi detectado:
+  contorno verde `✔ Recomendado: <motivo>` no que faz sentido para a máquina, laranja
+  `⚠ Não recomendado neste sistema: <motivo>` no que não faz. O motivo fica na dica da linha.
+  Nada é marcado sozinho — quem marca é o botão "Marcar todos os recomendados", quando você clica.
+- Drivers: a versão instalada da NVIDIA é comparada com a mais recente do catálogo do fabricante
+  (consulta ao site da NVIDIA, com cache de 24 horas em `%LocalAppData%\WinForge\cache`); para AMD
+  e Intel a tabela leva à página de download da marca. O botão "Buscar drivers no Windows Update"
+  pergunta ao Windows Update o que existe para este computador. Nada é baixado nem instalado
+  automaticamente: a lista é informativa e a instalação continua sendo sua.
+- "Exportar relatório HTML" grava um arquivo com tudo o que a aba mostra — perfil, recomendações e
+  drivers — e o abre no navegador.
+- O perfil é coletado em segundo plano ao abrir a janela, com barra de progresso, e cada etapa vai
+  para o log da sessão em `%LocalAppData%\WinForge\logs` — onde agora ficam guardadas as 30 sessões
+  mais recentes, com as anteriores apagadas ao abrir.
+- A coluna "verificar" da tabela de drivers só marca o que costuma mesmo envelhecer: vídeo, rede,
+  áudio e Bluetooth com mais de 180 dias. Chipset, USB e controladoras de disco saem de fábrica com
+  driver de anos e continuam certos — marcá-los enchia a aba de aviso sem informação (eram 17 de 20
+  numa máquina saudável).
+- Detecção mais precisa: um no-break USB não faz mais o desktop ser tratado como notebook,
+  convidados de nuvem (EC2, Compute Engine, Nutanix, OpenStack) são reconhecidos como máquina
+  virtual, máquina sem rede ativa mostra "sem conexão" em vez de falha de coleta, dois dispositivos
+  idênticos aparecem como duas linhas na tabela de drivers, e o nome do relatório exportado leva os
+  segundos, para dois relatórios seguidos não se sobrescreverem.
+
 ## 1.1.0 (2026-09-07)
 
 - Auditoria de risco de todos os tweaks e toggles, com três classes (Seguro, Cuidado, Removido)

@@ -55,9 +55,17 @@ $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
 $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
+$profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
+$driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
+$rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
+$recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
+$diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
+$rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
+$xamlDiagNav    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-nav.xml")
+$xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -136,16 +144,113 @@ $sync.ForceRestorePoint = [bool]$RestorePoint
 $sync.NoRestorePointPrompt = [bool]$NoRestorePoint
 $sync.RestorePointCreated = $false
 $sync.ReadyEventName = $ReadyEvent
+# runspace que roda o script principal: Write-WinForgeLog usa isto para saber quem pode escrever
+# no console (o transcript só captura o que sai desta runspace)
+$sync.MainRunspaceId = [runspace]::DefaultRunspace.Id
 '@ "sync init"
 
 $src = Replace-Once $src '$winutildir = "$env:LocalAppData\winutil"' '$winutildir = "$env:LocalAppData\WinForge"' "winutildir"
 $src = Replace-Once $src '$sync.logPath = "$logdir\winutil_$dateTime.log"' '$sync.logPath = "$logdir\WinForge_$dateTime.log"' "logPath"
+
+# O transcript mantém o arquivo aberto em modo exclusivo enquanto roda: ninguém mais consegue
+# anexar nele, nem o próprio processo. Como as threads do pool de runspaces (e os callbacks do
+# Dispatcher disparados de dentro delas) NÃO são capturadas pelo transcript, o log da sessão
+# precisa ser um arquivo separado - senão as entradas dessas threads se perdem.
+$src = Replace-Once $src @'
+$sync.transcriptPath = $sync.logPath
+Start-Transcript -Path $sync.logPath -Append -NoClobber | Out-Null
+'@ @'
+$sync.transcriptPath = "$logdir\WinForge_$dateTime.console.log"
+
+# São dois arquivos por sessão (log + console) e nada os apagava: a pasta crescia para sempre.
+# Guarda as 30 sessões mais recentes de cada tipo. Arquivo em uso por outra instância não sai, e
+# tudo bem - falha de poda não pode impedir o programa de abrir.
+try {
+    New-Item -ItemType Directory -Path $logdir -Force | Out-Null
+    $wfConsoleLogs = @(Get-ChildItem -LiteralPath $logdir -Filter "WinForge_*.console.log" -File -ErrorAction SilentlyContinue)
+    $wfSessionLogs = @(Get-ChildItem -LiteralPath $logdir -Filter "WinForge_*.log" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*.console.log" })
+    foreach ($wfLogSet in @($wfConsoleLogs, $wfSessionLogs)) {
+        foreach ($wfOld in @($wfLogSet | Sort-Object LastWriteTime -Descending | Select-Object -Skip 30)) {
+            Remove-Item -LiteralPath $wfOld.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+} catch { }
+
+Start-Transcript -Path $sync.transcriptPath -Append -NoClobber | Out-Null
+'@ "transcript separado do log"
+
+# Toda entrada do log vai para o arquivo, venha de onde vier (runspace do pool, callback do
+# Dispatcher ou a runspace principal). O Write-Host continua só na runspace principal: é o que põe
+# a linha no console e no transcript - e é de onde o -SelfTest captura o log com 6>&1.
+$src = Replace-Once $src @'
+        if (-not [string]::IsNullOrWhiteSpace($transcriptPath) -and $logPath -eq $transcriptPath) {
+            Write-Host $line
+            return
+        }
+
+        try {
+            Add-Content -Path $logPath -Value $line -Encoding UTF8 -ErrorAction Stop
+        } catch [System.IO.IOException] {
+            Write-Host $line
+        }
+'@ @'
+        if (-not [string]::IsNullOrWhiteSpace($transcriptPath) -and $logPath -eq $transcriptPath) {
+            # nunca acontece no WinForge (o transcript tem arquivo próprio); rede de segurança para
+            # o caso de $logPath cair no transcript por falta de outro caminho
+            Write-Host $line
+            return
+        }
+
+        # Só a runspace principal escreve no console: o transcript não captura o que sai de uma
+        # thread do pool de runspaces nem de um callback do Dispatcher disparado de dentro dela.
+        $wfOnMainRunspace = $false
+        try {
+            if ($null -ne $sync -and $sync.ContainsKey("MainRunspaceId") -and $null -ne [runspace]::DefaultRunspace) {
+                $wfOnMainRunspace = ([runspace]::DefaultRunspace.Id -eq $sync.MainRunspaceId)
+            }
+        } catch {
+            $wfOnMainRunspace = $false
+        }
+        if ($null -ne $sync -and $sync.ContainsKey("ForceFileLog") -and $sync.ForceFileLog) {
+            $wfOnMainRunspace = $false
+        }
+
+        # Duas runspaces podem anexar ao mesmo tempo: mutex nomeado por processo serializa a escrita.
+        # Nada aqui pode estourar - uma falha de log não pode derrubar quem chamou.
+        $wfMutex = $null
+        try {
+            if ($null -ne $sync) {
+                if ($null -eq $sync.LogMutex) {
+                    try { $sync.LogMutex = New-Object System.Threading.Mutex($false, "Local\WinForge.Log.$PID") } catch { $sync.LogMutex = $null }
+                }
+                $wfMutex = $sync.LogMutex
+            }
+        } catch {
+            $wfMutex = $null
+        }
+
+        $wfHeld = $false
+        try {
+            if ($null -ne $wfMutex) {
+                try { $wfHeld = $wfMutex.WaitOne(2000) } catch [System.Threading.AbandonedMutexException] { $wfHeld = $true }
+            }
+            [System.IO.File]::AppendAllText($logPath, $line + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+        } catch {
+        } finally {
+            if ($wfHeld) { try { $wfMutex.ReleaseMutex() } catch { } }
+        }
+
+        if ($wfOnMainRunspace) {
+            Write-Host $line
+        }
+'@ "log de runspace no arquivo"
 $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawUI.WindowTitle = "WinForge"' "window title console"
 
 # ---------------------------------------------------------------- funções e configs
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
+$src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
 
 # ---------------------------------------------------------------- logo
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
@@ -155,6 +260,21 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($launcherBlock.
 
 # ---------------------------------------------------------------- auditoria de risco (aplicação)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($auditBlock.TrimEnd() + "`n`n") "insert audit functions"
+
+# ---------------------------------------------------------------- perfil do sistema (detecção)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($profileBlock.TrimEnd() + "`n`n") "insert profile"
+
+# ---------------------------------------------------------------- consulta de drivers (rede)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($driversBlock.TrimEnd() + "`n`n") "insert drivers"
+
+# ---------------------------------------------------------------- regras de recomendação (motor)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.TrimEnd() + "`n`n") "insert rules"
+
+# ---------------------------------------------------------------- recomendações na interface (contornos, dicas, job)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.TrimEnd() + "`n`n") "insert reco ui"
+
+# ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
 
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
@@ -192,6 +312,183 @@ $src = Replace-Once $src @'
                         if ($entryInfo.Description) { $button.ToolTip = $entryInfo.Description }
                         $stackPanelContainer.Children.Add($button) | Out-Null
 '@ "button tooltip"
+
+# ---------------------------------------------------------------- linha da grade dentro de um Border (contorno das recomendações)
+# O contorno não pode ir no DockPanel/StackPanel da linha: a busca esconde esses painéis por
+# Visibility e a borda sumiria junto com o layout. O Border embrulha a linha, guarda a chave na Tag
+# (é assim que Update-WinForgeRecommendationVisuals reencontra a linha) e é ele quem a busca esconde.
+# A linha do Combobox fica de fora: nenhuma regra recomenda combo, e embrulhá-la só criaria um
+# Border sem uso para a busca desembrulhar.
+$src = Replace-Once $src @'
+                        $stackPanelContainer.Children.Add($dockPanel) | Out-Null
+'@ @'
+                        $wfRow = New-Object Windows.Controls.Border; $wfRow.BorderThickness = "0"; $wfRow.CornerRadius = "4"; $wfRow.Padding = "3,0"; $wfRow.Margin = "0,1"; $wfRow.Tag = $entryInfo.Name; $wfRow.Child = $dockPanel
+                        $stackPanelContainer.Children.Add($wfRow) | Out-Null
+'@ "row border toggle"
+
+$src = Replace-Once $src @'
+                        $stackPanelContainer.Children.Add($horizontalStackPanel) | Out-Null
+                        $sync[$entryInfo.Name] = $checkBox
+'@ @'
+                        $wfRow = New-Object Windows.Controls.Border; $wfRow.BorderThickness = "0"; $wfRow.CornerRadius = "4"; $wfRow.Padding = "3,0"; $wfRow.Margin = "0,1"; $wfRow.Tag = $entryInfo.Name; $wfRow.Child = $horizontalStackPanel
+                        $stackPanelContainer.Children.Add($wfRow) | Out-Null
+                        $sync[$entryInfo.Name] = $checkBox
+'@ "row border checkbox"
+
+# ---------------------------------------------------------------- busca: desembrulha o Border da linha
+# Find-TweaksByNameOrDescription reconhece a linha por tipo (DockPanel/StackPanel) e esconde o
+# próprio $item. Com o Border no meio, nenhum ramo casaria e a busca deixaria tudo visível: aqui
+# $item passa a ser o conteúdo (para o casamento) e $wfVisual o que some/aparece (o Border).
+$src = Replace-Once $src @'
+                            # Show all items in the category
+                            foreach ($item in $items) {
+                                if ($null -ne $item) {
+                                    # Check if it's a category label (first Label in the container)
+                                    if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                        $item.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                    elseif ($item -is [Windows.Controls.DockPanel] -or $item -is [Windows.Controls.StackPanel] -or $item.GetType().Name -eq "DockPanel" -or $item.GetType().Name -eq "StackPanel") {
+                                        # Show all checkbox containers
+                                        $item.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                }
+                            }
+'@ @'
+                            # Show all items in the category
+                            foreach ($item in $items) {
+                                if ($null -ne $item) {
+                                    # WinForge: a linha vem embrulhada num Border (contorno das recomendações)
+                                    $wfVisual = $item
+                                    if ($item -is [Windows.Controls.Border] -and $item.Child) { $item = $item.Child }
+                                    # Check if it's a category label (first Label in the container)
+                                    if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                        $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                    elseif ($item -is [Windows.Controls.DockPanel] -or $item -is [Windows.Controls.StackPanel] -or $item.GetType().Name -eq "DockPanel" -or $item.GetType().Name -eq "StackPanel") {
+                                        # Show all checkbox containers
+                                        $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    }
+                                }
+                            }
+'@ "search reset unwrap"
+
+$src = Replace-Once $src @'
+                        foreach ($item in $items) {
+                            if ($null -eq $item) {
+                                continue
+                            }
+'@ @'
+                        foreach ($item in $items) {
+                            if ($null -eq $item) {
+                                continue
+                            }
+
+                            # WinForge: a linha vem embrulhada num Border (contorno das recomendações)
+                            $wfVisual = $item
+                            if ($item -is [Windows.Controls.Border] -and $item.Child) { $item = $item.Child }
+'@ "search loop unwrap"
+
+$src = Replace-Once $src @'
+                            if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                $categoryLabel = $item
+                                # Initially hide category label; show it only if matches found
+                                $item.Visibility = [Windows.Visibility]::Collapsed
+                            }
+'@ @'
+                            if ($item -is [Windows.Controls.Label] -or $item.GetType().Name -eq "Label") {
+                                $categoryLabel = $item
+                                # Initially hide category label; show it only if matches found
+                                $wfVisual.Visibility = [Windows.Visibility]::Collapsed
+                            }
+'@ "search label visibility"
+
+$src = Replace-Once $src @'
+                                    $contentMatch = $labelContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $labelToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $item.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $item.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ @'
+                                    $contentMatch = $labelContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $labelToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ "search dockpanel visibility"
+
+$src = Replace-Once $src @'
+                                    $contentMatch = $checkboxContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $checkboxToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $item.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $item.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ @'
+                                    $contentMatch = $checkboxContentStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                                    $toolTipMatch = $checkboxToolTipStr.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+                                    if ($contentMatch -or $toolTipMatch) {
+                                        $itemMatches = $true
+                                    }
+                                }
+
+                                # Set visibility based on match result
+                                if ($itemMatches) {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Visible
+                                    $categoryHasMatch = $true
+                                }
+                                else {
+                                    $wfVisual.Visibility = [Windows.Visibility]::Collapsed
+                                }
+'@ "search stackpanel visibility"
+
+# ---------------------------------------------------------------- contornos ao montar a aba
+# A janela abre na aba Instalar: quando o diagnóstico termina, Tweaks e Jogos ainda não existem.
+# Pintar de novo no fim de cada montagem é o que garante contorno em aba aberta depois.
+$src = Replace-Once $src @'
+    # Sync freshly built controls to any selections already in $sync.selected* (import/preset).
+    Reset-WPFCheckBoxes -doToggles $true
+}
+'@ @'
+    # Sync freshly built controls to any selections already in $sync.selected* (import/preset).
+    Reset-WPFCheckBoxes -doToggles $true
+
+    # WinForge: contorno/dica das recomendações nos controles recém-criados
+    Update-WinForgeRecommendationVisuals | Out-Null
+}
+'@ "tab init reco visuals"
 
 # ---------------------------------------------------------------- filtro de compatibilidade nas seleções (presets/import)
 $src = Replace-Once $src @'
@@ -236,6 +533,9 @@ $src = Replace-Once $src @'
         }
         "Jogos" {
             Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos") -targetGridName "gamespanel" -columncount 2
+        }
+        "Diagnostico" {
+            Initialize-WinForgeDiagnosticsTab
         }
 '@ "tab init"
 
@@ -289,6 +589,7 @@ $src = Replace-Once $src @'
 $src = Replace-Once $src '            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab' @'
             "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
             "J" { Invoke-WPFButton "WPFTab7BT"; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
+            "D" { Invoke-WPFButton "WPFTab8BT"; $keyEventArgs.Handled = $true } # WinForge: aba Diagnóstico
 '@.TrimEnd() "alt+j"
 
 # ---------------------------------------------------------------- botões: lookup em tweaks + novos casos
@@ -317,6 +618,18 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFGamesApplyButton" {Invoke-WPFtweaksbutton}
         "WPFGamesUndoButton" {Invoke-WPFundoall}
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
+        "WPFSelectRecommended" {Select-WinForgeRecommended -Tab "Tweaks" | Out-Null}
+        "WPFGamesSelectRecommended" {Select-WinForgeRecommended -Tab "Jogos" | Out-Null}
+        "WPFDiagRefresh" {Start-WinForgeProfileJob}
+        "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
+        "WPFDiagExport" {
+            $wfRelatorio = Export-WinForgeDiagnosticsReport
+            if (-not $wfRelatorio) { [System.Windows.MessageBox]::Show("O diagnóstico ainda não terminou. Tente de novo em alguns segundos.", "WinForge", "OK", "Warning") | Out-Null }
+        }
+        "WPFDiagSelectRecommended" {
+            $wfMarcados = Select-WinForgeRecommended -Tab "All"
+            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas Tweaks e Jogos.", "WinForge", "OK", "Information") | Out-Null
+        }
 '@.TrimEnd() "button switch"
 
 # ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
@@ -463,6 +776,79 @@ if ($SelfTest) {
     Write-Host "  Auditoria: $wbSeguro Seguro, $wbCuidado Cuidado, $(@($sync.WinForgeAudit.Keys | Where-Object { $sync.WinForgeAudit[$_].Class -eq 'Removido' }).Count) Removido"
     Write-Host "  Ocultos neste sistema (tweaks): $($wbHidden.Count) -> $($wbHidden -join ', ')"
     Write-Host "  Ocultos neste sistema (appx)  : $($wbHiddenAppx.Count) -> $($wbHiddenAppx -join ', ')"
+    # Perfil do sistema: toda área tem de existir, o resultado tem de sobreviver ao ConvertTo-Json
+    # (nada de objeto CIM escondido) e as simulações têm de devolver o mesmo formato.
+    $wbProfile = Get-WinForgeSystemProfile -SkipNetwork
+    foreach ($area in 'OS','Machine','CPU','RAM','GPU','Storage','Network','Power','State','Drivers') { if ($null -eq $wbProfile[$area]) { Write-Host "  [ERRO] perfil sem área $area" -ForegroundColor Red; $wbErrors++ } }
+    if ($wbProfile.Errors.Count) { Write-Host "  Perfil: avisos -> $($wbProfile.Errors -join '; ')" }
+    $null = $wbProfile | ConvertTo-Json -Depth 6 -Compress   # serializável
+    Write-Host "  Perfil: $($wbProfile.OS.Caption) | $($wbProfile.CPU.Name) | RAM $($wbProfile.RAM.TotalGB) GB | GPU $(@($wbProfile.GPU | ForEach-Object { $_.Name }) -join ', ') | SSD=$($wbProfile.Storage.HasSSD) HDD=$($wbProfile.Storage.HasHDD) | laptop=$($wbProfile.Machine.IsLaptop) vm=$($wbProfile.Machine.IsVirtual) | drivers=$($wbProfile.Drivers.Count)"
+    # Cada simulação monta o perfil inteiro de novo (~3 s): guarda para reusar nas regras e nos drivers.
+    $wbSims = @{}
+    foreach ($sim in 'laptop','vm','server-iis','hdd','win10') {
+        try {
+            $sp = Get-WinForgeSimulatedProfile -Name $sim
+            if ($sp.Simulated -ne $sim) { Write-Host "  [ERRO] simulação $sim" -ForegroundColor Red; $wbErrors++ }
+            $wbSims[$sim] = $sp
+        } catch { Write-Host "  [ERRO] simulação $sim`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
+    }
+    # Regras de recomendação: as chaves citadas têm de existir, o que é recomendado tem de ser Seguro
+    # (nada de preset disfarçado de recomendação) e cada perfil simulado tem de cair na regra dele.
+    $wbRuleKeys = @($sync.WinForgeRules | ForEach-Object { @($_.Recommend) + @($_.Avoid) } | Where-Object { $_ } | Sort-Object -Unique)
+    foreach ($k in $wbRuleKeys) {
+        if ($null -eq $sync.configs.tweaks.PSObject.Properties[$k]) { Write-Host "  [ERRO] regras: chave desconhecida '$k'" -ForegroundColor Red; $wbErrors++ }
+    }
+    foreach ($k in @($sync.WinForgeRules | ForEach-Object { @($_.Recommend) } | Where-Object { $_ } | Sort-Object -Unique)) {
+        $e = $sync.configs.tweaks.$k
+        if ($e -and $e.risk -ne 'seguro') { Write-Host "  [ERRO] regras: '$k' é recomendado mas o risco é '$($e.risk)'" -ForegroundColor Red; $wbErrors++ }
+        # Toggle aplica o tweak no próprio evento Checked: recomendar um seria aplicar sozinho, e
+        # "nada é marcado sozinho" deixaria de ser verdade. Select-WinForgeRecommended pula toggles;
+        # esta trava impede que uma regra nova torne esse pulo silencioso.
+        if ($e -and [string]$e.Type -eq 'Toggle') { Write-Host "  [ERRO] regras: '$k' é Toggle (marcar aplicaria o tweak na hora)" -ForegroundColor Red; $wbErrors++ }
+    }
+    foreach ($wbCase in @(@('laptop','WPFTweaksWBPowerSettings'), @('vm','WPFToggleWBHAGS'), @('hdd','WPFTweaksWBPrefetch'), @('server-iis','WPFTweaksWBGameDVR'))) {
+        $sp = $wbSims[$wbCase[0]]
+        if (-not $sp) { continue }   # a simulação já foi acusada acima
+        $r = Invoke-WinForgeRules -Profile $sp
+        if (-not $r.Discouraged.Contains($wbCase[1])) { Write-Host "  [ERRO] regras ($($wbCase[0])): '$($wbCase[1])' deveria estar em Evitar" -ForegroundColor Red; $wbErrors++ }
+        if ($r.Recommended.Contains($wbCase[1])) { Write-Host "  [ERRO] regras ($($wbCase[0])): '$($wbCase[1])' evitado mas ainda recomendado" -ForegroundColor Red; $wbErrors++ }
+    }
+    # 'Finalizar tarefa' é recurso do Windows 11: no 10 a regra não pode disparar (a chave existe nas duas)
+    if ($wbSims['win10']) {
+        $wbW10 = Invoke-WinForgeRules -Profile $wbSims['win10']
+        if ($wbW10.Recommended.Contains('WPFTweaksEndTaskOnTaskbar')) { Write-Host "  [ERRO] regras (win10): 'WPFTweaksEndTaskOnTaskbar' não deveria ser recomendado" -ForegroundColor Red; $wbErrors++ }
+    }
+    # por último o perfil real, para que $sync.Recommended fique com o desta máquina
+    # (Invoke-WinForgeRules sobrescreve $sync.Recommended: as simulações acima deixaram lixo lá)
+    $sync.Profile = $wbProfile
+    $wbRules = Invoke-WinForgeRules -Profile $wbProfile
+    Write-Host "  Regras: $($wbRules.Fired.Count) disparadas no perfil real -> $($wbRules.Recommended.Count) recomendados, $($wbRules.Discouraged.Count) evitados, $($wbRules.Infos.Count) infos"
+    Write-Host "    disparadas : $($wbRules.Fired -join ', ')"
+    Write-Host "    recomendar : $(@($wbRules.Recommended.Keys) -join ', ')"
+    Write-Host "    evitar     : $(@($wbRules.Discouraged.Keys) -join ', ')"
+    foreach ($wbInfo in @($wbRules.Infos)) { Write-Host "    info       : $wbInfo" }
+    if ((ConvertTo-WinForgeNvidiaVersion '32.0.16.1656') -ne '616.56' -or (ConvertTo-WinForgeNvidiaVersion '32.0.15.6636') -ne '566.36') { Write-Host "  [ERRO] ConvertTo-WinForgeNvidiaVersion" -ForegroundColor Red; $wbErrors++ }
+    # Consulta de drivers: a parte que não depende de rede roda sempre.
+    foreach ($wbPair in @(@('NVIDIA GeForce RTX 3070', '30'), @('NVIDIA GeForce GTX 1660 SUPER', '16'), @('NVIDIA GeForce GTX 970M', '900M'), @('NVIDIA GeForce MX450', 'MX400'))) {
+        if ((Get-WinForgeNvidiaSeriesToken $wbPair[0]) -ne $wbPair[1]) { Write-Host "  [ERRO] série NVIDIA de '$($wbPair[0])': esperado $($wbPair[1])" -ForegroundColor Red; $wbErrors++ }
+    }
+    if ((Get-WinForgeNvidiaSeriesNameToken 'GeForce RTX 30 Series') -ne '30' -or (Get-WinForgeNvidiaSeriesNameToken 'GeForce GTX 16 Series (Notebooks)') -ne '16') { Write-Host "  [ERRO] Get-WinForgeNvidiaSeriesNameToken" -ForegroundColor Red; $wbErrors++ }
+    if (-not (Get-WinForgeVendorDriverUrl -Vendor 'nvidia')) { Write-Host "  [ERRO] Get-WinForgeVendorDriverUrl nvidia sem URL" -ForegroundColor Red; $wbErrors++ }
+    if ((Get-WinForgeVendorDriverUrl -Vendor 'other' -Profile @{ Machine = @{ Manufacturer = 'ASUSTeK COMPUTER INC.' } }) -notmatch 'asus\.com') { Write-Host "  [ERRO] Get-WinForgeVendorDriverUrl OEM" -ForegroundColor Red; $wbErrors++ }
+    if ($null -ne (Get-WinForgeVendorDriverUrl -Vendor 'other' -Profile @{ Machine = @{ Manufacturer = 'Fabricante Desconhecido' } })) { Write-Host "  [ERRO] Get-WinForgeVendorDriverUrl: OEM desconhecido deveria ser nulo" -ForegroundColor Red; $wbErrors++ }
+    # A simulação 'vm' não tem GPU NVIDIA: Update não pode consultar rede nem mexer no LatestStatus.
+    $wbVm = $wbSims['vm']
+    $wbVmBefore = @($wbVm.GPU | ForEach-Object { $_.LatestStatus }) -join '|'
+    Update-WinForgeProfileDriverStatus -Profile $wbVm
+    if ((@($wbVm.GPU | ForEach-Object { $_.LatestStatus }) -join '|') -ne $wbVmBefore) { Write-Host "  [ERRO] Update-WinForgeProfileDriverStatus mexeu em GPU não-NVIDIA" -ForegroundColor Red; $wbErrors++ }
+    $wbSemUrl = @($wbVm.Drivers | Where-Object { $_.Vendor -in @('nvidia','amd','intel','realtek','logitech') -and -not $_.Url })
+    if ($wbSemUrl.Count) { Write-Host "  [ERRO] drivers sem URL de fabricante: $(@($wbSemUrl | ForEach-Object { $_.Device }) -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    Write-Host "  Drivers: $(@($wbVm.Drivers | Where-Object Url).Count)/$($wbVm.Drivers.Count) com link de fabricante | status: $(@($wbVm.Drivers | Group-Object Status | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ', ')"
+    if ($env:WINFORGE_SELFTEST_NETWORK -eq '1') {
+        $wbNv = Get-WinForgeNvidiaLatestDriver -GpuName 'NVIDIA GeForce RTX 3070'
+        Write-Host "  NVIDIA (rede): status=$($wbNv.Status) versão=$($wbNv.Version) lançamento=$($wbNv.ReleaseDate)"
+        if ($wbNv.Status -ne 'ok' -or $wbNv.Version -notmatch '^\d{3}\.\d{2}$') { Write-Host "  [ERRO] Get-WinForgeNvidiaLatestDriver: esperado status 'ok' e versão no formato 000.00" -ForegroundColor Red; $wbErrors++ }
+    }
     try {
         [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
         [xml]$wbXaml = $inputXML
@@ -470,23 +856,92 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
         $sync["Form"] = $wbWindow
         $wbXaml.SelectNodes("//*[@Name]") | ForEach-Object { $sync["$($_.Name)"] = $sync["Form"].FindName($_.Name) }
         $sync.InitializedTabs = @{}
-        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX') {
+        # Antes do diagnóstico terminar, $sync.Recommended/$sync.Discouraged são nulos - é o estado
+        # real da janela recém-aberta. Enumerar .Keys de $null dava uma chave nula e uma exceção por
+        # montagem de aba ("não é possível indexar em uma matriz nula"), com zero contornos.
+        try {
+            $sync.Recommended = $null
+            $sync.Discouraged = $null
+            $wbSemRegras = Update-WinForgeRecommendationVisuals
+            if ($wbSemRegras -ne 0) { Write-Host "  [ERRO] contornos sem diagnóstico: esperado 0, veio $wbSemRegras" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Contornos sem diagnóstico: OK (0 linha(s), sem exceção)"
+        } catch {
+            Write-Host "  [ERRO] contornos sem diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            $null = Invoke-WinForgeRules -Profile $wbProfile   # devolve $sync.Recommended ao perfil real
+        }
+        # Ordem da janela real: o diagnóstico termina com a janela ainda na aba Instalar, ou seja,
+        # ANTES de a aba Diagnóstico existir de fato. O job tem de chegar ao fim assim mesmo - foi
+        # justamente aqui que ele morria calado, sem 'pronto' e sem 'falhou'.
+        try {
+            $sync.Profile = $null
+            $sync.ProfileJobRunning = $false
+            $wbJobAntes = (Start-WinForgeProfileJob -Synchronous -SkipNetwork 6>&1 | Out-String -Width 500)
+            if ($wbJobAntes -notmatch 'Diagnóstico pronto') { Write-Host "  [ERRO] job antes das abas: log sem 'Diagnóstico pronto'" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobAntes -match 'Diagnóstico falhou|falha ao atualizar a interface') { Write-Host "  [ERRO] job antes das abas: $($wbJobAntes.Trim())" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.ProfileJobRunning) { Write-Host "  [ERRO] job antes das abas: ProfileJobRunning ficou ligado" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Job de diagnóstico antes das abas: OK ($($sync.WPFDiagCards.Children.Count) cartões já desenhados)"
+        } catch {
+            Write-Host "  [ERRO] job antes das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # "Marcar todos os recomendados" no caminho real: janela recém-aberta, abas Tweaks e Jogos
+        # ainda não montadas. Este teste tem de vir ANTES do laço de montagem abaixo - depois dele
+        # as abas existem e o problema (marcar zero item) não aparece mais.
+        # A aba Instalar é montada primeiro porque a janela real faz isso antes de aparecer, e
+        # Reset-WPFCheckBoxes (chamada no fim de toda montagem) escreve em controles que nascem lá.
+        Initialize-WinForgeTabContent -TabName 'Install'
+        try {
+            $wfMarcadosCedo = Select-WinForgeRecommended -Tab All
+            if ($wfMarcadosCedo -le 0) { Write-Host "  [ERRO] marcar recomendados antes das abas: nenhuma caixa marcada" -ForegroundColor Red; $wbErrors++ }
+            if (-not $sync.InitializedTabs['Tweaks'] -or -not $sync.InitializedTabs['Jogos']) { Write-Host "  [ERRO] marcar recomendados antes das abas: as abas não foram montadas sob demanda" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Marcar recomendados antes das abas: OK ($wfMarcadosCedo item(ns) marcado(s), abas montadas sob demanda)"
+        } catch {
+            Write-Host "  [ERRO] marcar recomendados antes das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico') {
             try {
                 Initialize-WinUtilTabContent -TabName $tab
-                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } }
+                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } 'Diagnostico' { 'WPFDiagCards' } }
                 $grid = $wbWindow.FindName($panel)
                 $cbs = @($sync.Keys | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
                 Write-Host "  Aba $tab montada: $($grid.Children.Count) coluna(s), $cbs checkboxes/toggles no total até agora"
             } catch {
                 Write-Host "  [ERRO] montar aba $tab`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
             }
+        }
+        # Aba Diagnóstico: cartões, tabela de drivers, lista de recomendações e relatório HTML.
+        # A contagem esperada de recomendações é recalculada aqui a partir de $sync.Recommended/
+        # Discouraged - repetir a conta da UI não provaria nada.
+        try {
+            $wfCards = $sync.WPFDiagCards.Children.Count
+            if ($wfCards -lt 8) { Write-Host "  [ERRO] Diagnóstico: esperado ao menos 8 cartões, veio $wfCards" -ForegroundColor Red; $wbErrors++ }
+            $wfDrvUI = $sync.WPFDiagDrivers.Items.Count
+            $wfDrvPerfil = @($sync.Profile.Drivers).Count
+            if ($wfDrvUI -ne $wfDrvPerfil) { Write-Host "  [ERRO] Diagnóstico: tabela com $wfDrvUI driver(s), perfil com $wfDrvPerfil" -ForegroundColor Red; $wbErrors++ }
+            $wfRecEsperado = @(@($sync.Recommended.Keys) + @($sync.Discouraged.Keys) | Where-Object { $_ -and $sync.configs.tweaks.PSObject.Properties[$_] }).Count
+            if ($sync.WPFDiagRecs.Items.Count -ne $wfRecEsperado) { Write-Host "  [ERRO] Diagnóstico: $($sync.WPFDiagRecs.Items.Count) recomendação(ões) na lista, esperado $wfRecEsperado" -ForegroundColor Red; $wbErrors++ }
+            $wfRelPath = Join-Path $env:TEMP "winforge-diag-selftest.html"
+            $wfRel = Export-WinForgeDiagnosticsReport -Path $wfRelPath -NoOpen
+            if (-not $wfRel -or -not (Test-Path $wfRel)) {
+                Write-Host "  [ERRO] Diagnóstico: relatório HTML não foi gerado" -ForegroundColor Red; $wbErrors++
+            } else {
+                $wfRelTam = (Get-Item $wfRel).Length
+                $wfRelHtml = [System.IO.File]::ReadAllText($wfRel, [System.Text.Encoding]::UTF8)
+                if ($wfRelTam -lt 5KB) { Write-Host "  [ERRO] Diagnóstico: relatório com $wfRelTam byte(s), esperado mais de 5 KB" -ForegroundColor Red; $wbErrors++ }
+                $wfCpuHtml = [System.Net.WebUtility]::HtmlEncode([string]$sync.Profile.CPU.Name)
+                if (-not $wfRelHtml.Contains($wfCpuHtml)) { Write-Host "  [ERRO] Diagnóstico: relatório sem o nome da CPU ('$wfCpuHtml')" -ForegroundColor Red; $wbErrors++ }
+                Write-Host "  Aba Diagnóstico: $wfCards cartões, $wfDrvUI drivers, $($sync.WPFDiagRecs.Items.Count) recomendações | relatório $([math]::Round($wfRelTam / 1KB)) KB"
+                if (-not $env:WINFORGE_KEEP_REPORT) { Remove-Item -Path $wfRel -Force -ErrorAction SilentlyContinue }
+            }
+        } catch {
+            Write-Host "  [ERRO] aba Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         $wbLogo = Invoke-WinForgeAssets -Type "logo" -Size 25
         if ($null -eq $wbLogo -or @($wbLogo.Child.Children).Count -ne 4) { Write-Host "  [ERRO] logo: esperado 4 paths no canvas" -ForegroundColor Red; $wbErrors++ } else { Write-Host "  Logo: OK" }
@@ -496,6 +951,37 @@ if ($SelfTest) {
         foreach ($n in @($wbHidden) + @($wbHiddenAppx)) {
             if ($null -ne $sync[$n]) { Write-Host "  [ERRO] controle oculto '$n' foi criado mesmo assim" -ForegroundColor Red; $wbErrors++ }
         }
+        # Contornos: Update-WinForgeRecommendationVisuals roda no fim de cada montagem de aba, então
+        # o perfil real já tem de ter pintado alguma linha aqui (as regras rodaram antes do mount).
+        try {
+            $wbPintadas = @(@($sync.Recommended.Keys) + @($sync.Discouraged.Keys) | Sort-Object -Unique | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush })
+            if (@($sync.Recommended.Keys).Count -gt 0 -and $wbPintadas.Count -eq 0) { Write-Host "  [ERRO] contornos: nenhuma linha recebeu BorderBrush" -ForegroundColor Red; $wbErrors++ }
+            # idempotência: a segunda passada não pode empilhar prefixo nem perder a dica original
+            if ($wbPintadas.Count -gt 0) {
+                $wbTipAntes = [string]$wbPintadas[0].Tip.ToolTip
+                Update-WinForgeRecommendationVisuals | Out-Null
+                $wbTipDepois = [string]$wbPintadas[0].Tip.ToolTip
+                if ($wbTipAntes -ne $wbTipDepois) { Write-Host "  [ERRO] contornos: dica mudou na segunda passada (prefixo empilhado?)" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wbPintadas[0].Border.BorderBrush) { Write-Host "  [ERRO] contornos: BorderBrush perdido na segunda passada" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Contornos: $($wbPintadas.Count) linha(s) com contorno de recomendação"
+        } catch {
+            Write-Host "  [ERRO] contornos: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Busca com as linhas embrulhadas em Border: quem some/aparece é o Border, não o painel interno
+        try {
+            $sync.currentTab = "Tweaks"
+            $wbBordaCortana = (Get-WinForgeRecoRow -Key 'WPFTweaksWBCortana').Border
+            $wbBordaActivity = (Get-WinForgeRecoRow -Key 'WPFTweaksActivity').Border
+            Find-TweaksByNameOrDescription -SearchString 'Cortana'
+            if ($wbBordaCortana.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] busca 'Cortana': WPFTweaksWBCortana deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+            if ($wbBordaActivity.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] busca 'Cortana': WPFTweaksActivity deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+            Find-TweaksByNameOrDescription -SearchString ""
+            if ($wbBordaCortana.Visibility -ne [Windows.Visibility]::Visible -or $wbBordaActivity.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] busca vazia: as duas linhas deveriam voltar a aparecer" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Busca: filtro e reset OK com as linhas embrulhadas em Border"
+        } catch {
+            Write-Host "  [ERRO] busca: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
         try {
             Invoke-WPFPresets "Gamer" -checkboxfilterpattern "WPFTweak*"
             Write-Host "  Preset Gamer: $($sync.selectedTweaks.Count) tweaks selecionados -> $($sync.selectedTweaks -join ', ')"
@@ -503,6 +989,108 @@ if ($SelfTest) {
             Write-Host "  Preset AppxWinForge: $($sync.selectedAppx.Count) pacotes selecionados"
         } catch {
             Write-Host "  [ERRO] presets: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # depois dos presets, porque Invoke-WPFPresets desmarca o que não é do preset
+        try {
+            $wbSelTweaks = Select-WinForgeRecommended -Tab "Tweaks"
+            $wbSelJogos  = Select-WinForgeRecommended -Tab "Jogos"
+            $wbSelAll    = Select-WinForgeRecommended -Tab "All"
+            if ($wbSelAll -ne ($wbSelTweaks + $wbSelJogos)) { Write-Host "  [ERRO] Select-WinForgeRecommended: All ($wbSelAll) != Tweaks ($wbSelTweaks) + Jogos ($wbSelJogos)" -ForegroundColor Red; $wbErrors++ }
+            if ($wbSelAll -le 0) { Write-Host "  [ERRO] Select-WinForgeRecommended: nenhuma caixa marcada no perfil real" -ForegroundColor Red; $wbErrors++ }
+            foreach ($k in @($sync.Recommended.Keys)) {
+                if ($sync[$k] -isnot [System.Windows.Controls.CheckBox]) { continue }
+                # toggle é CheckBox mas aplica o tweak ao ser marcado: a função pula, e aqui a
+                # mensagem tem de dizer isso, não "não foi marcado"
+                if ($k -like 'WPFToggle*' -or [string]$sync.configs.tweaks.$k.Type -eq 'Toggle') {
+                    Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' é Toggle e não pode entrar em recomendação" -ForegroundColor Red; $wbErrors++
+                    continue
+                }
+                if (-not $sync[$k].IsChecked) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não foi marcado" -ForegroundColor Red; $wbErrors++ }
+                # marcar dispara o handler Checked, que é quem alimenta $sync.selectedTweaks
+                if ($k -like 'WPFTweaks*' -and -not $sync.selectedTweaks.Contains($k)) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não entrou em selectedTweaks" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Recomendados marcados: $wbSelAll (Tweaks $wbSelTweaks, Jogos $wbSelJogos) | selectedTweaks=$($sync.selectedTweaks.Count)"
+        } catch {
+            Write-Host "  [ERRO] Select-WinForgeRecommended: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Job de diagnóstico: mesmo corpo que roda na janela real, aqui na thread atual (sem janela
+        # mostrada não há Add_ContentRendered). Write-WinForgeLog vai para o host quando o log é o
+        # próprio transcript, então o 6>&1 é o que captura as linhas do log para conferir.
+        try {
+            $sync.Profile = $null
+            $sync.ProfileJobRunning = $false
+            $wbJobLog = (Start-WinForgeProfileJob -Synchronous -SkipNetwork 6>&1 | Out-String -Width 500)
+            Write-Host $wbJobLog.TrimEnd()
+            if ($null -eq $sync.Profile) { Write-Host "  [ERRO] job: `$sync.Profile continuou nulo" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.ProfileJobRunning) { Write-Host "  [ERRO] job: ProfileJobRunning ficou ligado no fim" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobLog -notmatch 'Diagnóstico iniciado \(job\)') { Write-Host "  [ERRO] job: log sem 'Diagnóstico iniciado'" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobLog -notmatch 'Diagnóstico pronto') { Write-Host "  [ERRO] job: log sem 'Diagnóstico pronto'" -ForegroundColor Red; $wbErrors++ }
+            if ($wbJobLog -match 'Diagnóstico falhou') { Write-Host "  [ERRO] job: o diagnóstico falhou" -ForegroundColor Red; $wbErrors++ }
+            # a barra é compartilhada: com outro trabalho rodando o diagnóstico não pode escrever nela
+            $sync.ProcessRunning = $true
+            $wbLabelAntes = $sync.ProfileJobLabel
+            if ((Set-WinForgeProfileProgress -Label "não deveria aparecer" -Percent 50) -ne $false) { Write-Host "  [ERRO] job: escreveu na barra com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.ProfileJobLabel -ne $wbLabelAntes) { Write-Host "  [ERRO] job: rótulo da barra mudou com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            $sync.ProcessRunning = $false
+            Write-Host "  Job de diagnóstico: OK | barra: $($sync.ProfileJobLabel)"
+        } catch {
+            Write-Host "  [ERRO] job de diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # O job real roda em uma runspace do pool, e o transcript não captura nada do que sai de lá.
+        # Esta sonda é a prova de que uma entrada escrita de dentro do pool chega ao arquivo do log.
+        try {
+            $wfOpenedPool = $false
+            if (-not $sync.runspace) { Initialize-WinForgeRunspacePool | Out-Null; $wfOpenedPool = $true }
+            $null = Invoke-WPFRunspace -ScriptBlock { Write-WinForgeLog -Component "Probe" -Message "runspace-log-probe" }
+            $wfProbeOk = $false
+            $wfDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $wfDeadline) {
+                Start-Sleep -Milliseconds 200
+                try { $wfTail = @(Get-Content -Path $sync.logPath -Tail 50 -ErrorAction Stop) } catch { $wfTail = @() }
+                if ($wfTail -match 'runspace-log-probe') { $wfProbeOk = $true; break }
+            }
+            if ($wfOpenedPool) { Close-WinForgeRunspacePool }
+            if ($wfProbeOk) { Write-Host "  Log de runspace: OK" }
+            else { Write-Host "  [ERRO] log de runspace não chegou ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        } catch {
+            Write-Host "  [ERRO] log de runspace: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # O diagnóstico DE VERDADE (sem -Synchronous): o corpo vai para uma runspace do pool e pede a
+        # atualização da janela pelo Dispatcher, atravessando a fronteira entre as duas runspaces.
+        # É o único ponto do SelfTest que exercita esse caminho - e era exatamente ali que o job
+        # morria calado, porque o Dispatcher executa o pedido na runspace de quem criou o scriptblock:
+        # criado dentro do job, ele trava no primeiro pipeline (a runspace do pool está parada em
+        # Dispatcher.Invoke esperando o callback, e o callback espera a runspace).
+        # Aviso: se a regressão voltar, este teste não acusa erro - ele TRAVA junto, porque quem fica
+        # preso dentro do callback é esta mesma thread. SelfTest que não termina aqui é o sintoma.
+        try {
+            $wfOpenedPool2 = $false
+            if (-not $sync.runspace) { Initialize-WinForgeRunspacePool | Out-Null; $wfOpenedPool2 = $true }
+            $sync.Profile = $null
+            $sync.ProfileJobRunning = $false
+            $sync.ProfileJobLabel = $null
+            $sync.WPFDiagStatus.Text = ''
+            $sync.WPFDiagCards.Children.Clear()
+            Start-WinForgeProfileJob -Force -SkipNetwork
+            # Sem bombear a fila do Dispatcher aqui, o pedido da outra runspace nunca seria atendido:
+            # esta thread criou a janela, mas no SelfTest não roda laço de mensagens nenhum.
+            $wfUiDeadline = (Get-Date).AddSeconds(90)
+            while ($sync.ProfileJobRunning -and (Get-Date) -lt $wfUiDeadline) {
+                $sync.Form.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{})
+                Start-Sleep -Milliseconds 100
+            }
+            if ($wfOpenedPool2) { Close-WinForgeRunspacePool }
+            if ($sync.ProfileJobRunning) {
+                Write-Host "  [ERRO] job na runspace do pool: não terminou em 90 s" -ForegroundColor Red; $wbErrors++
+            } elseif ([string]$sync.ProfileJobLabel -notmatch 'Diagnóstico pronto') {
+                Write-Host "  [ERRO] job na runspace do pool: terminou sem 'Diagnóstico pronto' (barra = '$($sync.ProfileJobLabel)')" -ForegroundColor Red; $wbErrors++
+            } elseif ($sync.WPFDiagStatus.Text -notmatch '^Diagnóstico de') {
+                Write-Host "  [ERRO] job na runspace do pool: a aba não foi redesenhada (status = '$($sync.WPFDiagStatus.Text)')" -ForegroundColor Red; $wbErrors++
+            } else {
+                Write-Host "  Job na runspace do pool: OK ($($sync.WPFDiagCards.Children.Count) cartões redesenhados pela thread da janela)"
+            }
+        } catch {
+            Write-Host "  [ERRO] job na runspace do pool: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
     } catch {
         Write-Host "  [ERRO] XAML: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -540,6 +1128,31 @@ $src = Replace-Once $src '"iex ""& { `$(irm https://christitus.com/win) } -Confi
 # ---------------------------------------------------------------- título da janela, sobre, créditos, pergunta do ponto de restauração
 $src = Replace-Once $src '$sync["Form"].title = $sync["Form"].title + " " + $sync.version' '$sync["Form"].title = $sync["Form"].title + " " + $sync.version + "  -  " + $sync.OSName + " " + $sync.OSDisplayVersion' "form title"
 
+# ---------------------------------------------------------------- fechamento da janela com job em andamento
+# Close-WinUtilRunspacePool é síncrono: para cada pipeline e ESPERA a thread do pool terminar. Como
+# o diagnóstico agora roda a cada abertura (e a busca no Windows Update é uma chamada COM que não se
+# interrompe), fechar a janela no meio de um deles congelava a janela por até um minuto - ou travava
+# de vez, se a thread do pool estivesse dentro de um Dispatcher.Invoke esperando esta mesma thread.
+$src = Replace-Once $src @'
+$sync["Form"].Add_Closing({
+    Close-WinUtilRunspacePool
+    [System.GC]::Collect()
+})
+'@ @'
+$sync["Form"].Add_Closing({
+    # avisa o diagnóstico e a busca de drivers: daqui em diante ninguém mais toca na interface
+    $sync.WinForgeClosing = $true
+    if ($sync.ProfileJobRunning -or $sync.DiagWUSearchRunning) {
+        # Fecha sem esperar: as threads do pool são de segundo plano e morrem com o processo.
+        try { $sync.runspace.BeginClose($null, $null) | Out-Null } catch { }
+        $sync.Remove("runspace")
+    } else {
+        Close-WinUtilRunspacePool
+    }
+    [System.GC]::Collect()
+})
+'@ "closing hook"
+
 $src = Replace-Between $src '$sync["AboutMenuItem"].Add_Click({' '$sync["DocumentationMenuItem"].Add_Click({' @'
 $sync["AboutMenuItem"].Add_Click({
     Invoke-WPFPopup -Action "Hide" -Popups @("Settings")
@@ -560,6 +1173,9 @@ $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windo
 
     # WinForge: avisa o launcher que a janela apareceu (fecha o splash)
     Send-WinForgeReady
+
+    # WinForge: diagnóstico do sistema em segundo plano (perfil + regras -> contornos e aba Diagnóstico)
+    $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{ Start-WinForgeProfileJob }) | Out-Null
 
     # WinForge: pergunta (opcional) sobre ponto de restauração depois que a janela aparece
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null
@@ -595,11 +1211,24 @@ $src = Insert-Before $src @'
                     Background="{DynamicResource ButtonConfigBackgroundColor}"
 '@ $xamlNav "xaml nav button"
 
+# Depois do de Jogos e na mesma âncora: o bloco inserido por último fica mais perto dela, então o
+# botão do Diagnóstico aparece à direita do de Jogos na barra de navegação.
+$src = Insert-Before $src @'
+                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
+                    Background="{DynamicResource ButtonConfigBackgroundColor}"
+'@ $xamlDiagNav "xaml diag nav button"
+
 $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
+
+# Precisa vir DEPOIS do insert da aba Jogos: Invoke-WPFTab mapeia WPFTab<N>BT para Items[N-1], então
+# o TabItem do Diagnóstico (WPFTab8) tem de ser o oitavo do TabControl - e, na mesma âncora, quem
+# insere por último fica mais perto dela, ou seja, depois de Jogos.
+$src = Insert-Before $src "        </TabControl>`n" $xamlDiagTab "xaml diag tab"
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
                                     <Button Name="WPFPresetWinForge" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Standard + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (WinForge)."/>
+                                    <Button Name="WPFSelectRecommended" Content=" Marcar recomendados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca os itens que o diagnóstico recomenda para este PC (contorno verde)."/>
 '@.TrimEnd() "xaml preset button"
 
 $src = Insert-After $src '                                    <Button Name="WPFDefaultAppxSelection" Content=" Default " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
