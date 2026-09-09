@@ -51,14 +51,23 @@ function Get-WinForgeDriverInventory {
         Inventário dos drivers que interessam (vídeo, rede, áudio, armazenamento, chipset, USB,
         Bluetooth), ignorando os que vêm da própria Microsoft.
     .DESCRIPTION
-        'Old' marca driver com mais de 180 dias. 'Status', 'Latest' e 'Url' são preenchidos depois
-        pela consulta online (Update-WinForgeProfileDriverStatus).
+        'Old' marca o driver que vale a pena conferir, e o prazo depende da classe: vídeo, rede,
+        áudio e Bluetooth mudam de verdade a cada poucos meses (180 dias), enquanto chipset, USB e
+        controladoras de disco saem de fábrica com INF de anos e continuam certos - marcar tudo isso
+        transformava a coluna "verificar" em ruído (17 de 20 numa máquina saudável), então para elas
+        o prazo é de três anos.
+        A ordenação inclui DeviceID: dois adaptadores de rede idênticos são duas linhas, e sem ele
+        o -Unique jogaria um fora, fazendo o inventário mentir na contagem.
+        'Status', 'Latest' e 'Url' são preenchidos depois pela consulta online
+        (Update-WinForgeProfileDriverStatus).
     #>
     $classes = 'DISPLAY', 'NET', 'MEDIA', 'HDC', 'SCSIADAPTER', 'SYSTEM', 'USB', 'BLUETOOTH'
+    $watchedClasses = 'DISPLAY', 'NET', 'MEDIA', 'BLUETOOTH'
     $cutoff = (Get-Date).AddDays(-180)
+    $cutoffOther = (Get-Date).AddDays(-1095)
     Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
         Where-Object { $_.DeviceClass -in $classes -and $_.DriverProviderName -and $_.DriverProviderName -ne 'Microsoft' -and $_.DeviceName } |
-        Sort-Object DeviceClass, DeviceName -Unique |
+        Sort-Object DeviceClass, DeviceName, DeviceID -Unique |
         ForEach-Object {
             [pscustomobject]@{
                 Device   = $_.DeviceName
@@ -69,7 +78,7 @@ function Get-WinForgeDriverInventory {
                 Signed   = [bool]$_.IsSigned
                 Signer   = $_.Signer
                 Vendor   = (Get-WinForgeVendorKey $_.DriverProviderName $_.DeviceName)
-                Old      = $(if ($_.DriverDate) { $_.DriverDate -lt $cutoff } else { $false })
+                Old      = $(if ($_.DriverDate) { $_.DriverDate -lt $(if ($_.DeviceClass -in $watchedClasses) { $cutoff } else { $cutoffOther }) } else { $false })
                 Status   = 'ok'
                 Latest   = $null
                 Url      = $null
@@ -126,16 +135,26 @@ function Get-WinForgeSystemProfile {
         $enc = Get-CimInstance Win32_SystemEnclosure
         $chassis = @($enc.ChassisTypes)
         $laptopTypes = 8, 9, 10, 11, 12, 14, 30, 31, 32
+        # Gabinete que o fabricante declarou como de mesa (torre, desktop, rack...). A bateria só
+        # conta como sinal de notebook fora dessa lista: um no-break USB (APC, CyberPower) aparece
+        # como Win32_Battery e transformava qualquer torre em "notebook" - com isso a regra 'laptop'
+        # disparava e a 'desktop' nunca disparava numa máquina de mesa.
+        $desktopTypes = 3, 4, 5, 6, 7, 13, 15, 16, 17, 23, 24
+        $chassisIsPortable = (@($chassis | Where-Object { $_ -in $laptopTypes }).Count -gt 0)
+        $chassisIsDesktop  = (@($chassis | Where-Object { $_ -in $desktopTypes }).Count -gt 0)
+        $hasBattery = [bool](Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
         # HypervisorPresent NÃO serve para detectar VM: ele fica ligado em máquina física com
         # Hyper-V, WSL2, Sandbox, Credential Guard ou VBS. A virtualização é decidida pela
         # assinatura do fabricante/modelo; HypervisorPresent vai junto, como campo separado.
-        $vmSignature = 'VMware|VirtualBox|innotek|KVM|QEMU|Virtual Machine|Hyper-V|Xen|Parallels|Bochs|BHYVE'
+        # A lista inclui os convidados de nuvem mais comuns, que não trazem 'Virtual' no nome.
+        $vmSignature = 'VMware|VirtualBox|innotek|KVM|QEMU|Virtual Machine|Hyper-V|Xen|Parallels|Bochs|BHYVE|' +
+                       'Amazon EC2|Google Compute Engine|Nutanix|OpenStack|oVirt|Cloud Hosting|Alibaba Cloud'
         $p.Machine = [ordered]@{
             Manufacturer      = $cs.Manufacturer
             Model             = $cs.Model
-            IsVirtual         = ("$($cs.Manufacturer) $($cs.Model)" -match $vmSignature)
+            IsVirtual         = ("$($cs.Manufacturer) $($cs.Model) $($cs.SystemFamily)" -match $vmSignature)
             HypervisorPresent = [bool]$cs.HypervisorPresent
-            IsLaptop          = (@($chassis | Where-Object { $_ -in $laptopTypes }).Count -gt 0) -or [bool](Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
+            IsLaptop          = $chassisIsPortable -or ($hasBattery -and -not $chassisIsDesktop)
             ChassisTypes      = $chassis
             SecureBoot        = $null
             TpmVersion        = $null
@@ -169,7 +188,10 @@ function Get-WinForgeSystemProfile {
             Cores                 = [int]$c.NumberOfCores
             Logical               = [int]$c.NumberOfLogicalProcessors
             MaxMHz                = [int]$c.MaxClockSpeed
-            Hybrid                = ($vendor -eq 'intel' -and $c.Name -match '1[2-9]\d{3}|Core Ultra')
+            # 12ª geração em diante: o SKU de mesa tem cinco dígitos (i7-12700K) e o de notebook
+            # quatro (i5-1235U), daí o {2,3}. O 'i<n>-' na frente evita casar com Xeon E5-1650 e
+            # afins, e o (?!\d) deixa passar o sufixo de letra (K/U/H).
+            Hybrid                = ($vendor -eq 'intel' -and $c.Name -match '(?i)i[3579]-1[2-9]\d{2,3}(?!\d)|Core(\(TM\))?\s*Ultra')
             VirtualizationEnabled = [bool]$c.VirtualizationFirmwareEnabled
         }
     } catch { $p.Errors += "CPU: $($_.Exception.Message)" }
@@ -249,13 +271,27 @@ function Get-WinForgeSystemProfile {
                                    @{ Expression = { [uint64]$_.ReceiveLinkSpeed }; Descending = $true } |
             Select-Object -First 1
         $dns = @((Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses | Select-Object -First 1).ServerAddresses)
-        $p.Network = [ordered]@{
-            Adapter     = $a.InterfaceDescription
-            Name        = $a.Name
-            LinkSpeed   = [string]$a.LinkSpeed
-            IsWifi      = ($a.MediaType -match '802\.11|Native 802.11|Wireless')
-            Dns         = $dns
-            IPv6Enabled = [bool](Get-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue).Enabled
+        if (-not $a) {
+            # Máquina sem nenhum adaptador ativo é um estado normal (cabo fora, Wi-Fi desligado),
+            # não uma falha de coleta. Sem esta saída, Get-NetAdapterBinding -Name $null estourava
+            # e o perfil registrava "Falha ao coletar" na aba e no relatório.
+            $p.Network = [ordered]@{
+                Adapter     = $null
+                Name        = $null
+                LinkSpeed   = 'sem conexão'
+                IsWifi      = $false
+                Dns         = $dns
+                IPv6Enabled = $null
+            }
+        } else {
+            $p.Network = [ordered]@{
+                Adapter     = $a.InterfaceDescription
+                Name        = $a.Name
+                LinkSpeed   = [string]$a.LinkSpeed
+                IsWifi      = ($a.MediaType -match '802\.11|Native 802.11|Wireless')
+                Dns         = $dns
+                IPv6Enabled = [bool](Get-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue).Enabled
+            }
         }
     } catch { $p.Errors += "Network: $($_.Exception.Message)" }
 

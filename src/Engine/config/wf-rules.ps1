@@ -118,12 +118,14 @@ $sync.WinForgeRules = @(
         Info      = '$g = @($p.GPU | Where-Object { $_.Vendor -eq "nvidia" -and $_.LatestStatus -eq "atualizar" })[0]; "Driver NVIDIA desatualizado: instalado $($g.MarketingVersion), disponível $($g.Latest)."'
     }
 
+    # Só vídeo, rede, áudio e Bluetooth: chipset, USB e controladora de disco vêm com INF de anos
+    # de fábrica e continuam corretos - contá-los aqui enchia a aba de aviso sem informação.
     @{  Id        = 'old-drivers'
-        When      = '@($p.Drivers | Where-Object Old).Count -gt 0'
+        When      = '@($p.Drivers | Where-Object { $_.Old -and $_.Class -in "DISPLAY", "NET", "MEDIA", "BLUETOOTH" }).Count -gt 0'
         Recommend = @()
         Avoid     = @()
         Reason    = 'Drivers antigos no inventário.'
-        Info      = '"{0} driver(es) com mais de 180 dias - veja a tabela." -f @($p.Drivers | Where-Object Old).Count'
+        Info      = '"{0} driver(es) de vídeo, rede, áudio ou Bluetooth com mais de 180 dias - veja a tabela." -f @($p.Drivers | Where-Object { $_.Old -and $_.Class -in "DISPLAY", "NET", "MEDIA", "BLUETOOTH" }).Count'
     }
 )
 

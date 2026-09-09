@@ -123,6 +123,11 @@ function Get-WinForgeNvidiaLatestDriver {
         pergunta o driver mais novo (WHQL/DCH) para o Windows instalado. O resultado fica 24 h em
         %LocalAppData%\WinForge\cache\nvidia-<psid>-<pfid>-<osID>.json.
         Status: 'ok' (achou), 'não encontrado' (placa fora do catálogo) ou 'indisponível' (sem rede).
+        Dois casos caem sempre em 'não encontrado', de propósito: placas profissionais (Quadro,
+        RTX A2000) - o nome não tem a família de quatro dígitos que Get-WinForgeNvidiaSeriesToken
+        procura - e o Windows Server, porque osID aqui é sempre o do cliente (135/57) e o catálogo
+        tem identificadores próprios para as edições de servidor. Nos dois a aba mostra o link do
+        fabricante, que é o que resta de útil.
     .PARAMETER GpuName
         Nome como o Windows reporta, por exemplo 'NVIDIA GeForce RTX 3070'.
     .PARAMETER IsWin11
@@ -240,7 +245,8 @@ function Update-WinForgeProfileDriverStatus {
         'indisponível' quando a consulta não resolveu). GPUs de outros fabricantes ficam como
         estavam - não há catálogo equivalente para consultar.
         Em cada driver do inventário grava a Url do fabricante e o Status: 'atualizar' quando a
-        placa NVIDIA está atrás, 'verificar' quando o driver tem mais de 180 dias, senão 'ok'.
+        placa NVIDIA está atrás, 'verificar' quando o driver está marcado como antigo pelo
+        inventário (o prazo varia por classe - ver Get-WinForgeDriverInventory), senão 'ok'.
     #>
     param($Profile)
     if (-not $Profile) { return }
