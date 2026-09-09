@@ -85,10 +85,13 @@ function Select-WinForgeRecommended {
     .SYNOPSIS
         Marca na interface as caixas recomendadas pelas regras, na aba pedida.
     .DESCRIPTION
-        Só mexe em chave que virou CheckBox nesta máquina: o filtro de compatibilidade
-        (Test-WinForgeBoostEntryCompatible) pode ter escondido a entrada, e nesse caso $sync[<chave>]
-        não existe. Marcar IsChecked dispara o handler Checked, que é quem atualiza
-        $sync.selectedTweaks - por isso aqui não se toca nessa lista.
+        As abas são montadas sob demanda: enquanto a aba Tweaks (ou Jogos) não for aberta, nenhuma
+        caixa dela existe e $sync[<chave>] é nulo. Por isso a função monta a aba de destino antes de
+        marcar - senão o botão da aba Diagnóstico, na janela recém-aberta, marcaria zero item.
+        Depois disso, chave sem controle é entrada que o filtro de compatibilidade
+        (Test-WinForgeBoostEntryCompatible) escondeu nesta máquina, e essa fica de fora mesmo.
+        Marcar IsChecked dispara o handler Checked, que é quem atualiza $sync.selectedTweaks - por
+        isso aqui não se toca nessa lista.
     .PARAMETER Tab
         'Tweaks' (entradas sem tab 'Jogos'), 'Jogos' ou 'All' (as duas).
     .OUTPUTS
@@ -99,12 +102,26 @@ function Select-WinForgeRecommended {
     # o botão existe antes do diagnóstico terminar: sem regras rodadas não há nada para marcar
     if (-not $sync.Recommended) { return 0 }
 
+    # Montar a aba é idempotente (Initialize-WinForgeTabContent sai na hora se ela já existe) e é o
+    # mesmo custo que o usuário pagaria ao abrir a aba na mão.
+    foreach ($wfTab in $(if ($Tab -eq 'All') { @('Tweaks', 'Jogos') } else { @($Tab) })) {
+        if (Get-Command Initialize-WinForgeTabContent -ErrorAction SilentlyContinue) {
+            try { Initialize-WinForgeTabContent -TabName $wfTab } catch {
+                Write-WinForgeLog -Component "Rules" -Level "WARN" -Message "Não foi possível montar a aba $wfTab antes de marcar: $($_.Exception.Message)"
+            }
+        }
+    }
+
     $count = 0
     foreach ($key in @($sync.Recommended.Keys)) {
         $control = $sync[$key]
         if ($control -isnot [System.Windows.Controls.CheckBox]) { continue }
 
         $entry = $sync.configs.tweaks.$key
+        # Um toggle é CheckBox também, e o handler Checked dele APLICA o tweak na hora. Recomendação
+        # não muda o sistema: marcar só vale para caixa comum, que espera o botão Aplicar.
+        if ($key -like 'WPFToggle*' -or ($entry -and [string]$entry.Type -eq 'Toggle')) { continue }
+
         $entryTab = 'Tweaks'
         if ($entry -and $entry.PSObject.Properties['tab'] -and [string]$entry.tab -eq 'Jogos') { $entryTab = 'Jogos' }
         if ($Tab -ne 'All' -and $entryTab -ne $Tab) { continue }

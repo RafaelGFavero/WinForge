@@ -134,13 +134,16 @@ function Set-WinForgeProfileProgress {
         A barra é uma só para tweaks, AppX, Win11 Creator e diagnóstico. Enquanto um desses trabalhos
         estiver rodando ($sync.ProcessRunning), o diagnóstico fica calado: perder o texto dele é bem
         melhor que apagar o texto do trabalho que o usuário mandou fazer e está olhando.
+        Com a janela fechando ($sync.WinForgeClosing) também não escreve: escrever é um
+        Dispatcher.Invoke, e a thread do pool ficaria parada esperando um Dispatcher que já está
+        desligando - exatamente o travamento que o handler de Closing existe para evitar.
         O rótulo escrito fica em $sync.ProfileJobLabel, para quem precisar saber o que está na barra.
     .OUTPUTS
         $true se escreveu, $false se cedeu a vez.
     #>
     param([string]$Label, [int]$Percent)
 
-    if ($sync.ProcessRunning) { return $false }
+    if ($sync.WinForgeClosing -or $sync.ProcessRunning) { return $false }
     $sync.ProfileJobLabel = $Label
     Set-WinForgeTweaksProgressIndicator -Visible $true -Label $Label -Percent $Percent
     return $true
@@ -169,7 +172,10 @@ function Start-WinForgeProfileJob {
     param([switch]$Force, [switch]$Synchronous, [switch]$SkipNetwork)
 
     if ($sync.ProfileJobRunning -and -not $Force) {
+        # Sem esta linha na barra o botão "Atualizar diagnóstico" pareceria morto: o pedido ignorado
+        # só apareceria no log da sessão, que ninguém abre no meio do clique.
         Write-WinForgeLog -Component "Profile" -Message "Diagnóstico já em andamento; pedido ignorado."
+        $null = Set-WinForgeProfileProgress -Label "Diagnóstico já em andamento - aguarde o fim da coleta." -Percent 50
         return
     }
     $sync.ProfileJobRunning = $true
@@ -205,7 +211,9 @@ function Start-WinForgeProfileJob {
             $null = Set-WinForgeProfileProgress -Label "Avaliando recomendações..." -Percent 70
             $wfRules = Invoke-WinForgeRules -Profile $sync.Profile
 
-            Invoke-WPFUIThread $sync.WinForgeProfileUiRefresh
+            # Janela fechando: Invoke-WPFUIThread é síncrono e esperaria por um Dispatcher que está
+            # sendo desligado. Não há mais interface para atualizar - o job só termina de se despedir.
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeProfileUiRefresh }
 
             $wfDone = "Diagnóstico pronto: {0} recomendações, {1} a evitar, {2} infos, {3} erros de coleta." -f $wfRules.Recommended.Count, $wfRules.Discouraged.Count, $wfRules.Infos.Count, @($sync.Profile.Errors).Count
             # a barra fica no 100% com o resumo, sem esconder depois: um Start-Sleep aqui só serviria

@@ -161,6 +161,21 @@ $sync.transcriptPath = $sync.logPath
 Start-Transcript -Path $sync.logPath -Append -NoClobber | Out-Null
 '@ @'
 $sync.transcriptPath = "$logdir\WinForge_$dateTime.console.log"
+
+# São dois arquivos por sessão (log + console) e nada os apagava: a pasta crescia para sempre.
+# Guarda as 30 sessões mais recentes de cada tipo. Arquivo em uso por outra instância não sai, e
+# tudo bem - falha de poda não pode impedir o programa de abrir.
+try {
+    New-Item -ItemType Directory -Path $logdir -Force | Out-Null
+    $wfConsoleLogs = @(Get-ChildItem -LiteralPath $logdir -Filter "WinForge_*.console.log" -File -ErrorAction SilentlyContinue)
+    $wfSessionLogs = @(Get-ChildItem -LiteralPath $logdir -Filter "WinForge_*.log" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*.console.log" })
+    foreach ($wfLogSet in @($wfConsoleLogs, $wfSessionLogs)) {
+        foreach ($wfOld in @($wfLogSet | Sort-Object LastWriteTime -Descending | Select-Object -Skip 30)) {
+            Remove-Item -LiteralPath $wfOld.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+} catch { }
+
 Start-Transcript -Path $sync.transcriptPath -Append -NoClobber | Out-Null
 '@ "transcript separado do log"
 
@@ -605,7 +620,7 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
         "WPFSelectRecommended" {Select-WinForgeRecommended -Tab "Tweaks" | Out-Null}
         "WPFGamesSelectRecommended" {Select-WinForgeRecommended -Tab "Jogos" | Out-Null}
-        "WPFDiagRefresh" {Start-WinForgeProfileJob -Force}
+        "WPFDiagRefresh" {Start-WinForgeProfileJob}
         "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
         "WPFDiagExport" {
             $wfRelatorio = Export-WinForgeDiagnosticsReport
@@ -786,6 +801,10 @@ if ($SelfTest) {
     foreach ($k in @($sync.WinForgeRules | ForEach-Object { @($_.Recommend) } | Where-Object { $_ } | Sort-Object -Unique)) {
         $e = $sync.configs.tweaks.$k
         if ($e -and $e.risk -ne 'seguro') { Write-Host "  [ERRO] regras: '$k' é recomendado mas o risco é '$($e.risk)'" -ForegroundColor Red; $wbErrors++ }
+        # Toggle aplica o tweak no próprio evento Checked: recomendar um seria aplicar sozinho, e
+        # "nada é marcado sozinho" deixaria de ser verdade. Select-WinForgeRecommended pula toggles;
+        # esta trava impede que uma regra nova torne esse pulo silencioso.
+        if ($e -and [string]$e.Type -eq 'Toggle') { Write-Host "  [ERRO] regras: '$k' é Toggle (marcar aplicaria o tweak na hora)" -ForegroundColor Red; $wbErrors++ }
     }
     foreach ($wbCase in @(@('laptop','WPFTweaksWBPowerSettings'), @('vm','WPFToggleWBHAGS'), @('hdd','WPFTweaksWBPrefetch'), @('server-iis','WPFTweaksWBGameDVR'))) {
         $sp = $wbSims[$wbCase[0]]
@@ -871,6 +890,20 @@ if ($SelfTest) {
             Write-Host "  Job de diagnóstico antes das abas: OK ($($sync.WPFDiagCards.Children.Count) cartões já desenhados)"
         } catch {
             Write-Host "  [ERRO] job antes das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # "Marcar todos os recomendados" no caminho real: janela recém-aberta, abas Tweaks e Jogos
+        # ainda não montadas. Este teste tem de vir ANTES do laço de montagem abaixo - depois dele
+        # as abas existem e o problema (marcar zero item) não aparece mais.
+        # A aba Instalar é montada primeiro porque a janela real faz isso antes de aparecer, e
+        # Reset-WPFCheckBoxes (chamada no fim de toda montagem) escreve em controles que nascem lá.
+        Initialize-WinForgeTabContent -TabName 'Install'
+        try {
+            $wfMarcadosCedo = Select-WinForgeRecommended -Tab All
+            if ($wfMarcadosCedo -le 0) { Write-Host "  [ERRO] marcar recomendados antes das abas: nenhuma caixa marcada" -ForegroundColor Red; $wbErrors++ }
+            if (-not $sync.InitializedTabs['Tweaks'] -or -not $sync.InitializedTabs['Jogos']) { Write-Host "  [ERRO] marcar recomendados antes das abas: as abas não foram montadas sob demanda" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Marcar recomendados antes das abas: OK ($wfMarcadosCedo item(ns) marcado(s), abas montadas sob demanda)"
+        } catch {
+            Write-Host "  [ERRO] marcar recomendados antes das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico') {
             try {
@@ -966,6 +999,12 @@ if ($SelfTest) {
             if ($wbSelAll -le 0) { Write-Host "  [ERRO] Select-WinForgeRecommended: nenhuma caixa marcada no perfil real" -ForegroundColor Red; $wbErrors++ }
             foreach ($k in @($sync.Recommended.Keys)) {
                 if ($sync[$k] -isnot [System.Windows.Controls.CheckBox]) { continue }
+                # toggle é CheckBox mas aplica o tweak ao ser marcado: a função pula, e aqui a
+                # mensagem tem de dizer isso, não "não foi marcado"
+                if ($k -like 'WPFToggle*' -or [string]$sync.configs.tweaks.$k.Type -eq 'Toggle') {
+                    Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' é Toggle e não pode entrar em recomendação" -ForegroundColor Red; $wbErrors++
+                    continue
+                }
                 if (-not $sync[$k].IsChecked) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não foi marcado" -ForegroundColor Red; $wbErrors++ }
                 # marcar dispara o handler Checked, que é quem alimenta $sync.selectedTweaks
                 if ($k -like 'WPFTweaks*' -and -not $sync.selectedTweaks.Contains($k)) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não entrou em selectedTweaks" -ForegroundColor Red; $wbErrors++ }
@@ -1088,6 +1127,31 @@ $src = Replace-Once $src '"iex ""& { `$(irm https://christitus.com/win) } -Confi
 
 # ---------------------------------------------------------------- título da janela, sobre, créditos, pergunta do ponto de restauração
 $src = Replace-Once $src '$sync["Form"].title = $sync["Form"].title + " " + $sync.version' '$sync["Form"].title = $sync["Form"].title + " " + $sync.version + "  -  " + $sync.OSName + " " + $sync.OSDisplayVersion' "form title"
+
+# ---------------------------------------------------------------- fechamento da janela com job em andamento
+# Close-WinUtilRunspacePool é síncrono: para cada pipeline e ESPERA a thread do pool terminar. Como
+# o diagnóstico agora roda a cada abertura (e a busca no Windows Update é uma chamada COM que não se
+# interrompe), fechar a janela no meio de um deles congelava a janela por até um minuto - ou travava
+# de vez, se a thread do pool estivesse dentro de um Dispatcher.Invoke esperando esta mesma thread.
+$src = Replace-Once $src @'
+$sync["Form"].Add_Closing({
+    Close-WinUtilRunspacePool
+    [System.GC]::Collect()
+})
+'@ @'
+$sync["Form"].Add_Closing({
+    # avisa o diagnóstico e a busca de drivers: daqui em diante ninguém mais toca na interface
+    $sync.WinForgeClosing = $true
+    if ($sync.ProfileJobRunning -or $sync.DiagWUSearchRunning) {
+        # Fecha sem esperar: as threads do pool são de segundo plano e morrem com o processo.
+        try { $sync.runspace.BeginClose($null, $null) | Out-Null } catch { }
+        $sync.Remove("runspace")
+    } else {
+        Close-WinUtilRunspacePool
+    }
+    [System.GC]::Collect()
+})
+'@ "closing hook"
 
 $src = Replace-Between $src '$sync["AboutMenuItem"].Add_Click({' '$sync["DocumentationMenuItem"].Add_Click({' @'
 $sync["AboutMenuItem"].Add_Click({

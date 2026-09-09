@@ -439,22 +439,25 @@ function Invoke-WinForgeDriverUpdateSearch {
         }
     }
 
+    # A consulta COM não é interrompível: quando a janela fecha no meio dela, o processo já está
+    # indo embora e nada mais aqui pode tocar a interface - escrever na barra ou pedir o Dispatcher
+    # seria esperar por uma thread que está desligando.
     $wfBody = {
         try {
             $sync.DiagWUResults = @(Search-WinForgeWindowsUpdateDrivers)
-            Invoke-WPFUIThread $sync.WinForgeWUUiRefresh
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUUiRefresh }
             $wfMsg = if ($sync.LastWUError) {
                 "Windows Update: a consulta falhou -> $($sync.LastWUError)"
             } else {
                 "Windows Update: $(@($sync.DiagWUResults).Count) driver(s) disponível(is) para este computador."
             }
-            if (-not $sync.ProcessRunning) {
+            if (-not $sync.ProcessRunning -and -not $sync.WinForgeClosing) {
                 Set-WinForgeTweaksProgressIndicator -Visible $true -Label $wfMsg -Percent 100
             }
             Write-WinForgeLog -Component "Diag" -Message $wfMsg
         } catch {
             Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Busca no Windows Update falhou: $($_.Exception.Message)"
-            if (-not $sync.ProcessRunning) {
+            if (-not $sync.ProcessRunning -and -not $sync.WinForgeClosing) {
                 Set-WinForgeTweaksProgressIndicator -Visible $true -Label "Busca no Windows Update falhou: $($_.Exception.Message)" -Percent 0
             }
         } finally {
@@ -522,7 +525,8 @@ function Export-WinForgeDiagnosticsReport {
         os acentos sem depender da code page do sistema.
     .PARAMETER Path
         Caminho do arquivo. Sem parâmetro:
-        %LocalAppData%\WinForge\reports\diagnostico-<aaaaMMdd-HHmm>.html
+        %LocalAppData%\WinForge\reports\diagnostico-<aaaaMMdd-HHmmss>.html
+        Com os segundos no nome, dois relatórios seguidos não se sobrescrevem.
     .PARAMETER NoOpen
         Não abre o arquivo depois de gravar (usado pelo -SelfTest).
     .OUTPUTS
@@ -537,7 +541,7 @@ function Export-WinForgeDiagnosticsReport {
     }
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
-        $Path = Join-Path $env:LocalAppData ("WinForge\reports\diagnostico-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmm'))
+        $Path = Join-Path $env:LocalAppData ("WinForge\reports\diagnostico-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
     }
     $parent = Split-Path -Parent $Path
     if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
