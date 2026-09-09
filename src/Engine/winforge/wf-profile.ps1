@@ -115,7 +115,16 @@ function Get-WinForgeSystemProfile {
     } catch { $p.Errors += "OS: $($_.Exception.Message)" }
 
     # ---- Papéis (só no Server: Get-WindowsFeature não existe no cliente)
-    $p.Roles = [ordered]@{ IIS = $false; AD = $false; HyperV = $false; DNS = $false; DHCP = $false; FileServer = $false; RDS = $false }
+    # IsDC/DomainRole/Domain valem para qualquer SO: um cliente ingressado no domínio também
+    # interessa às regras, e DomainRole >= 4 é o que separa controlador de domínio de membro.
+    $p.Roles = [ordered]@{ IIS = $false; AD = $false; HyperV = $false; DNS = $false; DHCP = $false; FileServer = $false; RDS = $false
+                           IsDC = $false; DomainRole = $null; Domain = $null }
+    try {
+        $csRole = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        $p.Roles.DomainRole = [int]$csRole.DomainRole
+        $p.Roles.Domain     = [string]$csRole.Domain
+        $p.Roles.IsDC       = ($p.Roles.DomainRole -ge 4)
+    } catch { $p.Errors += "DomainRole: $($_.Exception.Message)" }
     if ($p.OS.IsServer -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
         try {
             $f = Get-WindowsFeature | Where-Object Installed | Select-Object -ExpandProperty Name
@@ -330,6 +339,42 @@ function Get-WinForgeSystemProfile {
         }
     } catch { $p.Errors += "State: $($_.Exception.Message)" }
 
+    # ---- Servidor (só no Server; no cliente fica $null e os cartões/regras ignoram)
+    $p.Server = $null
+    if ($p.OS -and $p.OS.IsServer) {
+        $srv = [ordered]@{ Smb1Enabled = $null; SmbSigningRequired = $null; TcpAutotuning = $null; TimeSource = $null
+                           Iis = [ordered]@{ Installed = [bool]$p.Roles.IIS; PoolCount = $null; SiteCount = $null; LogDirectory = $null; LogOnOsDrive = $null; AppInitInstalled = $null; DynCompressionInstalled = $null }
+                           Ad  = [ordered]@{ NtdsPath = $null; SysvolPath = $null; NtdsOnOsDrive = $null; SysvolOnOsDrive = $null } }
+        try { $smb = Get-SmbServerConfiguration -ErrorAction Stop; $srv.Smb1Enabled = [bool]$smb.EnableSMB1Protocol; $srv.SmbSigningRequired = [bool]$smb.RequireSecuritySignature } catch { $p.Errors += "SMB: $($_.Exception.Message)" }
+        try { $tcp = (netsh int tcp show global 2>$null) -join "`n"; if ($tcp -match '(?im)^\s*Receive Window Auto-Tuning Level\s*:\s*(\S+)|^\s*Nível de Ajuste Automático da Janela de Recebimento\s*:\s*(\S+)') { $srv.TcpAutotuning = ($Matches[1] + $Matches[2]).ToLower() } } catch { }
+        try { $ts = (w32tm /query /source 2>$null) -join ' '; if ($ts) { $srv.TimeSource = $ts.Trim() } } catch { }
+        if ($p.Roles.IIS) {
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $srv.Iis.PoolCount = @(Get-ChildItem IIS:\AppPools -ErrorAction Stop).Count
+                $sites = @(Get-ChildItem IIS:\Sites -ErrorAction Stop)
+                $srv.Iis.SiteCount = $sites.Count
+                $dir = [string]($sites | Select-Object -First 1).logFile.directory
+                if ($dir) { $dir = [Environment]::ExpandEnvironmentVariables($dir); $srv.Iis.LogDirectory = $dir; $srv.Iis.LogOnOsDrive = ($dir -like "$($env:SystemDrive)*") }
+                if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+                    $srv.Iis.AppInitInstalled = [bool](Get-WindowsFeature Web-AppInit -ErrorAction SilentlyContinue).Installed
+                    $srv.Iis.DynCompressionInstalled = [bool](Get-WindowsFeature Web-Dyn-Compression -ErrorAction SilentlyContinue).Installed
+                }
+            } catch { $p.Errors += "IIS: $($_.Exception.Message)" }
+        }
+        if ($p.Roles.IsDC) {
+            try {
+                $ntds = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -ErrorAction Stop
+                $srv.Ad.NtdsPath = [string]$ntds.'DSA Database file'
+                $srv.Ad.NtdsOnOsDrive = ($srv.Ad.NtdsPath -like "$($env:SystemDrive)*")
+                $sysvol = [string](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -ErrorAction Stop).SysVol
+                $srv.Ad.SysvolPath = $sysvol
+                $srv.Ad.SysvolOnOsDrive = ($sysvol -like "$($env:SystemDrive)*")
+            } catch { $p.Errors += "AD: $($_.Exception.Message)" }
+        }
+        $p.Server = $srv
+    }
+
     # ---- Drivers (sempre array, mesmo vazio)
     try { $p.Drivers = @(Get-WinForgeDriverInventory) } catch { $p.Errors += "Drivers: $($_.Exception.Message)"; $p.Drivers = @() }
 
@@ -344,9 +389,10 @@ function Get-WinForgeSimulatedProfile {
     <#
     .SYNOPSIS
         Perfil desta máquina com uma característica forçada, para exercitar as regras sem precisar
-        do hardware correspondente (notebook, máquina virtual, servidor com IIS, HDD, Windows 10).
+        do hardware correspondente (notebook, máquina virtual, servidor com IIS, controlador de
+        domínio, HDD, Windows 10).
     #>
-    param([Parameter(Mandatory)][ValidateSet('laptop', 'vm', 'server-iis', 'hdd', 'win10')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('laptop', 'vm', 'server-iis', 'server-ad', 'hdd', 'win10')][string]$Name)
     $base = Get-WinForgeSystemProfile -SkipNetwork
     # Cada área pode ter vindo $null (coleta falhou). A simulação não pode explodir por causa disso:
     # sobrescreve o que existe e ignora o resto - o SelfTest já acusa a área faltando em separado.
@@ -364,7 +410,20 @@ function Get-WinForgeSimulatedProfile {
                 $base.OS.IsServer = $true
                 $base.OS.ProductType = 3
             }
-            if ($base.Roles) { $base.Roles.IIS = $true }
+            if ($base.Roles) { $base.Roles.IIS = $true; $base.Roles.IsDC = $false }
+            $base.Server = [ordered]@{ Smb1Enabled = $true; SmbSigningRequired = $false; TcpAutotuning = 'disabled'; TimeSource = 'Local CMOS Clock'
+                                       Iis = [ordered]@{ Installed = $true; PoolCount = 3; SiteCount = 2; LogDirectory = 'C:\inetpub\logs\LogFiles'; LogOnOsDrive = $true; AppInitInstalled = $false; DynCompressionInstalled = $true }
+                                       Ad  = [ordered]@{ NtdsPath = $null; SysvolPath = $null; NtdsOnOsDrive = $null; SysvolOnOsDrive = $null } }
+        }
+        'server-ad' {
+            if ($base.OS) {
+                $base.OS.IsServer = $true
+                $base.OS.ProductType = 2
+            }
+            if ($base.Roles) { $base.Roles.AD = $true; $base.Roles.IsDC = $true; $base.Roles.DNS = $true }
+            $base.Server = [ordered]@{ Smb1Enabled = $false; SmbSigningRequired = $true; TcpAutotuning = 'normal'; TimeSource = 'time.windows.com,0x9'
+                                       Iis = [ordered]@{ Installed = $false; PoolCount = $null; SiteCount = $null; LogDirectory = $null; LogOnOsDrive = $null; AppInitInstalled = $null; DynCompressionInstalled = $null }
+                                       Ad  = [ordered]@{ NtdsPath = 'C:\Windows\NTDS\ntds.dit'; SysvolPath = 'C:\Windows\SYSVOL\sysvol'; NtdsOnOsDrive = $true; SysvolOnOsDrive = $true } }
         }
         'hdd' {
             if ($base.Storage) {

@@ -5,8 +5,9 @@
 function Get-WinUtilBoostSystemInfo {
     <#
     .SYNOPSIS
-        Detecta a versão do Windows (10/11) e os fabricantes de GPU presentes.
-        Usado para ocultar recursos que não se aplicam ao sistema atual.
+        Detecta a versão do Windows (10/11/Server), os papéis de servidor instalados e os
+        fabricantes de GPU presentes. Usado para ocultar recursos que não se aplicam ao
+        sistema atual. Roda antes da janela abrir, então tudo aqui tem de ser barato.
     #>
     $build = [System.Environment]::OSVersion.Version.Build
     if ($env:WINFORGE_SIMULATE_BUILD) { $build = [int]$env:WINFORGE_SIMULATE_BUILD }   # só para testes (ex.: 19045 = Windows 10 22H2)
@@ -18,6 +19,34 @@ function Get-WinUtilBoostSystemInfo {
     } catch {
         $sync.OSDisplayVersion = ""
     }
+
+    # ---- Servidor e papéis (barato: ProductType + presença de serviços; o perfil completo vem depois)
+    $sync.IsServer = $false; $sync.ServerRoles = @(); $sync.IsDC = $false
+    if ($null -ne $env:WINFORGE_SIMULATE_SERVER) {
+        # só para testes: "iis,ad" simula um servidor com esses papéis; "" simula servidor sem papel
+        $sync.IsServer = $true
+        $sync.ServerRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+        $sync.IsDC = ('ad' -in $sync.ServerRoles)
+    } else {
+        try {
+            $wfOs = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $sync.IsServer = ([int]$wfOs.ProductType -ne 1)
+        } catch { }
+        if ($sync.IsServer) {
+            $roles = [System.Collections.Generic.List[string]]::new()
+            $wfSvc = @{}
+            foreach ($s in (Get-Service -ErrorAction SilentlyContinue)) { $wfSvc[$s.Name] = $true }
+            if ($wfSvc['W3SVC'])  { $roles.Add('iis') }
+            if ($wfSvc['NTDS'])   { $roles.Add('ad') }
+            if ($wfSvc['vmms'])   { $roles.Add('hyperv') }
+            if ($wfSvc['DNS'])    { $roles.Add('dns') }
+            if ($wfSvc['DHCPServer']) { $roles.Add('dhcp') }
+            $sync.ServerRoles = @($roles)
+            try { $sync.IsDC = ([int](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).DomainRole -ge 4) } catch { }
+            if ($sync.IsDC -and 'ad' -notin $sync.ServerRoles) { $sync.ServerRoles += 'ad' }
+        }
+    }
+    if ($sync.IsServer) { $sync.OSName = "Windows Server" }
 
     $vendors = [System.Collections.Generic.List[string]]::new()
     $names = [System.Collections.Generic.List[string]]::new()
@@ -42,8 +71,11 @@ function Test-WinUtilBoostEntryCompatible {
     .SYNOPSIS
         Retorna $true se a entrada (tweak/feature/appx) se aplica ao sistema atual.
         Campos opcionais na entrada:
-          "os"  : "win11" ou "win10"  -> só aparece nessa versão
-          "gpu" : "nvidia" | "amd" | "intel" (ou lista) -> só aparece se a GPU foi detectada
+          "os"       : "win11" ou "win10"  -> só aparece nessa versão
+          "gpu"      : "nvidia" | "amd" | "intel" (ou lista) -> só aparece se a GPU foi detectada
+          "platform" : "server" -> só no Windows Server; "client" -> só no Windows 10/11
+          "role"     : "iis" | "ad" | "hyperv" | "dns" | "dhcp" (ou lista) -> só aparece se
+                       QUALQUER um dos papéis listados estiver presente no servidor
     #>
     param($Entry)
 
@@ -61,6 +93,19 @@ function Test-WinUtilBoostEntryCompatible {
         }
     }
 
+    $platform = $null; $role = $null
+    if ($Entry.PSObject.Properties['platform']) { $platform = ([string]$Entry.platform).ToLower() }
+    if ($Entry.PSObject.Properties['role'])     { $role = $Entry.role }
+    if ($platform -eq 'server' -and -not $sync.IsServer) { return $false }
+    if ($platform -eq 'client' -and $sync.IsServer)      { return $false }
+    if ($role) {
+        $wanted = @($role | ForEach-Object { ([string]$_).ToLower() })
+        $have = @($sync.ServerRoles)
+        $ok = $false
+        foreach ($w in $wanted) { if ($have -contains $w) { $ok = $true } }
+        if (-not $ok) { return $false }
+    }
+
     if ($gpu) {
         $wanted = @($gpu | ForEach-Object { ([string]$_).ToLower() })
         $have = @($sync.GPUVendors)
@@ -76,19 +121,20 @@ function Test-WinUtilBoostEntryCompatible {
 function Get-WinUtilBoostConfigSubset {
     <#
     .SYNOPSIS
-        Retorna um PSCustomObject só com as entradas cuja propriedade 'tab' é igual a -Tab
-        (ou diferente, quando -Exclude). Usado para separar a aba "Jogos" da aba "Tweaks".
+        Retorna um PSCustomObject só com as entradas cuja propriedade 'tab' está em -Tab
+        (ou fora dela, quando -Exclude). Usado para separar as abas "Jogos" e "Servidor"
+        da aba "Tweaks".
     #>
     param(
         [Parameter(Mandatory)]$Config,
-        [string]$Tab,
+        [string[]]$Tab,
         [switch]$Exclude
     )
     $out = [PSCustomObject]@{}
     foreach ($p in $Config.PSObject.Properties) {
         $entryTab = ""
         if ($p.Value -and $p.Value.PSObject.Properties['tab']) { $entryTab = [string]$p.Value.tab }
-        $match = ($entryTab -eq $Tab)
+        $match = ($entryTab -in $Tab)
         if ($Exclude) { $match = -not $match }
         if ($match) { $out | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
     }
