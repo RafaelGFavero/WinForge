@@ -226,6 +226,15 @@ function Start-WinForgeProfileJob {
         return
     }
 
-    Invoke-WPFRunspace -ScriptBlock $wfBody -ArgumentList $SkipNetwork.IsPresent | Out-Null
+    # Se o despacho falhar (pool fechado, sem thread livre), o corpo do job nunca roda e o `finally`
+    # dele também não: quem zera a trava é este catch. Sem ele $sync.ProfileJobRunning ficaria ligado
+    # para sempre e o botão Atualizar nunca mais começaria um diagnóstico.
+    try {
+        Invoke-WPFRunspace -ScriptBlock $wfBody -ArgumentList $SkipNetwork.IsPresent | Out-Null
+    } catch {
+        $sync.ProfileJobRunning = $false
+        Write-WinForgeLog -Component "Profile" -Level "ERROR" -Message "Diagnóstico não pôde começar: $($_.Exception.Message)"
+        $null = Set-WinForgeProfileProgress -Label "Diagnóstico não pôde começar: $($_.Exception.Message)" -Percent 0
+    }
 }
 #endregion
