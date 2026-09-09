@@ -97,6 +97,27 @@ function Get-WinForgeSystemProfile {
 
     $p = [ordered]@{ GeneratedAt = (Get-Date).ToString('s'); Errors = @() }
 
+    # ---- Servidor simulado (WINFORGE_SIMULATE_SERVER): o mesmo override que o banner usa vale aqui.
+    # Sem isto a janela dizia "Windows Server" e o perfil devolvia OS.IsServer=$false e Server=$null:
+    # todo cartão e toda regra da aba Servidor caía em null exatamente na execução que deveria
+    # exercitá-los. Os papéis vêm de $sync (já normalizados por Get-WinUtilBoostSystemInfo); fora da
+    # janela - perfil chamado solto -, lê a variável direto, com a mesma normalização.
+    # Detecção real fica intacta quando a variável não existe.
+    $wfSimServer = ($null -ne $env:WINFORGE_SIMULATE_SERVER)
+    $wfSimRoles  = @()
+    $wfSimIsDC   = $false
+    if ($wfSimServer) {
+        $wfSyncRef = $null
+        try { $wfSyncRef = Get-Variable -Name sync -ValueOnly -ErrorAction Stop } catch { }
+        if ($wfSyncRef -and $wfSyncRef.ServerRoles) {
+            $wfSimRoles = @($wfSyncRef.ServerRoles)
+            $wfSimIsDC  = [bool]$wfSyncRef.IsDC
+        } else {
+            $wfSimRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -and $_ -ne 'none' })
+            $wfSimIsDC  = ('ad' -in $wfSimRoles)
+        }
+    }
+
     # ---- SO
     try {
         $os = Get-CimInstance Win32_OperatingSystem
@@ -106,8 +127,10 @@ function Get-WinForgeSystemProfile {
             Build          = [int][Environment]::OSVersion.Version.Build
             DisplayVersion = [string]$cv.DisplayVersion
             IsWin11        = ([Environment]::OSVersion.Version.Build -ge 22000)
-            IsServer       = ($os.ProductType -ne 1)
-            ProductType    = [int]$os.ProductType
+            IsServer       = ($wfSimServer -or ($os.ProductType -ne 1))
+            # 3 = servidor membro; sob simulação num cliente (ProductType 1) o perfil relata 3 para
+            # não ficar com IsServer=$true e ProductType=1, combinação que não existe em máquina real.
+            ProductType    = $(if ($wfSimServer -and [int]$os.ProductType -eq 1) { 3 } else { [int]$os.ProductType })
             InstallDate    = $os.InstallDate.ToString('yyyy-MM-dd')
             UptimeHours    = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1)
             Architecture   = $os.OSArchitecture
@@ -119,13 +142,25 @@ function Get-WinForgeSystemProfile {
     # interessa às regras, e DomainRole >= 4 é o que separa controlador de domínio de membro.
     $p.Roles = [ordered]@{ IIS = $false; AD = $false; HyperV = $false; DNS = $false; DHCP = $false; FileServer = $false; RDS = $false
                            IsDC = $false; DomainRole = $null; Domain = $null }
+    # $csRole é consultado uma vez só e reaproveitado pela área Máquina mais abaixo - eram duas
+    # chamadas à mesma classe, e Win32_ComputerSystem não é barato.
+    $csRole = $null
     try {
         $csRole = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
         $p.Roles.DomainRole = [int]$csRole.DomainRole
         $p.Roles.Domain     = [string]$csRole.Domain
         $p.Roles.IsDC       = ($p.Roles.DomainRole -ge 4)
     } catch { $p.Errors += "DomainRole: $($_.Exception.Message)" }
-    if ($p.OS.IsServer -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
+    if ($wfSimServer) {
+        # Simulação: os papéis vêm da lista, e não do Get-WindowsFeature que não existe no cliente.
+        # FileServer/RDS não têm sigla na simulação e ficam $false.
+        $p.Roles.IIS    = ('iis'    -in $wfSimRoles)
+        $p.Roles.AD     = ('ad'     -in $wfSimRoles)
+        $p.Roles.HyperV = ('hyperv' -in $wfSimRoles)
+        $p.Roles.DNS    = ('dns'    -in $wfSimRoles)
+        $p.Roles.DHCP   = ('dhcp'   -in $wfSimRoles)
+        $p.Roles.IsDC   = $wfSimIsDC
+    } elseif ($p.OS.IsServer -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
         try {
             $f = Get-WindowsFeature | Where-Object Installed | Select-Object -ExpandProperty Name
             $p.Roles.IIS        = 'Web-Server' -in $f
@@ -140,7 +175,8 @@ function Get-WinForgeSystemProfile {
 
     # ---- Máquina
     try {
-        $cs = Get-CimInstance Win32_ComputerSystem
+        # reaproveita a consulta do bloco Papéis; só refaz se aquela tiver falhado
+        $cs = $(if ($csRole) { $csRole } else { Get-CimInstance Win32_ComputerSystem })
         $enc = Get-CimInstance Win32_SystemEnclosure
         $chassis = @($enc.ChassisTypes)
         $laptopTypes = 8, 9, 10, 11, 12, 14, 30, 31, 32
@@ -347,7 +383,17 @@ function Get-WinForgeSystemProfile {
                            Ad  = [ordered]@{ NtdsPath = $null; SysvolPath = $null; NtdsOnOsDrive = $null; SysvolOnOsDrive = $null } }
         try { $smb = Get-SmbServerConfiguration -ErrorAction Stop; $srv.Smb1Enabled = [bool]$smb.EnableSMB1Protocol; $srv.SmbSigningRequired = [bool]$smb.RequireSecuritySignature } catch { $p.Errors += "SMB: $($_.Exception.Message)" }
         try { $tcp = (netsh int tcp show global 2>$null) -join "`n"; if ($tcp -match '(?im)^\s*Receive Window Auto-Tuning Level\s*:\s*(\S+)|^\s*Nível de Ajuste Automático da Janela de Recebimento\s*:\s*(\S+)') { $srv.TcpAutotuning = ($Matches[1] + $Matches[2]).ToLower() } } catch { }
-        try { $ts = (w32tm /query /source 2>$null) -join ' '; if ($ts) { $srv.TimeSource = $ts.Trim() } } catch { }
+        # O w32tm escreve a FALHA no stdout, não no stderr ("Ocorreu o seguinte erro: O serviço não
+        # foi iniciado. (0x80070426)"), então o 2>$null não filtra nada e a mensagem de erro virava
+        # a fonte de horário do relatório. Só o código de saída separa resposta de erro.
+        try {
+            $global:LASTEXITCODE = 0
+            $tsOut = @(w32tm /query /source 2>$null) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            $tsFirst = $(if (@($tsOut).Count) { ([string]@($tsOut)[0]).Trim() } else { '' })
+            if ($LASTEXITCODE -eq 0 -and $tsFirst) { $srv.TimeSource = $tsFirst }
+            elseif ($tsFirst) { $p.Errors += "Horário: $tsFirst" }
+            else { $p.Errors += "Horário: w32tm /query /source não respondeu (código $LASTEXITCODE)" }
+        } catch { $p.Errors += "Horário: $($_.Exception.Message)" }
         if ($p.Roles.IIS) {
             try {
                 Import-Module WebAdministration -ErrorAction Stop

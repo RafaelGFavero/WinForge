@@ -23,9 +23,11 @@ function Get-WinUtilBoostSystemInfo {
     # ---- Servidor e papéis (barato: ProductType + presença de serviços; o perfil completo vem depois)
     $sync.IsServer = $false; $sync.ServerRoles = @(); $sync.IsDC = $false
     if ($null -ne $env:WINFORGE_SIMULATE_SERVER) {
-        # só para testes: "iis,ad" simula um servidor com esses papéis; "" simula servidor sem papel
+        # só para testes: "iis,ad" simula um servidor com esses papéis; "none" simula servidor sem
+        # papel nenhum. String vazia não serve como sentinela: no Windows, $env:X = '' APAGA a
+        # variável, então "servidor sem papel" era um estado inalcançável.
         $sync.IsServer = $true
-        $sync.ServerRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+        $sync.ServerRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -and $_ -ne 'none' })
         $sync.IsDC = ('ad' -in $sync.ServerRoles)
     } else {
         try {
@@ -76,6 +78,11 @@ function Test-WinUtilBoostEntryCompatible {
           "platform" : "server" -> só no Windows Server; "client" -> só no Windows 10/11
           "role"     : "iis" | "ad" | "hyperv" | "dns" | "dhcp" (ou lista) -> só aparece se
                        QUALQUER um dos papéis listados estiver presente no servidor
+
+        ATENÇÃO ao "os": ele é decidido por BUILD (>= 22000 = win11), não por família. O Server
+        2022 é build 20348 e conta como "win10"; o Server 2025 é build 26100 e conta como "win11".
+        Entrada nova de servidor deve usar "platform"/"role" - "os" ali separa geração de kernel,
+        não cliente de servidor.
     #>
     param($Entry)
 

@@ -785,6 +785,26 @@ if ($SelfTest) {
     # senão os cartões da aba Servidor teriam de adivinhar se o perfil é velho ou é cliente.
     if (-not $wbProfile.Contains('Server')) { Write-Host "  [ERRO] perfil sem a chave Server" -ForegroundColor Red; $wbErrors++ }
     if ($wbProfile.Roles.IsDC -isnot [bool]) { Write-Host "  [ERRO] perfil: Roles.IsDC deveria ser booleano (veio '$($wbProfile.Roles.IsDC)')" -ForegroundColor Red; $wbErrors++ }
+    # Perfil x banner sob WINFORGE_SIMULATE_SERVER: os dois têm de contar a mesma história. Enquanto
+    # o perfil ignorava a variável, o SelfTest "de servidor" rodava com Server = $null e não exercitava
+    # nada da aba Servidor - o cartão só quebraria na máquina de verdade.
+    if ($null -ne $env:WINFORGE_SIMULATE_SERVER) {
+        $wbSimRoles = @($sync.ServerRoles)
+        if ($wbProfile.OS.IsServer -ne $true) { Write-Host "  [ERRO] perfil simulado: OS.IsServer deveria ser true sob WINFORGE_SIMULATE_SERVER" -ForegroundColor Red; $wbErrors++ }
+        if (('iis' -in $wbSimRoles) -and $wbProfile.Roles.IIS -ne $true) { Write-Host "  [ERRO] perfil simulado: Roles.IIS deveria ser true (papéis: $($wbSimRoles -join ','))" -ForegroundColor Red; $wbErrors++ }
+        if (('ad' -in $wbSimRoles) -and $wbProfile.Roles.IsDC -ne $true) { Write-Host "  [ERRO] perfil simulado: Roles.IsDC deveria ser true (papéis: $($wbSimRoles -join ','))" -ForegroundColor Red; $wbErrors++ }
+        # a hashtable Server tem de existir; os campos podem ser $null (os cmdlets de servidor não
+        # existem no cliente), e nesse caso o que se cobra é a linha em .Errors, não a exceção
+        if ($null -eq $wbProfile.Server) { Write-Host "  [ERRO] perfil simulado: Server não deveria ser null sob WINFORGE_SIMULATE_SERVER" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Perfil simulado: servidor=$($wbProfile.OS.IsServer) IIS=$($wbProfile.Roles.IIS) DC=$($wbProfile.Roles.IsDC) | Server.TimeSource=$(if ($null -eq $wbProfile.Server.TimeSource) { '(null)' } else { $wbProfile.Server.TimeSource })" }
+    } elseif ($wbProfile.OS.IsServer -ne $true -and $null -ne $wbProfile.Server) {
+        Write-Host "  [ERRO] perfil: Server deveria ser null num cliente sem simulação" -ForegroundColor Red; $wbErrors++
+    }
+    # TimeSource guarda a fonte de horário, não a mensagem do w32tm: com o serviço W32Time parado o
+    # comando escreve "Ocorreu o seguinte erro..." no stdout e com código != 0 - isso vai para .Errors.
+    if ($wbProfile.Server -and $wbProfile.Server.TimeSource -and ([string]$wbProfile.Server.TimeSource -match '(?i)erro|error')) {
+        Write-Host "  [ERRO] perfil: Server.TimeSource guardou uma mensagem de erro ('$($wbProfile.Server.TimeSource)')" -ForegroundColor Red; $wbErrors++
+    }
     if ($wbProfile.Errors.Count) { Write-Host "  Perfil: avisos -> $($wbProfile.Errors -join '; ')" }
     $null = $wbProfile | ConvertTo-Json -Depth 6 -Compress   # serializável
     Write-Host "  Perfil: $($wbProfile.OS.Caption) | $($wbProfile.CPU.Name) | RAM $($wbProfile.RAM.TotalGB) GB | GPU $(@($wbProfile.GPU | ForEach-Object { $_.Name }) -join ', ') | SSD=$($wbProfile.Storage.HasSSD) HDD=$($wbProfile.Storage.HasHDD) | laptop=$($wbProfile.Machine.IsLaptop) vm=$($wbProfile.Machine.IsVirtual) | drivers=$($wbProfile.Drivers.Count)"
