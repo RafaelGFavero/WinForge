@@ -918,6 +918,35 @@ if ($SelfTest) {
         $wbW10 = Invoke-WinForgeRules -Profile $wbSims['win10']
         if ($wbW10.Recommended.Contains('WPFTweaksEndTaskOnTaskbar')) { Write-Host "  [ERRO] regras (win10): 'WPFTweaksEndTaskOnTaskbar' não deveria ser recomendado" -ForegroundColor Red; $wbErrors++ }
     }
+    # Regras de servidor: as simulações são o único jeito de exercitá-las num cliente. 'server-iis'
+    # tem o papel IIS e SMB1 ligado; 'server-ad' é controlador de domínio SEM IIS - é esse par que
+    # prova que as recomendações de IIS não vazam para um DC e que as regras de informação disparam.
+    if ($wbSims['server-iis']) {
+        $wbSrvIis = Invoke-WinForgeRules -Profile $wbSims['server-iis']
+        foreach ($wbSrvK in @('WPFTweaksWFIisAlwaysRunning', 'WPFTweaksWFSrvSmb1Off')) {
+            if (-not $wbSrvIis.Recommended.Contains($wbSrvK)) { Write-Host "  [ERRO] regras (server-iis): '$wbSrvK' deveria ser recomendado" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (-not $wbSrvIis.Discouraged.Contains('WPFTweaksWBGameDVR')) { Write-Host "  [ERRO] regras (server-iis): 'WPFTweaksWBGameDVR' deveria estar em Evitar" -ForegroundColor Red; $wbErrors++ }
+        $wbSrvInfo = @($wbSrvIis.Infos | Where-Object { $_ -match 'Logs do IIS' })
+        if ($wbSrvInfo.Count -ne 1) { Write-Host "  [ERRO] regras (server-iis): esperado 1 info citando 'Logs do IIS', veio $($wbSrvInfo.Count)" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Regras (server-iis): $($wbSrvIis.Recommended.Count) recomendados, info -> $($wbSrvInfo[0])" }
+    }
+    if ($wbSims['server-ad']) {
+        $wbSrvAd = Invoke-WinForgeRules -Profile $wbSims['server-ad']
+        foreach ($wbSrvId in @('ad-dc', 'dc-ntds-os-drive')) {
+            if ($wbSrvId -notin @($wbSrvAd.Fired)) { Write-Host "  [ERRO] regras (server-ad): a regra '$wbSrvId' deveria ter disparado (disparadas: $(@($wbSrvAd.Fired) -join ', '))" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wbSrvAdIis = @(@($wbSrvAd.Recommended.Keys) | Where-Object { $_ -like 'WPFTweaksWFIis*' })
+        if ($wbSrvAdIis.Count) { Write-Host "  [ERRO] regras (server-ad): um DC sem IIS não pode receber $($wbSrvAdIis -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Regras (server-ad): $(@($wbSrvAd.Fired) -join ', ')" }
+    }
+    # Cartão Servidor: existe no perfil de servidor e NÃO existe num cliente - o relatório HTML sai
+    # das mesmas seções, então esta é a trava dos dois de uma vez.
+    if ($wbSims['server-iis']) {
+        $wbSecSrv = @(Get-WinForgeDiagSections -Profile $wbSims['server-iis'] | ForEach-Object { [string]$_.Title })
+        if ('Servidor' -notin $wbSecSrv) { Write-Host "  [ERRO] Diagnóstico (server-iis): esperada a seção 'Servidor' (veio: $($wbSecSrv -join ', '))" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Diagnóstico (server-iis): $($wbSecSrv.Count) seções, com 'Servidor'" }
+    }
     # por último o perfil real, para que $sync.Recommended fique com o desta máquina
     # (Invoke-WinForgeRules sobrescreve $sync.Recommended: as simulações acima deixaram lixo lá)
     $sync.Profile = $wbProfile
@@ -927,6 +956,15 @@ if ($SelfTest) {
     Write-Host "    recomendar : $(@($wbRules.Recommended.Keys) -join ', ')"
     Write-Host "    evitar     : $(@($wbRules.Discouraged.Keys) -join ', ')"
     foreach ($wbInfo in @($wbRules.Infos)) { Write-Host "    info       : $wbInfo" }
+    # Num cliente de verdade nada de servidor pode ser recomendado, e o Diagnóstico não pode ganhar o
+    # cartão Servidor: as entradas WF* nem existem na janela aqui, e recomendar chave invisível seria
+    # uma recomendação que ninguém consegue marcar.
+    if (-not $wbProfile.OS.IsServer) {
+        $wbCliSrv = @(@($wbRules.Recommended.Keys) | Where-Object { $_ -like 'WPFTweaksWF*' })
+        if ($wbCliSrv.Count) { Write-Host "  [ERRO] regras (cliente real): nada de servidor deveria ser recomendado, veio $($wbCliSrv -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        $wbCliSec = @(Get-WinForgeDiagSections -Profile $wbProfile | ForEach-Object { [string]$_.Title })
+        if ('Servidor' -in $wbCliSec) { Write-Host "  [ERRO] Diagnóstico (cliente real): a seção 'Servidor' não deveria existir" -ForegroundColor Red; $wbErrors++ }
+    }
     # ---------------------------------------------------------------- IIS: helpers puros (sem IIS)
     # Nenhum destes helpers toca no provedor IIS:\, então dão para exercitar em qualquer máquina - e
     # eles são o miolo do endereçamento, da conversão de valores e da comparação que decide o que
@@ -1249,6 +1287,24 @@ if ($SelfTest) {
         } catch {
             Write-Host "  [ERRO] aba Servidor: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
+        # Contornos verdes na aba Servidor: as regras de servidor só valem alguma coisa se chegarem à
+        # tela. Roda com o perfil simulado 'server-iis' (o perfil real desta máquina pode ser cliente),
+        # conta as linhas verdes de serverpanel e devolve $sync.Recommended ao perfil real - as
+        # conferências seguintes (lista do Diagnóstico, contornos) contam com ele.
+        if ($sync.IsServer -and $wbSims['server-iis']) {
+            try {
+                $null = Invoke-WinForgeRules -Profile $wbSims['server-iis']
+                Update-WinForgeRecommendationVisuals | Out-Null
+                $wfSrvVerdes = @($wfSrvKeys | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush -and [string]$_.Border.BorderBrush.Color -eq '#FF2E7D32' }).Count
+                if ($wfSrvVerdes -lt 5) { Write-Host "  [ERRO] aba Servidor: esperado ao menos 5 contornos verdes em serverpanel, veio $wfSrvVerdes" -ForegroundColor Red; $wbErrors++ }
+                else { Write-Host "  Aba Servidor (contornos): $wfSrvVerdes linha(s) verde(s) com as regras de server-iis" }
+            } catch {
+                Write-Host "  [ERRO] aba Servidor (contornos): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+            } finally {
+                $null = Invoke-WinForgeRules -Profile $wbProfile
+                Update-WinForgeRecommendationVisuals | Out-Null
+            }
+        }
         # Visibilidade das abas: a MESMA função que roda antes do ShowDialog, chamada nos dois
         # estados. Forçar $sync.IsServer aqui é o que permite testar o lado "servidor" num cliente
         # (e o lado "cliente" quando o SelfTest roda sob WINFORGE_SIMULATE_SERVER).
@@ -1280,7 +1336,10 @@ if ($SelfTest) {
         # Discouraged - repetir a conta da UI não provaria nada.
         try {
             $wfCards = $sync.WPFDiagCards.Children.Count
-            if ($wfCards -lt 8) { Write-Host "  [ERRO] Diagnóstico: esperado ao menos 8 cartões, veio $wfCards" -ForegroundColor Red; $wbErrors++ }
+            # 9 cartões fixos (Sistema, Máquina, Processador, Memória, Placa de vídeo, Armazenamento,
+            # Rede, Energia, Segurança e estado) + o cartão Servidor, que só existe no Windows Server.
+            $wfCardsEsperado = 9 + $(if ($sync.IsServer) { 1 } else { 0 })
+            if ($wfCards -ne $wfCardsEsperado) { Write-Host "  [ERRO] Diagnóstico: esperado $wfCardsEsperado cartões (servidor=$($sync.IsServer)), veio $wfCards" -ForegroundColor Red; $wbErrors++ }
             $wfDrvUI = $sync.WPFDiagDrivers.Items.Count
             $wfDrvPerfil = @($sync.Profile.Drivers).Count
             if ($wfDrvUI -ne $wfDrvPerfil) { Write-Host "  [ERRO] Diagnóstico: tabela com $wfDrvUI driver(s), perfil com $wfDrvPerfil" -ForegroundColor Red; $wbErrors++ }

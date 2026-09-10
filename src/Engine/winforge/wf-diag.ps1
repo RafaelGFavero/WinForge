@@ -45,7 +45,7 @@ function Get-WinForgeDiagSections {
     <#
     .SYNOPSIS
         Modelo do diagnóstico: uma seção por área do perfil (Sistema, Máquina, CPU, Memória, GPU,
-        Armazenamento, Rede, Energia, Segurança e estado).
+        Armazenamento, Rede, Energia, Segurança e estado) e, só no Windows Server, Servidor.
     .DESCRIPTION
         Fonte única dos cartões da janela e do relatório HTML. Área que a coleta não trouxe vira
         seção com linhas 'n/d' - o motivo real da falha aparece nas informações (perfil .Errors).
@@ -172,6 +172,47 @@ function Get-WinForgeDiagSections {
     Add-WinForgeDiagLine $sec "Windows Search" (Format-WinForgeDiagValue $stt.WSearch)
     Add-WinForgeDiagLine $sec "Inicialização rápida" (Format-WinForgeDiagValue $stt.FastStartup)
     $sections.Add($sec)
+
+    # ---- Servidor (só no Windows Server; num cliente este cartão não existe)
+    # O perfil de servidor traz uma área inteira que nenhum outro cartão mostra (SMB, TCP, horário,
+    # IIS, AD). Sem este cartão o relatório de um servidor sairia igual ao de um desktop e as regras
+    # de servidor pareceriam ter saído do nada.
+    if ($os.IsServer) {
+        $srv = $Profile.Server
+        $sec = New-WinForgeDiagSection "Servidor"
+        $papeis = @()
+        foreach ($r in @('IIS', 'AD', 'HyperV', 'DNS', 'DHCP', 'FileServer', 'RDS')) {
+            if ($Profile.Roles.$r) { $papeis += $r }
+        }
+        if ($Profile.Roles.IsDC) { $papeis += 'controlador de domínio' }
+        Add-WinForgeDiagLine $sec "Papéis" $(if ($papeis.Count) { $papeis -join ', ' } else { 'nenhum detectado' })
+        # Área Servidor ausente (perfil antigo, coleta que falhou inteira): as linhas viram 'n/d' em
+        # vez de sumir - o cartão continua contando o mesmo enredo, só sem os valores.
+        Add-WinForgeDiagLine $sec "SMB1" (Format-WinForgeDiagValue $(if ($srv) { $srv.Smb1Enabled } else { $null }))
+        Add-WinForgeDiagLine $sec "Assinatura SMB obrigatória" (Format-WinForgeDiagValue $(if ($srv) { $srv.SmbSigningRequired } else { $null }))
+        Add-WinForgeDiagLine $sec "Ajuste automático TCP" (Format-WinForgeDiagValue $(if ($srv) { $srv.TcpAutotuning } else { $null }))
+        Add-WinForgeDiagLine $sec "Fonte de horário" (Format-WinForgeDiagValue $(if ($srv) { $srv.TimeSource } else { $null }))
+        $iis = if ($srv) { $srv.Iis } else { $null }
+        if ($iis -and $iis.Installed) {
+            Add-WinForgeDiagLine $sec "IIS" ("{0} pool(s), {1} site(s)" -f (Format-WinForgeDiagValue $iis.PoolCount), (Format-WinForgeDiagValue $iis.SiteCount))
+            $logs = Format-WinForgeDiagValue $iis.LogDirectory
+            if ($iis.LogOnOsDrive -eq $true) { $logs = "$logs (disco do sistema)" }
+            Add-WinForgeDiagLine $sec "Logs do IIS" $logs
+        } else {
+            Add-WinForgeDiagLine $sec "IIS" "não instalado"
+        }
+        # NTDS/SYSVOL só existem num controlador de domínio: num servidor membro as duas linhas seriam
+        # 'n/d' fixo, e 'n/d' que nunca muda é ruído, não informação.
+        if ($Profile.Roles.IsDC) {
+            $ad = if ($srv) { $srv.Ad } else { $null }
+            foreach ($par in @(@('NTDS', 'NtdsPath', 'NtdsOnOsDrive'), @('SYSVOL', 'SysvolPath', 'SysvolOnOsDrive'))) {
+                $texto = Format-WinForgeDiagValue $(if ($ad) { $ad."$($par[1])" } else { $null })
+                if ($ad -and $ad."$($par[2])" -eq $true) { $texto = "$texto (disco do sistema)" }
+                Add-WinForgeDiagLine $sec $par[0] $texto
+            }
+        }
+        $sections.Add($sec)
+    }
 
     return @($sections)
 }

@@ -466,7 +466,10 @@ function Get-WinForgeSimulatedProfile {
                 $base.OS.IsServer = $true
                 $base.OS.ProductType = 2
             }
-            if ($base.Roles) { $base.Roles.AD = $true; $base.Roles.IsDC = $true; $base.Roles.DNS = $true }
+            # IIS = $false explícito: sob WINFORGE_SIMULATE_SERVER=iis,ad o perfil base já vem com o
+            # papel IIS, e um "DC com IIS" não exercitaria o que esta simulação existe para provar -
+            # que as recomendações de IIS não vazam para um controlador de domínio sem IIS.
+            if ($base.Roles) { $base.Roles.AD = $true; $base.Roles.IsDC = $true; $base.Roles.DNS = $true; $base.Roles.IIS = $false }
             $base.Server = [ordered]@{ Smb1Enabled = $false; SmbSigningRequired = $true; TcpAutotuning = 'normal'; TimeSource = 'time.windows.com,0x9'
                                        Iis = [ordered]@{ Installed = $false; PoolCount = $null; SiteCount = $null; LogDirectory = $null; LogOnOsDrive = $null; AppInitInstalled = $null; DynCompressionInstalled = $null }
                                        Ad  = [ordered]@{ NtdsPath = 'C:\Windows\NTDS\ntds.dit'; SysvolPath = 'C:\Windows\SYSVOL\sysvol'; NtdsOnOsDrive = $true; SysvolOnOsDrive = $true } }
