@@ -278,19 +278,52 @@ function Test-WinForgeIisAvailable {
     }
 }
 
+function Get-WinForgeMachineDataRoot {
+    <#
+    .SYNOPSIS
+        A base pública da máquina (%ProgramData%), lida da API de pastas do Windows e NUNCA da
+        variável de ambiente.
+    .DESCRIPTION
+        %ProgramData% e %TEMP% são variáveis de USUÁRIO: moram em HKCU\Environment, qualquer
+        processo de integridade média da conta as reescreve, e o motor elevado HERDA o ambiente de
+        quem o abriu (o launcher repassa o ambiente). Com 'ProgramData=C:\Users\Public\evil' toda a
+        raiz de confiança do WinForge - a pasta de backup, a pasta de downloads e a parada da cadeia
+        de ancestrais - mudava para uma pasta do atacante, e a conferência de dono e DACL passava
+        alegremente, porque lá ele é dono de tudo.
+
+        [Environment]::GetFolderPath(CommonApplicationData) não olha o ambiente: vem de
+        SHGetFolderPath, que lê HKLM (Shell Folders da máquina). É a MESMA fonte para os dois
+        padrões (iis-backup e downloads) e para Get-WinForgeSnapshotChainStop - se um deles usasse
+        outra fonte, a cadeia conferida não seria a cadeia usada.
+
+        A reserva não volta para o ambiente: sai da pasta do sistema ([Environment]::SystemDirectory,
+        que vem de GetSystemDirectory), da qual só se aproveita a letra do volume.
+    .OUTPUTS
+        O caminho normalizado, sem barra final.
+    #>
+    $base = ''
+    try { $base = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData) } catch { $base = '' }
+    if ([string]::IsNullOrWhiteSpace($base)) {
+        try { $base = Join-Path ([System.IO.Path]::GetPathRoot([Environment]::SystemDirectory)) 'ProgramData' } catch { $base = '' }
+    }
+    if ([string]::IsNullOrWhiteSpace($base)) { return '' }
+    try { return ([System.IO.Path]::GetFullPath($base)).TrimEnd('\') } catch { return $base.TrimEnd('\') }
+}
+
 function Get-WinForgeSnapshotRoot {
     <#
     .SYNOPSIS
         Pasta dos backups (IIS e ajustes de servidor). -Root existe para o -SelfTest não escrever em
         %ProgramData%.
     .DESCRIPTION
-        O caminho é normalizado UMA vez ([System.IO.Path]::GetFullPath): daqui para baixo todo mundo
-        conta com a mesma forma - sem '..', sem barra dupla, sem caminho relativo -, e é essa forma
-        que a checagem da cadeia de pastas confere.
+        A base vem de Get-WinForgeMachineDataRoot (API de pastas), e não de $env:ProgramData - ver
+        lá por quê. O caminho é normalizado UMA vez ([System.IO.Path]::GetFullPath): daqui para
+        baixo todo mundo conta com a mesma forma - sem '..', sem barra dupla, sem caminho relativo
+        -, e é essa forma que a checagem da cadeia de pastas confere.
     #>
     param([string]$Root)
 
-    $alvo = if ($Root) { $Root } else { (Join-Path $env:ProgramData 'WinForge\iis-backup') }
+    $alvo = if ($Root) { $Root } else { (Join-Path (Get-WinForgeMachineDataRoot) 'WinForge\iis-backup') }
     try { return [System.IO.Path]::GetFullPath($alvo) } catch { return $alvo }
 }
 
@@ -355,13 +388,33 @@ function Get-WinForgeSnapshotChainStop {
         grupo Usuários, e %ProgramData% faz o mesmo. É justamente por isso que a cadeia ABAIXO delas
         precisa ser conferida: qualquer usuário cria subpasta ali, e quem cria é dono.
 
+        Cada parada A MAIS aqui é uma pasta a MENOS conferida, então quem entra na lista importa:
+
+        - A base da máquina vem de Get-WinForgeMachineDataRoot (API de pastas), nunca de
+          $env:ProgramData. É a mesma fonte da pasta padrão, e tem de ser.
+        - O %TEMP% só entra com -ExplicitRoot, isto é, quando quem chamou passou um -Root próprio -
+          na prática o -SelfTest. Ele estava aqui SEMPRE, e como %TEMP% é variável de usuário
+          bastava apontá-la para '%ProgramData%\WinForge' para que a pasta do MEIO virasse parada e
+          saísse da conferência: é exatamente a pasta cuja ACL herdada dá FILE_DELETE_CHILD ao
+          usuário. Com -ExplicitRoot o valor sai de [System.IO.Path]::GetTempPath() - que também é
+          ambiente, e por isso mesmo só vale no caminho de teste, onde a pasta é escolhida por quem
+          chamou.
+
         A raiz do volume também para a subida, para o caso de uma pasta fora das duas bases - essa
         parada mora em Test-WinForgeSnapshotRootPath, que é quem sabe de que volume o caminho é.
+    .PARAMETER ExplicitRoot
+        Quem chamou passou um -Root próprio: %TEMP% entra na lista de paradas.
     .OUTPUTS
         Hashtable com os caminhos normalizados (sem barra final) como chaves.
     #>
+    param([switch]$ExplicitRoot)
+
+    $bases = @((Get-WinForgeMachineDataRoot))
+    if ($ExplicitRoot) {
+        try { $bases += [System.IO.Path]::GetTempPath() } catch { }
+    }
     $paradas = @{}
-    foreach ($base in @($env:ProgramData, $env:TEMP)) {
+    foreach ($base in $bases) {
         if ([string]::IsNullOrWhiteSpace($base)) { continue }
         try { $paradas[([System.IO.Path]::GetFullPath($base)).TrimEnd('\')] = $true } catch { }
     }
@@ -390,16 +443,22 @@ function Test-WinForgeSnapshotRootPath {
         junção no lugar - sem nunca deixar um ponto de reanálise onde a checagem antiga olhava. A
         lista vem da base pública (exclusive) até a última pasta (inclusive) e na ordem de FORA para
         DENTRO: quem recusa quer nomear o elo mais alto que quebrou, não o último.
+    .PARAMETER ExplicitRoot
+        Quem chamou passou um -Root próprio (o -SelfTest): %TEMP% também para a subida. Sem esta
+        chave a única base é a da máquina - ver Get-WinForgeSnapshotChainStop.
     .OUTPUTS
         @{ Trusted = <bool>; Reason = <string>; Path = <caminho normalizado>; Chain = <string[]> }.
     #>
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$ExplicitRoot
+    )
 
     $full = $Root
     try { $full = [System.IO.Path]::GetFullPath($Root) }
     catch { return @{ Trusted = $false; Reason = "'$Root' não é um caminho válido: $($_.Exception.Message)"; Path = $Root; Chain = @() } }
 
-    $paradas = Get-WinForgeSnapshotChainStop
+    $paradas = Get-WinForgeSnapshotChainStop -ExplicitRoot:$ExplicitRoot
     $raizVolume = ''
     try { $raizVolume = [System.IO.Path]::GetPathRoot($full) } catch { $raizVolume = '' }
     $cadeia = New-Object System.Collections.Generic.List[string]
@@ -483,8 +542,8 @@ function Test-WinForgeSnapshotRootTrusted {
         3. Ter uma ACE de permissão que dê escrita, modificação ou controle total a um SID fora da
            lista de permissão.
 
-        Os itens 2 e 3 valem para a CADEIA INTEIRA, de %ProgramData% (ou %TEMP%) exclusive até a
-        última pasta inclusive - não só para a última. Um '%ProgramData%\WinForge' criado por
+        Os itens 2 e 3 valem para a CADEIA INTEIRA, da base da máquina exclusive (e, só com
+        -ExplicitRoot, também de %TEMP%) até a última pasta inclusive - não só para a última. Um '%ProgramData%\WinForge' criado por
         New-Item com a herança de %ProgramData% dá FILE_DELETE_CHILD ao usuário: durante os minutos
         de um download ele RENOMEIA 'downloads', planta uma junção no lugar e troca o arquivo entre
         a conferência da assinatura e o Start-Process. A última pasta continuaria com dono e DACL
@@ -511,7 +570,7 @@ function Test-WinForgeSnapshotRootTrusted {
 
     # A cadeia de pastas é conferida ANTES de a pasta existir: a junção que desvia o backup mora num
     # ancestral, e ela pode estar lá antes da primeira execução.
-    $caminho = Test-WinForgeSnapshotRootPath -Root $Root
+    $caminho = Test-WinForgeSnapshotRootPath -Root $Root -ExplicitRoot:$ExplicitRoot
     if (-not $caminho.Trusted) { return @{ Trusted = $false; Reason = $caminho.Reason } }
     $Root = $caminho.Path
     $confiaveis = Get-WinForgeSnapshotTrustedSid -ExplicitRoot:$ExplicitRoot
@@ -519,7 +578,20 @@ function Test-WinForgeSnapshotRootTrusted {
     # De fora para dentro: a recusa nomeia o elo mais alto que quebrou, que é o que o administrador
     # precisa consertar - uma pasta do meio aberta explica sozinha por que a última não vale nada.
     foreach ($dir in @($caminho.Chain)) {
-        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        # Pasta que NÃO EXISTE é pulada; pasta que existe e não deixa nem dizer se existe é RECUSA.
+        # Test-Path devolve $false para as duas, e com isso um ancestral inacessível saía da
+        # conferência sem deixar rastro - a única defesa que existe aqui é conferir, e o que não pôde
+        # ser conferido não é um "sim". A diferença entre "não existe" e "não posso olhar" está no
+        # tipo da exceção de GetAttributes, e não no valor de retorno.
+        $existe = $true
+        try { [void][System.IO.File]::GetAttributes($dir) }
+        catch {
+            $erro = $_.Exception
+            while ($erro.InnerException) { $erro = $erro.InnerException }
+            if ($erro -is [System.IO.DirectoryNotFoundException] -or $erro -is [System.IO.FileNotFoundException]) { $existe = $false }
+            else { return @{ Trusted = $false; Reason = "não foi possível conferir '$dir': $($erro.Message)" } }
+        }
+        if (-not $existe) { continue }
         try {
             $acl = Get-Acl -LiteralPath $dir -ErrorAction Stop
             $dono = $null

@@ -427,10 +427,14 @@ function Get-WinForgeDownloadRoot {
         Só monta o caminho, normalizado uma vez ([System.IO.Path]::GetFullPath) como a pasta de
         backup: daqui para baixo todo mundo conta com a mesma forma. Quem cria e quem confere é
         Confirm-WinForgeDownloadRoot.
+
+        A base é Get-WinForgeMachineDataRoot - a MESMA da pasta de backup e a mesma da parada da
+        cadeia -, e não $env:ProgramData: variável de usuário não escolhe a pasta em que o motor
+        elevado grava um instalador que ele mesmo vai abrir.
     #>
     param([string]$Root)
 
-    $alvo = if ($Root) { $Root } else { (Join-Path $env:ProgramData 'WinForge\downloads') }
+    $alvo = if ($Root) { $Root } else { (Join-Path (Get-WinForgeMachineDataRoot) 'WinForge\downloads') }
     try { return [System.IO.Path]::GetFullPath($alvo) } catch { return $alvo }
 }
 
@@ -524,6 +528,49 @@ function Test-WinForgeNvidiaSigner {
     return $true
 }
 
+function Get-WinForgeDownloadFailureText {
+    <#
+    .SYNOPSIS
+        Traduz o erro de um download que falhou para o texto que vai para o log e para a barra de
+        status, dizendo REDIRECIONAMENTO quando foi disso que se tratou.
+    .DESCRIPTION
+        O download roda com -MaximumRedirection 0 de propósito: os endereços do catálogo da NVIDIA
+        são diretos, e seguir um redirecionamento é aceitar um host que Test-WinForgeNvidiaDownloadUrl
+        nunca viu. Só que a recusa precisa CHEGAR ao usuário, e no PowerShell 5.1 ela não vem escrita
+        na mensagem: o Invoke-WebRequest levanta um erro cujo Exception.Message é genérico, e a única
+        coisa que nomeia o motivo é o FullyQualifiedErrorId, que começa com 'MaximumRedirectExceeded'.
+        Procurar 'redirec' na mensagem - que era o que se fazia - só funcionava por acaso, e não
+        funcionava no 5.1: o usuário via um erro de rede qualquer no lugar de "recusei porque
+        tentaram me mandar para outro lugar".
+
+        Então são quatro sinais, e qualquer um deles basta: o FQID, o texto da mensagem, o
+        ErrorDetails.Message (que é onde alguns cmdlets põem o texto de verdade) e um código de
+        resposta 3xx. 'redirec' pega tanto "redirection" quanto "redirecionamento" - a mensagem do
+        Invoke-WebRequest vem no idioma do Windows.
+    .PARAMETER ErrorRecord
+        O erro capturado no catch.
+    .OUTPUTS
+        O texto da causa, em português.
+    #>
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $causa = ''
+    try { $causa = [string]$ErrorRecord.Exception.Message } catch { $causa = '' }
+    if ([string]::IsNullOrWhiteSpace($causa)) { $causa = [string]$ErrorRecord }
+    $fqid = ''
+    try { $fqid = [string]$ErrorRecord.FullyQualifiedErrorId } catch { $fqid = '' }
+    $detalhe = ''
+    try { if ($ErrorRecord.ErrorDetails) { $detalhe = [string]$ErrorRecord.ErrorDetails.Message } } catch { $detalhe = '' }
+    $codigo = $null
+    try { $codigo = [int]$ErrorRecord.Exception.Response.StatusCode } catch { $codigo = $null }
+
+    $redirecionou = ($fqid -like 'MaximumRedirectExceeded*') -or
+                    ($causa -match 'redirec') -or ($detalhe -match 'redirec') -or
+                    ($null -ne $codigo -and $codigo -ge 300 -and $codigo -lt 400)
+    if ($redirecionou) { return "o servidor tentou redirecionar o download; recusado ($causa)" }
+    return $causa
+}
+
 function Install-WinForgeNvidiaDriver {
     <#
     .SYNOPSIS
@@ -613,14 +660,9 @@ function Install-WinForgeNvidiaDriver {
         Move-Item -LiteralPath $parcial -Destination $destino -Force -ErrorAction Stop
     } catch {
         Remove-Item -LiteralPath $parcial -Force -ErrorAction SilentlyContinue
-        $causa = [string]$_.Exception.Message
-        $codigo = $null
-        try { $codigo = [int]$_.Exception.Response.StatusCode } catch { $codigo = $null }
-        # 'redirec' pega tanto "redirection" quanto "redirecionamento": a mensagem do
-        # Invoke-WebRequest vem no idioma do Windows.
-        if ($causa -match 'redirec' -or ($codigo -ge 300 -and $codigo -lt 400)) {
-            $causa = "o servidor respondeu com um redirecionamento e os endereços da NVIDIA são diretos ($causa)"
-        }
+        # Quem nomeia o motivo é Get-WinForgeDownloadFailureText: no PowerShell 5.1 a recusa de
+        # redirecionamento só aparece no FullyQualifiedErrorId, não na mensagem.
+        $causa = Get-WinForgeDownloadFailureText -ErrorRecord $_
         $msg = "Download do driver NVIDIA $Version falhou: $causa"
         Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
         return @{ Path = $null; Verified = $false; Started = $false; Text = $msg }

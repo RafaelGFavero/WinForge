@@ -1555,7 +1555,16 @@ if ($SelfTest) {
             if (-not $wbSecComRoot.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta de teste com -Root explícito deveria passar ('$($wbSecComRoot.Reason)')" -ForegroundColor Red; $wbErrors++ }
             $wbSecPadrao = Test-WinForgeSnapshotRootTrusted -Root $wbSecDono
             if ($wbSecPadrao.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta com dono fora de SYSTEM/Administradores passou nas regras da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
-            elseif ($wbSecPadrao.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Backup (dono): o motivo da recusa não fala do dono ('$($wbSecPadrao.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]::IsNullOrWhiteSpace([string]$wbSecPadrao.Reason)) { Write-Host "  [ERRO] Backup (dono): recusou sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+            # A recusa acima cai no PERFIL do usuário, antes de chegar na pasta de teste: com as
+            # regras da pasta padrão a cadeia não para mais em %TEMP% (a parada é só da base da
+            # máquina, ver Get-WinForgeSnapshotChainStop), e no caminho até %TEMP% tem elo que o
+            # usuário escreve. Por isso a regra de DONO é cobrada onde ela mora, e não pelo texto
+            # de uma recusa que depende de onde a pasta de teste foi parar.
+            $wbSecDonoPadrao = Get-WinForgeSnapshotTrustedSid -Owner
+            $wbSecDonoTeste = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot
+            if ($wbSecDonoPadrao.ContainsKey($wbSecEu.Value)) { Write-Host "  [ERRO] Backup (dono): a identidade atual é dona aceitável da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wbSecDonoTeste.ContainsKey($wbSecEu.Value)) { Write-Host "  [ERRO] Backup (dono): com -ExplicitRoot a identidade atual deveria poder ser dona" -ForegroundColor Red; $wbErrors++ }
         }
         # Aplicar numa pasta que qualquer um escreve: recusa antes de tudo, sem arquivo e sem
         # alteração. -CaptureOnly porque é o único caminho de aplicação que roda num cliente, e ele
@@ -2490,10 +2499,41 @@ if ($SelfTest) {
             if ($wfAcUrlVeio -ne [bool]$wfAcUrl[1]) { Write-Host "  [ERRO] URL de download NVIDIA: '$($wfAcUrl[0])' deveria dar $($wfAcUrl[1]), deu $wfAcUrlVeio" -ForegroundColor Red; $wbErrors++ }
             else { $wfAcUrlOk++ }
         }
+        # Recusa de redirecionamento: o download roda com -MaximumRedirection 0, mas no PowerShell
+        # 5.1 quem diz que foi redirecionamento NÃO é a mensagem (que vem genérica) - é o
+        # FullyQualifiedErrorId, que começa com 'MaximumRedirectExceeded'. Procurar 'redirec' na
+        # mensagem deixava o usuário com um erro de rede qualquer no lugar da recusa. O mapeamento é
+        # provado com ErrorRecord SINTÉTICO: nenhum byte de rede sai daqui.
+        # Caso: @(nome, FQID, mensagem, ErrorDetails, esperado dizer 'redirecionar')
+        $wfAcRedCasos = @(
+            @('FQID (5.1)', 'MaximumRedirectExceeded,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'A operação não pôde ser concluída.', $null, $true),
+            @('ErrorDetails', 'WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'Erro no servidor remoto.', 'O servidor respondeu com um redirecionamento.', $true),
+            @('mensagem', 'WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'The maximum redirection count has been exceeded.', $null, $true),
+            @('falha comum', 'WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'O tempo limite da operação foi atingido.', $null, $false)
+        )
+        $wfAcRedOk = 0
+        foreach ($wfAcRedCaso in $wfAcRedCasos) {
+            $wfAcRedErro = New-Object System.Management.Automation.ErrorRecord (
+                (New-Object System.Net.WebException ([string]$wfAcRedCaso[2])),
+                [string]$wfAcRedCaso[1],
+                ([System.Management.Automation.ErrorCategory]::InvalidOperation),
+                $null)
+            if ($null -ne $wfAcRedCaso[3]) { $wfAcRedErro.ErrorDetails = New-Object System.Management.Automation.ErrorDetails ([string]$wfAcRedCaso[3]) }
+            $wfAcRedTxt = [string](Get-WinForgeDownloadFailureText -ErrorRecord $wfAcRedErro)
+            $wfAcRedViu = [bool]($wfAcRedTxt -like '*o servidor tentou redirecionar o download; recusado*')
+            if ($wfAcRedViu -ne [bool]$wfAcRedCaso[4]) { Write-Host "  [ERRO] Recusa de redirecionamento ($($wfAcRedCaso[0])): esperado dizer redirecionamento = $($wfAcRedCaso[4]), veio '$wfAcRedTxt'" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAcRedTxt -notlike "*$($wfAcRedCaso[2])*") { Write-Host "  [ERRO] Recusa de redirecionamento ($($wfAcRedCaso[0])): a causa original sumiu do texto ('$wfAcRedTxt')" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcRedOk++ }
+        }
+        # E o catch do download usa ESTE mapeamento, e não uma cópia dele.
+        $wfAcRedDef = [string]${function:Install-WinForgeNvidiaDriver}
+        if ($wfAcRedDef -notmatch 'Get-WinForgeDownloadFailureText -ErrorRecord \$_') { Write-Host "  [ERRO] Recusa de redirecionamento: Install-WinForgeNvidiaDriver não usa Get-WinForgeDownloadFailureText" -ForegroundColor Red; $wbErrors++ }
         # Simulação do download: devolve o caminho de destino dentro da pasta de downloads e NÃO
         # começa nada. Nenhum byte sai da rede e nenhum arquivo nasce no disco.
         $wfAcRaiz = Get-WinForgeDownloadRoot
-        if ($wfAcRaiz -ne (Join-Path $env:ProgramData 'WinForge\downloads')) { Write-Host "  [ERRO] Get-WinForgeDownloadRoot: veio '$wfAcRaiz'" -ForegroundColor Red; $wbErrors++ }
+        # A base esperada sai da API de pastas, e não de $env:ProgramData - se o teste cobrasse a
+        # variável, ele passaria justamente no cenário que o conserto existe para impedir.
+        if ($wfAcRaiz -ne (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'WinForge\downloads')) { Write-Host "  [ERRO] Get-WinForgeDownloadRoot: veio '$wfAcRaiz'" -ForegroundColor Red; $wbErrors++ }
         $wfAcSeco = Install-WinForgeNvidiaDriver -Url 'https://us.download.nvidia.com/Windows/616.92/616.92-desktop-win10-win11-64bit-international-dch-whql.exe' -Version '616.92' -DryRun
         if (-not ([string]$wfAcSeco.Path).StartsWith($wfAcRaiz, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: '$($wfAcSeco.Path)' fora da pasta de downloads '$wfAcRaiz'" -ForegroundColor Red; $wbErrors++ }
         if ($wfAcSeco.Started -ne $false) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: Started deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
@@ -2583,9 +2623,13 @@ if ($SelfTest) {
             if (-not $wfAcComRoot.Trusted) { Write-Host "  [ERRO] Pasta de downloads (dono): a pasta de teste deveria passar com -ExplicitRoot ('$($wfAcComRoot.Reason)')" -ForegroundColor Red; $wbErrors++ }
             $wfAcConfDono = Confirm-WinForgeDownloadRoot -Root $wfAcRaizDono
             if ($wfAcConfDono.Ok) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: pasta com dono fora de SYSTEM/Administradores foi aceita" -ForegroundColor Red; $wbErrors++ }
-            elseif ([string]$wfAcConfDono.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: o motivo da recusa não fala do dono ('$($wfAcConfDono.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            # O motivo exato depende de onde a cadeia quebra primeiro - sem a parada de %TEMP% (que
+            # só existe com -ExplicitRoot) ela sobe pelo perfil do usuário, e lá o elo aberto
+            # aparece antes da pasta de teste. O que se cobra é a recusa COM motivo; a regra de dono
+            # em si é cobrada em 'Backup (dono)', sobre as listas de SID.
+            elseif ([string]::IsNullOrWhiteSpace([string]$wfAcConfDono.Reason)) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: recusou a pasta de usuário sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
         }
-        Write-Host "  Ações de driver: $wfAcOk de $($wfAcCasos.Count) linha(s) com a ação certa, $wfAcUrlOk de $($wfAcUrls.Count) URL(s) julgada(s), $wfAcRdnOk de $($wfAcRdnCasos.Count) assunto(s) de certificado, download e instalação recusados em SelfTest"
+        Write-Host "  Ações de driver: $wfAcOk de $($wfAcCasos.Count) linha(s) com a ação certa, $wfAcUrlOk de $($wfAcUrls.Count) URL(s) julgada(s), $wfAcRdnOk de $($wfAcRdnCasos.Count) assunto(s) de certificado, $wfAcRedOk de $($wfAcRedCasos.Count) erro(s) de download traduzido(s), download e instalação recusados em SelfTest"
     } catch {
         Write-Host "  [ERRO] ações de driver: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
@@ -2624,11 +2668,13 @@ if ($SelfTest) {
             #    de %TEMP% e reprovar C:\ (que dá 'criar pasta/acrescentar dados' ao grupo Usuários).
             $wfCadLimpa = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha -ExplicitRoot
             if (-not $wfCadLimpa.Trusted) { Write-Host "  [ERRO] cadeia protegida: a cadeia de teste recém-criada deveria passar com -ExplicitRoot ('$($wfCadLimpa.Reason)')" -ForegroundColor Red; $wbErrors++ }
-            # 3. Com as regras da pasta PADRÃO a mesma cadeia é recusada: sem elevação nada aqui
-            #    pertence a SYSTEM nem ao grupo Administradores.
+            # 3. Com as regras da pasta PADRÃO a mesma cadeia é recusada, e por MAIS motivos do que
+            #    antes: sem elevação nada aqui pertence a SYSTEM nem ao grupo Administradores, e
+            #    sem a parada de %TEMP% (que só vale com -ExplicitRoot) a conferência ainda sobe
+            #    pelo perfil do usuário, onde o próprio usuário escreve.
             $wfCadPadrao = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha
             if ($wfCadPadrao.Trusted) { Write-Host "  [ERRO] cadeia protegida: a cadeia de teste passou com as regras da pasta padrão" -ForegroundColor Red; $wbErrors++ }
-            elseif ([string]$wfCadPadrao.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] cadeia protegida: a recusa com as regras da pasta padrão não fala do dono ('$($wfCadPadrao.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]::IsNullOrWhiteSpace([string]$wfCadPadrao.Reason)) { Write-Host "  [ERRO] cadeia protegida: a recusa com as regras da pasta padrão veio sem motivo" -ForegroundColor Red; $wbErrors++ }
             # 4. A PROVA de que os ancestrais são conferidos: só a pasta do MEIO ganha escrita para
             #    'Todos'. A última pasta continua limpa (a ACL dela é protegida, a ACE nova não
             #    desce até lá), então uma conferência que olhasse só a folha diria que está tudo bem.
@@ -2657,6 +2703,69 @@ if ($SelfTest) {
         Write-Host "  [ERRO] cadeia protegida: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
         Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- raiz de confiança: API de pastas, não ambiente
+    # %ProgramData% e %TEMP% são variáveis de USUÁRIO: moram em HKCU\Environment, qualquer processo
+    # de integridade média da conta as reescreve, e o motor ELEVADO herda o ambiente de quem o abriu
+    # (o launcher repassa o ambiente). Enquanto a raiz de confiança saía delas, era o atacante quem
+    # escolhia onde o WinForge confia - e as duas metades do ataque são diferentes:
+    #   1. 'ProgramData=C:\Users\Public\...' movia a pasta de backup E a de downloads para uma pasta
+    #      dele, onde ele é dono e passa em toda conferência de dono e DACL;
+    #   2. 'TEMP=%ProgramData%\WinForge' fazia a pasta do MEIO virar parada da cadeia e sair da
+    #      conferência - justamente a pasta cuja ACL herdada dá FILE_DELETE_CHILD ao usuário, que é
+    #      o que permite renomear 'downloads' e plantar uma junção no lugar.
+    # As duas variáveis são apontadas para esses valores DE PROPÓSITO aqui, e nada pode mudar. Nada
+    # é criado nem escrito: só se pergunta que caminho as funções montam e que cadeia elas conferem.
+    $wfAmbPdAntes = $env:ProgramData
+    $wfAmbTmpAntes = $env:TEMP
+    try {
+        $wfAmbBase = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+        $wfAmbMeio = Join-Path $wfAmbBase 'WinForge'
+        $env:ProgramData = 'C:\Users\Public\WinForge-Ambiente-Falso'
+        $env:TEMP = $wfAmbMeio
+        $wfAmbBk = Get-WinForgeSnapshotRoot
+        $wfAmbDl = Get-WinForgeDownloadRoot
+        if ($wfAmbBk -ne (Join-Path $wfAmbBase 'WinForge\iis-backup')) { Write-Host "  [ERRO] raiz de confiança: com `$env:ProgramData sequestrado, Get-WinForgeSnapshotRoot veio '$wfAmbBk'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAmbDl -ne (Join-Path $wfAmbBase 'WinForge\downloads')) { Write-Host "  [ERRO] raiz de confiança: com `$env:ProgramData sequestrado, Get-WinForgeDownloadRoot veio '$wfAmbDl'" -ForegroundColor Red; $wbErrors++ }
+        # A cadeia da pasta PADRÃO tem de continuar com as duas pastas - a do meio inclusive, que é
+        # a que o %TEMP% sequestrado tentava transformar em parada.
+        $wfAmbCad = @((Test-WinForgeSnapshotRootPath -Root $wfAmbDl).Chain)
+        if ($wfAmbCad.Count -ne 2) { Write-Host "  [ERRO] raiz de confiança: a cadeia da pasta padrão deveria ter 2 pastas, veio $($wfAmbCad.Count) ($($wfAmbCad -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfAmbCad[0] -ne $wfAmbMeio) { Write-Host "  [ERRO] raiz de confiança: `$env:TEMP tirou a pasta do meio da cadeia (veio '$($wfAmbCad[0])', esperado '$wfAmbMeio')" -ForegroundColor Red; $wbErrors++ }
+        # A parada de %TEMP% também não existe SEM -ExplicitRoot: uma pasta de teste conferida com as
+        # regras da pasta padrão sobe até a raiz do volume, como qualquer outra.
+        $wfAmbParadas = Get-WinForgeSnapshotChainStop
+        if ($wfAmbParadas.Count -ne 1) { Write-Host "  [ERRO] raiz de confiança: sem -ExplicitRoot deveria haver 1 parada, veio $($wfAmbParadas.Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not $wfAmbParadas.ContainsKey($wfAmbBase.TrimEnd('\'))) { Write-Host "  [ERRO] raiz de confiança: a única parada deveria ser '$wfAmbBase' ($(@($wfAmbParadas.Keys) -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+    } catch {
+        Write-Host "  [ERRO] raiz de confiança: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        $env:ProgramData = $wfAmbPdAntes
+        $env:TEMP = $wfAmbTmpAntes
+    }
+    # O teste não pode deixar o ambiente estragado para os blocos seguintes.
+    if ($env:ProgramData -ne $wfAmbPdAntes -or $env:TEMP -ne $wfAmbTmpAntes) { Write-Host "  [ERRO] raiz de confiança: o ambiente não voltou ao que era" -ForegroundColor Red; $wbErrors++ }
+    # Com -ExplicitRoot (o caminho do -SelfTest) a parada de %TEMP% volta, e é o %TEMP% DE VERDADE:
+    # a cadeia de uma pasta de teste começa logo abaixo dele. Sem a chave, a mesma pasta é conferida
+    # até a raiz do volume - é essa diferença que faz a pasta padrão não ganhar parada de graça.
+    try {
+        $wfAmbTmpReal = ([System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())).TrimEnd('\')
+        $wfAmbAlvo = Join-Path $wfAmbTmpReal 'WinForge-SelfTest\parada\folha'
+        $wfAmbExp = @((Test-WinForgeSnapshotRootPath -Root $wfAmbAlvo -ExplicitRoot).Chain)
+        if ($wfAmbExp.Count -ne 3) { Write-Host "  [ERRO] raiz de confiança (-ExplicitRoot): a cadeia deveria parar em '$wfAmbTmpReal' e ter 3 pastas, veio $($wfAmbExp.Count) ($($wfAmbExp -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfAmbExp[0] -ne (Join-Path $wfAmbTmpReal 'WinForge-SelfTest')) { Write-Host "  [ERRO] raiz de confiança (-ExplicitRoot): a cadeia começa em '$($wfAmbExp[0])'" -ForegroundColor Red; $wbErrors++ }
+        $wfAmbSem = @((Test-WinForgeSnapshotRootPath -Root $wfAmbAlvo).Chain)
+        if ($wfAmbSem.Count -le 3) { Write-Host "  [ERRO] raiz de confiança: sem -ExplicitRoot a cadeia parou em %TEMP% assim mesmo ($($wfAmbSem -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+        # Ancestral que não pôde ser LIDO virou recusa (antes era pulado junto com o inexistente,
+        # porque Test-Path devolve $false para os dois). O lado que dá para provar sem elevação é o
+        # outro: pasta que simplesmente NÃO EXISTE continua confiável. É o caso da primeira
+        # execução - se ele virasse recusa, nada mais gravaria backup nenhum.
+        $wfAmbNova = Join-Path $wfAmbTmpReal ('WinForge-SelfTest\ainda-nao-existe-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $wfAmbNovaT = Test-WinForgeSnapshotRootTrusted -Root $wfAmbNova -ExplicitRoot
+        if (-not $wfAmbNovaT.Trusted) { Write-Host "  [ERRO] raiz de confiança: pasta inexistente deveria ser confiável ('$($wfAmbNovaT.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Raiz de confiança: base e paradas vêm da API de pastas; `$env:ProgramData e `$env:TEMP sequestrados não movem nada e o ambiente volta ao que era"
+    } catch {
+        Write-Host "  [ERRO] raiz de confiança (-ExplicitRoot): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # ---------------------------------------------------------------- pino do arquivo baixado
     # Entre a conferência da assinatura e o Start-Process havia uma janela: o caminho era conferido,
