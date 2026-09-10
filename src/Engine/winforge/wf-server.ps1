@@ -681,11 +681,15 @@ function Get-WinForgeSnapshotRoot {
     .SYNOPSIS
         Pasta dos backups (IIS e ajustes de servidor). -Root existe para o -SelfTest não escrever em
         %ProgramData%.
+    .DESCRIPTION
+        O caminho é normalizado UMA vez ([System.IO.Path]::GetFullPath): daqui para baixo todo mundo
+        conta com a mesma forma - sem '..', sem barra dupla, sem caminho relativo -, e é essa forma
+        que a checagem da cadeia de pastas confere.
     #>
     param([string]$Root)
 
-    if ($Root) { return $Root }
-    return (Join-Path $env:ProgramData 'WinForge\iis-backup')
+    $alvo = if ($Root) { $Root } else { (Join-Path $env:ProgramData 'WinForge\iis-backup') }
+    try { return [System.IO.Path]::GetFullPath($alvo) } catch { return $alvo }
 }
 
 function Get-WinForgeSnapshotTrustedSid {
@@ -738,6 +742,44 @@ function Get-WinForgeSnapshotTrustedSid {
     return $sids
 }
 
+function Test-WinForgeSnapshotRootPath {
+    <#
+    .SYNOPSIS
+        Confere a CADEIA de pastas até a raiz de backup: nenhuma delas pode ser ponto de reanálise.
+    .DESCRIPTION
+        Conferir só a última pasta deixava passar o desvio mais barato de todos. %ProgramData% deixa
+        qualquer usuário criar subpasta, e criar subpasta inclui criar JUNÇÃO: com
+        '%ProgramData%\WinForge' apontando para uma pasta do usuário, '%ProgramData%\WinForge\iis-backup'
+        nasce - e é conferida - lá do outro lado, com a DACL de lá, e nenhum atributo de reanálise
+        aparece na última pasta.
+
+        Então o caminho é normalizado uma vez e cada ancestral EXISTENTE é conferido, da pasta final
+        até a raiz do volume. Ancestral que não existe não é problema: quem o criar será o WinForge,
+        com a DACL de New-WinForgeSnapshotRoot.
+    .OUTPUTS
+        @{ Trusted = <bool>; Reason = <string>; Path = <caminho normalizado> }.
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+
+    $full = $Root
+    try { $full = [System.IO.Path]::GetFullPath($Root) }
+    catch { return @{ Trusted = $false; Reason = "'$Root' não é um caminho válido: $($_.Exception.Message)"; Path = $Root } }
+
+    $atual = $full
+    while ($atual) {
+        $item = $null
+        try { $item = Get-Item -LiteralPath $atual -Force -ErrorAction Stop } catch { $item = $null }
+        if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            return @{ Trusted = $false; Reason = "'$atual' é um ponto de reanálise (junção ou link)"; Path = $full }
+        }
+        $pai = $null
+        try { $pai = Split-Path -Parent $atual } catch { $pai = $null }
+        if ([string]::IsNullOrWhiteSpace($pai) -or $pai -eq $atual) { break }
+        $atual = $pai
+    }
+    return @{ Trusted = $true; Reason = ''; Path = $full }
+}
+
 function Test-WinForgeSnapshotRootTrusted {
     <#
     .SYNOPSIS
@@ -745,7 +787,8 @@ function Test-WinForgeSnapshotRootTrusted {
     .DESCRIPTION
         O Desfazer roda elevado e reescreve o que o arquivo mandar. Três coisas desqualificam a pasta:
 
-        1. Ser um ponto de reanálise (junção/link): o caminho conferido não seria o caminho lido.
+        1. Ter um ponto de reanálise (junção/link) em QUALQUER pasta do caminho, e não só na última:
+           o caminho conferido não seria o caminho lido (ver Test-WinForgeSnapshotRootPath).
         2. Ter como dono alguém fora da lista de DONO - que na pasta padrão é SYSTEM e
            Administradores, e só isso. Dono guarda WRITE_DAC implícito e pode devolver a si mesmo a
            permissão de escrita a qualquer momento, então dono é escrita.
@@ -768,12 +811,13 @@ function Test-WinForgeSnapshotRootTrusted {
         [switch]$ExplicitRoot
     )
 
+    # A cadeia de pastas é conferida ANTES de a pasta existir: a junção que desvia o backup mora num
+    # ancestral, e ela pode estar lá antes da primeira execução.
+    $caminho = Test-WinForgeSnapshotRootPath -Root $Root
+    if (-not $caminho.Trusted) { return @{ Trusted = $false; Reason = $caminho.Reason } }
+    $Root = $caminho.Path
     if (-not (Test-Path -LiteralPath $Root)) { return @{ Trusted = $true; Reason = '' } }
     try {
-        $item = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
-        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-            return @{ Trusted = $false; Reason = "'$Root' é um ponto de reanálise (junção ou link)" }
-        }
         $acl = Get-Acl -LiteralPath $Root -ErrorAction Stop
         $confiaveis = Get-WinForgeSnapshotTrustedSid -ExplicitRoot:$ExplicitRoot
         $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot:$ExplicitRoot
@@ -822,23 +866,31 @@ function Test-WinForgeSnapshotFileTrusted {
         (ou de um link apontando para fora). Um link é recusado porque o arquivo lido não seria o
         arquivo conferido.
 
-        Aqui a identidade atual entra na lista de dono mesmo na pasta padrão, e por um motivo
-        prático: o Windows dá ao CRIADOR a propriedade do arquivo (a política "dono padrão dos
-        objetos criados por administradores" vem como "criador do objeto" desde o XP), então os
-        backups que o próprio WinForge grava elevado pertencem à conta do administrador, não ao
-        grupo. Recusá-los seria recusar o backup bom. Quem não pode entrar na pasta continua sem
-        conseguir plantar arquivo nenhum: é a DACL da pasta que responde por isso.
+        A regra de dono é a MESMA da pasta, e quem decide é quem chamou - não o código daqui. Esta
+        chave já esteve fixa em -ExplicitRoot, e isso valia dizer "na pasta padrão o dono pode ser a
+        conta atual": como dono guarda WRITE_DAC implícito, um processo de integridade MÉDIA da mesma
+        conta de administrador podia reescrever a DACL do arquivo pelo caminho completo (a DACL da
+        pasta não é conferida na abertura de um arquivo cujo caminho já se conhece) e plantar valores
+        que o Desfazer elevado aplicaria. Na pasta padrão o dono tem de ser SYSTEM ou Administradores
+        - e é New-WinForgeSnapshot que entrega o arquivo recém-gravado ao grupo Administradores, para
+        que o backup bom continue passando.
+    .PARAMETER ExplicitRoot
+        Quem chamou passou um -Root próprio (na prática, o -SelfTest em %TEMP%): a identidade atual
+        pode ser dona do arquivo.
     .OUTPUTS
         @{ Trusted = <bool>; Reason = <string> }.
     #>
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$ExplicitRoot
+    )
 
     try {
         $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
         if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
             return @{ Trusted = $false; Reason = "é um ponto de reanálise (link)" }
         }
-        $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot
+        $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot:$ExplicitRoot
         $dono = $null
         try { $dono = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { }
         if ($null -eq $dono) { return @{ Trusted = $false; Reason = "o dono não pôde ser lido" } }
@@ -883,6 +935,11 @@ function New-WinForgeSnapshotRoot {
             $sid = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::$tipo), $null
             $s.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
         }
+        # OWNER RIGHTS (S-1-3-4) herdável, só leitura: sem esta ACE, o DONO de um arquivo criado aqui
+        # dentro guarda WRITE_DAC implícito e pode devolver a si mesmo a escrita. Com ela, o Windows
+        # troca os direitos implícitos do dono por estes - e um processo de integridade média da mesma
+        # conta deixa de conseguir reescrever a DACL do backup pelo caminho completo.
+        $s.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-3-4'), 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
         return $s
     }
 
@@ -933,6 +990,49 @@ function Confirm-WinForgeSnapshotRoot {
     return @{ Ok = $false; Reason = $t.Reason; Path = $dir }
 }
 
+function Protect-WinForgeSnapshotFile {
+    <#
+    .SYNOPSIS
+        Entrega o backup recém-gravado ao grupo Administradores e fecha a DACL dele em SYSTEM +
+        Administradores.
+    .DESCRIPTION
+        O Windows dá ao CRIADOR a propriedade do arquivo (a política "dono padrão dos objetos criados
+        por administradores" vem como "criador do objeto" desde o XP), então um backup gravado elevado
+        nasce pertencendo à CONTA do administrador, não ao grupo. Dono guarda WRITE_DAC implícito: um
+        processo de integridade MÉDIA da mesma conta abre o arquivo pelo caminho completo, reescreve a
+        DACL e planta valores que o Desfazer elevado aplica. Trocar o dono para
+        BUILTIN\Administradores (S-1-5-32-544) tira esse poder do processo médio, que tem o grupo como
+        SID de negação.
+
+        O dono vai PRIMEIRO e sozinho: sem elevação ele é recusado, e aí a DACL fechada também não é
+        escrita - fechá-la sem poder trocar o dono só trancaria o próprio WinForge para fora do
+        arquivo que ele acabou de gravar.
+    .OUTPUTS
+        @{ Hardened = <bool>; Reason = <string> }.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        $system = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+        $admin = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+        $arquivo = New-Object System.IO.FileInfo $Path
+
+        $sd = New-Object System.Security.AccessControl.FileSecurity
+        $sd.SetOwner($admin)
+        $arquivo.SetAccessControl($sd)   # só a seção de dono: o objeto novo só tem ela modificada
+
+        $dacl = New-Object System.Security.AccessControl.FileSecurity
+        $dacl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @($system, $admin)) {
+            $dacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $sid, 'FullControl', 'Allow'))
+        }
+        $arquivo.SetAccessControl($dacl)
+        return @{ Hardened = $true; Reason = '' }
+    } catch {
+        return @{ Hardened = $false; Reason = $_.Exception.Message }
+    }
+}
+
 function New-WinForgeSnapshot {
     <#
     .SYNOPSIS
@@ -944,8 +1044,15 @@ function New-WinForgeSnapshot {
 
         O prefixo é o -Name: 'AlwaysRunning' para os itens de IIS, 'setting-Smb1Off' para os ajustes
         de servidor. Um prefixo, uma pasta, as mesmas regras de proteção e de leitura.
+
+        Gravado o arquivo, ele é ENDURECIDO (Protect-WinForgeSnapshotFile): dono Administradores e
+        DACL fechada. Na pasta PADRÃO isso não é opcional - um backup que não pôde ser protegido é um
+        arquivo que a própria conta pode reescrever de um processo não elevado, então ele é APAGADO e
+        a função devolve $null, e quem chamou recusa a aplicação inteira sem alterar nada. Com -Root
+        próprio (o -SelfTest em %TEMP%, ou uma execução sem elevação) fica só uma linha de WARN, uma
+        vez por sessão.
     .OUTPUTS
-        Caminho do arquivo gravado.
+        Caminho do arquivo gravado, ou $null se o backup da pasta padrão não pôde ser protegido.
     #>
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -954,9 +1061,23 @@ function New-WinForgeSnapshot {
     )
 
     $dir = Get-WinForgeSnapshotRoot $Root
+    $explicito = -not [string]::IsNullOrWhiteSpace($Root)
     New-WinForgeSnapshotRoot -Root $dir | Out-Null
     $path = Join-Path $dir ("{0}-{1}.json" -f $Name, (Get-Date).ToString('yyyyMMdd-HHmmss-fff'))
     @{ Name = $Name; Date = (Get-Date).ToString('s'); Values = $Values } | ConvertTo-Json -Depth 4 | Set-Content -Path $path -Encoding UTF8
+
+    $prot = Protect-WinForgeSnapshotFile -Path $path
+    if (-not $prot.Hardened) {
+        if (-not $explicito) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            Write-WinForgeLog -Component "IIS" -Level "ERROR" -Message "não foi possível proteger o backup de $Name ($($prot.Reason)); o arquivo foi apagado."
+            return $null
+        }
+        if (-not $script:WinForgeSnapshotHardenWarned) {
+            $script:WinForgeSnapshotHardenWarned = $true
+            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Backup gravado sem endurecer dono e DACL (pasta de backup própria, sem elevação): $($prot.Reason)"
+        }
+    }
     Write-WinForgeLog -Component "IIS" -Message "Valores anteriores de $Name guardados em $path ($($Values.Count) item(ns))."
     return $path
 }
@@ -1026,7 +1147,7 @@ function Get-WinForgeSnapshot {
     foreach ($file in $files) {
         # O arquivo também é conferido, e antes de ser lido: pasta protegida depois de um arquivo
         # estranho já estar lá, ou um link apontando para fora, não podem virar Desfazer.
-        $fileTrust = Test-WinForgeSnapshotFileTrusted -Path $file.FullName
+        $fileTrust = Test-WinForgeSnapshotFileTrusted -Path $file.FullName -ExplicitRoot:(-not [string]::IsNullOrWhiteSpace($Root))
         if (-not $fileTrust.Trusted) {
             Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Backup não confiável, ignorado: $($file.FullName) -> $($fileTrust.Reason)"
             continue
@@ -1674,6 +1795,15 @@ function Invoke-WinForgeIisTweak {
             return $result
         }
         $result.Snapshot = New-WinForgeSnapshot -Name $Name -Values $previous -Root $Root
+        # Sem backup protegido não se altera nada: o arquivo é o que um Desfazer elevado reescreve no
+        # servidor, e um que a própria conta pode reescrever sem elevação não serve para isso.
+        if (-not $result.Snapshot) {
+            $result.Changed = 0
+            $result.Skipped = "IIS: não foi possível proteger o backup de '$Name'; nada foi alterado."
+            Write-WinForgeLog -Component "IIS" -Level "ERROR" -Message $result.Skipped
+            Write-Host $result.Skipped -ForegroundColor Red
+            return $result
+        }
 
         foreach ($key in $pending) {
             try {
@@ -2002,6 +2132,13 @@ function Invoke-WinForgeServerSetting {
             $tudo = @{}
             foreach ($chave in $spec.Keys) { if ($atual.ContainsKey($chave)) { $tudo[$chave] = [string]$atual[$chave] } }
             $result.Snapshot = New-WinForgeSnapshot -Name "setting-$Name" -Values $tudo -Root $Root
+            if (-not $result.Snapshot) {
+                $result.Changed = 0
+                $result.Skipped = "Servidor: não foi possível proteger o backup de '$Name'; nada foi alterado."
+                Write-WinForgeLog -Component "Server" -Level "ERROR" -Message $result.Skipped
+                Write-Host $result.Skipped -ForegroundColor Red
+                return $result
+            }
             $result.Skipped = "Servidor: '$Name' apenas capturado ($($tudo.Count) valor(es)); nada foi alterado."
             return $result
         }
@@ -2014,6 +2151,14 @@ function Invoke-WinForgeServerSetting {
         }
 
         $result.Snapshot = New-WinForgeSnapshot -Name "setting-$Name" -Values $anterior -Root $Root
+        # Mesma regra do IIS: backup que não pôde ser protegido não autoriza alteração nenhuma.
+        if (-not $result.Snapshot) {
+            $result.Changed = 0
+            $result.Skipped = "Servidor: não foi possível proteger o backup de '$Name'; nada foi alterado."
+            Write-WinForgeLog -Component "Server" -Level "ERROR" -Message $result.Skipped
+            Write-Host $result.Skipped -ForegroundColor Red
+            return $result
+        }
         foreach ($chave in $pendentes) {
             try {
                 Set-WinForgeServerSettingValue -Key $chave -Value ([string]$spec.Targets[$chave])

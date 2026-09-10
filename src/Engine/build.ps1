@@ -1260,6 +1260,59 @@ if ($SelfTest) {
     } finally {
         Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- backup: dono do ARQUIVO e cadeia de pastas
+    # Terceira rodada de revisão de segurança, e os dois furos são da mesma família do anterior:
+    #   1. a checagem do ARQUIVO aceitava a identidade atual como dona SEMPRE (o -ExplicitRoot estava
+    #      fixo no código). Na pasta PADRÃO isso devolvia o WRITE_DAC implícito do dono a um processo
+    #      de integridade média da mesma conta de administrador: ele reescrevia a DACL do arquivo pelo
+    #      caminho completo e plantava valores que o Desfazer elevado aplicaria. Agora quem decide é
+    #      quem chamou, e na pasta padrão o dono tem de ser SYSTEM ou Administradores.
+    #   2. o ponto de reanálise era conferido só na ÚLTIMA pasta. Uma junção em %ProgramData%\WinForge
+    #      fazia a pasta de backup nascer fora de %ProgramData%, com a DACL de onde a junção aponta.
+    #      Agora o caminho é normalizado uma vez e TODA a cadeia de ancestrais é conferida.
+    $wb3Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada3'
+    $wb3Root = Join-Path $wb3Base 'backup'
+    try {
+        if (Test-Path $wb3Base) { Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue }
+        # Com -Root próprio (o teste roda sem elevação) o backup continua saindo e continua sendo lido:
+        # endurecer dono/DACL é obrigação da pasta PADRÃO, não uma trava que quebra o -SelfTest.
+        $wb3Arq = New-WinForgeSnapshot -Name 'setting-RdpNla' -Values @{ 'MaxIdleTime' = '1800000' } -Root $wb3Root
+        if (-not $wb3Arq -or -not (Test-Path -LiteralPath $wb3Arq)) { Write-Host "  [ERRO] Backup (rodada 3): New-WinForgeSnapshot não gravou arquivo com -Root próprio ('$wb3Arq')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wb3Lido = Get-WinForgeSnapshot -Name 'setting-RdpNla' -Root $wb3Root -AllowedKey @{ 'MaxIdleTime' = $true }
+            if ($null -eq $wb3Lido -or $wb3Lido.Values['MaxIdleTime'] -ne '1800000') { Write-Host "  [ERRO] Backup (rodada 3): o backup gravado não voltou na leitura ('$($wb3Lido.Values['MaxIdleTime'])')" -ForegroundColor Red; $wbErrors++ }
+            # Dono do arquivo: o MESMO arquivo passa com -ExplicitRoot (é o do teste, em %TEMP%) e é
+            # recusado pelas regras da pasta padrão. Só faz sentido cobrar quando o dono é mesmo a
+            # conta atual - num build elevado o próprio New-WinForgeSnapshot já o entrega a
+            # Administradores, e aí as duas checagens passam.
+            $wb3Dono = (Get-Acl -LiteralPath $wb3Arq).GetOwner([System.Security.Principal.SecurityIdentifier])
+            $wb3System = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+            $wb3Admin = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+            $wb3Exp = Test-WinForgeSnapshotFileTrusted -Path $wb3Arq -ExplicitRoot
+            if (-not $wb3Exp.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): o arquivo do teste deveria passar com -ExplicitRoot ('$($wb3Exp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wb3Pad = Test-WinForgeSnapshotFileTrusted -Path $wb3Arq
+            if ($wb3Dono.Value -eq $wb3System.Value -or $wb3Dono.Value -eq $wb3Admin.Value) {
+                if (-not $wb3Pad.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): arquivo de SYSTEM/Administradores foi recusado nas regras da pasta PADRÃO ('$($wb3Pad.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            } else {
+                if ($wb3Pad.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): arquivo com dono fora de SYSTEM/Administradores passou nas regras da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
+                elseif ($wb3Pad.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Backup (rodada 3): o motivo da recusa do arquivo não fala do dono ('$($wb3Pad.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # Junção NO MEIO do caminho (não na última pasta): a raiz tem de ser recusada mesmo com
+        # -ExplicitRoot, porque o caminho conferido não seria o caminho escrito.
+        $wb3Alvo = Join-Path $wb3Base 'real'
+        New-Item -ItemType Directory -Path $wb3Alvo -Force | Out-Null
+        $wb3Junc = Join-Path $wb3Base 'junc'
+        New-Item -ItemType Junction -Path $wb3Junc -Target $wb3Alvo -ErrorAction Stop | Out-Null
+        $wb3Cadeia = Test-WinForgeSnapshotRootTrusted -Root (Join-Path $wb3Junc 'backup') -ExplicitRoot
+        if ($wb3Cadeia.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): raiz com junção na cadeia de pastas foi considerada confiável" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wb3Cadeia.Reason -notmatch 'reanálise') { Write-Host "  [ERRO] Backup (rodada 3): o motivo da recusa não fala do ponto de reanálise ('$($wb3Cadeia.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Backup (rodada 3): backup com -Root próprio grava e lê, dono do arquivo cobrado pela pasta de quem chamou, junção na cadeia de pastas recusada"
+    } catch {
+        Write-Host "  [ERRO] Backup (rodada 3): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # O crivo do Desfazer tem de dizer o mesmo que o plano do item. Só dá para cobrar isso nos dois
     # itens de nível de servidor: o plano dos itens de pool/site precisa do provedor IIS:\ para
     # listar os alvos, e numa máquina sem IIS ele vem vazio.
