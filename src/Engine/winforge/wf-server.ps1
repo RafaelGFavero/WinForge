@@ -1,18 +1,8 @@
 ﻿#region ===== WinForge - servidor (IIS/AD) =====
 # Ações dos botões da aba Servidor, a visibilidade das abas que dependem do tipo de Windows e o
 # ajuste do IIS (pools, sites e configuração do servidor) com backup dos valores anteriores.
-# Os comandos de leitura dos botões (w32tm, Defender, netsh) chegam na tarefa 4; até lá o botão
-# avisa que ainda não existe, em vez de falhar calado.
-
-function Invoke-WinForgeServerCommand {
-    <#
-    .SYNOPSIS
-        Executa um comando de leitura da aba Servidor pelo nome curto (placeholder da tarefa 2).
-    #>
-    param([string]$Name)
-
-    [System.Windows.MessageBox]::Show("Comando '$Name' ainda não implementado.", "WinForge", "OK", "Information") | Out-Null
-}
+# Os botões de comando (w32tm, Defender, netsh, dcdiag, repadmin, DNS, NTDS) só LEEM: rodam a
+# ferramenta, guardam a saída num arquivo na pasta de logs e mostram o texto numa janela.
 
 function Update-WinForgeTabVisibility {
     <#
@@ -56,6 +46,446 @@ function Update-WinForgeTabVisibility {
 
     Write-WinForgeLog -Component "Server" -Message ("Abas ajustadas para {0}: {1} botão(ões) de navegação alterado(s)." -f $(if ($sync.IsServer) { "servidor" } else { "cliente" }), $changed)
     return $changed
+}
+
+# ---------------------------------------------------------------------------
+# Comandos de leitura da aba Servidor (Servidor e Active Directory)
+#
+# Todo botão desta aba cai em Invoke-WinForgeServerCommand -Name <nome curto>. O nome curto é a
+# única coisa que a interface conhece: o QUE roda mora na tabela de Get-WinForgeServerCommand, o
+# COMO roda mora no núcleo síncrono (Invoke-WinForgeServerCommandCore) e a janela que mostra o
+# resultado é montada em código, sem XAML.
+#
+# Nada aqui altera o servidor. É de propósito: dcdiag, repadmin e afins são o primeiro lugar onde
+# se olha num servidor com problema, e um botão que só lê pode ser clicado em produção sem medo.
+# ---------------------------------------------------------------------------
+
+function Get-WinForgeServerCommand {
+    <#
+    .SYNOPSIS
+        Tabela dos comandos de leitura da aba Servidor: título, texto do comando e ferramenta exigida.
+    .DESCRIPTION
+        Separada da execução porque é dado puro: o -SelfTest confere os sete comandos (título, texto
+        que compila, ferramenta exigida) em qualquer máquina, sem rodar nenhum deles.
+
+        'Requires' é o nome de um executável ('dcdiag.exe') ou de um cmdlet ('Get-DnsServerScavenging')
+        resolvido com Get-Command. Ausente, o comando não roda: vira uma frase dizendo qual ferramenta
+        falta. É o caso normal - dcdiag e repadmin só existem com as ferramentas de AD instaladas, e
+        Get-DnsServerScavenging só com o papel de DNS.
+    .OUTPUTS
+        Hashtable com Title, Command (texto do comando) e Requires (ou $null).
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    switch ($Name) {
+        'TimeCheck' {
+            return @{
+                Title    = 'Fonte de horário (w32tm)'
+                Command  = 'w32tm /query /status; w32tm /query /source; w32tm /query /configuration'
+                Requires = 'w32tm.exe'
+            }
+        }
+        'DefenderExclusions' {
+            return @{
+                Title    = 'Exclusões do Microsoft Defender'
+                Command  = 'Get-MpPreference | Select-Object ExclusionPath, ExclusionProcess, ExclusionExtension | Format-List'
+                Requires = 'Get-MpPreference'
+            }
+        }
+        'TcpShow' {
+            return @{
+                Title    = 'Parâmetros TCP (netsh)'
+                Command  = 'netsh int tcp show global'
+                Requires = 'netsh.exe'
+            }
+        }
+        'Dcdiag' {
+            return @{
+                Title    = 'Diagnóstico do controlador de domínio (dcdiag /q)'
+                Command  = 'dcdiag /q'
+                Requires = 'dcdiag.exe'
+            }
+        }
+        'ReplSummary' {
+            return @{
+                Title    = 'Resumo de replicação (repadmin /replsummary)'
+                Command  = 'repadmin /replsummary'
+                Requires = 'repadmin.exe'
+            }
+        }
+        'DnsScavenging' {
+            return @{
+                Title    = 'Limpeza de registros DNS (scavenging)'
+                Command  = 'Get-DnsServerScavenging | Format-List'
+                Requires = 'Get-DnsServerScavenging'
+            }
+        }
+        'NtdsLocation' {
+            # Sem 'Requires': quem responde é o registro, que existe em qualquer Windows. Num
+            # computador que não é controlador de domínio as chaves simplesmente não estão lá, e a
+            # própria função diz isso - não é erro, é a resposta.
+            return @{
+                Title    = 'Onde estão NTDS e SYSVOL'
+                Command  = 'Get-WinForgeServerNtdsLocationText'
+                Requires = $null
+            }
+        }
+    }
+    throw "Comando de servidor desconhecido: '$Name'."
+}
+
+function Get-WinForgeServerNtdsLocationText {
+    <#
+    .SYNOPSIS
+        Onde ficam o banco do AD (ntds.dit), os logs de transação e o SYSVOL, lidos do registro.
+    .DESCRIPTION
+        A pergunta atrás deste botão é sempre a mesma: "isso está no disco do sistema?". Banco e logs
+        de transação no mesmo disco do Windows é a receita de um DC lento e de um C: que enche - por
+        isso cada caminho sai marcado quando começa por %SystemDrive%.
+
+        O nome NTDS vem do serviço; os caminhos moram em HKLM\...\Services\NTDS\Parameters, e o do
+        SYSVOL em Netlogon\Parameters. Ler o registro não exige as ferramentas de AD instaladas.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $ntds = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+    $netlogon = 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
+    $itens = @(
+        @('Banco de dados do AD (ntds.dit)', $ntds, 'DSA Database file'),
+        @('Pasta de trabalho do NTDS', $ntds, 'DSA Working Directory'),
+        @('Logs de transação do NTDS', $ntds, 'Database log files path'),
+        @('SYSVOL', $netlogon, 'SysVol')
+    )
+
+    $linhas = New-Object System.Collections.Generic.List[string]
+    foreach ($item in $itens) {
+        $valor = $null
+        try { $valor = (Get-ItemProperty -LiteralPath $item[1] -Name $item[2] -ErrorAction Stop).($item[2]) } catch { $valor = $null }
+        $texto = [string]$valor
+        if ([string]::IsNullOrWhiteSpace($texto)) { continue }
+        $marca = ''
+        if ($env:SystemDrive -and $texto.StartsWith($env:SystemDrive, [System.StringComparison]::OrdinalIgnoreCase)) { $marca = ' (disco do sistema)' }
+        $linhas.Add(("{0}: {1}{2}" -f $item[0], $texto, $marca))
+    }
+
+    if ($linhas.Count -eq 0) { return "Este computador não é controlador de domínio (chaves NTDS ausentes)." }
+    $linhas.Add('')
+    $linhas.Add("Disco do sistema: $env:SystemDrive - banco e logs de transação fora dele costumam render um controlador de domínio mais rápido.")
+    return ($linhas -join "`r`n")
+}
+
+function Test-WinForgeServerRequirement {
+    <#
+    .SYNOPSIS
+        Diz se a ferramenta exigida por um comando existe nesta máquina. Sem exigência, é sempre sim.
+    #>
+    param([string]$Requires)
+
+    if ([string]::IsNullOrWhiteSpace($Requires)) { return $true }
+    return [bool](Get-Command $Requires -ErrorAction SilentlyContinue)
+}
+
+function Get-WinForgeServerOutputPath {
+    <#
+    .SYNOPSIS
+        Caminho do arquivo de saída de um comando: server-<Nome>-<aaaaMMdd-HHmmss>.txt na pasta de logs.
+    .DESCRIPTION
+        A pasta é a mesma da sessão ($sync.logPath): quem for pedir ajuda já sabe olhar lá, e não
+        aparece uma segunda pasta só para isso. Com os segundos no nome, dois cliques seguidos não se
+        sobrescrevem.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    $dir = $null
+    if ($null -ne $sync -and $sync.logPath) { $dir = Split-Path -Parent $sync.logPath }
+    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Join-Path $env:LocalAppData 'WinForge\logs' }
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    return (Join-Path $dir ("server-{0}-{1}.txt" -f $Name, (Get-Date -Format 'yyyyMMdd-HHmmss')))
+}
+
+function Invoke-WinForgeServerCommandCore {
+    <#
+    .SYNOPSIS
+        Roda um comando de leitura da aba Servidor e grava a saída num arquivo. Síncrono, não mostra nada.
+    .DESCRIPTION
+        É o miolo do botão, sem interface nenhuma: é o que roda dentro do runspace e é o que o
+        -SelfTest consegue exercitar sem abrir janela.
+
+        Três decisões moram aqui:
+
+        1. Ferramenta ausente NÃO é exceção. w32tm existe em qualquer Windows, dcdiag e repadmin não:
+           o texto vira "Ferramenta 'x' não encontrada neste sistema.", o arquivo é gravado do mesmo
+           jeito e o retorno tem a mesma forma do caso bem-sucedido. Quem chama nunca precisa de dois
+           caminhos.
+        2. '2>&1' antes do Out-String: dcdiag e repadmin escrevem parte do que interessa no fluxo de
+           erro, e sem isso a janela sairia vazia justamente quando há problema. -Width 200 evita que
+           uma tabela larga volte quebrada no meio.
+        3. A code page da saída. w32tm, netsh, dcdiag e repadmin escrevem em OEM (850/437 no Brasil);
+           o PowerShell decodifica pelo [Console]::OutputEncoding, que costuma estar em outra coisa -
+           e toda palavra acentuada chega embaralhada. A troca é PROCESSO INTEIRO, então a janela é
+           a menor possível: muda, roda o comando, devolve no finally. Nenhuma outra thread do
+           programa lê saída de executável, e o próprio comando roda um de cada vez.
+    .OUTPUTS
+        Hashtable com Name, Title, Text (o que vai para a janela) e Path (arquivo gravado, ou $null).
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    $cmd = Get-WinForgeServerCommand -Name $Name
+    $inicio = Get-Date
+
+    if (-not (Test-WinForgeServerRequirement -Requires $cmd.Requires)) {
+        $texto = "Ferramenta '$($cmd.Requires)' não encontrada neste sistema."
+        Write-WinForgeLog -Component "Server" -Level "WARN" -Message "$Name não executado: $texto"
+    } else {
+        $encodingAnterior = $null
+        try {
+            try {
+                $encodingAnterior = [Console]::OutputEncoding
+                [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+            } catch {
+                $encodingAnterior = $null
+            }
+            $texto = & ([scriptblock]::Create($cmd.Command)) 2>&1 | Out-String -Width 200
+        } catch {
+            $texto = "Falha ao executar o comando: $($_.Exception.Message)"
+            Write-WinForgeLog -Component "Server" -Level "ERROR" -Message "$Name falhou: $($_.Exception.Message)"
+        } finally {
+            if ($null -ne $encodingAnterior) { try { [Console]::OutputEncoding = $encodingAnterior } catch { } }
+        }
+        # 'dcdiag /q' só fala quando encontra problema: saída vazia é a boa notícia, e uma janela em
+        # branco pareceria o comando ter falhado.
+        if ($Name -eq 'Dcdiag' -and [string]::IsNullOrWhiteSpace($texto)) { $texto = "Sem erros reportados pelo dcdiag." }
+    }
+
+    $texto = [string]$texto
+    $arquivo = $null
+    try {
+        $arquivo = Get-WinForgeServerOutputPath -Name $Name
+        $cabecalho = "WinForge - $($cmd.Title)`r`n$((Get-Date).ToString('dd/MM/yyyy HH:mm:ss')) - $env:COMPUTERNAME`r`nComando: $($cmd.Command)`r`n" + ('-' * 78)
+        Set-Content -LiteralPath $arquivo -Value ($cabecalho + "`r`n" + $texto) -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-WinForgeLog -Component "Server" -Level "WARN" -Message "$Name`: saída não pôde ser gravada em '$arquivo' -> $($_.Exception.Message)"
+        $arquivo = $null
+    }
+
+    $segundos = [math]::Round(((Get-Date) - $inicio).TotalSeconds, 1)
+    Write-WinForgeLog -Component "Server" -Message "$Name concluído em $segundos s: $($texto.Length) caractere(s)$(if ($arquivo) { " em $arquivo" } else { ' (sem arquivo)' })."
+    return @{ Name = $Name; Title = $cmd.Title; Text = $texto; Path = $arquivo }
+}
+
+function Show-WinForgeOutputWindow {
+    <#
+    .SYNOPSIS
+        Janela com a saída de um comando: texto somente leitura, Copiar, Abrir arquivo e Fechar.
+    .DESCRIPTION
+        Montada em código, e não em XAML, porque é uma janela só e nasce inteira aqui - um arquivo de
+        XAML a mais só espalharia a mesma informação em dois lugares. As cores saem dos recursos do
+        tema da janela principal, então ela acompanha claro/escuro sem tabela própria de cor.
+
+        O TextBox é registrado com o nome 'WFOutputText' num NameScope da janela: sem isso,
+        FindName() não acha nada numa árvore criada em código - e é por FindName que o -SelfTest
+        confere o texto.
+    .PARAMETER NoShow
+        Monta e devolve a janela sem ShowDialog. É o que o -SelfTest usa: abrir uma janela modal
+        durante o build deixaria o build parado para sempre esperando alguém clicar.
+    .OUTPUTS
+        A janela ([System.Windows.Window]).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [string]$Text = '',
+        [string]$Path,
+        [switch]$NoShow
+    )
+
+    # Em uso normal o WPF já está carregado desde a montagem da janela principal. No -SelfTest não:
+    # esta função roda antes do XAML, e sem os dois assemblies o primeiro [System.Windows.*] do
+    # corpo falharia com "não é possível localizar o tipo".
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationcore')
+
+    $fundo = $null
+    $frente = $null
+    if ($null -ne $sync -and $null -ne $sync.Form) {
+        try { $fundo = $sync.Form.Resources['MainBackgroundColor'] } catch { $fundo = $null }
+        try { $frente = $sync.Form.Resources['MainForegroundColor'] } catch { $frente = $null }
+    }
+    if ($null -eq $fundo) { $fundo = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(35, 38, 41)) }
+    if ($null -eq $frente) { $frente = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(230, 230, 230)) }
+
+    $janela = New-Object System.Windows.Window
+    $janela.Title = "WinForge - $Title"
+    $janela.Width = 800
+    $janela.Height = 500
+    $janela.Background = $fundo
+    $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+    # Owner só depois de a janela principal ter aparecido: o WPF recusa como dona uma janela que
+    # ainda não foi mostrada, e o -SelfTest roda antes de qualquer ShowDialog.
+    if ($null -ne $sync -and $null -ne $sync.Form -and $sync.Form.IsVisible) {
+        try {
+            $janela.Owner = $sync.Form
+            $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+        } catch { }
+    }
+
+    $grade = New-Object System.Windows.Controls.Grid
+    $grade.Margin = New-Object System.Windows.Thickness 10
+    $linhaTexto = New-Object System.Windows.Controls.RowDefinition
+    $linhaTexto.Height = New-Object System.Windows.GridLength (1, [System.Windows.GridUnitType]::Star)
+    $linhaBotoes = New-Object System.Windows.Controls.RowDefinition
+    $linhaBotoes.Height = [System.Windows.GridLength]::Auto
+    $grade.RowDefinitions.Add($linhaTexto)
+    $grade.RowDefinitions.Add($linhaBotoes)
+
+    $caixa = New-Object System.Windows.Controls.TextBox
+    $caixa.Text = $Text
+    $caixa.IsReadOnly = $true
+    $caixa.FontFamily = New-Object System.Windows.Media.FontFamily 'Consolas'
+    $caixa.FontSize = 12
+    $caixa.AcceptsReturn = $true
+    $caixa.TextWrapping = [System.Windows.TextWrapping]::NoWrap
+    $caixa.VerticalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
+    $caixa.HorizontalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
+    $caixa.Background = $fundo
+    $caixa.Foreground = $frente
+    [System.Windows.Controls.Grid]::SetRow($caixa, 0)
+    $grade.Children.Add($caixa) | Out-Null
+
+    $barra = New-Object System.Windows.Controls.StackPanel
+    $barra.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $barra.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+    $barra.Margin = New-Object System.Windows.Thickness (0, 10, 0, 0)
+    [System.Windows.Controls.Grid]::SetRow($barra, 1)
+    $grade.Children.Add($barra) | Out-Null
+
+    $novoBotao = {
+        param($Conteudo)
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $Conteudo
+        $b.MinWidth = 110
+        $b.Margin = New-Object System.Windows.Thickness (8, 0, 0, 0)
+        $b.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+        return $b
+    }
+
+    $btnCopiar = & $novoBotao 'Copiar'
+    $textoParaCopiar = $Text
+    $btnCopiar.Add_Click({
+        try {
+            [System.Windows.Clipboard]::SetText($textoParaCopiar)
+            Write-WinForgeLog -Component "Server" -Message "Saída de '$Title' copiada para a área de transferência."
+        } catch {
+            Write-WinForgeLog -Component "Server" -Level "WARN" -Message "Não foi possível copiar a saída: $($_.Exception.Message)"
+        }
+    }.GetNewClosure())
+    $barra.Children.Add($btnCopiar) | Out-Null
+
+    $btnArquivo = & $novoBotao 'Abrir arquivo'
+    $caminhoArquivo = $Path
+    $btnArquivo.IsEnabled = [bool]($caminhoArquivo -and (Test-Path -LiteralPath $caminhoArquivo))
+    $btnArquivo.Add_Click({
+        try { Start-Process $caminhoArquivo } catch {
+            Write-WinForgeLog -Component "Server" -Level "WARN" -Message "Não foi possível abrir '$caminhoArquivo': $($_.Exception.Message)"
+        }
+    }.GetNewClosure())
+    $barra.Children.Add($btnArquivo) | Out-Null
+
+    $btnFechar = & $novoBotao 'Fechar'
+    $btnFechar.Add_Click({ $janela.Close() }.GetNewClosure())
+    $barra.Children.Add($btnFechar) | Out-Null
+
+    $janela.Content = $grade
+    [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
+    $janela.RegisterName('WFOutputText', $caixa)
+
+    if (-not $NoShow) { $janela.ShowDialog() | Out-Null }
+    return $janela
+}
+
+# O callback da interface nasce AQUI, na runspace principal, e não dentro do runspace do comando.
+# Scriptblock criado numa runspace do pool e executado pelo Dispatcher trava na primeira pipeline
+# que ele tenta rodar - a thread da janela pede a runspace de origem, que está parada esperando o
+# Dispatcher terminar. Foi assim que o diagnóstico morreu calado na tarefa do Plano 3.
+# Invoke-WPFUIThread chama o bloco SEM argumento (Dispatcher.Invoke([action])), então o que mostrar
+# viaja por $sync.ServerCommandOutput; os parâmetros continuam aceitos para quem chamar direto.
+$sync.WinForgeServerOutputCallback = {
+    param($Title, $Text, $Path)
+
+    try {
+        $pendente = $sync.ServerCommandOutput
+        if ($null -ne $pendente) {
+            if (-not $Title) { $Title = [string]$pendente.Title }
+            if (-not $Text) { $Text = [string]$pendente.Text }
+            if (-not $Path) { $Path = [string]$pendente.Path }
+        }
+        Show-WinForgeOutputWindow -Title $Title -Text $Text -Path $Path | Out-Null
+    } catch {
+        Write-WinForgeLog -Component "Server" -Level "ERROR" -Message "Janela de saída falhou: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-WinForgeServerCommand {
+    <#
+    .SYNOPSIS
+        Ação dos botões da aba Servidor: roda o comando fora da thread da janela e mostra a saída.
+    .DESCRIPTION
+        A thread da janela não pode esperar por um dcdiag: são segundos (às vezes minutos) com a
+        interface congelada. O comando roda num runspace do pool e a janela de saída é aberta pela
+        thread da interface, com o callback que nasceu na runspace principal.
+
+        Um de cada vez ($sync.ServerCommandRunning). A trava é zerada no 'finally' do corpo E no
+        'catch' do despacho: se o Invoke-WPFRunspace falhar (pool fechado, sem thread livre), o corpo
+        nunca roda, o 'finally' dele também não, e sem esse catch o botão ficaria morto até fechar o
+        programa.
+
+        Ferramenta que não existe nem chega a virar runspace: a resposta é imediata e cabe num aviso.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    try {
+        $cmd = Get-WinForgeServerCommand -Name $Name
+    } catch {
+        Write-WinForgeLog -Component "Server" -Level "ERROR" -Message $_.Exception.Message
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "WinForge", "OK", "Error") | Out-Null
+        return
+    }
+
+    if ($sync.ServerCommandRunning) {
+        [System.Windows.MessageBox]::Show("Já existe um comando da aba Servidor em andamento. Espere ele terminar.", "WinForge", "OK", "Warning") | Out-Null
+        return
+    }
+
+    if (-not (Test-WinForgeServerRequirement -Requires $cmd.Requires)) {
+        $aviso = "Ferramenta '$($cmd.Requires)' não encontrada neste sistema."
+        Write-WinForgeLog -Component "Server" -Level "WARN" -Message "$Name não executado: $aviso"
+        [System.Windows.MessageBox]::Show($aviso, "WinForge", "OK", "Information") | Out-Null
+        return
+    }
+
+    $sync.ServerCommandRunning = $true
+    $corpo = {
+        param($wfName)
+        try {
+            $wfRes = Invoke-WinForgeServerCommandCore -Name $wfName
+            $sync.ServerCommandOutput = @{ Title = $wfRes.Title; Text = $wfRes.Text; Path = $wfRes.Path }
+            # Janela fechando: Invoke-WPFUIThread é síncrono e esperaria por um Dispatcher que está
+            # sendo desligado. Não há mais janela para mostrar nada - o arquivo já está gravado.
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeServerOutputCallback }
+        } catch {
+            Write-WinForgeLog -Component "Server" -Level "ERROR" -Message "$wfName falhou: $($_.Exception.Message)"
+        } finally {
+            $sync.ServerCommandRunning = $false
+        }
+    }
+
+    Write-WinForgeLog -Component "Server" -Message "$Name iniciado: $($cmd.Command)"
+    try {
+        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList $Name | Out-Null
+    } catch {
+        $sync.ServerCommandRunning = $false
+        Write-WinForgeLog -Component "Server" -Level "ERROR" -Message "$Name não pôde começar: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show("O comando não pôde começar: $($_.Exception.Message)", "WinForge", "OK", "Error") | Out-Null
+    }
 }
 
 # ---------------------------------------------------------------------------

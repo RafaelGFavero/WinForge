@@ -5,7 +5,7 @@
 #   panel 1 = checkboxes | panel 2 = botões | tab "Servidor" = aba Servidor
 #   platform "server" = só aparece no Windows Server (ver Test-WinUtilBoostEntryCompatible)
 #   role "iis"/"ad"   = itens por função: só aparecem quando o papel está instalado (categoria IIS
-#                       aqui; os itens de AD chegam na tarefa seguinte)
+#                       e os botões de Active Directory)
 # Nada daqui entra em preset: preset é para máquina de usuário, não para servidor em produção.
 # ---------------------------------------------------------------------------
 $sync.configs.wfserver = @'
@@ -252,6 +252,50 @@ $sync.configs.wfserver = @'
     "panel": "2",
     "tab": "Servidor",
     "platform": "server",
+    "Type": "Button",
+    "ButtonWidth": "300"
+  },
+  "WPFWFAdDcdiag": {
+    "Content": "Executar dcdiag /q",
+    "Description": "Roda o dcdiag em modo silencioso: só aparece o que está errado no controlador de domínio. Só lê, não altera nada.",
+    "category": "Active Directory",
+    "panel": "2",
+    "tab": "Servidor",
+    "platform": "server",
+    "role": "ad",
+    "Type": "Button",
+    "ButtonWidth": "300"
+  },
+  "WPFWFAdReplSummary": {
+    "Content": "Resumo de replicação (repadmin)",
+    "Description": "Mostra o resumo de replicação entre os controladores de domínio (repadmin /replsummary): atrasos e falhas por parceiro. Só lê, não altera nada.",
+    "category": "Active Directory",
+    "panel": "2",
+    "tab": "Servidor",
+    "platform": "server",
+    "role": "ad",
+    "Type": "Button",
+    "ButtonWidth": "300"
+  },
+  "WPFWFAdDnsScavenging": {
+    "Content": "Limpeza de registros DNS (scavenging)",
+    "Description": "Mostra a configuração de limpeza automática de registros DNS antigos neste servidor. Só lê, não altera nada.",
+    "category": "Active Directory",
+    "panel": "2",
+    "tab": "Servidor",
+    "platform": "server",
+    "role": "ad",
+    "Type": "Button",
+    "ButtonWidth": "300"
+  },
+  "WPFWFAdNtdsLocation": {
+    "Content": "Onde estão NTDS e SYSVOL",
+    "Description": "Mostra em que disco e pasta estão o banco do AD (ntds.dit), os logs de transação e o SYSVOL, marcando o que está no disco do sistema. Só lê, não altera nada.",
+    "category": "Active Directory",
+    "panel": "2",
+    "tab": "Servidor",
+    "platform": "server",
+    "role": "ad",
     "Type": "Button",
     "ButtonWidth": "300"
   }

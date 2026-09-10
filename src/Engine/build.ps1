@@ -657,6 +657,10 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFSrvTimeCheck" {Invoke-WinForgeServerCommand -Name TimeCheck}
         "WPFWFSrvDefenderExclusions" {Invoke-WinForgeServerCommand -Name DefenderExclusions}
         "WPFWFSrvTcpShow" {Invoke-WinForgeServerCommand -Name TcpShow}
+        "WPFWFAdDcdiag" {Invoke-WinForgeServerCommand -Name Dcdiag}
+        "WPFWFAdReplSummary" {Invoke-WinForgeServerCommand -Name ReplSummary}
+        "WPFWFAdDnsScavenging" {Invoke-WinForgeServerCommand -Name DnsScavenging}
+        "WPFWFAdNtdsLocation" {Invoke-WinForgeServerCommand -Name NtdsLocation}
         "WPFDiagRefresh" {Start-WinForgeProfileJob}
         "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
         "WPFDiagExport" {
@@ -785,7 +789,7 @@ if ($SelfTest) {
     if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
-    if (@($wbServerTab.PSObject.Properties).Count -ne 18) { Write-Host "  [ERRO] aba Servidor: esperado 18 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -1069,6 +1073,57 @@ if ($SelfTest) {
     } else {
         Write-Host "  IIS presente: teste de recusa pulado (o módulo WebAdministration existe nesta máquina)"
     }
+    # ---------------------------------------------------------------- comandos de leitura da aba Servidor
+    # Nada aqui exige servidor: a tabela de comandos é dado puro, o núcleo é síncrono e o netsh
+    # existe em qualquer Windows. O caso do dcdiag prova o contrário do TcpShow - ferramenta que
+    # não existe tem de virar texto explicando isso, e não exceção no meio do runspace.
+    $wbSrvNomes = @('TimeCheck', 'DefenderExclusions', 'TcpShow', 'Dcdiag', 'ReplSummary', 'DnsScavenging', 'NtdsLocation')
+    foreach ($wbSrvNome in $wbSrvNomes) {
+        $wbSrvCmd = Get-WinForgeServerCommand -Name $wbSrvNome
+        if ($null -eq $wbSrvCmd -or [string]::IsNullOrWhiteSpace($wbSrvCmd.Title) -or [string]::IsNullOrWhiteSpace($wbSrvCmd.Command)) { Write-Host "  [ERRO] Servidor: comando '$wbSrvNome' sem título ou sem texto de comando" -ForegroundColor Red; $wbErrors++; continue }
+        try { [scriptblock]::Create($wbSrvCmd.Command) | Out-Null } catch { Write-Host "  [ERRO] Servidor: comando '$wbSrvNome' não compila: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
+    }
+    if ((Get-WinForgeServerCommand -Name Dcdiag).Requires -ne 'dcdiag.exe') { Write-Host "  [ERRO] Servidor: Dcdiag deveria exigir 'dcdiag.exe', veio '$((Get-WinForgeServerCommand -Name Dcdiag).Requires)'" -ForegroundColor Red; $wbErrors++ }
+    if ($null -ne (Get-WinForgeServerCommand -Name NtdsLocation).Requires) { Write-Host "  [ERRO] Servidor: NtdsLocation não deveria exigir ferramenta nenhuma (veio '$((Get-WinForgeServerCommand -Name NtdsLocation).Requires)')" -ForegroundColor Red; $wbErrors++ }
+    $wbSrvDesconhecido = $false
+    try { Get-WinForgeServerCommand -Name 'NaoExiste' | Out-Null } catch { $wbSrvDesconhecido = $true }
+    if (-not $wbSrvDesconhecido) { Write-Host "  [ERRO] Servidor: Get-WinForgeServerCommand aceitou um comando desconhecido" -ForegroundColor Red; $wbErrors++ }
+    try {
+        $wbSrvTcp = Invoke-WinForgeServerCommandCore -Name TcpShow
+        if ([string]::IsNullOrWhiteSpace($wbSrvTcp.Text)) { Write-Host "  [ERRO] Servidor: TcpShow voltou sem texto" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wbSrvTcp.Path -or -not (Test-Path -LiteralPath $wbSrvTcp.Path)) { Write-Host "  [ERRO] Servidor: TcpShow não gravou o arquivo ('$($wbSrvTcp.Path)')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Servidor (comandos): TcpShow -> $(([string]$wbSrvTcp.Text).Length) caractere(s) em $(Split-Path -Leaf $wbSrvTcp.Path)" }
+    } catch {
+        Write-Host "  [ERRO] Servidor: Invoke-WinForgeServerCommandCore -Name TcpShow lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+    }
+    if (Get-Command 'dcdiag.exe' -ErrorAction SilentlyContinue) {
+        Write-Host "  Servidor (comandos): recusa do dcdiag pulada (a ferramenta existe nesta máquina)"
+    } else {
+        try {
+            $wbSrvDc = Invoke-WinForgeServerCommandCore -Name Dcdiag
+            if ([string]$wbSrvDc.Text -notmatch 'não encontrada') { Write-Host "  [ERRO] Servidor: dcdiag ausente deveria dizer 'não encontrada', veio '$([string]$wbSrvDc.Text)'" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wbSrvDc.Path -or -not (Test-Path -LiteralPath $wbSrvDc.Path)) { Write-Host "  [ERRO] Servidor: dcdiag ausente deveria gravar o arquivo mesmo assim ('$($wbSrvDc.Path)')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Servidor (comandos): ferramenta ausente -> $(([string]$wbSrvDc.Text).Trim())" }
+        } catch {
+            Write-Host "  [ERRO] Servidor: dcdiag ausente lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    # A janela de saída é montada em código, sem XAML: o -NoShow existe para o SelfTest provar que o
+    # TextBox nasce com o texto certo sem abrir nada na tela (ShowDialog aqui travaria o build).
+    try {
+        $wbSrvTexto = "primeira linha`r`nsegunda linha com acento: configuração"
+        $wbSrvJanela = Show-WinForgeOutputWindow -Title 'SelfTest' -Text $wbSrvTexto -NoShow
+        if ($wbSrvJanela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Servidor: Show-WinForgeOutputWindow -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wbSrvCaixa = $wbSrvJanela.FindName('WFOutputText')
+            if ($null -eq $wbSrvCaixa) { Write-Host "  [ERRO] Servidor: a janela de saída não tem o TextBox 'WFOutputText'" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wbSrvCaixa.Text -ne $wbSrvTexto) { Write-Host "  [ERRO] Servidor: o texto da janela veio '$($wbSrvCaixa.Text)'" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wbSrvCaixa.IsReadOnly) { Write-Host "  [ERRO] Servidor: o TextBox da janela de saída deveria ser somente leitura" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Servidor (janela de saída): WFOutputText com $($wbSrvCaixa.Text.Length) caractere(s), somente leitura, sem ShowDialog" }
+        }
+    } catch {
+        Write-Host "  [ERRO] Servidor (janela de saída): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     if ((ConvertTo-WinForgeNvidiaVersion '32.0.16.1656') -ne '616.56' -or (ConvertTo-WinForgeNvidiaVersion '32.0.15.6636') -ne '566.36') { Write-Host "  [ERRO] ConvertTo-WinForgeNvidiaVersion" -ForegroundColor Red; $wbErrors++ }
     # Consulta de drivers: a parte que não depende de rede roda sempre.
     foreach ($wbPair in @(@('NVIDIA GeForce RTX 3070', '30'), @('NVIDIA GeForce GTX 1660 SUPER', '16'), @('NVIDIA GeForce GTX 970M', '900M'), @('NVIDIA GeForce MX450', 'MX400'))) {
@@ -1177,6 +1232,14 @@ if ($SelfTest) {
                     $wfIisCaixas = @($wfSrvKeys | Where-Object { $_ -like 'WPFTweaksWFIis*' -and $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
                     if ($wfIisCaixas -ne 7) { Write-Host "  [ERRO] aba Servidor: esperado 7 caixas de IIS com o papel IIS presente, veio $wfIisCaixas" -ForegroundColor Red; $wbErrors++ }
                     Write-Host "  Aba Servidor (IIS): $wfIisCaixas caixa(s) de IIS com o papel presente"
+                }
+                # Mesma regra para os botões de Active Directory (role "ad"): eles são a única coisa
+                # da aba que roda dcdiag/repadmin, e num servidor com o papel presente têm de estar
+                # na tela. Sem esta trava, um erro de categoria os esconderia sem ninguém notar.
+                if ('ad' -in @($sync.ServerRoles)) {
+                    $wfAdBotoes = @(@('WPFWFAdDcdiag', 'WPFWFAdReplSummary', 'WPFWFAdDnsScavenging', 'WPFWFAdNtdsLocation') | Where-Object { $sync[$_] -is [System.Windows.Controls.Button] }).Count
+                    if ($wfAdBotoes -ne 4) { Write-Host "  [ERRO] aba Servidor: esperado 4 botões de Active Directory com o papel AD presente, veio $wfAdBotoes" -ForegroundColor Red; $wbErrors++ }
+                    Write-Host "  Aba Servidor (AD): $wfAdBotoes botão(ões) de Active Directory com o papel presente"
                 }
             } else {
                 if ($wfSrvCaixas -ne 0) { Write-Host "  [ERRO] aba Servidor: $wfSrvCaixas caixa(s) criada(s) num cliente, esperado 0" -ForegroundColor Red; $wbErrors++ }
