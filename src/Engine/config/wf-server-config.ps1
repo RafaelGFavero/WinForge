@@ -47,71 +47,72 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFSrvHighPerf": {
     "Content": "Plano de energia Alto desempenho",
-    "Description": "Ativa o plano 'Alto desempenho' (o padrão recomendado para servidores: sem redução de clock em ocioso, latência menor). Aumenta o consumo de energia. Desfazer volta ao plano Equilibrado.",
+    "Description": "Ativa o plano 'Alto desempenho' (o padrão recomendado para servidores: sem redução de clock em ocioso, latência menor). Aumenta o consumo de energia. O plano que estava ativo é gravado em %ProgramData%\\WinForge\\iis-backup antes da troca; 'Desfazer' volta a ele - e não faz nada se o Alto desempenho já era o plano ativo, porque nesse caso não há o que devolver.",
     "category": "Servidor",
     "panel": "1",
     "tab": "Servidor",
     "platform": "server",
     "InvokeScript": [
-      "powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+      "Invoke-WinForgeServerSetting -Name HighPerf | Out-Null"
     ],
     "UndoScript": [
-      "powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e"
+      "Invoke-WinForgeServerSetting -Name HighPerf -Undo | Out-Null"
     ]
   },
   "WPFTweaksWFSrvRdpNla": {
     "Content": "RDP: exigir Autenticação no Nível da Rede e tempo limite de sessão ociosa (30 min)",
-    "Description": "Exige NLA (autenticação antes de abrir a sessão) e camada de segurança TLS no RDP, e derruba sessões ociosas depois de 30 minutos. Clientes antigos sem suporte a NLA (Windows XP, thin clients velhos) deixam de conseguir conectar. Desfazer remove só o tempo limite de ociosidade: NLA e TLS continuam exigidos, porque esse é o padrão do Windows Server 2016 em diante e desligá-los seria abrir o servidor.",
+    "Description": "Exige NLA (autenticação antes de abrir a sessão) e camada de segurança TLS no RDP, e derruba sessões ociosas depois de 30 minutos. Clientes antigos sem suporte a NLA (Windows XP, thin clients velhos) deixam de conseguir conectar. Os três valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' devolve exatamente o que estava lá - inclusive apagando o tempo limite se ele não existia.",
     "category": "Servidor",
     "panel": "1",
     "tab": "Servidor",
     "platform": "server",
-    "registry": [
-      { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp", "Name": "UserAuthentication", "Value": "1", "Type": "DWord", "OriginalValue": "1" },
-      { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp", "Name": "SecurityLayer", "Value": "2", "Type": "DWord", "OriginalValue": "2" },
-      { "Path": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services", "Name": "MaxIdleTime", "Value": "1800000", "Type": "DWord", "OriginalValue": "<RemoveEntry>" }
+    "InvokeScript": [
+      "Invoke-WinForgeServerSetting -Name RdpNla | Out-Null"
+    ],
+    "UndoScript": [
+      "Invoke-WinForgeServerSetting -Name RdpNla -Undo | Out-Null"
     ]
   },
   "WPFTweaksWFSrvSmb1Off": {
     "Content": "Desativar o SMB1 no servidor",
-    "Description": "Desliga o protocolo SMB1 no serviço de arquivos. Dispositivos antigos que só falam SMB1 (scanners e multifuncionais de rede, NAS velhos, Windows XP) param de acessar os compartilhamentos. O cartão de perfil da aba Diagnóstico mostra o estado atual do SMB1. Desfazer religa o SMB1.",
+    "Description": "Desliga o protocolo SMB1 no serviço de arquivos (o recurso do Windows continua instalado; o WinForge não desinstala recurso). Dispositivos antigos que só falam SMB1 (scanners e multifuncionais de rede, NAS velhos, Windows XP) param de acessar os compartilhamentos. O cartão de perfil da aba Diagnóstico mostra o estado atual do SMB1. O estado anterior é gravado em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' devolve o que estava lá - e não liga o SMB1 num servidor onde ele já estava desligado.",
     "category": "Servidor",
     "panel": "1",
     "tab": "Servidor",
     "platform": "server",
     "InvokeScript": [
-      "Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force"
+      "Invoke-WinForgeServerSetting -Name Smb1Off | Out-Null"
     ],
     "UndoScript": [
-      "Set-SmbServerConfiguration -EnableSMB1Protocol $true -Force"
+      "Invoke-WinForgeServerSetting -Name Smb1Off -Undo | Out-Null"
     ]
   },
   "WPFTweaksWFSrvSmbSigning": {
     "Content": "SMB: exigir assinatura",
-    "Description": "Passa a exigir assinatura digital em toda sessão SMB do servidor. Desfazer volta a aceitar sessões sem assinatura.",
+    "Description": "Passa a exigir assinatura digital em toda sessão SMB do servidor. O estado anterior é gravado em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' devolve o que estava lá - num controlador de domínio, onde a assinatura já é obrigatória por política, aplicar não muda nada e desfazer também não.",
     "category": "Servidor",
     "panel": "1",
     "tab": "Servidor",
     "platform": "server",
     "InvokeScript": [
-      "Set-SmbServerConfiguration -RequireSecuritySignature $true -Force"
+      "Invoke-WinForgeServerSetting -Name SmbSigning | Out-Null"
     ],
     "UndoScript": [
-      "Set-SmbServerConfiguration -RequireSecuritySignature $false -Force"
+      "Invoke-WinForgeServerSetting -Name SmbSigning -Undo | Out-Null"
     ]
   },
   "WPFTweaksWFSrvTcpAutotuning": {
     "Content": "TCP: nível de ajuste automático 'normal'",
-    "Description": "Devolve o autotuning da janela de recepção TCP ao valor padrão 'normal'. Serve para desfazer o 'disabled' ou 'restricted' que scripts de otimização antigos deixam para trás e que derruba a taxa de transferência em rede rápida. 'Desfazer selecionados' também deixa em 'normal', porque esse é o padrão do Windows - use o botão 'Mostrar parâmetros TCP (netsh)' para conferir antes e depois.",
+    "Description": "Devolve o autotuning da janela de recepção TCP ao valor padrão 'normal'. Serve para desfazer o 'disabled' ou 'restricted' que scripts de otimização antigos deixam para trás e que derruba a taxa de transferência em rede rápida. O nível anterior é gravado em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' devolve exatamente esse nível - use o botão 'Mostrar parâmetros TCP' para conferir antes e depois.",
     "category": "Servidor",
     "panel": "1",
     "tab": "Servidor",
     "platform": "server",
     "InvokeScript": [
-      "netsh int tcp set global autotuninglevel=normal"
+      "Invoke-WinForgeServerSetting -Name TcpAutotuning | Out-Null"
     ],
     "UndoScript": [
-      "netsh int tcp set global autotuninglevel=normal"
+      "Invoke-WinForgeServerSetting -Name TcpAutotuning -Undo | Out-Null"
     ]
   },
 
@@ -246,8 +247,8 @@ $sync.configs.wfserver = @'
     "ButtonWidth": "300"
   },
   "WPFWFSrvTcpShow": {
-    "Content": "Mostrar parâmetros TCP (netsh)",
-    "Description": "Mostra a saída de 'netsh int tcp show global' (autotuning, RSS, ECN e afins). Só lê, não altera nada.",
+    "Content": "Mostrar parâmetros TCP",
+    "Description": "Mostra os parâmetros TCP do perfil de Internet (Get-NetTCPSetting) e as opções de descarregamento da placa (Get-NetOffloadGlobalSetting): autotuning, algoritmo de congestionamento, ECN, RSS e afins. Só lê, não altera nada.",
     "category": "Servidor",
     "panel": "2",
     "tab": "Servidor",
