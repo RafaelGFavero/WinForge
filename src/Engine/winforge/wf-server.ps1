@@ -86,10 +86,14 @@ function Get-WinForgeServerCommand {
 
     switch ($Name) {
         'TimeCheck' {
+            # Caminho completo, e não 'w32tm': o WinForge roda elevado e o PATH escolhe o binário.
+            # Get-WinForgeSystemExe monta %SystemRoot%\System32\<exe> uma vez, e o texto do comando
+            # chama pelo operador & com o caminho entre aspas simples.
+            $w32tm = Get-WinForgeSystemExe -Name 'w32tm.exe'
             return @{
                 Title    = 'Fonte de horário (w32tm)'
-                Command  = 'w32tm /query /status; w32tm /query /source; w32tm /query /configuration'
-                Requires = 'w32tm.exe'
+                Command  = "& '$w32tm' /query /status; & '$w32tm' /query /source; & '$w32tm' /query /configuration"
+                Requires = $w32tm
                 Native   = $true
             }
         }
@@ -114,18 +118,20 @@ function Get-WinForgeServerCommand {
             }
         }
         'Dcdiag' {
+            $dcdiag = Get-WinForgeSystemExe -Name 'dcdiag.exe'
             return @{
                 Title    = 'Diagnóstico do controlador de domínio (dcdiag /q)'
-                Command  = 'dcdiag /q'
-                Requires = 'dcdiag.exe'
+                Command  = "& '$dcdiag' /q"
+                Requires = $dcdiag
                 Native   = $true
             }
         }
         'ReplSummary' {
+            $repadmin = Get-WinForgeSystemExe -Name 'repadmin.exe'
             return @{
                 Title    = 'Resumo de replicação (repadmin /replsummary)'
-                Command  = 'repadmin /replsummary'
-                Requires = 'repadmin.exe'
+                Command  = "& '$repadmin' /replsummary"
+                Requires = $repadmin
                 Native   = $true
             }
         }
@@ -1571,7 +1577,7 @@ function Get-WinForgeServerSettingSpec {
         'HighPerf' {
             # O plano de energia é identificado pelo GUID, não pelo nome: 'Alto desempenho' e 'High
             # performance' são o mesmo 8c5e7fda no mundo inteiro, e o nome muda com o idioma.
-            return @{ Keys = @('ActiveSchemeGuid'); Targets = @{ 'ActiveSchemeGuid' = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c' }; Requires = 'powercfg.exe' }
+            return @{ Keys = @('ActiveSchemeGuid'); Targets = @{ 'ActiveSchemeGuid' = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c' }; Requires = (Get-WinForgeSystemExe -Name 'powercfg.exe') }
         }
         'TcpAutotuning' {
             return @{ Keys = @('AutoTuningLevelLocal'); Targets = @{ 'AutoTuningLevelLocal' = 'Normal' }; Requires = 'Get-NetTCPSetting' }
@@ -1631,7 +1637,7 @@ function Get-WinForgeServerSettingState {
         }
         'HighPerf' {
             try {
-                $saida = (Invoke-WinForgeNativeCommand -FilePath 'powercfg.exe' -Arguments @('/getactivescheme')).Text
+                $saida = (Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'powercfg.exe') -Arguments @('/getactivescheme')).Text
                 if ([string]$saida -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') { $estado['ActiveSchemeGuid'] = $Matches[1].ToLower() }
             } catch {
                 Write-WinForgeLog -Component "Server" -Level "WARN" -Message "Energia: plano ativo não pôde ser lido -> $($_.Exception.Message)"
@@ -1697,7 +1703,7 @@ function Set-WinForgeServerSettingValue {
             return
         }
         'ActiveSchemeGuid' {
-            $r = Invoke-WinForgeNativeCommand -FilePath 'powercfg.exe' -Arguments @('/setactive', $Value)
+            $r = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'powercfg.exe') -Arguments @('/setactive', $Value)
             if ($r.ExitCode -ne 0) { throw "powercfg.exe /setactive $Value devolveu código $($r.ExitCode): $([string]$r.Text)" }
             return
         }

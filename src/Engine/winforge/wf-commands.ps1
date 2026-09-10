@@ -20,14 +20,52 @@
 # de rodar é o dono da tabela. O núcleo genérico só executa o que mandarem executar.
 # ---------------------------------------------------------------------------
 
+function Get-WinForgeSystemExe {
+    <#
+    .SYNOPSIS
+        Caminho completo de um executável do Windows dentro de %SystemRoot%\System32.
+    .DESCRIPTION
+        Existe para nenhum executável de sistema ser resolvido pelo PATH. O WinForge roda SEMPRE
+        elevado (o manifesto do lançador pede administrador), e chamar 'chkdsk.exe' pelo nome deixa a
+        escolha do binário com a variável PATH: normalmente o System32 vem primeiro, mas um PATH de
+        sistema editado por instalador (que prepende a própria pasta) muda isso, e aí um executável
+        de terceiro roda com token de administrador. O nome vira caminho aqui, uma vez só, e quem
+        chama passa o caminho inteiro para -FilePath.
+
+        O 'Name' pode trazer subpasta: o winmgmt mora em System32\wbem, não em System32
+        ('wbem\winmgmt.exe'). Sem %SystemRoot% definido sobra o padrão 'C:\Windows' - é a raiz de
+        qualquer Windows instalado no disco do sistema.
+
+        Função pura: monta texto e não toca no disco. Quem confere se o arquivo existe é
+        Test-WinForgeCommandRequirement, que aceita caminho absoluto.
+    .OUTPUTS
+        Caminho completo do executável.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    $raiz = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($raiz)) { $raiz = 'C:\Windows' }
+    return (Join-Path $raiz (Join-Path 'System32' $Name))
+}
+
 function Test-WinForgeCommandRequirement {
     <#
     .SYNOPSIS
         Diz se a ferramenta exigida por um comando existe nesta máquina. Sem exigência, é sempre sim.
+    .DESCRIPTION
+        Duas formas de exigência, e a diferença importa:
+
+        - CAMINHO ABSOLUTO ('C:\Windows\System32\fsutil.exe'): a pergunta é se o arquivo está lá, e
+          quem responde é Test-Path. É a forma dos executáveis do sistema, que não passam mais pelo
+          PATH (Get-WinForgeSystemExe) - resolver um caminho absoluto com Get-Command devolveria o
+          mesmo arquivo na maioria das máquinas e nenhum na que tem o PATH quebrado, sem motivo.
+        - NOME ('Get-MpPreference', 'dcdiag.exe'): cmdlet ou ferramenta opcional do Windows, que só
+          o Get-Command sabe encontrar (módulo a carregar, pasta de RSAT).
     #>
     param([string]$Requires)
 
     if ([string]::IsNullOrWhiteSpace($Requires)) { return $true }
+    if ([System.IO.Path]::IsPathRooted($Requires)) { return (Test-Path -LiteralPath $Requires -PathType Leaf) }
     return [bool](Get-Command $Requires -ErrorAction SilentlyContinue)
 }
 
@@ -121,13 +159,19 @@ function Invoke-WinForgeNativeCommand {
         Executável a chamar. Os argumentos vão num VETOR, um a um, sem passar por interpretador:
         é o que impede um valor de backup ('x; algo-perigoso') de virar comando. Um GUID plantado
         no JSON chega ao powercfg como um argumento só - inválido, e ele reclama.
+    .PARAMETER Utf8
+        Decodifica a saída como UTF-8 em vez de OEM. É o caso do winget, que escreve UTF-8: com a
+        troca para OEM, todo acento do texto localizado dele ("Nenhum pacote instalado encontrado")
+        e dos nomes de pacote chega embaralhado ao relatório. A troca continua sendo do PROCESSO
+        INTEIRO e continua serializada pelo mesmo mutex - só o destino muda.
     .OUTPUTS
         @{ Text = <string>; ExitCode = <int> }.
     #>
     param(
         [string]$Command,
         [string]$FilePath,
-        [string[]]$Arguments = @()
+        [string[]]$Arguments = @(),
+        [switch]$Utf8
     )
 
     if ([string]::IsNullOrWhiteSpace($Command) -and [string]::IsNullOrWhiteSpace($FilePath)) {
@@ -149,7 +193,13 @@ function Invoke-WinForgeNativeCommand {
         }
         try {
             $encodingAnterior = [Console]::OutputEncoding
-            [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+            if ($Utf8) {
+                # UTF8Encoding($false): sem BOM. Com BOM, os três bytes iniciais entrariam no texto
+                # da primeira linha da saída.
+                [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+            } else {
+                [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+            }
         } catch {
             $encodingAnterior = $null
         }
@@ -426,23 +476,41 @@ function Show-WinForgeOutputWindow {
     return $janela
 }
 
+# Saída pendente de janela: um slot POR CHAMADA, com chave própria, e não um único global. O slot
+# nasce no runspace do comando e morre no callback, que o remove assim que o lê - nada sobrevive à
+# janela. A fila guarda a ORDEM das chaves, porque o callback é chamado sem argumento e precisa
+# saber qual slot é o dele.
+$sync.CommandOutputs = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.CommandOutputQueue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
+
 # O callback da interface nasce AQUI, na runspace principal, e não dentro do runspace do comando.
 # Scriptblock criado numa runspace do pool e executado pelo Dispatcher trava na primeira pipeline
 # que ele tenta rodar - a thread da janela pede a runspace de origem, que está parada esperando o
 # Dispatcher terminar. Foi assim que o diagnóstico morreu calado na tarefa do Plano 3.
-# Invoke-WPFUIThread chama o bloco SEM argumento (Dispatcher.Invoke([action])), então o que mostrar
-# viaja por $sync.CommandOutput; os parâmetros continuam aceitos para quem chamar direto.
+# Invoke-WPFUIThread chama o bloco SEM argumento (Dispatcher.Invoke([action]) não passa parâmetro),
+# então o que mostrar viaja pelo slot da vez; os parâmetros continuam aceitos para quem chamar direto.
 $sync.WinForgeCommandOutputCallback = {
     param($Title, $Text, $Path)
 
     $componente = 'Command'
     try {
-        $pendente = $sync.CommandOutput
-        if ($null -ne $pendente) {
-            if (-not $Title) { $Title = [string]$pendente.Title }
-            if (-not $Text) { $Text = [string]$pendente.Text }
-            if (-not $Path) { $Path = [string]$pendente.Path }
-            if ($pendente.Component) { $componente = [string]$pendente.Component }
+        if ([string]::IsNullOrWhiteSpace($Title) -and [string]::IsNullOrWhiteSpace($Text)) {
+            $chave = $null
+            try { if ($sync.CommandOutputQueue.Count -gt 0) { $chave = [string]$sync.CommandOutputQueue.Dequeue() } } catch { $chave = $null }
+            $pendente = $null
+            if (-not [string]::IsNullOrWhiteSpace($chave)) {
+                $pendente = $sync.CommandOutputs[$chave]
+                # Removido AQUI, e não depois de a janela abrir: o slot é desta chamada e de mais
+                # ninguém. Era um único $sync.CommandOutput global, e um segundo comando que
+                # terminasse antes de o Dispatcher processar o primeiro trocava o texto da janela.
+                [void]$sync.CommandOutputs.Remove($chave)
+            }
+            if ($null -ne $pendente) {
+                $Title = [string]$pendente.Title
+                $Text = [string]$pendente.Text
+                $Path = [string]$pendente.Path
+                if ($pendente.Component) { $componente = [string]$pendente.Component }
+            }
         }
         Show-WinForgeOutputWindow -Title $Title -Text $Text -Path $Path -Component $componente | Out-Null
     } catch {
@@ -460,12 +528,14 @@ function Invoke-WinForgeCommandButton {
         aberta pela thread da interface, com o callback que nasceu na runspace principal.
 
         Um de cada vez ($sync.CommandRunning), e a trava é do PROGRAMA INTEIRO, não de uma aba: dois
-        comandos em paralelo disputariam a troca de code page e a janela de saída. A trava cai assim
-        que o comando termina - antes de abrir a janela de saída, que é modeless e pode ficar aberta o
-        tempo que o usuário quiser - e o 'finally' do corpo cobre o caminho de exceção. Ela é zerada
-        também no 'catch' do despacho: se o Invoke-WPFRunspace falhar (pool fechado, sem thread
-        livre), o corpo nunca roda, o 'finally' dele também não, e sem esse catch o botão ficaria
-        morto até fechar o programa.
+        comandos em paralelo disputariam a troca de code page e a janela de saída. A trava é
+        SEGURADA até o callback da janela voltar, e não solta assim que o comando termina: soltá-la
+        antes deixava dois comandos entregando saída ao mesmo tempo, e o Dispatcher podia processar o
+        segundo antes do primeiro. Como ela vale por toda a entrega, existe no máximo um slot de
+        saída pendente por vez. O 'finally' do corpo cobre o caminho de exceção e a limpeza do slot;
+        ela é zerada também no 'catch' do despacho: se o Invoke-WPFRunspace falhar (pool fechado, sem
+        thread livre), o corpo nunca roda, o 'finally' dele também não, e sem esse catch o botão
+        ficaria morto até fechar o programa.
 
         Quem confere a ferramenta é o núcleo, dentro do runspace: Get-Command sobre 'Get-MpPreference'
         ou 'Get-DnsServerScavenging' faz o Windows carregar o módulo correspondente na primeira vez,
@@ -490,20 +560,28 @@ function Invoke-WinForgeCommandButton {
     $sync.CommandRunning = $true
     $corpo = {
         param($wfArgs)
+        $wfChave = $null
         try {
             $wfRes = Invoke-WinForgeCommandCore -Spec $wfArgs.Spec -Name $wfArgs.Name -Component $wfArgs.Component -Prefix $wfArgs.Prefix
-            $sync.CommandOutput = @{ Title = $wfRes.Title; Text = $wfRes.Text; Path = $wfRes.Path; Component = $wfArgs.Component }
-            # A trava cai ANTES de abrir a janela: o comando já terminou e o arquivo já está gravado,
-            # então segurá-la enquanto a janela de saída existe só faria o próximo botão recusar por
-            # um trabalho que não está mais rodando. O 'finally' abaixo continua sendo a rede de
-            # segurança para o caminho de exceção.
-            $sync.CommandRunning = $false
             # Janela fechando: Invoke-WPFUIThread é síncrono e esperaria por um Dispatcher que está
             # sendo desligado. Não há mais janela para mostrar nada - o arquivo já está gravado.
-            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeCommandOutputCallback }
+            if (-not $sync.WinForgeClosing) {
+                # Slot próprio, com chave própria: o callback lê ESTE resultado e o remove. Nenhum
+                # global é lido depois que a trava cai, porque a trava só cai abaixo, no 'finally'.
+                $wfChave = [guid]::NewGuid().ToString('N')
+                $sync.CommandOutputs[$wfChave] = @{ Title = $wfRes.Title; Text = $wfRes.Text; Path = $wfRes.Path; Component = $wfArgs.Component }
+                $sync.CommandOutputQueue.Enqueue($wfChave)
+                Invoke-WPFUIThread $sync.WinForgeCommandOutputCallback
+            }
         } catch {
             Write-WinForgeLog -Component $wfArgs.Component -Level "ERROR" -Message "$($wfArgs.Name) falhou: $($_.Exception.Message)"
         } finally {
+            # A janela pode não ter aberto (sem Dispatcher, programa fechando, exceção no meio): o
+            # slot não pode ficar para trás esperando o callback do PRÓXIMO comando encontrá-lo.
+            if ($wfChave -and $sync.CommandOutputs.ContainsKey($wfChave)) {
+                [void]$sync.CommandOutputs.Remove($wfChave)
+                try { if ($sync.CommandOutputQueue.Count -gt 0 -and [string]$sync.CommandOutputQueue.Peek() -eq $wfChave) { [void]$sync.CommandOutputQueue.Dequeue() } } catch { }
+            }
             $sync.CommandRunning = $false
         }
     }

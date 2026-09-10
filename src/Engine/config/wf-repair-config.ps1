@@ -106,8 +106,8 @@ $sync.configs.wfrepair = @'
     "ButtonWidth": "350"
   },
   "WPFWFRepDirectX": {
-    "Content": "DirectX (instalador web da Microsoft)",
-    "Description": "INSTALA COMPONENTE. Baixa o dxwebsetup.exe da Microsoft em %TEMP%\\WinForge, confere a assinatura digital da Microsoft Corporation e só então o abre - se a assinatura não fechar, o arquivo é apagado sem ser executado. Ele instala as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua vindo pelo Windows Update. O instalador é interativo: quem conduz as telas é você. Precisa de internet.",
+    "Content": "DirectX: abrir a página oficial da Microsoft",
+    "Description": "Só abre uma página. Abre no navegador a página oficial de download do DirectX End-User Runtime Web Installer, no site da Microsoft. O download e a execução do dxwebsetup.exe são seus, no navegador: o WinForge não baixa nem executa arquivo nenhum da internet. O instalador é interativo e traz as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua vindo pelo Windows Update. Precisa de internet.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
