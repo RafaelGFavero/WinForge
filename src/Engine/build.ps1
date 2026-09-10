@@ -1313,6 +1313,64 @@ if ($SelfTest) {
     } finally {
         Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- backup: OWNER RIGHTS na pasta que já existe e DACL do arquivo
+    # Quarta rodada. Os dois furos são o resto da anterior:
+    #   1. a ACE herdável de OWNER RIGHTS (S-1-3-4, só leitura) só era escrita na CRIAÇÃO da pasta.
+    #      Numa pasta que já existia sem ela, o dono do backup recém-gravado guardava o WRITE_DAC
+    #      implícito entre a gravação e o Protect - a janela que a ACE existe para fechar.
+    #   2. a checagem do ARQUIVO olhava só o dono: um backup com ACE de escrita para 'Todos' passava
+    #      mesmo com o dono certo.
+    $wb4Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada4'
+    try {
+        if (Test-Path $wb4Base) { Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue }
+        $wb4Root = Join-Path $wb4Base 'backup'
+        New-Item -ItemType Directory -Path $wb4Root -Force | Out-Null
+        $wb4Eu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wb4System = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+        $wb4Admin = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+        # Pasta LEGADA: protegida e com os donos certos, mas sem a ACE de OWNER RIGHTS.
+        $wb4Acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $wb4Acl.SetAccessRuleProtection($true, $false)
+        foreach ($wb4Sid in @($wb4System, $wb4Admin, $wb4Eu)) {
+            $wb4Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $wb4Sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        }
+        Set-Acl -LiteralPath $wb4Root -AclObject $wb4Acl
+        $wb4TemOwner = {
+            param($caminho)
+            $rx = [int][System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+            foreach ($ace in (Get-Acl -LiteralPath $caminho).Access) {
+                if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+                $sid = $ace.IdentityReference
+                try { if ($sid -isnot [System.Security.Principal.SecurityIdentifier]) { $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier]) } } catch { continue }
+                if ($sid.Value -eq 'S-1-3-4' -and ([int]$ace.FileSystemRights -band $rx) -eq $rx) { return $true }
+            }
+            return $false
+        }
+        if (& $wb4TemOwner $wb4Root) { Write-Host "  [ERRO] Backup (rodada 4): a pasta de teste já nasceu com a ACE de OWNER RIGHTS - o teste não prova nada" -ForegroundColor Red; $wbErrors++ }
+        $wb4Conf = Confirm-WinForgeSnapshotRoot -Root $wb4Root
+        if (-not $wb4Conf.Ok) { Write-Host "  [ERRO] Backup (rodada 4): a pasta legada deveria ser aceita depois do conserto ('$($wb4Conf.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (& $wb4TemOwner $wb4Root)) { Write-Host "  [ERRO] Backup (rodada 4): Confirm-WinForgeSnapshotRoot não acrescentou a ACE de OWNER RIGHTS (S-1-3-4) na pasta que já existia" -ForegroundColor Red; $wbErrors++ }
+        # Arquivo de backup bom passa; o MESMO arquivo com uma ACE de escrita para 'Todos' é recusado
+        # - dono certo não salva DACL aberta.
+        $wb4Arq = New-WinForgeSnapshot -Name 'setting-RdpNla' -Values @{ 'MaxIdleTime' = '1800000' } -Root $wb4Root
+        if (-not $wb4Arq -or -not (Test-Path -LiteralPath $wb4Arq)) { Write-Host "  [ERRO] Backup (rodada 4): New-WinForgeSnapshot não gravou arquivo ('$wb4Arq')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wb4Bom = Test-WinForgeSnapshotFileTrusted -Path $wb4Arq -ExplicitRoot
+            if (-not $wb4Bom.Trusted) { Write-Host "  [ERRO] Backup (rodada 4): o arquivo recém-gravado deveria passar com -ExplicitRoot ('$($wb4Bom.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wb4Info = New-Object System.IO.FileInfo $wb4Arq
+            $wb4AclArq = $wb4Info.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            $wb4AclArq.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Write', 'None', 'None', 'Allow'))
+            $wb4Info.SetAccessControl($wb4AclArq)
+            $wb4Mau = Test-WinForgeSnapshotFileTrusted -Path $wb4Arq -ExplicitRoot
+            if ($wb4Mau.Trusted) { Write-Host "  [ERRO] Backup (rodada 4): arquivo com escrita para 'Todos' foi considerado confiável" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wb4Mau.Reason -notmatch 'escrita') { Write-Host "  [ERRO] Backup (rodada 4): o motivo da recusa do arquivo não fala da permissão de escrita ('$($wb4Mau.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Backup (rodada 4): pasta que já existia recebe a ACE de OWNER RIGHTS, arquivo com DACL aberta recusado"
+    } catch {
+        Write-Host "  [ERRO] Backup (rodada 4): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # O crivo do Desfazer tem de dizer o mesmo que o plano do item. Só dá para cobrar isso nos dois
     # itens de nível de servidor: o plano dos itens de pool/site precisa do provedor IIS:\ para
     # listar os alvos, e numa máquina sem IIS ele vem vazio.

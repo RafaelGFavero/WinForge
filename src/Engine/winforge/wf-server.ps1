@@ -780,6 +780,50 @@ function Test-WinForgeSnapshotRootPath {
     return @{ Trusted = $true; Reason = ''; Path = $full }
 }
 
+function Find-WinForgeSnapshotUnsafeAce {
+    <#
+    .SYNOPSIS
+        Devolve o nome do primeiro SID de fora da lista que tem escrita numa DACL - de pasta OU de
+        arquivo.
+    .DESCRIPTION
+        A regra é a mesma nos dois lugares, e estar escrita só na pasta era metade da tranca: um
+        arquivo de backup com uma ACE de escrita para 'Todos' passava, porque a checagem do arquivo
+        olhava só o dono. Escrita, modificação, controle total, exclusão, troca de DACL e troca de
+        dono contam todas como escrita - quem pode reescrever a DACL pode devolver a si mesmo o
+        resto.
+
+        0x40000000 (GENERIC_WRITE) e 0x10000000 (GENERIC_ALL) não têm nome em FileSystemRights e
+        aparecem crus numa ACE gravada por uma API antiga: sem eles, uma ACE de escrita genérica
+        passaria batida.
+    .OUTPUTS
+        O nome (ou o SID) de quem tem escrita indevida, ou $null se a DACL está limpa.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Access,
+        [Parameter(Mandatory)][hashtable]$Trusted
+    )
+
+    $perigo = [int][System.Security.AccessControl.FileSystemRights]::Write -bor
+              [int][System.Security.AccessControl.FileSystemRights]::Modify -bor
+              [int][System.Security.AccessControl.FileSystemRights]::FullControl -bor
+              [int][System.Security.AccessControl.FileSystemRights]::Delete -bor
+              [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+              [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+              [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+              0x40000000 -bor 0x10000000
+    foreach ($ace in $Access) {
+        if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        if (-not ([int]$ace.FileSystemRights -band [int]$perigo)) { continue }
+        $sid = $ace.IdentityReference
+        try { if ($sid -isnot [System.Security.Principal.SecurityIdentifier]) { $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier]) } } catch { continue }
+        if ($Trusted.ContainsKey($sid.Value)) { continue }
+        $nome = $sid.Value
+        try { $nome = $sid.Translate([System.Security.Principal.NTAccount]).Value } catch { }
+        return $nome
+    }
+    return $null
+}
+
 function Test-WinForgeSnapshotRootTrusted {
     <#
     .SYNOPSIS
@@ -829,27 +873,8 @@ function Test-WinForgeSnapshotRootTrusted {
             try { $nome = $dono.Translate([System.Security.Principal.NTAccount]).Value } catch { }
             return @{ Trusted = $false; Reason = "'$Root' pertence a '$nome', fora de SYSTEM/Administradores" }
         }
-        # 0x40000000 (GENERIC_WRITE) e 0x10000000 (GENERIC_ALL) não têm nome em FileSystemRights e
-        # aparecem crus numa ACE gravada por uma API antiga: sem eles, uma ACE de escrita genérica
-        # passaria batida.
-        $perigo = [int][System.Security.AccessControl.FileSystemRights]::Write -bor
-                  [int][System.Security.AccessControl.FileSystemRights]::Modify -bor
-                  [int][System.Security.AccessControl.FileSystemRights]::FullControl -bor
-                  [int][System.Security.AccessControl.FileSystemRights]::Delete -bor
-                  [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-                  [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                  [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-                  0x40000000 -bor 0x10000000
-        foreach ($ace in $acl.Access) {
-            if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
-            if (-not ([int]$ace.FileSystemRights -band [int]$perigo)) { continue }
-            $sid = $ace.IdentityReference
-            try { if ($sid -isnot [System.Security.Principal.SecurityIdentifier]) { $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier]) } } catch { continue }
-            if ($confiaveis.ContainsKey($sid.Value)) { continue }
-            $nome = $sid.Value
-            try { $nome = $sid.Translate([System.Security.Principal.NTAccount]).Value } catch { }
-            return @{ Trusted = $false; Reason = "'$nome' tem permissão de escrita em '$Root'" }
-        }
+        $mau = Find-WinForgeSnapshotUnsafeAce -Access @($acl.Access) -Trusted $confiaveis
+        if ($mau) { return @{ Trusted = $false; Reason = "'$mau' tem permissão de escrita em '$Root'" } }
         return @{ Trusted = $true; Reason = '' }
     } catch {
         return @{ Trusted = $false; Reason = "não foi possível conferir '$Root': $($_.Exception.Message)" }
@@ -859,7 +884,7 @@ function Test-WinForgeSnapshotRootTrusted {
 function Test-WinForgeSnapshotFileTrusted {
     <#
     .SYNOPSIS
-        Confere o arquivo de backup em si, antes de ele ser lido: dono e ponto de reanálise.
+        Confere o arquivo de backup em si, antes de ele ser lido: dono, DACL e ponto de reanálise.
     .DESCRIPTION
         A pasta protegida já impede que alguém de fora escreva lá dentro. Esta checagem é a segunda
         tranca, para o caso de a pasta ter sido protegida DEPOIS de um arquivo estranho já estar lá
@@ -874,6 +899,10 @@ function Test-WinForgeSnapshotFileTrusted {
         que o Desfazer elevado aplicaria. Na pasta padrão o dono tem de ser SYSTEM ou Administradores
         - e é New-WinForgeSnapshot que entrega o arquivo recém-gravado ao grupo Administradores, para
         que o backup bom continue passando.
+
+        A DACL do arquivo é conferida com a MESMA regra da pasta (Find-WinForgeSnapshotUnsafeAce):
+        olhar só o dono deixava passar o arquivo que já estava lá com uma ACE de escrita para
+        'Todos' - o dono podia ser SYSTEM e qualquer um reescrever o conteúdo assim mesmo.
     .PARAMETER ExplicitRoot
         Quem chamou passou um -Root próprio (na prática, o -SelfTest em %TEMP%): a identidade atual
         pode ser dona do arquivo.
@@ -891,14 +920,17 @@ function Test-WinForgeSnapshotFileTrusted {
             return @{ Trusted = $false; Reason = "é um ponto de reanálise (link)" }
         }
         $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot:$ExplicitRoot
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
         $dono = $null
-        try { $dono = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { }
+        try { $dono = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { }
         if ($null -eq $dono) { return @{ Trusted = $false; Reason = "o dono não pôde ser lido" } }
         if (-not $donos.ContainsKey($dono.Value)) {
             $nome = $dono.Value
             try { $nome = $dono.Translate([System.Security.Principal.NTAccount]).Value } catch { }
             return @{ Trusted = $false; Reason = "pertence a '$nome', fora de SYSTEM/Administradores" }
         }
+        $mau = Find-WinForgeSnapshotUnsafeAce -Access @($acl.Access) -Trusted (Get-WinForgeSnapshotTrustedSid -ExplicitRoot:$ExplicitRoot)
+        if ($mau) { return @{ Trusted = $false; Reason = "'$mau' tem permissão de escrita no arquivo" } }
         return @{ Trusted = $true; Reason = '' }
     } catch {
         return @{ Trusted = $false; Reason = $_.Exception.Message }
@@ -965,6 +997,63 @@ function New-WinForgeSnapshotRoot {
     }
 }
 
+function Repair-WinForgeSnapshotRootOwnerRight {
+    <#
+    .SYNOPSIS
+        Garante a ACE herdável de OWNER RIGHTS (S-1-3-4, só leitura) na pasta de backup que JÁ existe.
+    .DESCRIPTION
+        A ACE só era escrita na CRIAÇÃO da pasta. Numa pasta que já existia sem ela - a criada por
+        uma versão anterior do WinForge, ou por qualquer outro caminho - o dono do arquivo
+        recém-gravado continuava com o WRITE_DAC implícito: entre o New-WinForgeSnapshot e o
+        Protect-WinForgeSnapshotFile havia uma janela em que um processo de integridade média da
+        mesma conta reescrevia a DACL do backup pelo caminho completo e plantava valores que o
+        Desfazer elevado aplicaria. Com a ACE herdável, o Windows troca os direitos implícitos do
+        dono por estes - e a janela fecha.
+
+        A ACE existente só conta se for herdável (pasta E arquivo) e trouxer os direitos de leitura:
+        uma ACE de OWNER RIGHTS só na própria pasta não protege os arquivos de dentro.
+    .OUTPUTS
+        @{ Ok = <bool>; Added = <bool>; Reason = <string> }.
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+
+    $rx = [int][System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $heranca = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+               [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $tem = {
+        param($acl)
+        foreach ($ace in $acl.Access) {
+            if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            $sid = $ace.IdentityReference
+            try { if ($sid -isnot [System.Security.Principal.SecurityIdentifier]) { $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier]) } } catch { continue }
+            if ($sid.Value -ne 'S-1-3-4') { continue }
+            if (([int]$ace.FileSystemRights -band $rx) -ne $rx) { continue }
+            if (([int]$ace.InheritanceFlags -band [int]$heranca) -ne [int]$heranca) { continue }
+            return $true
+        }
+        return $false
+    }
+
+    try {
+        # Só a seção DACL, e por DirectoryInfo: Get-Acl/Set-Acl carregam também a seção de AUDITORIA,
+        # e gravar SACL exige SeSecurityPrivilege - privilégio que o WinForge não tem e não precisa.
+        $pasta = New-Object System.IO.DirectoryInfo $Root
+        $secao = [System.Security.AccessControl.AccessControlSections]::Access
+        $acl = $pasta.GetAccessControl($secao)
+        if (& $tem $acl) { return @{ Ok = $true; Added = $false; Reason = '' } }
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-3-4'), 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        $pasta.SetAccessControl($acl)
+        # Relido do disco: a gravação pode ser aceita e a ACE não ficar (filtro de driver, volume sem
+        # ACL). Quem confia é o disco, não a cópia em memória.
+        if (-not (& $tem ((New-Object System.IO.DirectoryInfo $Root).GetAccessControl($secao)))) {
+            return @{ Ok = $false; Added = $false; Reason = 'a ACE de OWNER RIGHTS não ficou gravada' }
+        }
+        return @{ Ok = $true; Added = $true; Reason = '' }
+    } catch {
+        return @{ Ok = $false; Added = $false; Reason = $_.Exception.Message }
+    }
+}
+
 function Confirm-WinForgeSnapshotRoot {
     <#
     .SYNOPSIS
@@ -977,6 +1066,11 @@ function Confirm-WinForgeSnapshotRoot {
 
         Então a ordem é esta: não existe -> cria com a DACL protegida; existe -> confere; não passou
         -> quem chamou RECUSA a aplicação inteira, sem alterar nada.
+
+        Passar na conferência ainda não basta: a pasta que já existia pode estar sem a ACE herdável
+        de OWNER RIGHTS (ver Repair-WinForgeSnapshotRootOwnerRight), e sem ela o dono do backup
+        recém-gravado guarda WRITE_DAC até o Protect. A ACE é acrescentada aqui, antes de qualquer
+        gravação; se não der para acrescentar, a pasta vale como NÃO confiável.
     .OUTPUTS
         @{ Ok = <bool>; Reason = <string>; Path = <pasta> }.
     #>
@@ -986,8 +1080,19 @@ function Confirm-WinForgeSnapshotRoot {
     $explicito = -not [string]::IsNullOrWhiteSpace($Root)
     if (-not (Test-Path -LiteralPath $dir)) { New-WinForgeSnapshotRoot -Root $dir | Out-Null }
     $t = Test-WinForgeSnapshotRootTrusted -Root $dir -ExplicitRoot:$explicito
-    if ($t.Trusted) { return @{ Ok = $true; Reason = ''; Path = $dir } }
-    return @{ Ok = $false; Reason = $t.Reason; Path = $dir }
+    if (-not $t.Trusted) { return @{ Ok = $false; Reason = $t.Reason; Path = $dir } }
+    $dono = Repair-WinForgeSnapshotRootOwnerRight -Root $dir
+    if (-not $dono.Ok) {
+        return @{ Ok = $false; Reason = "pasta de backup sem proteção de dono ('$dir'): $($dono.Reason)"; Path = $dir }
+    }
+    if ($dono.Added) {
+        if ($null -eq $script:WinForgeSnapshotOwnerRightLogged) { $script:WinForgeSnapshotOwnerRightLogged = @{} }
+        if (-not $script:WinForgeSnapshotOwnerRightLogged.ContainsKey($dir)) {
+            $script:WinForgeSnapshotOwnerRightLogged[$dir] = $true
+            try { Write-WinForgeLog -Component "IIS" -Message "Pasta de backup existente recebeu a ACE de OWNER RIGHTS (só leitura): $dir" } catch { }
+        }
+    }
+    return @{ Ok = $true; Reason = ''; Path = $dir }
 }
 
 function Protect-WinForgeSnapshotFile {
