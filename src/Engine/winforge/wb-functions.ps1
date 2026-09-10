@@ -2,6 +2,48 @@
 # Todas as funções levam "WinUtilBoost" no nome para serem importadas automaticamente
 # nos runspaces (Initialize-WinUtilRunspacePool importa tudo que casa com 'winutil|WPF').
 
+function Get-WinForgeWindowsProductType {
+    <#
+    .SYNOPSIS
+        Diz se este Windows é cliente ou servidor, lendo o registro; o CIM só entra se o registro falhar.
+    .DESCRIPTION
+        HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions\ProductType responde em 12 ms aqui,
+        contra 100-190 ms de um Get-CimInstance Win32_OperatingSystem quente (e muito mais com o
+        winmgmt frio). Mais importante: num servidor com o repositório WMI corrompido a chamada CIM
+        lança, $sync.IsServer ficava $false e a aba Servidor inteira sumia sem uma palavra.
+
+        'WinNT' = cliente; 'ServerNT' (servidor membro) e 'LanmanNT' (controlador de domínio) =
+        servidor. Falhando os dois caminhos, a resposta é 'cliente' com um WARN no log: esconder a
+        aba Servidor num servidor é chato, mostrar itens de servidor num cliente é pior.
+    .OUTPUTS
+        @{ IsServer = <bool>; Source = 'registry'|'cim'|'nenhum'; ProductType = <texto ou $null> }.
+    #>
+    try {
+        $pt = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions' -Name 'ProductType' -ErrorAction Stop).ProductType
+        if (-not [string]::IsNullOrWhiteSpace($pt)) {
+            return @{ IsServer = ($pt -ne 'WinNT'); Source = 'registry'; ProductType = $pt }
+        }
+    } catch { }
+    try {
+        $osTipo = [int](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).ProductType
+        return @{ IsServer = ($osTipo -ne 1); Source = 'cim'; ProductType = [string]$osTipo }
+    } catch { }
+    try { Write-WinForgeLog -Component "Server" -Level "WARN" -Message "Tipo de produto do Windows não pôde ser lido (nem pelo registro nem pelo CIM): assumindo cliente." } catch { }
+    return @{ IsServer = $false; Source = 'nenhum'; ProductType = $null }
+}
+
+function Test-WinForgeRealServer {
+    <#
+    .SYNOPSIS
+        $true só num Windows Server de verdade - WINFORGE_SIMULATE_SERVER não conta.
+    .DESCRIPTION
+        A simulação existe para montar a aba e exercitar as regras num cliente. O que ela NÃO pode
+        fazer é liberar a escrita em SMB, plano de energia, TCP ou RDP da máquina de quem está
+        testando: por isso quem mexe de verdade pergunta aqui, e não a $sync.IsServer.
+    #>
+    return [bool](Get-WinForgeWindowsProductType).IsServer
+}
+
 function Get-WinUtilBoostSystemInfo {
     <#
     .SYNOPSIS
@@ -30,10 +72,7 @@ function Get-WinUtilBoostSystemInfo {
         $sync.ServerRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -and $_ -ne 'none' })
         $sync.IsDC = ('ad' -in $sync.ServerRoles)
     } else {
-        try {
-            $wfOs = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-            $sync.IsServer = ([int]$wfOs.ProductType -ne 1)
-        } catch { }
+        $sync.IsServer = [bool](Get-WinForgeWindowsProductType).IsServer
         if ($sync.IsServer) {
             $roles = [System.Collections.Generic.List[string]]::new()
             $wfSvc = @{}

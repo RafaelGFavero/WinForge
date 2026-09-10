@@ -186,6 +186,9 @@ function Get-WinForgeDiagSections {
         }
         if ($Profile.Roles.IsDC) { $papeis += 'controlador de domínio' }
         Add-WinForgeDiagLine $sec "Papéis" $(if ($papeis.Count) { $papeis -join ', ' } else { 'nenhum detectado' })
+        # Perfil montado sob simulação: sem esta linha, o relatório HTML de um teste afirmaria que a
+        # máquina é servidor sem dizer que quem mandou isso foi uma variável de ambiente.
+        if ($Profile.Simulated) { Add-WinForgeDiagLine $sec "Simulação" ([string]$Profile.Simulated) }
         # Área Servidor ausente (perfil antigo, coleta que falhou inteira): as linhas viram 'n/d' em
         # vez de sumir - o cartão continua contando o mesmo enredo, só sem os valores.
         Add-WinForgeDiagLine $sec "SMB1" (Format-WinForgeDiagValue $(if ($srv) { $srv.Smb1Enabled } else { $null }))

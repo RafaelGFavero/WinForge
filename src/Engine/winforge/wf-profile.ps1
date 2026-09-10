@@ -95,7 +95,7 @@ function Get-WinForgeSystemProfile {
     #>
     param([switch]$SkipNetwork)
 
-    $p = [ordered]@{ GeneratedAt = (Get-Date).ToString('s'); Errors = @() }
+    $p = [ordered]@{ GeneratedAt = (Get-Date).ToString('s'); Errors = @(); Simulated = $null }
 
     # ---- Servidor simulado (WINFORGE_SIMULATE_SERVER): o mesmo override que o banner usa vale aqui.
     # Sem isto a janela dizia "Windows Server" e o perfil devolvia OS.IsServer=$false e Server=$null:
@@ -116,6 +116,10 @@ function Get-WinForgeSystemProfile {
             $wfSimRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -and $_ -ne 'none' })
             $wfSimIsDC  = ('ad' -in $wfSimRoles)
         }
+        # O relatório HTML e o cartão Servidor passam a dizer de onde veio esse "servidor": sob
+        # simulação o perfil relata ProductType 3 numa máquina que é ProductType 1, e um relatório
+        # que afirma isso sem ressalva vira uma informação errada quando alguém o abre depois.
+        $p.Simulated = 'env:WINFORGE_SIMULATE_SERVER'
     }
 
     # ---- SO
@@ -382,7 +386,17 @@ function Get-WinForgeSystemProfile {
                            Iis = [ordered]@{ Installed = [bool]$p.Roles.IIS; PoolCount = $null; SiteCount = $null; LogDirectory = $null; LogOnOsDrive = $null; AppInitInstalled = $null; DynCompressionInstalled = $null }
                            Ad  = [ordered]@{ NtdsPath = $null; SysvolPath = $null; NtdsOnOsDrive = $null; SysvolOnOsDrive = $null } }
         try { $smb = Get-SmbServerConfiguration -ErrorAction Stop; $srv.Smb1Enabled = [bool]$smb.EnableSMB1Protocol; $srv.SmbSigningRequired = [bool]$smb.RequireSecuritySignature } catch { $p.Errors += "SMB: $($_.Exception.Message)" }
-        try { $tcp = (netsh int tcp show global 2>$null) -join "`n"; if ($tcp -match '(?im)^\s*Receive Window Auto-Tuning Level\s*:\s*(\S+)|^\s*Nível de Ajuste Automático da Janela de Recebimento\s*:\s*(\S+)') { $srv.TcpAutotuning = ($Matches[1] + $Matches[2]).ToLower() } } catch { }
+        # Get-NetTCPSetting, e não 'netsh int tcp show global': o netsh escreve UTF-8 quando a saída é
+        # um cano (e OEM quando é console), então no processo sem janela que o lançador usa o texto
+        # chegava embaralhado e a linha em português nunca casava com a expressão regular - o campo
+        # ficava $null em toda máquina localizada, e é justamente o campo que o item
+        # WPFTweaksWFSrvTcpAutotuning existe para corrigir. O cmdlet devolve objeto, existe desde o
+        # Server 2012 e não depende de idioma; AutoTuningLevelLocal é o que o antigo
+        # 'netsh int tcp set global autotuninglevel' escrevia.
+        try {
+            $nivelTcp = [string](Get-NetTCPSetting -SettingName Internet -ErrorAction Stop).AutoTuningLevelLocal
+            if (-not [string]::IsNullOrWhiteSpace($nivelTcp)) { $srv.TcpAutotuning = $nivelTcp.ToLower() }
+        } catch { $p.Errors += "TCP: $($_.Exception.Message)" }
         # O w32tm escreve a FALHA no stdout, não no stderr ("Ocorreu o seguinte erro: O serviço não
         # foi iniciado. (0x80070426)"), então filtrar o stderr não adianta e a mensagem de erro virava
         # a fonte de horário do relatório. Só o código de saída separa resposta de erro - e a leitura
