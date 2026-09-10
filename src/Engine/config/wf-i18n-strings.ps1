@@ -34,7 +34,9 @@ $WinForgeI18nStrings = @(
     @('Text="Large"', 'Text="Grande"'),
     @('Content="Reset"', 'Content="Padrão"'),
     @('Content="Apply"', 'Content="Aplicar"'),
-    @('ToolTip="Settings"', 'ToolTip="Configurações"'),
+    # A engrenagem não abre "Configurações": abre o menu Importar / Exportar / Sobre / Documentação /
+    # Créditos. "Configurações" colidia com a aba de mesmo nome e mandava o usuário para o lugar errado.
+    @('ToolTip="Settings"', 'ToolTip="Importar/Exportar configurações"'),
     @('Header="Import" Name="ImportMenuItem"', 'Header="Importar" Name="ImportMenuItem"'),
     @('Header="Export" Name="ExportMenuItem"', 'Header="Exportar" Name="ExportMenuItem"'),
     @('<ToolTip Content="Import Configuration from exported file."/>', '<ToolTip Content="Importa uma configuração de um arquivo exportado."/>'),
@@ -82,7 +84,9 @@ $WinForgeI18nStrings = @(
     @('Content=" Get Installed Tweaks "', 'Content=" Detectar aplicados "'),
     @('Content=" AppX Removal "', 'Content=" Remover AppX "'),
     @('Content="Run Tweaks"', 'Content="Aplicar ajustes"'),
-    @('Content="Undo Selected Tweaks"', 'Content="Desfazer selecionados"'),
+    # "Desfazer selecionados" é o rótulo dos botões equivalentes das abas Jogos e Servidor; aqui o
+    # botão é o da aba Ajustes e diz o que desfaz.
+    @('Content="Undo Selected Tweaks"', 'Content="Desfazer ajustes selecionados"'),
     @('Note: Hover over items to get a better description. Please be careful as many of these tweaks will heavily modify your system.',
       'Dica: passe o mouse sobre um item para ler a descrição. Muitos destes ajustes mexem fundo no sistema - vá com calma.'),
     @('<LineBreak/>Recommended selections are for normal users and if you are unsure do NOT check anything else!',
@@ -267,16 +271,28 @@ $WinForgeI18nStrings += @(
     @('Write-Host "Applying tweaks..."', 'Write-Host "Aplicando os ajustes..."'),
     @('Write-Host "Applying features..."', 'Write-Host "Aplicando os recursos..."'),
     @('Write-Host "Done."', 'Write-Host "Concluído."'),
-    @('"--   AppX Install Finished   ---"', '"--   Instalação de AppX concluída   ---"'),
-    @('"---   Features are Installed    ---"', '"---   Recursos instalados    ---"'),
+    # Faixas do console: a moldura de "=" em volta tem largura fixa, então o texto traduzido tem de
+    # ocupar exatamente a mesma largura do original - senão o "---" da direita sai do lugar. O
+    # espaçamento aqui é calculado, não estético; o build reprova quem errar (ver "largura das faixas
+    # do console" em build.ps1).
+    @('"--   AppX Install Finished   ---"', '"--      AppX instalados      ---"'),
+    @('"--   AppX Removal Finished   ---"', '"--      AppX removidos       ---"'),
+    @('"---   Features are Installed    ---"', '"---     Recursos instalados     ---"'),
+    @('"---  A Reboot may be required   ---"', '"---  Pode ser preciso reiniciar ---"'),
+    @('"--      Installs have finished          ---"', '"--        Instalações concluídas        ---"'),
+    @('"--       Uninstalls have finished       ---"', '"--       Desinstalações concluídas      ---"'),
+    @('"-- NTP Configuration Complete ---"', '"--       NTP configurado      ---"'),
+    @('Write-Host "==> Starting WinGet Repair"', 'Write-Host "==> Iniciando o reparo do WinGet"'),
+    @('Write-Host "==> Finished WinGet Repair"', 'Write-Host "==> Reparo do WinGet concluído"'),
+    @('Write-Host "==> Finished System Repair"', 'Write-Host "==> Reparo do sistema concluído"'),
     @('Write-Host "Network Configuration has been Reset. Please restart your computer."', 'Write-Host "A configuração de rede voltou ao padrão. Reinicie o computador."'),
     @('Write-Host "Starting Windows Update Repair..."', 'Write-Host "Iniciando o reparo do Windows Update..."'),
     @('Write-Host "Defaulting driver offering through Windows Update..."', 'Write-Host "Voltando ao padrão a oferta de drivers pelo Windows Update..."'),
     @('Write-Host "Defaulting Windows Update automatic restart..."', 'Write-Host "Voltando ao padrão o reinício automático do Windows Update..."'),
     @('Write-Host "Clearing ANY Windows Update Policy settings..."', 'Write-Host "Apagando QUALQUER política do Windows Update..."'),
-    @('"-- Reset All Windows Update Settings to Stock -"', '"-- Windows Update de volta ao padrão de fábrica -"'),
-    @('"--     OpenSSH Server installed!    ---"', '"--     Servidor OpenSSH instalado!    ---"'),
-    @('"---  Undo Tweaks are Finished  ---"', '"---  Ajustes desfeitos  ---"'),
+    @('"-- Reset All Windows Update Settings to Stock -"', '"-- Windows Update de volta ao padrão original -"'),
+    @('"--     OpenSSH Server installed!    ---"', '"--    Servidor OpenSSH instalado!   ---"'),
+    @('"---  Undo Tweaks are Finished  ---"', '"---      Ajustes desfeitos     ---"'),
     @('Write-Host "Enabling OpenSSH Server... This will take a long time."', 'Write-Host "Ativando o servidor OpenSSH... isso demora."'),
     @('Write-Host "Starting the services"', 'Write-Host "Iniciando os serviços"'),
     @('Write-Host "Firewall rule for OpenSSH Server created and enabled."', 'Write-Host "Regra de firewall do servidor OpenSSH criada e ativada."'),
@@ -293,16 +309,16 @@ $WinForgeI18nStrings += @(
     @('Write-Host "Restored wuauserv to Manual."', 'Write-Host "O wuauserv voltou para Manual."'),
     @('Write-Host "Restored UsoSvc to Automatic."', 'Write-Host "O UsoSvc voltou para Automático."'),
     @('Write-Host "Enabling update related scheduled tasks..."', 'Write-Host "Reativando as tarefas agendadas de atualização..."'),
-    @('"---  Windows Update Settings Reset to Default   ---"', '"---  Windows Update de volta ao padrão   ---"'),
+    @('"---  Windows Update Settings Reset to Default   ---"', '"---      Windows Update de volta ao padrão      ---"'),
     @('Write-Host "Configuring registry settings..."', 'Write-Host "Configurando o registro..."'),
     @('Write-Host "Stopping and disabling $serviceName service."', 'Write-Host "Parando e desativando o serviço $serviceName."'),
     @('Write-Host "Cleared SoftwareDistribution folder."', 'Write-Host "Pasta SoftwareDistribution limpa."'),
     @('Write-Host "Disabling update related scheduled tasks..."', 'Write-Host "Desativando as tarefas agendadas de atualização..."'),
-    @('"--- Windows Update Is Disabled ---"', '"--- Windows Update desativado ---"'),
+    @('"--- Windows Update Is Disabled ---"', '"---  Windows Update desativado ---"'),
     @('Write-Host "Disabling driver offering through Windows Update..."', 'Write-Host "Desativando a oferta de drivers pelo Windows Update..."'),
     @('Write-Host "Restoring Windows Update availability..."', 'Write-Host "Restaurando o acesso ao Windows Update..."'),
     @('Write-Host "Deferring feature updates by 365 days and quality updates by 4 days..."', 'Write-Host "Adiando atualizações de recursos por 365 dias e de qualidade por 4 dias..."'),
-    @('"-- Updates Set to Recommended ---"', '"-- Atualizações no perfil Recomendado ---"'),
+    @('"-- Updates Set to Recommended ---"', '"--  Atualizações: Recomendado ---"'),
     # dentro do InvokeScript do tweak da lista de bloqueio da Adobe (texto escapado no JSON)
     @('Added Adobe url block list from host file', 'Lista de bloqueio da Adobe adicionada ao arquivo hosts'),
     @('Removed Adobe url block list from host file', 'Lista de bloqueio da Adobe removida do arquivo hosts')
@@ -337,7 +353,7 @@ $WinForgeI18nStrings += @(
       '"Deu erro ao montar ou conferir a ISO:`n`n$errorMessage",'),
     @('"No verified ISO found. Please complete Steps 1 and 2 first.",', '"Nenhuma ISO conferida. Faça as etapas 1 e 2 primeiro.",'),
     @('[System.Windows.MessageBox]::Show("No modified ISO content found. Please complete Steps 1-3 first.", "Not Ready", "OK", "Warning")',
-      '[System.Windows.MessageBox]::Show("Nenhum conteúdo de ISO modificado. Faça as etapas 1 a 3 primeiro.", "Ainda não dá", "OK", "Warning")'),
+      '[System.Windows.MessageBox]::Show("Nenhum conteúdo de ISO modificado. Faça as etapas 1 a 3 primeiro.", "Ainda não é possível", "OK", "Warning")'),
     @('"No modified ISO content found.  Please complete Steps 1-3 first.",', '"Nenhum conteúdo de ISO modificado.  Faça as etapas 1 a 3 primeiro.",'),
     @('"A previous WinForge ISO working directory was found:`n`n$($existingWorkDir.FullName)`n`n(Last modified: $modified)`n`nStep 4 (output options) has been restored so you can save the already-modified image.`n`nClick ''Clean & Reset'' in Step 4 if you want to start over.",',
       '"Encontrei uma pasta de trabalho de ISO do WinForge:`n`n$($existingWorkDir.FullName)`n`n(Modificada em: $modified)`n`nA etapa 4 (opções de saída) foi restaurada para você salvar a imagem que já está modificada.`n`nClique em ''Limpar e recomeçar'' na etapa 4 se quiser começar do zero.",'),
@@ -357,7 +373,7 @@ $WinForgeI18nStrings += @(
     @('"Modification Error", "OK", "Error")', '"Erro na modificação", "OK", "Error")'),
     @('"This ISO uses an install.esd file that is $esdSizeMB MB. WinForge''s FAT32 USB format cannot store files larger than 4 GB.`n`nExport an ISO instead or use media with install.wim.",',
       '"Esta ISO usa um install.esd de $esdSizeMB MB. O formato FAT32 que o WinForge usa no pendrive não guarda arquivo maior que 4 GB.`n`nExporte uma ISO ou use uma mídia com install.wim.",'),
-    @('"USB Creation Not Supported", "OK", "Warning")', '"Não dá para criar o pendrive", "OK", "Warning")'),
+    @('"USB Creation Not Supported", "OK", "Warning")', '"Falha ao criar o pendrive", "OK", "Warning")'),
     @('[System.Windows.MessageBox]::Show("Please select a USB drive from the dropdown.", "No Drive Selected", "OK", "Warning")',
       '[System.Windows.MessageBox]::Show("Escolha um pendrive na lista.", "Nenhum pendrive escolhido", "OK", "Warning")'),
     @('"ALL data on Disk $diskNum ($($targetDisk.FriendlyName), $sizeGB GB) will be PERMANENTLY ERASED.`n`nAre you sure you want to continue?",',
@@ -367,7 +383,30 @@ $WinForgeI18nStrings += @(
       '"Pendrive criado com sucesso!`n`nJá dá para dar boot por ele e instalar o Windows 11.",'),
     @('"USB Ready", "OK", "Info")', '"Pendrive pronto", "OK", "Info")'),
     @('[System.Windows.MessageBox]::Show("USB write failed:`n`n$_", "USB Write Error", "OK", "Error")',
-      '[System.Windows.MessageBox]::Show("A gravação no pendrive falhou:`n`n$_", "Erro na gravação", "OK", "Error")')
+      '[System.Windows.MessageBox]::Show("A gravação no pendrive falhou:`n`n$_", "Erro na gravação", "OK", "Error")'),
+    # --- "processo em andamento": as duas chamadas que o par repetido lá embaixo NÃO resolve sozinho.
+    # O par repetido casa ' Install process is currently running."' (com o espaço da frente) e por isso
+    # deixava para trás o "An" de "[Invoke-WPFInstall] An Install process...", produzindo a frase
+    # quebrada "An Já existe um processo em andamento.". Estas duas linhas trocam a frase inteira ANTES
+    # do laço de repetidos - Replace-Once roda primeiro -, e sobram 4 ocorrências para ele.
+    @('$msg = "[Invoke-WPFInstall] An Install process is currently running."',
+      '$msg = "[Invoke-WPFInstall] Já existe um processo em andamento."'),
+    # esta não tem ponto final, então o par repetido nem chegava perto dela
+    @('$msg = "[Invoke-WPFUnInstall] Install process is currently running"',
+      '$msg = "[Invoke-WPFUnInstall] Já existe um processo em andamento."'),
+    @('$WarningMsg = "Please select the program(s) to install or upgrade."',
+      '$WarningMsg = "Escolha o(s) programa(s) para instalar ou atualizar."'),
+    @('$WarningMsg = "Please select the program(s) to uninstall"',
+      '$WarningMsg = "Escolha o(s) programa(s) para desinstalar."'),
+    @('Show-WinForgeMessage -Message "Another process is currently running." -Title "WinForge"',
+      'Show-WinForgeMessage -Message "Já existe outro processo em andamento." -Title "WinForge"'),
+    # --- importação de configuração antiga (formato pré-WinForge)
+    @('Show-WinForgeMessage -Message "This legacy configuration contains no settings supported by this version of WinForge. No changes have been made." -Title "Unsupported Legacy Configuration"',
+      'Show-WinForgeMessage -Message "Esta configuração antiga não traz nenhum item aceito por esta versão do WinForge. Nada foi alterado." -Title "Configuração antiga sem itens aceitos"'),
+    @('$skippedDisplay += "`n...and $($skippedSelections.Count - 10) more. See the WinForge log for details."',
+      '$skippedDisplay += "`n...e mais $($skippedSelections.Count - 10). Veja o registro do WinForge para os detalhes."'),
+    @('Show-WinForgeMessage -Message "Supported settings were imported. The following retired settings were skipped:`n`n$skippedDisplay" -Title "Legacy Configuration Partially Imported"',
+      'Show-WinForgeMessage -Message "Os itens aceitos foram importados. Estes itens aposentados ficaram de fora:`n`n$skippedDisplay" -Title "Configuração antiga importada em parte"')
 )
 
 # ---------------------------------------------------------------- registro de status da aba ISO Win11
@@ -459,9 +498,15 @@ $WinForgeI18nStrings += @(
 $WinForgeI18nRepeated += @(
     @(' Install process is currently running."', ' Já existe um processo em andamento."'),
     @('Write-Host "Error: $_"', 'Write-Host "Erro: $_"'),
-    @('"-- You can close this window if desired ---"', '"-- Se quiser, pode fechar esta janela ---"'),
-    @('"--     Tweaks are Finished    ---"', '"--     Ajustes concluídos    ---"'),
+    @('"--           Updates started            ---"', '"--        Atualizações iniciadas        ---"'),
+    @('"-- You can close this window if desired ---"', '"--  Se quiser, pode fechar esta janela  ---"'),
+    @('"--     Tweaks are Finished    ---"', '"--     Ajustes concluídos     ---"'),
     @('Write-Host "Note: You must restart your system in order for all changes to take effect."', 'Write-Host "Aviso: reinicie o computador para que tudo passe a valer."'),
     @('-Label "Tweaks finished"', '-Label "Ajustes concluídos"'),
-    @('"Not Ready", "OK", "Warning")', '"Ainda não dá", "OK", "Warning")')
+    @('"Not Ready", "OK", "Warning")', '"Ainda não é possível", "OK", "Warning")'),
+    # as duas caixas da aba AppX (instalar e remover) usam texto idêntico
+    @('-Message "An AppX process is currently running." -Title "WinForge"',
+      '-Message "Já existe um processo de AppX em andamento." -Title "WinForge"'),
+    @('-Message "No AppX Package selected" -Title "Error"',
+      '-Message "Nenhum pacote AppX selecionado" -Title "Erro"')
 )

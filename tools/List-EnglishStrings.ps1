@@ -4,7 +4,10 @@
 # e o rename aplicados) e lista o que ainda está em inglês em três frentes:
 #   1. atributos do XAML ($inputXML): Content=, Text=, Header=, ToolTip=, Placeholder=, Watermark=
 #   2. texto solto entre tags do XAML (o miolo de <TextBlock>...</TextBlock>)
-#   3. mensagens de código: [System.Windows.MessageBox]::Show(...) e Write-Host (primeiro argumento)
+#   3. mensagens de código: [System.Windows.MessageBox]::Show(...), Show-WinForgeMessage -Message/-Title
+#      (o wrapper de diálogo do próprio motor - a maioria das caixas passa por ele, não pelo MessageBox
+#      direto), as atribuições $msg = "..." / $WarningMsg = "..." que alimentam esse wrapper, e
+#      Write-Host (primeiro argumento)
 #
 # O filtro é heurístico: a linha só entra na lista se contiver alguma palavra da lista abaixo como
 # palavra inteira. Serve para achar o que traduzir, não para provar que acabou - quem prova é a
@@ -34,7 +37,12 @@ $englishWords = @(
     'maximize', 'font', 'scaling', 'small', 'large', 'offline', 'mode', 'internet', 'connection',
     'import', 'export', 'actions', 'features', 'fixes', 'legacy', 'panels', 'remote', 'access',
     'performance', 'plans', 'essential', 'tweaks', 'customize', 'preferences', 'caution', 'note',
-    'undo', 'dark', 'light', 'drive', 'edition', 'output', 'modify', 'creator', 'profiles'
+    'undo', 'dark', 'light', 'drive', 'edition', 'output', 'modify', 'creator', 'profiles',
+    # terceira leva: o que os padrões novos (Show-WinForgeMessage e $msg =) trouxeram e a lista não
+    # pegava - "An AppX process is currently running.", "Undo Tweaks are Finished", "Unsupported
+    # Legacy Configuration". Sem estas palavras o inventário dava a caixa por traduzida.
+    'process', 'running', 'another', 'currently', 'finished', 'removal', 'reboot', 'required',
+    'started', 'unsupported', 'supported', 'skipped'
 )
 $englishRegex = [regex]("(?i)\b(" + ($englishWords -join '|') + ")\b")
 
@@ -58,6 +66,13 @@ if ($xamlStart -lt 0 -or $xamlEnd -lt 0) { throw "Não achei a região do `$inpu
 $attrRegex  = [regex]'(?<attr>Content|Text|Header|ToolTip|Placeholder|Watermark)\s*=\s*"(?<val>[^"]*)"'
 $msgRegex   = [regex]'\[System\.Windows\.MessageBox\]::Show\(\s*(?:"(?<val>[^"]*)"|''(?<val>[^'']*)'')'
 $hostRegex  = [regex]'Write-Host\s+(?:"(?<val>[^"]*)"|''(?<val>[^'']*)'')'
+# Wrapper de diálogo do motor: Show-WinForgeMessage -Message "..." -Title "..." (a maioria das caixas
+# vem por aqui, não pelo MessageBox direto - sem este padrão o inventário dava a interface por pronta).
+# Aplicado só nas linhas que chamam o wrapper, senão -Title casaria em qualquer cmdlet.
+$showRegex  = [regex]'-(?:Message|Title)\s+(?:"(?<val>[^"]*)"|''(?<val>[^'']*)'')'
+# Texto que o wrapper recebe por variável: $msg = "..." / $WarningMsg = "...". Como a atribuição fica
+# numa linha e a chamada em outra, $showRegex sozinho não enxerga o texto.
+$varRegex   = [regex]'^\s*\$(?:msg|WarningMsg|Message|Title|MessageBody|MessageTitle)\s*=\s*(?:"(?<val>[^"]*)"|''(?<val>[^'']*)'')'
 
 $hits = New-Object System.Collections.Generic.List[object]
 
@@ -97,6 +112,16 @@ if ('Code' -in $Section) {
         foreach ($m in $hostRegex.Matches($line)) {
             $v = $m.Groups['val'].Value
             if ($All -or (Test-English $v)) { $hits.Add([pscustomobject]@{ Kind = 'Write-Host'; Line = $i + 1; Value = $v }) }
+        }
+        if ($line -match 'Show-WinForgeMessage') {
+            foreach ($m in $showRegex.Matches($line)) {
+                $v = $m.Groups['val'].Value
+                if ($All -or (Test-English $v)) { $hits.Add([pscustomobject]@{ Kind = 'Show-WinForgeMessage'; Line = $i + 1; Value = $v }) }
+            }
+        }
+        foreach ($m in $varRegex.Matches($line)) {
+            $v = $m.Groups['val'].Value
+            if ($All -or (Test-English $v)) { $hits.Add([pscustomobject]@{ Kind = 'Texto de diálogo ($msg)'; Line = $i + 1; Value = $v }) }
         }
     }
 }

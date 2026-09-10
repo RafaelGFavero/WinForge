@@ -65,7 +65,8 @@ function Test-WinForgeEnglishLeftovers {
         selections" são o mesmo deslize.
 
         Devolve o número de termos encontrados (0 = tudo em português) e escreve uma linha [ERRO]
-        para cada um, no formato que o -SelfTest já usa.
+        para cada um, no formato que o -SelfTest já usa. Com -Xaml também devolve 1 quando a própria
+        extração falha (texto visível vazio ou curto demais) - ver o piso lá embaixo.
     .PARAMETER Text
         Texto a varrer: o XAML gerado ($inputXML) ou o texto visível das configurações.
     .PARAMETER Where
@@ -91,6 +92,22 @@ function Test-WinForgeEnglishLeftovers {
             [void]$visivel.AppendLine($m.Groups[1].Value)
         }
         $Text = $visivel.ToString()
+        # Piso da extração. Sem ele a trava fica VERDE justamente no pior caso: se uma das duas regex
+        # acima parar de casar (um atributo novo, uma mudança de aspas, um XAML que chegou vazio),
+        # $Text vira "" e nenhum termo é encontrado - a varredura passa por não ter mais o que olhar.
+        # 2000 caracteres e a palavra 'Diagnóstico' (Content="Atualizar diagnóstico" e as dicas de
+        # "Marcar recomendados", sempre no XAML) provam que ainda há interface aqui dentro. Os valores
+        # são folgados de propósito: a interface real passa de 20 000 caracteres visíveis. A busca
+        # ignora maiúsculas porque o rótulo da barra de navegação vem partido pelo atalho de teclado
+        # (<Underline>D</Underline>iagnóstico) e nunca aparece inteiro na extração.
+        if ($Text.Length -lt 2000) {
+            Write-Host "  [ERRO] trava de idioma ($Where): a extração devolveu $($Text.Length) caractere(s) visível(is), esperado 2000 ou mais - a varredura não olhou a interface" -ForegroundColor Red
+            return 1
+        }
+        if ($Text.IndexOf('Diagnóstico', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Write-Host "  [ERRO] trava de idioma ($Where): a extração não trouxe 'Diagnóstico' - a varredura não olhou a interface" -ForegroundColor Red
+            return 1
+        }
     }
     $achados = 0
     foreach ($termo in @($sync.WinForgeEnglishSweep)) {

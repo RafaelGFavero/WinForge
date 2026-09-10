@@ -97,7 +97,6 @@ $appsData       = Read-Lf (Join-Path $PSScriptRoot "config\wf-apps.ps1")
 # arquivo não serve (o PowerShell 5.1 lê .ps1 pela code page ANSI quando não há BOM); ler o texto em
 # UTF-8 e rodar um scriptblock mantém os acentos independentemente do BOM.
 . ([scriptblock]::Create([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "config\wf-i18n-strings.ps1"), [System.Text.Encoding]::UTF8)))
-$wfI18nHits = 0
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -2860,6 +2859,19 @@ foreach ($pair in $WinForgeI18nRepeated) {
     $src = Replace-All $src $pair[0] $pair[1] "i18n (repetido): $($pair[0])"
 }
 Write-Host "Tradução: $wfI18nOnce texto(s) único(s) + $($WinForgeI18nRepeated.Count) repetido(s) em $wfI18nHits ocorrência(s)"
+
+# ---------------------------------------------------------------- largura das faixas do console
+# As faixas do tipo "--   AppX Install Finished   ---" ficam entre duas linhas de "=" de largura fixa.
+# Se a tradução mudar o comprimento, o "---" da direita sai do lugar e a moldura fica torta. Aqui o
+# build reprova o par inteiro em vez de esperar alguém olhar o console.
+$wfFaixaRuim = @()
+foreach ($pair in @($WinForgeI18nStrings) + @($WinForgeI18nRepeated)) {
+    if ($pair[0] -match '^"-{2,}.*-"$' -and $pair[0].Length -ne $pair[1].Length) {
+        $wfFaixaRuim += "  |$($pair[0])| ($($pair[0].Length)) -> |$($pair[1])| ($($pair[1].Length))"
+    }
+}
+if ($wfFaixaRuim.Count) { throw "Faixa(s) do console com largura diferente do original:`n$($wfFaixaRuim -join "`n")" }
+Write-Host "Faixas do console: largura igual à do original em todas"
 
 # Trava de idioma do -SelfTest: a lista de termos é injetada AQUI, depois do laço, senão o próprio
 # laço traduziria a lista (e a trava passaria por não ter mais o que procurar).
