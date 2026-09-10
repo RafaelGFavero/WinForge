@@ -20,52 +20,52 @@ prioridade de CPU por jogo (IFEO): uma chave de registro por executável, removi
 
 | Chave | Nome | Motivo |
 |---|---|---|
-| `WPFToggleBatteryPercentage` | System Tray Battery Percentage | — |
-| `WPFToggleBingSearch` | Start Menu Bing Search | — |
-| `WPFToggleDarkMode` | Dark Theme for Windows | — |
-| `WPFToggleDetailedBSoD` | BSoD Verbose Mode | — |
-| `WPFToggleGameMode` | Game Mode | — |
-| `WPFToggleHiddenFiles` | File Explorer Hidden Files | — |
-| `WPFToggleHideSettingsHome` | Settings Home Page | — |
-| `WPFToggleLoginBlur` | Logon Screen Acrylic Blur | — |
-| `WPFToggleLongPaths` | Enable Long Paths | — |
-| `WPFToggleMouseAcceleration` | Mouse Acceleration | — |
-| `WPFToggleNewOutlook` | Microsoft Outlook New Version | — |
-| `WPFToggleNumLock` | Num Lock on Startup | — |
-| `WPFToggleScrollbars` | Scrollbars Always Visible | — |
-| `WPFToggleShowExt` | File Explorer File Extensions | — |
-| `WPFToggleStandbyFix` | S0 Sleep Network Connectivity | — |
-| `WPFToggleStartMenuRecommendations` | Start Menu Recommendations | — |
-| `WPFToggleStickyKeys` | Sticky Keys | — |
-| `WPFToggleTaskView` | Taskbar Task View Icon | — |
-| `WPFToggleTaskbarAlignment` | Taskbar Centered Icons | — |
-| `WPFToggleTaskbarSearch` | Taskbar Search Icon | — |
-| `WPFToggleVerboseLogon` | Logon Verbose Mode | — |
+| `WPFToggleBatteryPercentage` | Porcentagem da bateria na área de notificação | — |
+| `WPFToggleBingSearch` | Busca do Bing no menu Iniciar | — |
+| `WPFToggleDarkMode` | Tema escuro do Windows | — |
+| `WPFToggleDetailedBSoD` | Tela azul detalhada | — |
+| `WPFToggleGameMode` | Modo Jogo | — |
+| `WPFToggleHiddenFiles` | Arquivos ocultos no Explorador | — |
+| `WPFToggleHideSettingsHome` | Página inicial das Configurações | — |
+| `WPFToggleLoginBlur` | Desfoque acrílico na tela de logon | — |
+| `WPFToggleLongPaths` | Caminhos longos | — |
+| `WPFToggleMouseAcceleration` | Aceleração do mouse | — |
+| `WPFToggleNewOutlook` | Nova versão do Microsoft Outlook | — |
+| `WPFToggleNumLock` | Num Lock ao iniciar | — |
+| `WPFToggleScrollbars` | Barras de rolagem sempre visíveis | — |
+| `WPFToggleShowExt` | Extensões de arquivo no Explorador | — |
+| `WPFToggleStandbyFix` | Rede durante a suspensão S0 | — |
+| `WPFToggleStartMenuRecommendations` | Recomendações do menu Iniciar | — |
+| `WPFToggleStickyKeys` | Teclas de aderência | — |
+| `WPFToggleTaskView` | Ícone de Visão de Tarefas na barra de tarefas | — |
+| `WPFToggleTaskbarAlignment` | Ícones centralizados na barra de tarefas | — |
+| `WPFToggleTaskbarSearch` | Ícone de pesquisa na barra de tarefas | — |
+| `WPFToggleVerboseLogon` | Mensagens detalhadas no logon | — |
 | `WPFToggleWBHAGS` | HAGS - Agendamento de GPU acelerado por hardware | — |
 | `WPFToggleWBTransparency` | Transparência do Windows (efeitos de vidro) | — |
-| `WPFToggleWindowSnapping` | Window Snapping | — |
-| `WPFTweaksActivity` | Activity History - Disable | — |
-| `WPFTweaksBraveDebloat` | Brave Browser - Debloat | — |
-| `WPFTweaksConsumerFeatures` | ConsumerFeatures - Disable | — |
-| `WPFTweaksDeleteTempFiles` | Temporary Files - Remove | — |
-| `WPFTweaksDeliveryOptimization` | Delivery Optimization - Disable | — |
-| `WPFTweaksDisableExplorerAutoDiscovery` | File Explorer Automatic Folder Discovery - Disable | — |
-| `WPFTweaksDisableLockscreen` | Lock Screen - Disable | — |
-| `WPFTweaksDiskCleanup` | Disk Cleanup - Run | — |
-| `WPFTweaksDisplay` | Visual Effects - Set to Best Performance | — |
-| `WPFTweaksEdgeDebloat` | Microsoft Edge - Debloat | — |
-| `WPFTweaksEndTaskOnTaskbar` | End Task With Right Click - Enable | — |
-| `WPFTweaksHiber` | Hibernation - Disable | — |
-| `WPFTweaksIPv46` | IPv6 - Set IPv4 as Preferred | — |
-| `WPFTweaksLocation` | Location Tracking - Disable | — |
-| `WPFTweaksPreventDeviceMetadataFromNetwork` | Prevent Device Companion Apps | — |
-| `WPFTweaksRazerBlock` | Razer Software Auto-Install - Disable | — |
-| `WPFTweaksRemoveHomeAndGallery` | File Explorer Home and Gallery - Disable | — |
-| `WPFTweaksRestorePoint` | Restore Point - Create | — |
-| `WPFTweaksRightClickMenu` | Right-Click Menu Previous Layout - Enable | — |
-| `WPFTweaksServices` | Services - Set to Manual | — |
-| `WPFTweaksStorage` | Storage Sense - Disable | — |
-| `WPFTweaksTelemetry` | Telemetry - Disable | — |
+| `WPFToggleWindowSnapping` | Encaixe de janelas | — |
+| `WPFTweaksActivity` | Histórico de atividades - Desativar | — |
+| `WPFTweaksBraveDebloat` | Navegador Brave - Remover excessos | — |
+| `WPFTweaksConsumerFeatures` | Recursos ao consumidor (ConsumerFeatures) - Desativar | — |
+| `WPFTweaksDeleteTempFiles` | Arquivos temporários - Remover | — |
+| `WPFTweaksDeliveryOptimization` | Otimização de Entrega - Desativar | — |
+| `WPFTweaksDisableExplorerAutoDiscovery` | Descoberta automática do tipo de pasta no Explorador - Desativar | — |
+| `WPFTweaksDisableLockscreen` | Tela de bloqueio - Desativar | — |
+| `WPFTweaksDiskCleanup` | Limpeza de Disco - Executar | — |
+| `WPFTweaksDisplay` | Efeitos visuais - Ajustar para melhor desempenho | — |
+| `WPFTweaksEdgeDebloat` | Microsoft Edge - Remover excessos | — |
+| `WPFTweaksEndTaskOnTaskbar` | Finalizar tarefa com o botão direito - Ativar | — |
+| `WPFTweaksHiber` | Hibernação - Desativar | — |
+| `WPFTweaksIPv46` | IPv6 - Preferir IPv4 | — |
+| `WPFTweaksLocation` | Rastreamento de localização - Desativar | — |
+| `WPFTweaksPreventDeviceMetadataFromNetwork` | Aplicativos complementares de dispositivo - Bloquear | — |
+| `WPFTweaksRazerBlock` | Instalação automática do software Razer - Desativar | — |
+| `WPFTweaksRemoveHomeAndGallery` | Início e Galeria do Explorador de Arquivos - Desativar | — |
+| `WPFTweaksRestorePoint` | Ponto de restauração - Criar | — |
+| `WPFTweaksRightClickMenu` | Layout anterior do menu de contexto - Ativar | — |
+| `WPFTweaksServices` | Serviços - Definir como Manual | — |
+| `WPFTweaksStorage` | Sensor de Armazenamento - Desativar | — |
+| `WPFTweaksTelemetry` | Telemetria - Desativar | — |
 | `WPFTweaksWBAds` | Anúncios e sugestões do Windows - Desativar | — |
 | `WPFTweaksWBAmdCrashDefender` | AMD - Desativar serviço Crash Defender | — |
 | `WPFTweaksWBAmdShaderCache` | AMD - Forçar Shader Cache sempre ativo | — |
@@ -160,8 +160,8 @@ prioridade de CPU por jogo (IFEO): uma chave de registro por executável, removi
 | `WPFTweaksWFSrvShutdownTracker` | Desativar o Rastreador de Eventos de Desligamento | — |
 | `WPFTweaksWFSrvSmb1Off` | Desativar o SMB1 no servidor | — |
 | `WPFTweaksWFSrvTcpAutotuning` | TCP: nível de ajuste automático 'normal' | — |
-| `WPFTweaksWPBT` | Windows Platform Binary Table (WPBT) - Disable | — |
-| `WPFTweaksWidget` | Widgets - Remove | — |
+| `WPFTweaksWPBT` | Windows Platform Binary Table (WPBT) - Desativar | — |
+| `WPFTweaksWidget` | Widgets - Remover | — |
 
 ## Cuidado (30)
 
@@ -170,20 +170,20 @@ na interface.
 
 | Chave | Nome | Motivo |
 |---|---|---|
-| `WPFToggleS3Sleep` | S3 Sleep | força suspensão S3 em vez de Modern Standby; em notebooks modernos pode impedir a suspensão ou o despertar correto |
-| `WPFTweaksBlockAdobeNet` | Adobe URL Block List - Enable | edita o arquivo hosts com uma lista baixada da internet; quebra login, licenciamento e atualização de produtos Adobe |
-| `WPFTweaksDisableBGapps` | Background Apps - Disable | impede TODOS os apps da Store de rodar em segundo plano: e-mail, calendário e mensagens param de sincronizar/notificar |
-| `WPFTweaksDisableBitLocker` | BitLocker - Disable | descriptografa a unidade do sistema: perde a proteção contra roubo/acesso físico e demora muito em discos grandes |
-| `WPFTweaksDisableIPv6` | IPv6 - Disable | desativa o IPv6 em todos os adaptadores; redes, VPNs e provedores que dependem de IPv6 param de funcionar |
-| `WPFTweaksDisableNotifications` | System Tray Notifications & Calendar - Disable | desliga TODAS as notificações (toasts) e a Central de Ações, incluindo alertas de antivírus e de bateria |
-| `WPFTweaksDisableStoreSearch` | Microsoft Store Recommended Search Results - Disable | nega permissão ao banco da Microsoft Store (store.db); pode quebrar a busca e atualizações da Store até desfazer |
-| `WPFTweaksDisableWarningForUnsignedRdp` | RDP Unsigned File Warnings - Disable | remove o aviso de segurança ao abrir arquivos .rdp não assinados |
-| `WPFTweaksRemoveEdge` | Microsoft Edge - Remove | remove o navegador Edge; apps que dependem dele (Widgets, alguns instaladores, PDF padrão) deixam de funcionar; o Windows pode reinstalá-lo em atualizações |
-| `WPFTweaksRemoveOneDrive` | Microsoft OneDrive - Remove | desinstala o OneDrive e move arquivos para o perfil local; arquivos só na nuvem NÃO são baixados antes |
-| `WPFTweaksReservedStorage` | Disable Reserved Storage | sem o armazenamento reservado, atualizações do Windows podem falhar quando o disco estiver quase cheio |
-| `WPFTweaksRevertStartMenu` | Start Menu Previous Layout - Enable | usa override interno de recurso (FeatureManagement) que a Microsoft pode remover; pode não ter efeito ou reverter sozinho |
-| `WPFTweaksTeredo` | Teredo - Disable | o Teredo é usado pelo Xbox Live (chat de festa, multiplayer de jogos Xbox no PC); desativar pode quebrar esses recursos |
-| `WPFTweaksUTC` | Date & Time - Set Time to UTC | só faz sentido em dual boot com Linux; em PC só Windows o relógio fica errado até desfazer |
+| `WPFToggleS3Sleep` | Suspensão S3 | força suspensão S3 em vez de Modern Standby; em notebooks modernos pode impedir a suspensão ou o despertar correto |
+| `WPFTweaksBlockAdobeNet` | Lista de bloqueio de URLs da Adobe - Ativar | edita o arquivo hosts com uma lista baixada da internet; quebra login, licenciamento e atualização de produtos Adobe |
+| `WPFTweaksDisableBGapps` | Aplicativos em segundo plano - Desativar | impede TODOS os apps da Store de rodar em segundo plano: e-mail, calendário e mensagens param de sincronizar/notificar |
+| `WPFTweaksDisableBitLocker` | BitLocker - Desativar | descriptografa a unidade do sistema: perde a proteção contra roubo/acesso físico e demora muito em discos grandes |
+| `WPFTweaksDisableIPv6` | IPv6 - Desativar | desativa o IPv6 em todos os adaptadores; redes, VPNs e provedores que dependem de IPv6 param de funcionar |
+| `WPFTweaksDisableNotifications` | Notificações e calendário da área de notificação - Desativar | desliga TODAS as notificações (toasts) e a Central de Ações, incluindo alertas de antivírus e de bateria |
+| `WPFTweaksDisableStoreSearch` | Resultados recomendados da Microsoft Store na busca - Desativar | nega permissão ao banco da Microsoft Store (store.db); pode quebrar a busca e atualizações da Store até desfazer |
+| `WPFTweaksDisableWarningForUnsignedRdp` | Avisos de arquivo RDP não assinado - Desativar | remove o aviso de segurança ao abrir arquivos .rdp não assinados |
+| `WPFTweaksRemoveEdge` | Microsoft Edge - Remover | remove o navegador Edge; apps que dependem dele (Widgets, alguns instaladores, PDF padrão) deixam de funcionar; o Windows pode reinstalá-lo em atualizações |
+| `WPFTweaksRemoveOneDrive` | Microsoft OneDrive - Remover | desinstala o OneDrive e move arquivos para o perfil local; arquivos só na nuvem NÃO são baixados antes |
+| `WPFTweaksReservedStorage` | Armazenamento reservado - Desativar | sem o armazenamento reservado, atualizações do Windows podem falhar quando o disco estiver quase cheio |
+| `WPFTweaksRevertStartMenu` | Layout anterior do menu Iniciar - Ativar | usa override interno de recurso (FeatureManagement) que a Microsoft pode remover; pode não ter efeito ou reverter sozinho |
+| `WPFTweaksTeredo` | Teredo - Desativar | o Teredo é usado pelo Xbox Live (chat de festa, multiplayer de jogos Xbox no PC); desativar pode quebrar esses recursos |
+| `WPFTweaksUTC` | Data e hora - Usar UTC no relógio | só faz sentido em dual boot com Linux; em PC só Windows o relógio fica errado até desfazer |
 | `WPFTweaksWBAmdULPS` | AMD - Desativar ULPS (stutter e quedas de clock) | altera o driver AMD (ULPS) em todas as instâncias; em notebooks pode aumentar consumo; exige reinício |
 | `WPFTweaksWBHypervisorOff` | Hypervisor (Hyper-V) - Desativar no boot | quebra WSL2, Hyper-V, Windows Sandbox, WSA e emuladores baseados em Hyper-V; exige reinício |
 | `WPFTweaksWBIndexing` | Indexação (Windows Search) - Desativar serviço | a pesquisa do menu Iniciar, do Explorador e do Outlook fica lenta ou incompleta |
@@ -199,7 +199,7 @@ na interface.
 | `WPFTweaksWFIisMemoryRecycling` | Pools: reciclar por memória, não por tempo | recicla o pool quando passa do limite de memória privada calculado (60% da RAM dividido pelos pools); pools com muitos dados em memória podem reciclar mais que hoje |
 | `WPFTweaksWFSrvIEESC` | Desativar a Configuração de Segurança Reforçada do IE (administradores) | reduz a proteção do navegador para administradores no servidor; use só se administra pelo navegador local |
 | `WPFTweaksWFSrvSmbSigning` | SMB: exigir assinatura | custo de CPU em servidores de arquivos e clientes antigos sem assinatura param de acessar |
-| `WPFTweaksWindowsAI` | Windows AI - Disable And Remove | remove o Copilot/Recall e componentes de IA (pacote CoreAI) do sistema; reinstalar exige atualização do Windows |
+| `WPFTweaksWindowsAI` | IA do Windows - Desativar e remover | remove o Copilot/Recall e componentes de IA (pacote CoreAI) do sistema; reinstalar exige atualização do Windows |
 
 ## Removido (2)
 

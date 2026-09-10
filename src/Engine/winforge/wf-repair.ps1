@@ -944,7 +944,7 @@ function Install-WinForgeVcRedist {
 
     $winget = Get-WinForgeWingetPath
     if (-not $winget) {
-        return "winget não encontrado: use 'WinGet - Reinstall' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
+        return "winget não encontrado: use 'WinGet - Reinstalar' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
     }
 
     $linhas = New-Object System.Collections.Generic.List[string]
@@ -1002,7 +1002,7 @@ function Install-WinForgePowerShell7 {
 
     $winget = Get-WinForgeWingetPath
     if (-not $winget) {
-        return "winget não encontrado: use 'WinGet - Reinstall' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
+        return "winget não encontrado: use 'WinGet - Reinstalar' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
     }
 
     $r = Invoke-WinForgeNativeCommand -FilePath $winget -Utf8 -Arguments @(

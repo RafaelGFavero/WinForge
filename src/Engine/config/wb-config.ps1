@@ -490,7 +490,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolDnsJumper": {
     "Content": "DNS Jumper (teste e troca de DNS)",
-    "Description": "Abre o DnsJumper da pasta 'Apps' ou a página oficial da Sordum. A aba Tweaks também tem um seletor de DNS (Cloudflare, Google, etc.).",
+    "Description": "Abre o DnsJumper da pasta 'Apps' ou a página oficial da Sordum. A aba Ajustes também tem um seletor de DNS (Cloudflare, Google, etc.).",
     "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",

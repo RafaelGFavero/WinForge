@@ -109,10 +109,18 @@ function Test-WinForgeEnglishLeftovers {
             return 1
         }
     }
+    # Busca por palavra inteira, não por pedaço de palavra. Com IndexOf puro, ' - Remove' casava com
+    # ' - Remover' e 'Browse' casava com 'Browser' (Tor Browser, Zen Browser): a tradução correta em
+    # português acusava erro de idioma. A borda só é exigida do lado em que o termo começa/termina
+    # com caractere de palavra - ' - Disable' começa com espaço, e exigir borda ali perderia
+    # '(WPBT) - Disable', onde o caractere anterior é ')'.
     $achados = 0
     foreach ($termo in @($sync.WinForgeEnglishSweep)) {
         if ([string]::IsNullOrEmpty($termo)) { continue }
-        if ($Text.IndexOf($termo, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $padrao = [regex]::Escape($termo)
+        if ($termo -match '^\w') { $padrao = '(?<!\w)' + $padrao }
+        if ($termo -match '\w$') { $padrao = $padrao + '(?!\w)' }
+        if ([regex]::IsMatch($Text, $padrao, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
             Write-Host "  [ERRO] inglês na interface ($Where): '$termo'" -ForegroundColor Red
             $achados++
         }

@@ -92,6 +92,7 @@ $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 $xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
 $xamlServerTab  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-tab.xml")
 $appsData       = Read-Lf (Join-Path $PSScriptRoot "config\wf-apps.ps1")
+$i18nConfigs    = Read-Lf (Join-Path $PSScriptRoot "config\wf-i18n-configs.ps1")
 
 # Dicionário de tradução: é código, não bloco injetado, então tem de ser EXECUTADO. Dot-source do
 # arquivo não serve (o PowerShell 5.1 lê .ps1 pela code page ANSI quando não há BOM); ler o texto em
@@ -285,6 +286,7 @@ $src = Insert-Before $src "`$inputXML = @'" ($repairConfig.TrimEnd() + "`n`n") "
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 $src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
 $src = Insert-Before $src "`$inputXML = @'" ($appsData.TrimEnd() + "`n`n") "insert apps data"
+$src = Insert-Before $src "`$inputXML = @'" ($i18nConfigs.TrimEnd() + "`n`n") "insert i18n configs"
 
 # ---------------------------------------------------------------- logo
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
@@ -898,6 +900,52 @@ if ($SelfTest) {
     $wfIdiomaXaml = Test-WinForgeEnglishLeftovers -Text $inputXML -Where 'XAML' -Xaml
     if ($wfIdiomaXaml) { $wbErrors += $wfIdiomaXaml }
     else { Write-Host "  Idioma: $(@($sync.WinForgeEnglishSweep).Count) termo(s) em inglês procurados no XAML, nenhum encontrado" }
+    # Cobertura do dicionário por chave (config\wf-i18n-configs.ps1). O texto dos três blocos JSON
+    # não dá para traduzir por substituição literal como o resto - são centenas de frases parecidas -
+    # então a tradução é por chave, e a prova de que nenhuma ficou de fora é esta.
+    # As entradas do próprio WinForge já nascem em português: ficam fora POR PREFIXO, e não por
+    # "parece português", que daria falso verde em qualquer texto curto.
+    $wfI18nPrefixos = @('WPFTweaksWB', 'WPFTweaksWF', 'WPFToggleWB', 'WPFPanelWB', 'WPFWFRep', 'WPFWFSrv', 'WPFWFAd')
+    $wfI18nAlvos = @(
+        @{ Nome = 'tweaks';      Config = $sync.configs.tweaks;       Campos = @('Content', 'Description') }
+        @{ Nome = 'Config';      Config = $sync.configs.feature;      Campos = @('Content', 'Description') }
+        @{ Nome = 'aplicativos'; Config = $sync.configs.applications; Campos = @('description') }
+    )
+    $wfI18nDic = $sync.WinForgeI18n
+    if ($null -eq $wfI18nDic) { $wfI18nDic = @{} }
+    $wfI18nSemTraducao = @()
+    $wfI18nExistentes = @{}
+    $wfI18nTexto = New-Object System.Text.StringBuilder
+    foreach ($wfAlvo in $wfI18nAlvos) {
+        foreach ($p in $wfAlvo.Config.PSObject.Properties) {
+            $wfI18nExistentes[$p.Name] = $true
+            foreach ($wfCampo in $wfAlvo.Campos) {
+                $wfProp = $p.Value.PSObject.Properties[$wfCampo]
+                if ($wfProp) { [void]$wfI18nTexto.AppendLine([string]$wfProp.Value) }
+            }
+            $wfProprio = $false
+            foreach ($wfPre in $wfI18nPrefixos) { if ($p.Name.StartsWith($wfPre, [StringComparison]::Ordinal)) { $wfProprio = $true; break } }
+            if ($wfProprio) { continue }
+            if (-not $wfI18nDic.ContainsKey($p.Name)) { $wfI18nSemTraducao += "$($wfAlvo.Nome):$($p.Name)" }
+        }
+    }
+    if ($wfI18nSemTraducao.Count) {
+        Write-Host "  [ERRO] dicionário: $($wfI18nSemTraducao.Count) entrada(s) da base sem tradução -> $($wfI18nSemTraducao -join ', ')" -ForegroundColor Red; $wbErrors++
+    }
+    # Sentido inverso: chave no dicionário que não existe em configuração nenhuma é tradução morta -
+    # some da tela sem ninguém notar quando o arquivo base muda o nome de uma entrada.
+    $wfI18nOrfas = @($wfI18nDic.Keys | Where-Object { -not $wfI18nExistentes.ContainsKey($_) } | Sort-Object)
+    if ($wfI18nOrfas.Count) {
+        Write-Host "  [ERRO] dicionário: $($wfI18nOrfas.Count) chave(s) sem entrada correspondente -> $($wfI18nOrfas -join ', ')" -ForegroundColor Red; $wbErrors++
+    }
+    if (-not $wfI18nSemTraducao.Count -and -not $wfI18nOrfas.Count) {
+        Write-Host "  Dicionário por chave: $(@($wfI18nDic.Keys).Count) entrada(s), cobrindo tudo que veio da base"
+    }
+    # Mesma trava de idioma do XAML, agora sobre o texto que os três blocos mostram na tela. Sem
+    # -Xaml: aqui o texto já é o visível (Content/Description), não tem marcação para extrair.
+    $wfIdiomaConfigs = Test-WinForgeEnglishLeftovers -Text $wfI18nTexto.ToString() -Where 'configurações'
+    if ($wfIdiomaConfigs) { $wbErrors += $wfIdiomaConfigs }
+    else { Write-Host "  Idioma: nenhum termo em inglês no Content/Description de tweaks, Config e aplicativos" }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -2972,10 +3020,30 @@ function Sort-RowsByKeyOrdinal([object[]]$rows) {
     return ,$items
 }
 
+function Get-WinForgeI18nData {
+    $sync = @{}
+    . (Get-ConfigScriptBlock "config\wf-i18n-configs.ps1")
+    return $sync
+}
+
 $auditSync  = Get-WinForgeAuditData
 $audit      = $auditSync.WinForgeAudit
 $configSync = Get-WinForgeConfigData
 $jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'), (Get-JsonConfigBlock $src 'wfserver'))
+
+# O doc mostra o nome que o usuário vê na tela, e na tela o nome já está traduzido: sem aplicar o
+# dicionário aqui, docs\auditoria.md sairia com o Content em inglês para tudo que veio da base.
+# É a mesma tradução que Initialize-WinUtilBoostConfigs faz em tempo de execução - só que o doc lê
+# os blocos JSON direto, sem passar por lá.
+$i18nDict = (Get-WinForgeI18nData).WinForgeI18n
+foreach ($o in $jsonTweaks) {
+    foreach ($p in $o.PSObject.Properties) {
+        $t = $i18nDict[$p.Name]
+        if (-not $t -or -not $t.ContainsKey('Content')) { continue }
+        $prop = $p.Value.PSObject.Properties['Content']
+        if ($prop) { $prop.Value = $t['Content'] }
+    }
+}
 
 function Get-TweakEntry([string]$key) {
     foreach ($o in $jsonTweaks) {

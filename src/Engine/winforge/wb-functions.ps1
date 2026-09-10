@@ -271,6 +271,29 @@ function Initialize-WinUtilBoostConfigs {
         if ($app) { $app.Value.Category = $o.Value }
     }
     Write-WinUtilLog -Component "Boost" -Message "Aba Instalar: $wfRemovidos aplicativo(s) removido(s), $(@($sync.configs.applications.PSObject.Properties).Count) na lista."
+
+    # Tradução por chave do texto que veio do arquivo base (config\wf-i18n-configs.ps1).
+    # Roda DEPOIS das mesclas - assim vê as chaves da base e as do WinForge de uma vez - e ANTES de
+    # Initialize-WinForgeAudit, que prefixa "CUIDADO: ..." na descrição dos itens de risco: se a
+    # tradução viesse depois, ela sobrescreveria a descrição já prefixada e o aviso sumiria.
+    # A busca da propriedade é pelo nome que existe na entrada, não por um nome fixo: o bloco de
+    # aplicativos usa 'description' em minúsculo (e o nome do produto em 'content', que não se
+    # traduz), enquanto tweaks e recursos usam 'Content'/'Description'.
+    $wfTraduzidos = 0
+    foreach ($cfg in @($sync.configs.tweaks, $sync.configs.feature, $sync.configs.applications)) {
+        foreach ($p in $cfg.PSObject.Properties) {
+            $t = $sync.WinForgeI18n[$p.Name]
+            if (-not $t) { continue }
+            foreach ($campo in @('Content', 'Description')) {
+                if (-not $t.ContainsKey($campo)) { continue }
+                $prop = $p.Value.PSObject.Properties[$campo]
+                if (-not $prop) { continue }
+                $prop.Value = $t[$campo]
+                $wfTraduzidos++
+            }
+        }
+    }
+    Write-WinUtilLog -Component "Boost" -Message "Tradução por chave: $wfTraduzidos texto(s) traduzido(s) em $(@($sync.WinForgeI18n.Keys).Count) entrada(s)."
 }
 
 function Set-WinForgeInstallCollapsed {
@@ -332,7 +355,7 @@ function Invoke-WinUtilBoostRestorePointPrompt {
                "Sim  = criar agora (leva de 30 segundos a alguns minutos; a janela pode ficar sem resposta nesse tempo)`n" +
                "Não  = continuar sem criar. Você ainda pode criar depois em:`n" +
                "         Configurações > WinForge - Manutenção > 'Ponto de restauração - Criar agora'`n" +
-               "         ou marcando 'Restore Point - Create' na aba Ajustes."
+               "         ou marcando '$($sync.configs.tweaks.WPFTweaksRestorePoint.Content)' na aba Ajustes."
         $result = [System.Windows.MessageBox]::Show($sync.Form, $msg, "WinForge - Ponto de Restauração",
             [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
         $create = ($result -eq [System.Windows.MessageBoxResult]::Yes)
