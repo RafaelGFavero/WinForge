@@ -10,10 +10,11 @@
 #   repair  - mexe no sistema (repositório WMI, registro de aplicativos, agendamento de disco).
 #   install - baixa e instala componente (DISM, winget, instalador da Microsoft).
 #
-# Nesta etapa só 'read' é despachado de fato. 'repair' e 'install' têm o helper escrito e a linha na
-# tabela, mas o clique responde "Disponível na próxima etapa": a confirmação antes de mexer na
-# máquina é a próxima tarefa do plano, e um botão que repara sem perguntar é pior que um botão que
-# ainda não faz nada.
+# 'read' vai direto para o despacho. 'repair' e 'install' passam antes por uma caixa de Sim/Não que
+# repete o título e a descrição do botão (Get-WinForgeRepairConfirmText) e tem o "Não" como padrão:
+# um Enter distraído não repara nada. A pergunta acontece na thread da janela, ANTES da trava de
+# comando em andamento - perguntar depois de tomar a trava deixaria o programa sem botões enquanto a
+# caixa espera resposta.
 #
 # Nenhum comando desta tabela é montado com texto vindo de fora do programa. O que chama executável
 # usa Invoke-WinForgeNativeCommand -FilePath/-Arguments, que entrega cada argumento inteiro, sem
@@ -36,6 +37,9 @@ function Get-WinForgeRepairCommand {
         o núcleo trocar a code page para um pipeline de cmdlet e inventar um "Código de saída: 0".
 
         'Kind' e 'Confirm' são lidos por Invoke-WinForgeRepairCommand, não pelo núcleo genérico.
+        'Confirm' é a RESERVA do texto da caixa: quem manda é a descrição da config (a mesma frase do
+        botão na tela), e este campo entra só se a entrada da config sumir. Nenhum dos dois termina
+        com a pergunta - "Continuar?" é acrescentado uma única vez por Get-WinForgeRepairConfirmText.
     .OUTPUTS
         Hashtable com Title, Command, Requires, Native, Kind e (fora de 'read') Confirm.
     #>
@@ -88,7 +92,7 @@ function Get-WinForgeRepairCommand {
                 Requires = 'winmgmt.exe'
                 Native   = $false
                 Kind     = 'repair'
-                Confirm  = 'Verificar o repositório WMI e, se ele estiver inconsistente, tentar recuperá-lo. Programas que consultam o WMI podem falhar durante a recuperação. Continuar?'
+                Confirm  = 'Verificar o repositório WMI e, se ele estiver inconsistente, tentar recuperá-lo. Programas que consultam o WMI podem falhar durante a recuperação. Exige o WinForge aberto como administrador: sem elevação a verificação responde "acesso negado" e nada é recuperado.'
             }
         }
         'StoreReregister' {
@@ -98,7 +102,7 @@ function Get-WinForgeRepairCommand {
                 Requires = 'Get-AppxPackage'
                 Native   = $false
                 Kind     = 'repair'
-                Confirm  = 'Registrar de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App para todos os usuários. Os aplicativos fecham durante o registro. Continuar?'
+                Confirm  = 'Registrar de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App PARA O USUÁRIO ATUAL, a partir dos arquivos que já estão no disco. Os aplicativos fecham durante o registro. Outros usuários desta máquina não são afetados: cada um precisa rodar isto no próprio logon.'
             }
         }
         'ChkdskSchedule' {
@@ -108,7 +112,7 @@ function Get-WinForgeRepairCommand {
                 Requires = 'fsutil.exe'
                 Native   = $false
                 Kind     = 'repair'
-                Confirm  = 'Marcar o disco do sistema como "sujo": na próxima reinicialização o Windows roda o chkdsk antes de carregar, e isso pode demorar bastante. Continuar?'
+                Confirm  = 'Marcar o disco do sistema como "sujo" (fsutil dirty set): na próxima reinicialização o Windows roda o chkdsk com reparo antes de carregar, e isso pode demorar bastante. NÃO TEM DESFAZER: quem limpa a marca é o próprio chkdsk, e só quando concluir que o volume está íntegro - até lá a verificação se repete a cada reinicialização.'
             }
         }
         'MemoryDiag' {
@@ -118,7 +122,7 @@ function Get-WinForgeRepairCommand {
                 Requires = 'bcdedit.exe'
                 Native   = $false
                 Kind     = 'repair'
-                Confirm  = 'Colocar o Diagnóstico de Memória do Windows na sequência de inicialização: a próxima reinicialização vai testar a memória antes de carregar o Windows. Continuar?'
+                Confirm  = 'Colocar o Diagnóstico de Memória do Windows na sequência de inicialização: a próxima reinicialização vai testar a memória antes de carregar o Windows.'
             }
         }
         'DotNet35Enable' {
@@ -128,7 +132,7 @@ function Get-WinForgeRepairCommand {
                 Requires = $null
                 Native   = $false
                 Kind     = 'install'
-                Confirm  = 'Habilitar o recurso NetFx3 (.NET Framework 3.5) pelo DISM. Os arquivos vêm do Windows Update: precisa de internet e pode demorar. Continuar?'
+                Confirm  = 'Habilitar o recurso NetFx3 (.NET Framework 3.5) pelo DISM. Os arquivos vêm do Windows Update: precisa de internet e pode demorar.'
             }
         }
         'VcRedist' {
@@ -142,7 +146,7 @@ function Get-WinForgeRepairCommand {
                 Requires = $null
                 Native   = $false
                 Kind     = 'install'
-                Confirm  = 'Instalar (ou atualizar) os pacotes redistribuíveis do Visual C++ de 2005 a 2022, x86 e x64, pelo winget. São vários downloads e pode demorar. Continuar?'
+                Confirm  = 'Instalar (ou atualizar) os pacotes redistribuíveis do Visual C++ de 2005 a 2022, x86 e x64, pelo winget. São vários downloads e pode demorar.'
             }
         }
         'PowerShell7' {
@@ -152,7 +156,7 @@ function Get-WinForgeRepairCommand {
                 Requires = $null
                 Native   = $false
                 Kind     = 'install'
-                Confirm  = 'Instalar o PowerShell 7 (Microsoft.PowerShell) pelo winget. O Windows PowerShell 5.1 continua instalado e é ele que o WinForge usa. Continuar?'
+                Confirm  = 'Instalar o PowerShell 7 (Microsoft.PowerShell) pelo winget. O Windows PowerShell 5.1 continua instalado e é ele que o WinForge usa.'
             }
         }
         'DirectX' {
@@ -162,7 +166,7 @@ function Get-WinForgeRepairCommand {
                 Requires = $null
                 Native   = $false
                 Kind     = 'install'
-                Confirm  = 'Baixar o instalador web do DirectX (dxwebsetup.exe) da Microsoft e abri-lo. O instalador é interativo: quem conduz as telas é você. Continuar?'
+                Confirm  = 'Baixar o instalador web do DirectX (dxwebsetup.exe) da Microsoft e abri-lo. O instalador é interativo: quem conduz as telas é você.'
             }
         }
     }
@@ -426,6 +430,90 @@ function Invoke-WinForgeChkdskScan {
     return "chkdsk $unidade /scan - código de saída: $($r.ExitCode)`r`n`r`n$($r.Text)"
 }
 
+function Select-WinForgeNewestPackage {
+    <#
+    .SYNOPSIS
+        O pacote de versão mais alta de uma lista de pacotes Appx.
+    .DESCRIPTION
+        Existe por um motivo só, e é um que morde calado: a propriedade Version de Get-AppxPackage é
+        TEXTO. Ordenar texto põe '1.9.0.0' na frente de '1.25.0.0' - o 9 é maior que o 2 -, e quem
+        pega o primeiro acaba com a pasta de instalação de uma versão antiga que pode já ter sido
+        removida. Convertendo para [version] antes de ordenar, 1.25.0.0 volta a ser a mais nova.
+
+        Uma versão que não converte (formato inesperado) vira 0.0.0.0 em vez de derrubar a ordenação:
+        um pacote esquisito na lista não pode fazer o botão inteiro falhar.
+
+        Função pura, sem tocar na máquina: é assim que o -SelfTest prova a ordem com uma lista
+        sintética, sem depender do que está instalado em quem compila.
+    .OUTPUTS
+        O objeto de maior versão, ou $null quando a lista está vazia.
+    #>
+    param([object[]]$Package)
+
+    if ($null -eq $Package -or $Package.Count -eq 0) { return $null }
+    return ($Package | Sort-Object {
+        $v = $null
+        if ([version]::TryParse([string]$_.Version, [ref]$v)) { $v } else { [version]'0.0.0.0' }
+    } -Descending | Select-Object -First 1)
+}
+
+function Test-WinForgeMicrosoftSigner {
+    <#
+    .SYNOPSIS
+        Diz se o titular ('Subject') de um certificado é a Microsoft Corporation.
+    .DESCRIPTION
+        A metade da porteira que dá para provar em qualquer máquina. A outra metade (a assinatura ser
+        válida) depende de um arquivo assinado de verdade, e um arquivo assim não cabe no repositório
+        nem existe igual em toda máquina - mas ESTA metade é só texto, e é a que separa "assinado" de
+        "assinado pela Microsoft": sem ela, qualquer empresa com um certificado de código válido
+        passaria pela conferência, que é exatamente o buraco que um proxy de inspeção HTTPS explora
+        ao reassinar o download com o próprio certificado.
+
+        A comparação é pelo nome comum da organização dentro do Subject, que vem como
+        'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'.
+    .OUTPUTS
+        $true ou $false.
+    #>
+    param([string]$Subject)
+
+    if ([string]::IsNullOrWhiteSpace($Subject)) { return $false }
+    return ([string]$Subject -like '*O=Microsoft Corporation*')
+}
+
+function Test-WinForgeMicrosoftSignature {
+    <#
+    .SYNOPSIS
+        Diz se o arquivo tem assinatura Authenticode válida da Microsoft Corporation.
+    .DESCRIPTION
+        Porteira de tudo que o WinForge baixa da internet e abre. Um executável que veio pela rede é
+        um executável que alguém no caminho pode ter trocado - DNS sequestrado, proxy corporativo mal
+        configurado, cache envenenado -, e a resposta para isso não é confiar no endereço, é conferir
+        quem assinou o arquivo que chegou.
+
+        As duas perguntas são independentes e as duas precisam de sim:
+        1. Status 'Valid' - a assinatura existe, o arquivo não foi alterado depois dela e a cadeia
+           fecha numa raiz confiável desta máquina.
+        2. O titular do certificado é a Microsoft Corporation (Test-WinForgeMicrosoftSigner) - sem
+           isso, um instalador assinado por qualquer empresa com um certificado válido passaria.
+
+        Arquivo ausente, ilegível ou sem assinatura nenhuma cai no $false: a função nunca lança, e a
+        recusa é a resposta padrão de tudo que ela não conseguiu confirmar.
+    .OUTPUTS
+        $true ou $false.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+        $assinatura = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+        if ($null -eq $assinatura -or [string]$assinatura.Status -ne 'Valid') { return $false }
+        if ($null -eq $assinatura.SignerCertificate) { return $false }
+        return (Test-WinForgeMicrosoftSigner -Subject ([string]$assinatura.SignerCertificate.Subject))
+    } catch {
+        return $false
+    }
+}
+
 function Get-WinForgeWingetPath {
     <#
     .SYNOPSIS
@@ -436,23 +524,27 @@ function Get-WinForgeWingetPath {
         recém-instalada (ou logo depois de registrar o pacote de novo) o executável existe e o PATH
         ainda não sabe disso - daí a segunda tentativa, pela pasta de instalação do pacote.
 
+        Quando há mais de uma versão do pacote instalada, a escolha passa por
+        Select-WinForgeNewestPackage: Version é texto e a ordem de texto elegeria a versão errada.
+
         -AllUsers exige elevação: sem admin ele lança, e o catch cai no caminho do usuário atual.
     .OUTPUTS
         Caminho completo do winget.exe, ou $null.
     #>
     $cmd = Get-Command 'winget.exe' -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source) { return [string]$cmd.Source }
+    if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath ([string]$cmd.Source) -PathType Leaf)) { return [string]$cmd.Source }
 
-    $pacote = $null
+    $pacotes = @()
     try {
-        $pacote = Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop | Sort-Object Version -Descending | Select-Object -First 1
+        $pacotes = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop)
     } catch {
-        try { $pacote = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop | Sort-Object Version -Descending | Select-Object -First 1 } catch { $pacote = $null }
+        try { $pacotes = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop) } catch { $pacotes = @() }
     }
+    $pacote = Select-WinForgeNewestPackage -Package $pacotes
     if ($null -eq $pacote -or [string]::IsNullOrWhiteSpace($pacote.InstallLocation)) { return $null }
 
     $caminho = Join-Path $pacote.InstallLocation 'winget.exe'
-    if (Test-Path -LiteralPath $caminho) { return $caminho }
+    if (Test-Path -LiteralPath $caminho -PathType Leaf) { return $caminho }
     return $null
 }
 
@@ -470,6 +562,12 @@ function Invoke-WinForgeWmiRepair {
            aproveitar (o /resetrepository, que joga tudo fora, fica de fora de propósito).
         4. Verifica de novo, para o texto terminar dizendo se resolveu.
 
+        Entre o 2 e o 3 mora a elevação, e ela é conferida ANTES do salvage por um motivo concreto:
+        sem admin o /verifyrepository não responde "inconsistente", responde "acesso negado" - e o
+        código de saída dele não é 0 do mesmo jeito. Um salvage disparado por acesso negado seria uma
+        reconstrução do repositório WMI de uma máquina saudável, decidida por uma leitura que nunca
+        aconteceu. Por isso, sem elevação, o texto diz que precisa de elevação e para aí.
+
         A saída de cada passo entra inteira no relatório: é ela que alguém vai colar num chamado.
     .OUTPUTS
         Texto pronto para a janela de saída.
@@ -484,6 +582,14 @@ function Invoke-WinForgeWmiRepair {
     # não respondeu). O texto muda com o idioma do Windows, o código não.
     if ($ver.ExitCode -eq 0) {
         $linhas.Add('Repositório consistente: nada a recuperar.')
+        return ($linhas -join "`r`n")
+    }
+
+    if (-not (Test-WinForgeRepairElevated)) {
+        $linhas.Add('')
+        $linhas.Add('O repositório não foi dado como consistente, mas este WinForge não está elevado: precisa de elevação para saber se o problema é real.')
+        $linhas.Add('Sem admin o próprio /verifyrepository responde "acesso negado", e recuperar o repositório com base nessa resposta reconstruiria o WMI de uma máquina que pode estar saudável.')
+        $linhas.Add('Feche o WinForge, abra como administrador e clique de novo.')
         return ($linhas -join "`r`n")
     }
 
@@ -508,15 +614,30 @@ function Invoke-WinForgeWmiRepair {
 function Invoke-WinForgeStoreReregister {
     <#
     .SYNOPSIS
-        Registra de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App.
+        Registra de novo, PARA O USUÁRIO ATUAL, a Microsoft Store, o App Installer (winget) e o Store
+        Purchase App.
     .DESCRIPTION
         É o reparo padrão de "a Store não abre" e de "o winget sumiu": o pacote continua no disco, só
         o registro do usuário se perdeu. Add-AppxPackage -Register aponta para o AppXManifest.xml da
         própria pasta de instalação e refaz esse registro, sem baixar nada.
 
-        -AllUsers em Get-AppxPackage exige elevação; sem admin, cai para os pacotes do usuário atual,
-        que é justamente o registro que costuma estar quebrado. Cada pacote tem seu try/catch: um que
-        não existe nesta edição do Windows não pode derrubar os outros dois.
+        O registro vale só para QUEM ESTÁ RODANDO o WinForge, e isso não é uma limitação de elevação
+        que dá para contornar: 'Add-AppxPackage -Register' registra no perfil do chamador. Elevar
+        muda o chamador, não amplia o alcance - num WinForge aberto como outro administrador o
+        registro sairia no perfil DELE, e o usuário que reclamou continuaria sem a Store. Registrar
+        para os outros usuários é outro comando (-AllUsers em Add-AppxPackage, que só aceita pacote
+        provisionado) e não é o que este botão faz.
+
+        -AllUsers em Get-AppxPackage é outra coisa: é só a LISTAGEM, e serve para achar a pasta de
+        instalação de um pacote que sumiu do perfil atual. Ele exige elevação; sem admin, cai para os
+        pacotes do usuário atual.
+
+        Quando a listagem traz mais de uma versão do mesmo pacote, o registro usa a mais nova
+        (Select-WinForgeNewestPackage): Version é texto, e registrar a mais antiga significa apontar
+        para uma pasta que a próxima limpeza do Windows apaga.
+
+        Cada pacote tem seu try/catch: um que não existe nesta edição do Windows não pode derrubar os
+        outros dois.
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
@@ -536,7 +657,15 @@ function Invoke-WinForgeStoreReregister {
             $linhas.Add('  Pacote não encontrado nesta máquina.')
             continue
         }
-        foreach ($p in $pacotes) {
+        # Uma arquitetura de cada pacote registra por vez; entre versões duplicadas do mesmo pacote
+        # vale a mais nova. Sem isso, registrar 1.9.0.0 por cima de 1.25.0.0 desfaria uma atualização.
+        $porNome = $pacotes | Group-Object -Property Name
+        foreach ($grupo in $porNome) {
+            $p = Select-WinForgeNewestPackage -Package @($grupo.Group)
+            if ($null -eq $p) { continue }
+            if (@($grupo.Group).Count -gt 1) {
+                $linhas.Add("  $($grupo.Name): $(@($grupo.Group).Count) versões instaladas, usando a mais nova ($($p.Version)).")
+            }
             if ([string]::IsNullOrWhiteSpace($p.InstallLocation)) {
                 $linhas.Add("  $($p.PackageFullName): sem pasta de instalação (pacote provisionado, nada a registrar).")
                 continue
@@ -548,7 +677,7 @@ function Invoke-WinForgeStoreReregister {
             }
             try {
                 Add-AppxPackage -DisableDevelopmentMode -Register $manifesto -ErrorAction Stop
-                $linhas.Add("  $($p.PackageFullName): registrado.")
+                $linhas.Add("  $($p.PackageFullName): registrado para o usuário atual.")
             } catch {
                 $linhas.Add("  $($p.PackageFullName): falhou - $($_.Exception.Message)")
             }
@@ -556,6 +685,7 @@ function Invoke-WinForgeStoreReregister {
     }
 
     $linhas.Add('')
+    $linhas.Add('O registro vale para o usuário que está com o WinForge aberto, e só para ele: cada usuário desta máquina que estiver com a Store quebrada precisa rodar este botão no próprio logon.')
     $linhas.Add('Se a Store continuar sem abrir, reinicie o computador antes de tentar de novo: o registro só vale a partir do próximo logon em alguns casos.')
     return (($linhas -join "`r`n").Trim())
 }
@@ -616,13 +746,18 @@ function Install-WinForgeVcRedist {
         código de saída de cada um vira uma linha do relatório - um pacote que falha não interrompe
         os outros. Código 0 é sucesso; -1978335189 é "nenhuma atualização aplicável", que aqui
         significa "já está instalado e atualizado".
+
+        Antes de instalar cada id vem um 'winget list --id <id> -e', que é leitura pura: o que já
+        está na máquina é pulado com uma linha dizendo isso. São doze pacotes e a maioria das
+        máquinas já tem quase todos - sem essa pergunta, o botão gastaria minutos para o winget
+        responder doze vezes que não havia nada a fazer.
+    .PARAMETER DryRun
+        Devolve a lista de ids e não chama o winget. É o que o -SelfTest usa para conferir a lista
+        (os doze pacotes, nas duas arquiteturas, na ordem) sem instalar nada em quem compila.
     .OUTPUTS
-        Texto pronto para a janela de saída.
+        Com -DryRun: os ids, em ordem. Sem -DryRun: texto pronto para a janela de saída.
     #>
-    $winget = Get-WinForgeWingetPath
-    if (-not $winget) {
-        return "winget não encontrado: use 'WinGet - Reinstall' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
-    }
+    param([switch]$DryRun)
 
     $ids = @(
         'Microsoft.VCRedist.2005.x86', 'Microsoft.VCRedist.2005.x64',
@@ -632,10 +767,29 @@ function Install-WinForgeVcRedist {
         'Microsoft.VCRedist.2013.x86', 'Microsoft.VCRedist.2013.x64',
         'Microsoft.VCRedist.2015+.x86', 'Microsoft.VCRedist.2015+.x64'
     )
+    if ($DryRun) { return $ids }
+
+    $winget = Get-WinForgeWingetPath
+    if (-not $winget) {
+        return "winget não encontrado: use 'WinGet - Reinstall' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
+    }
+
     $linhas = New-Object System.Collections.Generic.List[string]
     $linhas.Add("winget: $winget")
+    $linhas.Add('')
+    $instalados = 0
 
     foreach ($id in $ids) {
+        # 'winget list --id <id> -e' devolve 0 quando achou. O código sozinho não basta: em algumas
+        # versões do winget uma origem que responde devagar também sai com 0 e um texto de "nenhum
+        # pacote encontrado", então o id tem de aparecer na saída para a linha contar como instalado.
+        $lista = Invoke-WinForgeNativeCommand -FilePath $winget -Arguments @('list', '--id', $id, '-e', '--accept-source-agreements')
+        if ([int]$lista.ExitCode -eq 0 -and [string]$lista.Text -match [regex]::Escape($id)) {
+            $linhas.Add("$id`: já instalado (nada a fazer)")
+            $instalados++
+            continue
+        }
+
         $r = Invoke-WinForgeNativeCommand -FilePath $winget -Arguments @(
             'install', '--id', $id, '-e', '--silent',
             '--accept-package-agreements', '--accept-source-agreements'
@@ -650,6 +804,7 @@ function Install-WinForgeVcRedist {
     }
 
     $linhas.Add('')
+    $linhas.Add("$instalados de $($ids.Count) pacote(s) já estavam na máquina e foram pulados.")
     $linhas.Add('Reinicie os programas que reclamavam de DLL depois da instalação.')
     return ($linhas -join "`r`n")
 }
@@ -693,18 +848,40 @@ function Install-WinForgeDirectX {
 
         O download vai para %TEMP%\WinForge e tem tempo limite: sem ele, uma rede que aceita a
         conexão e não responde deixaria o botão pendurado até o usuário fechar o programa.
+
+        Nada é aberto sem a assinatura conferir. O que chega pela rede não é o que foi pedido, é o
+        que a rede entregou: DNS sequestrado, proxy de inspeção mal configurado ou cache envenenado
+        colocam OUTRO executável nesse caminho, e o WinForge o abriria com o mesmo clique. Por isso
+        Test-WinForgeMicrosoftSignature roda entre o download e o Start-Process, e o arquivo é
+        APAGADO quando a assinatura não fecha - deixar um executável não confirmado em %TEMP% com
+        nome de instalador da Microsoft é pior que não ter baixado nada. O download que falha no meio
+        também é apagado: um arquivo pela metade seria um instalador quebrado esperando um clique.
+
+        TLS 1.2 é fixado na mão porque o padrão do .NET Framework no PowerShell 5.1 ainda inclui SSL3
+        e TLS 1.0; o download.microsoft.com já recusa os dois, e sem esta linha o download falha com
+        um erro de conexão que não diz o motivo.
+    .PARAMETER DryRun
+        Devolve a origem e o destino sem baixar nem abrir nada. É o que o -SelfTest usa.
     .OUTPUTS
-        Texto pronto para a janela de saída.
+        Com -DryRun: @{ Url; Path }. Sem -DryRun: texto pronto para a janela de saída.
     #>
+    param([switch]$DryRun)
+
     $url = 'https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe'
     $pasta = Join-Path $env:TEMP 'WinForge'
     $destino = Join-Path $pasta 'dxwebsetup.exe'
+
+    if ($DryRun) { return @{ Url = $url; Path = $destino } }
 
     try {
         if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
     } catch {
         return "Não foi possível criar a pasta '$pasta': $($_.Exception.Message)"
     }
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    } catch { }
 
     try {
         # -UseBasicParsing: sem ele o Invoke-WebRequest do PowerShell 5.1 tenta usar o motor do
@@ -717,19 +894,25 @@ function Install-WinForgeDirectX {
             $ProgressPreference = $progresso
         }
     } catch {
-        return "Falha ao baixar o instalador do DirectX: $($_.Exception.Message)`r`n`r`nOrigem: $url"
+        Remove-Item -LiteralPath $destino -Force -ErrorAction SilentlyContinue
+        return "Falha ao baixar o instalador do DirectX: $($_.Exception.Message)`r`n`r`nOrigem: $url`r`n`r`nO que tinha sido baixado foi apagado."
     }
 
     $tamanho = 0
     try { $tamanho = [math]::Round((Get-Item -LiteralPath $destino).Length / 1KB, 0) } catch { $tamanho = 0 }
 
+    if (-not (Test-WinForgeMicrosoftSignature -Path $destino)) {
+        Remove-Item -LiteralPath $destino -Force -ErrorAction SilentlyContinue
+        return "O arquivo baixado NÃO tem assinatura válida da Microsoft Corporation e foi apagado sem ser aberto.`r`n`r`nOrigem: $url`r`nTamanho baixado: $tamanho KB`r`n`r`nIsso costuma ser um proxy que inspeciona HTTPS e reescreve o download, ou uma rede que devolveu outra coisa no lugar do instalador. Baixe o dxwebsetup.exe direto do site da Microsoft, por uma rede de confiança."
+    }
+
     try {
         Start-Process -FilePath $destino -ErrorAction Stop | Out-Null
     } catch {
-        return "O instalador foi baixado em '$destino' ($tamanho KB), mas não pôde ser aberto: $($_.Exception.Message)"
+        return "O instalador foi baixado em '$destino' ($tamanho KB) e a assinatura da Microsoft conferiu, mas ele não pôde ser aberto: $($_.Exception.Message)"
     }
 
-    return "Instalador do DirectX baixado em '$destino' ($tamanho KB) e aberto.`r`n`r`nEle é interativo: siga as telas do instalador da Microsoft. Ele instala as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua sendo atualizado pelo Windows Update."
+    return "Instalador do DirectX baixado em '$destino' ($tamanho KB), assinatura da Microsoft conferida, e aberto.`r`n`r`nEle é interativo: siga as telas do instalador da Microsoft. Ele instala as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua sendo atualizado pelo Windows Update."
 }
 
 function Invoke-WinForgeChkdskSchedule {
@@ -741,6 +924,11 @@ function Invoke-WinForgeChkdskSchedule {
         consegue bloquear o volume em uso, e é a forma sem interação de agendar a verificação com
         reparo - 'chkdsk /f' direto faria uma pergunta no console, e não há console nenhum na frente
         do usuário aqui.
+
+        É de MÃO ÚNICA: não existe 'fsutil dirty clear'. Quem limpa o bit é o autochk, e só depois de
+        rodar e concluir que o volume está íntegro. Enquanto o disco tiver problema que ele não
+        conserta, o chkdsk volta a rodar A CADA reinicialização - o botão não tem desfazer, e é isso
+        que o texto de confirmação precisa dizer antes do clique.
 
         Depois de marcar, 'fsutil dirty query' confirma o estado: o relatório termina dizendo o que
         vai acontecer no próximo boot, não o que se pretendia fazer.
@@ -766,6 +954,8 @@ function Invoke-WinForgeChkdskSchedule {
     $linhas.Add([string]$query.Text)
     $linhas.Add('')
     $linhas.Add("Na próxima reinicialização o Windows roda o chkdsk em $unidade antes de carregar. Num disco grande isso pode demorar bastante - não desligue a máquina no meio.")
+    $linhas.Add('')
+    $linhas.Add('Não há como desmarcar: quem limpa a marca é o próprio chkdsk, depois de rodar e concluir que o volume está íntegro. Se o disco tiver um problema que ele não consegue reparar, a verificação vai se repetir em toda reinicialização até o problema sair do caminho.')
     return ($linhas -join "`r`n")
 }
 
@@ -780,6 +970,12 @@ function Invoke-WinForgeMemoryDiagSchedule {
 
         A confirmação sai de 'bcdedit /enum {bootmgr}': a linha 'bootsequence' só existe quando a
         ordem foi aceita, então o relatório mostra a linha real em vez de repetir a intenção.
+
+        Os RÓTULOS do /enum são traduzidos - num Windows em português a linha é 'sequência de
+        inicialização', não 'bootsequence', e a busca não acha nada mesmo com a ordem aceita. Por
+        isso o caminho de "não achei" não manda ninguém "conferir o resultado acima": ele imprime o
+        /enum inteiro, que é onde a resposta está em qualquer idioma. Quem decide se deu certo é o
+        código de saída do /bootsequence, já conferido acima; esta parte é só a leitura de apoio.
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
@@ -800,7 +996,9 @@ function Invoke-WinForgeMemoryDiagSchedule {
         $linhas.Add('Sequência de inicialização atual:')
         foreach ($l in $sequencia) { $linhas.Add("  $($l.Trim())") }
     } else {
-        $linhas.Add('O bcdedit não reportou linha de bootsequence: confira o resultado acima.')
+        $linhas.Add('Nenhuma linha "bootsequence" foi encontrada na saída abaixo - o que é esperado num Windows traduzido, onde o rótulo aparece como "sequência de inicialização". A ordem foi aceita (código de saída 0 acima); segue o gerenciador de inicialização inteiro:')
+        $linhas.Add("bcdedit /enum {bootmgr} - código de saída: $($enum.ExitCode)")
+        $linhas.Add([string]$enum.Text)
     }
     $linhas.Add('')
     $linhas.Add('Reinicie para o teste começar. Ele roda antes do Windows carregar e o resultado aparece no Visualizador de Eventos (origem MemoryDiagnostics-Results) depois do próximo logon.')
@@ -828,23 +1026,68 @@ function Invoke-WinForgeRepairCommandCore {
     return Invoke-WinForgeCommandCore -Spec (Get-WinForgeRepairCommand -Name $Name) -Name $Name -Component 'Repair' -Prefix 'repair' -DryRun:$DryRun
 }
 
+function Get-WinForgeRepairConfirmText {
+    <#
+    .SYNOPSIS
+        O texto da caixa de confirmação de um botão que altera o sistema.
+    .DESCRIPTION
+        Três partes, nesta ordem, separadas por linha em branco:
+
+        1. O TÍTULO do botão. Sem ele a caixa seria um "Continuar?" sem dizer continuar o quê - e a
+           essa altura o usuário já clicou, já tirou os olhos do botão e está lendo a caixa.
+        2. A DESCRIÇÃO da config, que é a MESMA frase mostrada ao lado do botão na aba Config. Repetir
+           a descrição, em vez de escrever um segundo texto só para a caixa, é o que garante que o
+           que foi prometido e o que vai ser confirmado não divirjam com o tempo: um texto duplicado
+           é um texto que envelhece pela metade. O 'Confirm' da tabela é a reserva, para o caso de a
+           entrada da config sumir - a pergunta nunca sai em branco.
+        3. A PERGUNTA. Uma só, no fim, onde o olho para.
+    .OUTPUTS
+        Texto de uma caixa de mensagem.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    $cmd = Get-WinForgeRepairCommand -Name $Name
+    $descricao = $null
+    try {
+        $entrada = $sync.configs.feature."WPFWFRep$Name"
+        if ($entrada) { $descricao = [string]$entrada.Description }
+    } catch { $descricao = $null }
+    if ([string]::IsNullOrWhiteSpace($descricao)) { $descricao = [string]$cmd.Confirm }
+    if ([string]::IsNullOrWhiteSpace($descricao)) { $descricao = 'Esta ação altera o sistema.' }
+
+    return "$($cmd.Title)`r`n`r`n$($descricao.Trim())`r`n`r`nContinuar?"
+}
+
 function Invoke-WinForgeRepairCommand {
     <#
     .SYNOPSIS
-        Ação dos botões de reparo: só despacha o que é leitura; o resto ainda não roda.
+        Ação dos botões de reparo: leitura vai direto, o que altera o sistema pergunta antes.
     .DESCRIPTION
         Nome desconhecido morre AQUI, no clique, e não dentro do runspace: a tabela é deste grupo de
         botões, e uma caixa de mensagem dizendo qual botão está errado vale mais que uma linha de log
         que ninguém vai ler.
 
-        'Kind read' segue para Invoke-WinForgeCommandButton, que é quem tem a trava de um comando por
-        vez, o runspace do pool e a janela de saída. 'repair' e 'install' param aqui com um aviso: a
-        confirmação antes de mexer na máquina é a próxima etapa do plano, e despachar sem ela agora
-        seria reparar o sistema de quem só clicou para ver o que o botão faz.
+        'Kind read' segue direto para Invoke-WinForgeCommandButton, sem pergunta: ler o estado da
+        máquina não muda nada, e uma confirmação para cada leitura treinaria o usuário a clicar em
+        "Sim" sem ler - que é exatamente o hábito que a confirmação do 'repair' precisa combater.
+
+        'repair' e 'install' passam pela caixa de Sim/Não montada por Get-WinForgeRepairConfirmText,
+        com ícone de aviso e SEM botão padrão de "Sim": quem não leu e apertou Enter não repara nada.
+        "Não" vira uma linha de log e o botão volta ao lugar; "Sim" cai no mesmo despacho da leitura -
+        a trava de um comando por vez, o runspace do pool e a janela de saída são os mesmos.
+
+        A caixa aparece na thread da janela porque este é o handler do botão, que já roda nela. Não
+        há Invoke-WPFUIThread aqui de propósito: chamá-lo de dentro da própria thread da interface
+        esperaria por um Dispatcher que está parado esperando esta função retornar.
+
+        A decisão fica antes do despacho, e não dentro do runspace, por um motivo: a trava
+        $sync.CommandRunning só é tomada por Invoke-WinForgeCommandButton. Perguntar depois de tomar
+        a trava deixaria o programa inteiro sem botões enquanto uma caixa espera alguém ler.
     .PARAMETER NoUI
         Devolve a decisão em vez de mostrar janela ou caixa de mensagem, e não despacha nada. É o que
-        o -SelfTest usa: ele roda sem ninguém na frente e não pode abrir nada na tela nem sair
-        reparando a máquina de quem compila.
+        o -SelfTest usa: ele roda sem ninguém na frente, não pode abrir caixa nenhuma (não há quem
+        responda, e o build ficaria pendurado até alguém passar pela máquina) e não pode sair
+        reparando o sistema de quem compila.
     .OUTPUTS
         Com -NoUI: @{ Dispatched = <bool>; Reason = <string>; Kind = <string> }. Sem -NoUI: nada.
     #>
@@ -866,11 +1109,22 @@ function Invoke-WinForgeRepairCommand {
     if ([string]::IsNullOrWhiteSpace($kind)) { $kind = 'read' }
 
     if ($kind -ne 'read') {
-        $aviso = "$($cmd.Title)`r`n`r`nDisponível na próxima etapa: este botão altera o sistema e ainda não pede confirmação."
-        Write-WinForgeLog -Component "Repair" -Message "$Name não despachado: ação do tipo '$kind' ainda depende da confirmação."
-        if ($NoUI) { return @{ Dispatched = $false; Reason = 'confirmação'; Kind = $kind } }
-        [System.Windows.MessageBox]::Show($aviso, "WinForge", "OK", "Information") | Out-Null
-        return
+        if ($NoUI) {
+            Write-WinForgeLog -Component "Repair" -Message "$Name não despachado: ação do tipo '$kind' precisa de confirmação e não há ninguém para confirmar."
+            return @{ Dispatched = $false; Reason = 'confirmação'; Kind = $kind }
+        }
+        $resposta = [System.Windows.MessageBox]::Show(
+            (Get-WinForgeRepairConfirmText -Name $Name),
+            "WinForge",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Warning,
+            [System.Windows.MessageBoxResult]::No
+        )
+        if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
+            Write-WinForgeLog -Component "Repair" -Message "$Name cancelado na confirmação. Nada foi alterado."
+            return
+        }
+        Write-WinForgeLog -Component "Repair" -Message "$Name confirmado pelo usuário (ação do tipo '$kind')."
     }
 
     if ($NoUI) { return @{ Dispatched = $false; Reason = 'NoUI'; Kind = $kind } }

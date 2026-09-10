@@ -1665,12 +1665,130 @@ if ($SelfTest) {
         Write-Host "  [ERRO] Reparo (execução): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # winget fora do PATH é o caso normal logo depois de um logon novo, e é por isso que a busca não
-    # é um Get-Command: o que ela não pode é lançar.
+    # é um Get-Command: o que ela não pode é lançar - nem devolver um caminho que não existe, que
+    # viraria "o sistema não pode encontrar o arquivo" dentro do runspace, longe do botão.
     try {
         $wfRepWinget = Get-WinForgeWingetPath
+        if ($wfRepWinget -and -not (Test-Path -LiteralPath $wfRepWinget -PathType Leaf)) { Write-Host "  [ERRO] Reparo (winget): caminho devolvido não existe ('$wfRepWinget')" -ForegroundColor Red; $wbErrors++ }
         Write-Host "  Reparo (winget): $(if ($wfRepWinget) { $wfRepWinget } else { 'não encontrado nesta máquina' })"
     } catch {
         Write-Host "  [ERRO] Reparo (winget): Get-WinForgeWingetPath lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+    }
+    # Versão de pacote Appx é TEXTO: '1.9.0.0' é maior que '1.25.0.0' em ordem alfabética e menor em
+    # ordem de versão. Quem escolhe errado aponta o winget para uma pasta de instalação antiga que
+    # pode nem existir mais - por isso a escolha é uma função pura, testada com a lista sintética.
+    try {
+        $wfRepPacotes = @(
+            [pscustomobject]@{ Version = '1.9.0.0';  InstallLocation = 'C:\antigo' },
+            [pscustomobject]@{ Version = '1.25.0.0'; InstallLocation = 'C:\novo' },
+            [pscustomobject]@{ Version = '1.10.0.0'; InstallLocation = 'C:\meio' }
+        )
+        $wfRepNovo = Select-WinForgeNewestPackage -Package $wfRepPacotes
+        if ([string]$wfRepNovo.Version -ne '1.25.0.0') { Write-Host "  [ERRO] Reparo (versão): a mais nova de 1.9.0.0/1.25.0.0/1.10.0.0 deveria ser 1.25.0.0, veio '$($wfRepNovo.Version)'" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne (Select-WinForgeNewestPackage -Package @())) { Write-Host "  [ERRO] Reparo (versão): lista vazia deveria devolver nulo" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (versão): 1.25.0.0 escolhido sobre 1.10.0.0 e 1.9.0.0 (ordem de versão, não de texto)" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (versão): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Confirmação: o texto que aparece na caixa antes de mexer na máquina. Ele nasce do título e da
+    # descrição da config - a mesma frase que o usuário já leu no botão -, e termina perguntando.
+    # Uma ação que muda o sistema sem o título na pergunta seria uma caixa dizendo "Continuar?" sem
+    # dizer continuar o quê.
+    try {
+        $wfRepConfOk = 0
+        foreach ($wfRepNome in $wfRepNomes) {
+            $wfRepSpec = Get-WinForgeRepairCommand -Name $wfRepNome
+            if ([string]$wfRepSpec.Kind -eq 'read') { continue }
+            $wfRepConf = [string](Get-WinForgeRepairConfirmText -Name $wfRepNome)
+            if ($wfRepConf -notmatch [regex]::Escape([string]$wfRepSpec.Title)) { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: o texto não traz o título" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepConf -notmatch 'Continuar') { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: o texto não pergunta 'Continuar'" -ForegroundColor Red; $wbErrors++ }
+            if (([regex]::Matches($wfRepConf, 'Continuar')).Count -ne 1) { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: 'Continuar' aparece mais de uma vez" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepConf.Length -lt 120) { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: texto curto demais ($($wfRepConf.Length) caractere(s)) para explicar o que muda" -ForegroundColor Red; $wbErrors++ }
+            $wfRepConfOk++
+        }
+        # A caixa é de Sim/Não com ícone de aviso: um "OK" não é confirmação, é aviso, e o botão
+        # rodaria de qualquer jeito.
+        $wfRepFonte = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        if ($wfRepFonte -notmatch 'YesNo') { Write-Host "  [ERRO] Reparo (confirmação): a caixa deveria ser YesNo" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (confirmação): $wfRepConfOk texto(s) com título, descrição e uma pergunta"
+    } catch {
+        Write-Host "  [ERRO] Reparo (confirmação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Os dois instaladores em simulação: a lista de ids e o alvo do download saem sem winget rodar e
+    # sem um byte baixado. É o único jeito de o build conferir a lista do Visual C++ (as duas
+    # arquiteturas de cada ano) sem instalar doze pacotes na máquina de quem compila.
+    try {
+        $wfRepIdsEsperados = @(
+            'Microsoft.VCRedist.2005.x86', 'Microsoft.VCRedist.2005.x64',
+            'Microsoft.VCRedist.2008.x86', 'Microsoft.VCRedist.2008.x64',
+            'Microsoft.VCRedist.2010.x86', 'Microsoft.VCRedist.2010.x64',
+            'Microsoft.VCRedist.2012.x86', 'Microsoft.VCRedist.2012.x64',
+            'Microsoft.VCRedist.2013.x86', 'Microsoft.VCRedist.2013.x64',
+            'Microsoft.VCRedist.2015+.x86', 'Microsoft.VCRedist.2015+.x64'
+        )
+        $wfRepIds = @(Install-WinForgeVcRedist -DryRun)
+        if ($wfRepIds.Count -ne $wfRepIdsEsperados.Count) { Write-Host "  [ERRO] Reparo (VcRedist simulado): $($wfRepIds.Count) id(s), esperado $($wfRepIdsEsperados.Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif (($wfRepIds -join '|') -ne ($wfRepIdsEsperados -join '|')) { Write-Host "  [ERRO] Reparo (VcRedist simulado): lista fora de ordem ou diferente: $($wfRepIds -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (VcRedist simulado): $($wfRepIds.Count) id(s) na ordem, sem chamar o winget" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (VcRedist simulado): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    try {
+        # O alvo do download é fixo, então a prova de "não baixou" é o carimbo do arquivo antes e
+        # depois - e não "o arquivo não existe": numa máquina onde alguém já clicou no botão de
+        # verdade ele existe, e um SelfTest que quebrasse por isso seria um teste sobre a máquina,
+        # não sobre o código.
+        $wfRepDxAlvo = Join-Path (Join-Path $env:TEMP 'WinForge') 'dxwebsetup.exe'
+        $wfRepDxAntes = if (Test-Path -LiteralPath $wfRepDxAlvo) { [string](Get-Item -LiteralPath $wfRepDxAlvo).LastWriteTimeUtc.Ticks } else { 'ausente' }
+        $wfRepDx = Install-WinForgeDirectX -DryRun
+        $wfRepDxDepois = if (Test-Path -LiteralPath $wfRepDxAlvo) { [string](Get-Item -LiteralPath $wfRepDxAlvo).LastWriteTimeUtc.Ticks } else { 'ausente' }
+        if ([string]$wfRepDx.Url -notmatch '^https://download\.microsoft\.com/') { Write-Host "  [ERRO] Reparo (DirectX simulado): a origem deveria ser download.microsoft.com, veio '$($wfRepDx.Url)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfRepDx.Path -notlike '*dxwebsetup.exe') { Write-Host "  [ERRO] Reparo (DirectX simulado): destino inesperado '$($wfRepDx.Path)'" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepDxDepois -ne $wfRepDxAntes) { Write-Host "  [ERRO] Reparo (DirectX simulado): a simulação mexeu no arquivo de destino '$wfRepDxAlvo'" -ForegroundColor Red; $wbErrors++ }
+        # O carimbo acima cobre o destino que a função DEVERIA usar; este cobre o que ela DISSE que
+        # usa. Sem os dois, uma simulação que baixasse para outro caminho passaria despercebida.
+        elseif ([string]$wfRepDx.Path -ne $wfRepDxAlvo) { Write-Host "  [ERRO] Reparo (DirectX simulado): destino '$($wfRepDx.Path)' não é '$wfRepDxAlvo'" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (DirectX simulado): origem e destino resolvidos, nada baixado (destino $wfRepDxAntes)" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (DirectX simulado): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Executável baixado da internet só é aberto depois da assinatura da Microsoft conferir. Um
+    # arquivo vazio com extensão .exe é o caso mais simples de "não assinado": se a porteira deixar
+    # esse passar, ela deixa passar qualquer coisa que um DNS sequestrado devolva no lugar do
+    # instalador.
+    try {
+        $wfRepFalso = Join-Path $env:TEMP "WinForge-SelfTest\assinatura-$([guid]::NewGuid().ToString('N')).exe"
+        $wfRepFalsoDir = Split-Path -Parent $wfRepFalso
+        if (-not (Test-Path -LiteralPath $wfRepFalsoDir)) { New-Item -ItemType Directory -Path $wfRepFalsoDir -Force | Out-Null }
+        Set-Content -LiteralPath $wfRepFalso -Value '' -Encoding Byte -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $wfRepFalso)) { New-Item -ItemType File -Path $wfRepFalso -Force | Out-Null }
+        if (Test-WinForgeMicrosoftSignature -Path $wfRepFalso) { Write-Host "  [ERRO] Reparo (assinatura): arquivo não assinado passou pela conferência" -ForegroundColor Red; $wbErrors++ }
+        elseif (Test-WinForgeMicrosoftSignature -Path (Join-Path $wfRepFalsoDir 'nao-existe-este-arquivo.exe')) { Write-Host "  [ERRO] Reparo (assinatura): arquivo inexistente passou pela conferência" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (assinatura): arquivo sem assinatura e arquivo ausente recusados" }
+        Remove-Item -LiteralPath $wfRepFalso -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "  [ERRO] Reparo (assinatura): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # A outra metade da porteira: "assinado" não é "assinado pela Microsoft". Um arquivo vazio nunca
+    # chega nesta pergunta (a assinatura já falha antes), então quem prova esta metade é o texto do
+    # titular - que não depende de haver um executável assinado na máquina de quem compila.
+    try {
+        $wfRepTitulares = @(
+            @('CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US', $true),
+            @('CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US',     $true),
+            @('CN=Outra Empresa Ltda, O=Outra Empresa Ltda, L=São Paulo, C=BR',                   $false),
+            @('CN=Microsoft Corporation Fake, O=Empresa Qualquer, C=BR',                          $false),
+            @('', $false)
+        )
+        $wfRepTitOk = 0
+        foreach ($wfRepTit in $wfRepTitulares) {
+            $wfRepTitVeio = [bool](Test-WinForgeMicrosoftSigner -Subject $wfRepTit[0])
+            if ($wfRepTitVeio -ne [bool]$wfRepTit[1]) { Write-Host "  [ERRO] Reparo (titular): '$($wfRepTit[0])' deveria dar $($wfRepTit[1]), deu $wfRepTitVeio" -ForegroundColor Red; $wbErrors++ }
+            else { $wfRepTitOk++ }
+        }
+        Write-Host "  Reparo (titular): $wfRepTitOk de $($wfRepTitulares.Count) titular(es) classificados (só O=Microsoft Corporation passa)"
+    } catch {
+        Write-Host "  [ERRO] Reparo (titular): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # A guarda do lookup de Invoke-WPFButton: sem ela o caminho da config chamaria $buttonConfig.function
     # (inexistente nestas entradas) e o clique morreria antes de chegar ao switch que passa o -Name.

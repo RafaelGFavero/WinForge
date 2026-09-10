@@ -9,9 +9,11 @@
 # config chamaria a função SEM argumento nenhum, e ela não saberia qual comando rodar - por isso o
 # lookup de Invoke-WPFButton também pula as chaves WPFWFRep*.
 #
-# A descrição de cada botão diz o que ele faz, o que muda na máquina e o que ele exige. Os botões
-# que alteram o sistema avisam isso na primeira linha: nesta etapa eles ainda respondem "Disponível
-# na próxima etapa" (a confirmação vem na próxima tarefa do plano).
+# A descrição de cada botão diz o que ele faz, o que muda na máquina e o que ele exige, e os que
+# alteram o sistema avisam isso na primeira linha. Ela tem um segundo leitor além de quem passa o
+# olho na aba: Get-WinForgeRepairConfirmText usa ESTE texto na caixa de Sim/Não que aparece antes de
+# 'repair' e 'install' rodarem. Por isso ele descreve, mas não pergunta - a pergunta é acrescentada
+# uma vez só, na hora de montar a caixa.
 # ---------------------------------------------------------------------------
 $sync.configs.wfrepair = @'
 {
@@ -49,7 +51,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepWmiRepair": {
     "Content": "Repositório WMI: verificar e recuperar",
-    "Description": "ALTERA O SISTEMA. Roda 'winmgmt /verifyrepository' e, só se o repositório estiver inconsistente, 'winmgmt /salvagerepository' (recupera o que dá para aproveitar; não apaga o repositório). Programas que consultam o WMI podem falhar durante a recuperação. Exige o WinForge aberto como administrador.",
+    "Description": "ALTERA O SISTEMA. Roda 'winmgmt /verifyrepository' e, só se o repositório estiver inconsistente, 'winmgmt /salvagerepository' (recupera o que dá para aproveitar; não apaga o repositório). Programas que consultam o WMI podem falhar durante a recuperação. Exige o WinForge aberto como administrador: sem elevação a verificação responde 'acesso negado', e o botão para aí em vez de recuperar o repositório por causa de uma leitura que não aconteceu.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -57,7 +59,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepStoreReregister": {
     "Content": "Microsoft Store e App Installer: registrar de novo",
-    "Description": "ALTERA O SISTEMA. Registra de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App a partir do AppXManifest.xml que já está no disco, sem baixar nada. É o reparo de 'a Store não abre' e de 'o winget sumiu'. Os aplicativos fecham durante o registro. Exige o WinForge aberto como administrador para alcançar todos os usuários.",
+    "Description": "ALTERA O SISTEMA. Registra de novo, PARA O USUÁRIO ATUAL, a Microsoft Store, o App Installer (winget) e o Store Purchase App a partir do AppXManifest.xml que já está no disco, sem baixar nada. É o reparo de 'a Store não abre' e de 'o winget sumiu'. Os aplicativos fecham durante o registro. Vale só para quem está com o WinForge aberto: outros usuários da máquina precisam rodar o botão no próprio logon. Com o WinForge como administrador a busca alcança os pacotes que sumiram do perfil atual.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -65,7 +67,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepChkdskSchedule": {
     "Content": "Agendar chkdsk /f na próxima reinicialização",
-    "Description": "ALTERA O SISTEMA. Marca o disco do Windows como 'sujo' (fsutil dirty set): na próxima reinicialização o chkdsk roda com reparo antes de o Windows carregar, e isso pode demorar bastante - a máquina não pode ser desligada no meio. Nada é verificado agora. Exige o WinForge aberto como administrador.",
+    "Description": "ALTERA O SISTEMA E NÃO TEM DESFAZER. Marca o disco do Windows como 'sujo' (fsutil dirty set): na próxima reinicialização o chkdsk roda com reparo antes de o Windows carregar, e isso pode demorar bastante - a máquina não pode ser desligada no meio. Não existe 'fsutil dirty clear': quem limpa a marca é o próprio chkdsk, e só quando concluir que o volume está íntegro, então num disco com problema a verificação se repete a cada reinicialização. Nada é verificado agora. Exige o WinForge aberto como administrador.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -89,7 +91,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepVcRedist": {
     "Content": "Visual C++ 2005–2022 (x86/x64) via winget",
-    "Description": "INSTALA COMPONENTE. Instala ou atualiza os 12 pacotes redistribuíveis do Visual C++ (2005, 2008, 2010, 2012, 2013 e 2015-2022), nas duas arquiteturas, pelo winget. É o que resolve erro de VCRUNTIME140.dll e MSVCP140.dll. São vários downloads: precisa de internet e demora. Exige o winget instalado (App Installer) e o WinForge aberto como administrador.",
+    "Description": "INSTALA COMPONENTE. Instala ou atualiza os 12 pacotes redistribuíveis do Visual C++ (2005, 2008, 2010, 2012, 2013 e 2015-2022), nas duas arquiteturas, pelo winget. O que já está instalado é pulado. É o que resolve erro de VCRUNTIME140.dll e MSVCP140.dll. São vários downloads: precisa de internet e demora. Exige o winget instalado (App Installer) e o WinForge aberto como administrador.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -105,7 +107,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepDirectX": {
     "Content": "DirectX (instalador web da Microsoft)",
-    "Description": "INSTALA COMPONENTE. Baixa o dxwebsetup.exe da Microsoft em %TEMP%\\WinForge e o abre. Ele instala as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua vindo pelo Windows Update. O instalador é interativo: quem conduz as telas é você. Precisa de internet.",
+    "Description": "INSTALA COMPONENTE. Baixa o dxwebsetup.exe da Microsoft em %TEMP%\\WinForge, confere a assinatura digital da Microsoft Corporation e só então o abre - se a assinatura não fechar, o arquivo é apagado sem ser executado. Ele instala as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua vindo pelo Windows Update. O instalador é interativo: quem conduz as telas é você. Precisa de internet.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
