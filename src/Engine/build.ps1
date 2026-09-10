@@ -1421,9 +1421,11 @@ if ($SelfTest) {
         $wbSrvCapturados = 0
         foreach ($wbSrvItem in $wbSrvItens) {
             # Aplicar num cliente: sem exceção, sem alteração e com um motivo que diga por quê.
-            $wbSrvApl = Invoke-WinForgeServerSetting -Name $wbSrvItem[0] -Root $wbSrvRoot
-            if ($null -eq $wbSrvApl) { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' não devolveu resultado" -ForegroundColor Red; $wbErrors++; continue }
+            # Num Windows Server de verdade (o runner do CI é um) o apply mudaria SMB/RDP da máquina:
+            # ali este passo não roda - só a recusa em cliente, o Desfazer sem backup e a captura.
             if (-not (Test-WinForgeRealServer)) {
+                $wbSrvApl = Invoke-WinForgeServerSetting -Name $wbSrvItem[0] -Root $wbSrvRoot
+                if ($null -eq $wbSrvApl) { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' não devolveu resultado" -ForegroundColor Red; $wbErrors++; continue }
                 if ($wbSrvApl.Changed -ne 0) { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' alterou $($wbSrvApl.Changed) valor(es) num cliente" -ForegroundColor Red; $wbErrors++ }
                 if ([string]$wbSrvApl.Skipped -notmatch 'Windows Server') { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' num cliente deveria dizer que só vale no Windows Server ('$($wbSrvApl.Skipped)')" -ForegroundColor Red; $wbErrors++ }
                 if ($null -ne $wbSrvApl.Snapshot) { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' gravou backup num cliente ('$($wbSrvApl.Snapshot)')" -ForegroundColor Red; $wbErrors++ }
