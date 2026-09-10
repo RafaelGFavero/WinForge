@@ -923,6 +923,106 @@ if ($SelfTest) {
     Write-Host "    recomendar : $(@($wbRules.Recommended.Keys) -join ', ')"
     Write-Host "    evitar     : $(@($wbRules.Discouraged.Keys) -join ', ')"
     foreach ($wbInfo in @($wbRules.Infos)) { Write-Host "    info       : $wbInfo" }
+    # ---------------------------------------------------------------- IIS: helpers puros (sem IIS)
+    # Nenhum destes helpers toca no provedor IIS:\, então dão para exercitar em qualquer máquina - e
+    # eles são o miolo do endereçamento, da conversão de valores e da comparação que decide o que
+    # entra no backup. A comparação é o que sustenta a idempotência: chave já no alvo fica fora do
+    # backup, senão aplicar duas vezes gravaria um backup com os valores já ajustados e o Desfazer
+    # (que pega o mais novo) restauraria justamente o que se queria desfazer.
+    $wbIisKey = Split-WinForgeIisKey -Key 'pool:My Pool:processModel.idleTimeout'
+    if ($wbIisKey.Kind -ne 'pool' -or $wbIisKey.Target -ne 'My Pool' -or $wbIisKey.Property -ne 'processModel.idleTimeout') { Write-Host "  [ERRO] IIS: Split-WinForgeIisKey veio kind='$($wbIisKey.Kind)' alvo='$($wbIisKey.Target)' prop='$($wbIisKey.Property)'" -ForegroundColor Red; $wbErrors++ }
+    $wbIisKeySrv = Split-WinForgeIisKey -Key 'server:system.webServer/caching:enableKernelCache'
+    if ($wbIisKeySrv.Kind -ne 'server' -or $wbIisKeySrv.Target -ne 'system.webServer/caching' -or $wbIisKeySrv.Property -ne 'enableKernelCache') { Write-Host "  [ERRO] IIS: Split-WinForgeIisKey (server) veio kind='$($wbIisKeySrv.Kind)' alvo='$($wbIisKeySrv.Target)' prop='$($wbIisKeySrv.Property)'" -ForegroundColor Red; $wbErrors++ }
+    if ((Get-WinForgeIisFilter 'system.webServer/caching') -ne '/system.webServer/caching' -or (Get-WinForgeIisFilter '/system.webServer/caching') -ne '/system.webServer/caching') { Write-Host "  [ERRO] IIS: Get-WinForgeIisFilter não normalizou a seção" -ForegroundColor Red; $wbErrors++ }
+    # TimeSpan acima de 24 h tem de virar hora corrida ('26:00:00'): o ToString() padrão daria
+    # '1.02:00:00', que o IIS recusa de volta. uint32 e valor embrulhado em .Value (PSObject ou
+    # hashtable) também têm de sair como texto simples - '@{Value=5000}' no backup é backup perdido.
+    foreach ($wbIisCase in @(
+        @([TimeSpan]'1.02:00:00', '26:00:00'),
+        @([TimeSpan]::FromMinutes(20), '00:20:00'),
+        @([TimeSpan]::Zero, '00:00:00'),
+        @($true, 'True'),
+        @($false, 'False'),
+        @([uint32]5000, '5000'),
+        @([int64]1048576, '1048576'),
+        @([pscustomobject]@{ Value = 'OnDemand' }, 'OnDemand'),
+        @([pscustomobject]@{ Value = [TimeSpan]'1.02:00:00' }, '26:00:00'),
+        @(@{ Value = '5000' }, '5000'),
+        @($null, '')
+    )) {
+        $wbIisGot = ConvertTo-WinForgeIisString $wbIisCase[0]
+        if ($wbIisGot -ne $wbIisCase[1]) { Write-Host "  [ERRO] IIS: ConvertTo-WinForgeIisString veio '$wbIisGot', esperado '$($wbIisCase[1])'" -ForegroundColor Red; $wbErrors++ }
+    }
+    foreach ($wbIisM in @(
+        @([TimeSpan]::Zero, '00:00:00', $true),
+        @('alwaysrunning', 'AlwaysRunning', $true),
+        @([pscustomobject]@{ Value = $true }, 'True', $true),
+        @([TimeSpan]::FromMinutes(20), '00:00:00', $false),
+        @([uint32]1000, '5000', $false)
+    )) {
+        $wbIisMGot = Test-WinForgeIisValueMatch -Current $wbIisM[0] -Target $wbIisM[1]
+        if ($wbIisMGot -ne $wbIisM[2]) { Write-Host "  [ERRO] IIS: Test-WinForgeIisValueMatch ('$($wbIisM[0])' vs '$($wbIisM[1])') veio $wbIisMGot, esperado $($wbIisM[2])" -ForegroundColor Red; $wbErrors++ }
+    }
+    # As duas pontas da faixa de memória privada, com a RAM vinda por parâmetro para o resultado não
+    # depender da máquina que roda o teste.
+    foreach ($wbIisMem in @(
+        @(2097152, 4, 1048576),
+        @(33554432, 4, 5033164),
+        @(33554432, 1, 8388608)
+    )) {
+        $wbIisMemGot = Get-WinForgeIisPrivateMemoryLimitKb -PoolCount $wbIisMem[1] -TotalKb $wbIisMem[0]
+        if ($wbIisMemGot -ne $wbIisMem[2]) { Write-Host "  [ERRO] IIS: memória privada com $($wbIisMem[0]) KB / $($wbIisMem[1]) pool(s) veio $wbIisMemGot, esperado $($wbIisMem[2])" -ForegroundColor Red; $wbErrors++ }
+    }
+    # As duas chaves de registro do ASP.NET: a de 64 bits e a de 32 bits (Wow6432Node), que é a que
+    # o pool em modo 32 bits lê. Com uma só, metade dos pools ficaria sem o ajuste - e o Desfazer,
+    # que apaga o que a entrada criou, deixaria a outra chave para trás.
+    $wbIisConc = @($sync.configs.tweaks.'WPFTweaksWFIisConcurrency'.registry)
+    if ($wbIisConc.Count -ne 2 -or @($wbIisConc | Where-Object { $_.Path -like '*\Wow6432Node\*' }).Count -ne 1 -or @($wbIisConc | Where-Object { $_.Name -eq 'MaxConcurrentRequestsPerCPU' -and $_.OriginalValue -eq '<RemoveEntry>' }).Count -ne 2) { Write-Host "  [ERRO] IIS: WPFTweaksWFIisConcurrency deveria ter as duas chaves MaxConcurrentRequestsPerCPU (64 e 32 bits) com Original <RemoveEntry>, veio $($wbIisConc.Count): $(@($wbIisConc | ForEach-Object { $_.Path }) -join ' | ')" -ForegroundColor Red; $wbErrors++ }
+    # Alvos de dois itens: OutputCache e Compression são os únicos que não listam pools/sites, então
+    # o plano deles pode ser conferido sem IIS.
+    $wbIisPlanOc = Get-WinForgeIisTweakPlan -Name 'OutputCache'
+    $wbIisOcKeys = @($wbIisPlanOc.Targets.Keys)
+    if ($wbIisOcKeys.Count -ne 2 -or $wbIisPlanOc.Targets['server:system.webServer/caching:enabled'] -ne 'True' -or $wbIisPlanOc.Targets['server:system.webServer/caching:enableKernelCache'] -ne 'True') { Write-Host "  [ERRO] IIS: alvos de OutputCache vieram '$($wbIisOcKeys -join ', ')'" -ForegroundColor Red; $wbErrors++ }
+    $wbIisPlanCp = Get-WinForgeIisTweakPlan -Name 'Compression'
+    if ($wbIisPlanCp.Targets['server:system.webServer/urlCompression:doStaticCompression'] -ne 'True') { Write-Host "  [ERRO] IIS: Compression sem doStaticCompression = True (veio '$($wbIisPlanCp.Targets['server:system.webServer/urlCompression:doStaticCompression'])')" -ForegroundColor Red; $wbErrors++ }
+    # Sem o recurso de compressão dinâmica a chave sai da lista, mas o motivo tem de dizer isso -
+    # ficar de fora calado seria um item que promete duas coisas e entrega uma.
+    if (-not $wbIisPlanCp.Targets.Contains('server:system.webServer/urlCompression:doDynamicCompression') -and [string]$wbIisPlanCp.Skipped -notmatch 'Web-Dyn-Compression') { Write-Host "  [ERRO] IIS: compressão dinâmica fora dos alvos sem citar Web-Dyn-Compression ('$($wbIisPlanCp.Skipped)')" -ForegroundColor Red; $wbErrors++ }
+    $wbIisPlanThrew = $false
+    try { Get-WinForgeIisTweakPlan -Name 'ItemQueNaoExiste' | Out-Null } catch { $wbIisPlanThrew = $true }
+    if (-not $wbIisPlanThrew) { Write-Host "  [ERRO] IIS: Get-WinForgeIisTweakPlan aceitou um item desconhecido" -ForegroundColor Red; $wbErrors++ }
+    # O que entra no backup, com os cinco casos que decidem a reversibilidade do item: leitura que
+    # falhou (chave ausente), valor vazio, valor nulo, valor já no alvo e valor diferente. Só o
+    # último pode entrar no backup e na escrita - vazio no backup viraria um Desfazer que apaga a
+    # propriedade, e "já no alvo" no backup viraria um Desfazer que restaura o valor ajustado.
+    $wbIisAlvos = [ordered]@{
+        'pool:A:startMode'                  = 'AlwaysRunning'
+        'pool:B:startMode'                  = 'AlwaysRunning'
+        'pool:C:startMode'                  = 'AlwaysRunning'
+        'pool:D:startMode'                  = 'AlwaysRunning'
+        'pool:E:processModel.idleTimeout'   = '00:00:00'
+    }
+    $wbIisAtual = @{
+        'pool:B:startMode'                = ''
+        'pool:C:startMode'                = $null
+        'pool:D:startMode'                = 'alwaysrunning'
+        'pool:E:processModel.idleTimeout' = [TimeSpan]::FromMinutes(20)
+    }
+    $wbIisSet = Get-WinForgeIisChangeSet -Targets $wbIisAlvos -Current $wbIisAtual
+    if ((@($wbIisSet.Pending) -join ',') -ne 'pool:E:processModel.idleTimeout') { Write-Host "  [ERRO] IIS: conjunto de mudanças deveria ter só a chave diferente, veio '$(@($wbIisSet.Pending) -join ',')'" -ForegroundColor Red; $wbErrors++ }
+    if ((@($wbIisSet.Unreadable) -join ',') -ne 'pool:A:startMode,pool:B:startMode,pool:C:startMode') { Write-Host "  [ERRO] IIS: não lidas deveriam ser A (ausente), B (vazia) e C (nula), veio '$(@($wbIisSet.Unreadable) -join ',')'" -ForegroundColor Red; $wbErrors++ }
+    if ((@($wbIisSet.Already) -join ',') -ne 'pool:D:startMode') { Write-Host "  [ERRO] IIS: 'já no alvo' deveria ser só D, veio '$(@($wbIisSet.Already) -join ',')'" -ForegroundColor Red; $wbErrors++ }
+    if ($wbIisSet.Previous.Count -ne 1 -or $wbIisSet.Previous['pool:E:processModel.idleTimeout'] -ne '00:20:00') { Write-Host "  [ERRO] IIS: backup deveria ter só E = '00:20:00', veio $($wbIisSet.Previous.Count) item(ns) ('$($wbIisSet.Previous['pool:E:processModel.idleTimeout'])')" -ForegroundColor Red; $wbErrors++ }
+    # Item inteiro já aplicado: nada a escrever, e é por isso que Invoke não grava backup nesse caso.
+    $wbIisSetOk = Get-WinForgeIisChangeSet -Targets $wbIisAlvos -Current @{
+        'pool:A:startMode'                = 'AlwaysRunning'
+        'pool:B:startMode'                = 'AlwaysRunning'
+        'pool:C:startMode'                = 'AlwaysRunning'
+        'pool:D:startMode'                = 'AlwaysRunning'
+        'pool:E:processModel.idleTimeout' = [TimeSpan]::Zero
+    }
+    if (@($wbIisSetOk.Pending).Count -ne 0 -or $wbIisSetOk.Previous.Count -ne 0 -or @($wbIisSetOk.Already).Count -ne 5) { Write-Host "  [ERRO] IIS: item já aplicado deveria dar 0 a escrever, 0 no backup e 5 no alvo (veio $(@($wbIisSetOk.Pending).Count)/$($wbIisSetOk.Previous.Count)/$(@($wbIisSetOk.Already).Count))" -ForegroundColor Red; $wbErrors++ }
+    Write-Host "  IIS (helpers): chave, filtro, $(@($wbIisOcKeys).Count) alvos de OutputCache, conversão de valor, comparação, faixa de memória e conjunto de mudanças OK"
     # ---------------------------------------------------------------- IIS: backup dos valores anteriores
     # O backup é o que torna os itens de IIS reversíveis: sem arquivo, "Desfazer" não tem para onde
     # voltar. Numa máquina sem IIS dá para provar duas coisas, e são as duas cobradas aqui: o
@@ -936,14 +1036,17 @@ if ($SelfTest) {
         $wbIisSnap = Get-WinForgeIisSnapshot -Name 'SelfTest' -Root $wbIisRoot
         if ($null -eq $wbIisSnap) { Write-Host "  [ERRO] IIS: Get-WinForgeIisSnapshot não achou o backup recém-gravado" -ForegroundColor Red; $wbErrors++ }
         elseif ($wbIisSnap.Values['pool:DefaultAppPool:startMode'] -ne 'OnDemand') { Write-Host "  [ERRO] IIS: valor do backup veio '$($wbIisSnap.Values['pool:DefaultAppPool:startMode'])', esperado 'OnDemand'" -ForegroundColor Red; $wbErrors++ }
-        # O nome do arquivo carrega o horário com precisão de segundo: sem esperar 1 s, o segundo
-        # backup cairia no MESMO arquivo e "o mais novo vence" passaria sem ser testado.
-        Start-Sleep -Seconds 1
+        # Segundo backup no MESMO segundo, de propósito: o nome carrega milissegundo, então os dois
+        # arquivos coexistem e o primeiro - o dos valores originais - continua no disco. Com precisão
+        # de segundo, este é o cenário que apagava o backup bom (aplicar duas vezes seguidas).
+        Start-Sleep -Milliseconds 5
         $wbIisFile2 = New-WinForgeIisSnapshot -Name 'SelfTest' -Values @{ 'pool:DefaultAppPool:startMode' = 'AlwaysRunning' } -Root $wbIisRoot
-        if ($wbIisFile2 -eq $wbIisFile) { Write-Host "  [ERRO] IIS: o segundo backup sobrescreveu o primeiro ($wbIisFile2)" -ForegroundColor Red; $wbErrors++ }
+        if ($wbIisFile2 -eq $wbIisFile) { Write-Host "  [ERRO] IIS: o segundo backup do mesmo segundo caiu no mesmo arquivo ($wbIisFile2)" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wbIisFile)) { Write-Host "  [ERRO] IIS: o primeiro backup desapareceu depois do segundo ($wbIisFile)" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wbIisRoot -Filter 'SelfTest-*.json').Count -ne 2) { Write-Host "  [ERRO] IIS: esperado 2 arquivos de backup, veio $(@(Get-ChildItem -LiteralPath $wbIisRoot -Filter 'SelfTest-*.json').Count)" -ForegroundColor Red; $wbErrors++ }
         $wbIisNovo = Get-WinForgeIisSnapshot -Name 'SelfTest' -Root $wbIisRoot
         if ($null -eq $wbIisNovo -or $wbIisNovo.Values['pool:DefaultAppPool:startMode'] -ne 'AlwaysRunning') { Write-Host "  [ERRO] IIS: o backup mais novo deveria vencer (veio '$($wbIisNovo.Values['pool:DefaultAppPool:startMode'])')" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  IIS: backup em $(Split-Path -Leaf $wbIisFile2) | round-trip OK, o mais novo vence"
+        Write-Host "  IIS: backup em $(Split-Path -Leaf $wbIisFile2) | round-trip OK, o mais novo vence, mesmo segundo não sobrescreve"
     } catch {
         Write-Host "  [ERRO] IIS (backup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {

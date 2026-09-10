@@ -162,7 +162,7 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFIisPreload": {
     "Content": "Sites: pré-carregar (preloadEnabled)",
-    "Description": "Liga applicationDefaults.preloadEnabled em todos os sites: o IIS carrega o aplicativo assim que o pool sobe, sem esperar o primeiro visitante. Depende do recurso 'Inicialização de Aplicativos' (Web-AppInit); se ele não estiver instalado, o item avisa e não altera nada - o WinForge não instala recursos do Windows. Os valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta.",
+    "Description": "Liga applicationDefaults.preloadEnabled em todos os sites: o IIS carrega o aplicativo assim que o pool sobe, sem esperar o primeiro visitante. O que muda é o PADRÃO DO SITE - o aplicativo que já tem preloadEnabled definido explicitamente continua com o valor dele, ligado ou desligado. Depende do recurso 'Inicialização de Aplicativos' (Web-AppInit); se ele não estiver instalado, o item avisa e não altera nada - o WinForge não instala recursos do Windows. Os valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta.",
     "category": "IIS",
     "panel": "2",
     "tab": "Servidor",
@@ -207,14 +207,15 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFIisConcurrency": {
     "Content": "Fila e requisições concorrentes (5000)",
-    "Description": "Sobe o queueLength de todos os pools para 5000 (padrão: 1000), então picos de acesso ficam na fila em vez de receber 503, e libera as requisições concorrentes do ASP.NET (MaxConcurrentRequestsPerCPU = 5000). Fila maior significa espera maior quando o aplicativo é o gargalo - não substitui mais CPU. Os valores anteriores dos pools são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta e remove a chave do ASP.NET.",
+    "Description": "Sobe o queueLength de todos os pools para 5000 (padrão: 1000), então picos de acesso ficam na fila em vez de receber 503, e libera as requisições concorrentes do ASP.NET (MaxConcurrentRequestsPerCPU = 5000) nas duas chaves, a de 64 bits e a de 32 bits (Wow6432Node) - pool em modo 32 bits lê a segunda. Fila maior significa espera maior quando o aplicativo é o gargalo - não substitui mais CPU. Os valores anteriores dos pools são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta e remove as duas chaves do ASP.NET.",
     "category": "IIS",
     "panel": "2",
     "tab": "Servidor",
     "platform": "server",
     "role": "iis",
     "registry": [
-      { "Path": "HKLM:\\SOFTWARE\\Microsoft\\ASP.NET\\4.0.30319.0", "Name": "MaxConcurrentRequestsPerCPU", "Value": "5000", "Type": "DWord", "OriginalValue": "<RemoveEntry>" }
+      { "Path": "HKLM:\\SOFTWARE\\Microsoft\\ASP.NET\\4.0.30319.0", "Name": "MaxConcurrentRequestsPerCPU", "Value": "5000", "Type": "DWord", "OriginalValue": "<RemoveEntry>" },
+      { "Path": "HKLM:\\SOFTWARE\\Wow6432Node\\Microsoft\\ASP.NET\\4.0.30319.0", "Name": "MaxConcurrentRequestsPerCPU", "Value": "5000", "Type": "DWord", "OriginalValue": "<RemoveEntry>" }
     ],
     "InvokeScript": [
       "Invoke-WinForgeIisTweak -Name Concurrency | Out-Null"

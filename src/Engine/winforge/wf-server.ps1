@@ -72,6 +72,15 @@ function Update-WinForgeTabVisibility {
 #   server:<seção>:<atributo>                      -> Get/Set-WebConfigurationProperty no APPHOST
 # Tudo é guardado como texto ('00:00:00', 'True', '5000'): o WebAdministration aceita string nessas
 # propriedades, então restaurar é reescrever o mesmo texto, sem adivinhar tipo.
+#
+# Duas regras valem para TODA conversa com o provedor IIS:\ daqui para baixo.
+#
+# 1. -LiteralPath, nunca -Path. Nome de pool ou site com '[' ou ']' (o IIS aceita) é um curinga para
+#    -Path: o caminho não casa com nada, o cmdlet não devolve valor NEM lança - a leitura viraria ''
+#    e a escrita, um nada silencioso que ainda contaria como alteração.
+# 2. Só entra no backup (e na escrita) a chave cujo valor atual DIFERE do alvo. Aplicar duas vezes
+#    seguidas com backup dos dois lados gravaria um segundo arquivo já com os valores ajustados, e
+#    o Desfazer - que pega o mais novo - restauraria justamente o que se queria desfazer.
 # ---------------------------------------------------------------------------
 
 function Test-WinForgeIisAvailable {
@@ -81,7 +90,7 @@ function Test-WinForgeIisAvailable {
     #>
     try {
         Import-Module WebAdministration -ErrorAction Stop
-        return [bool](Test-Path 'IIS:\')
+        return [bool](Test-Path -LiteralPath 'IIS:\')
     } catch {
         return $false
     }
@@ -102,6 +111,10 @@ function New-WinForgeIisSnapshot {
     <#
     .SYNOPSIS
         Grava os valores anteriores de um item de IIS num JSON com data e hora no nome.
+    .DESCRIPTION
+        O nome carrega os milissegundos ('-fff'): com precisão de segundo, dois backups do mesmo item
+        no mesmo segundo cairiam no MESMO arquivo e o primeiro - o que tem os valores originais -
+        seria sobrescrito. Milissegundo mantém a ordenação por nome (o campo é de largura fixa).
     .OUTPUTS
         Caminho do arquivo gravado.
     #>
@@ -112,8 +125,8 @@ function New-WinForgeIisSnapshot {
     )
 
     $dir = Get-WinForgeIisSnapshotRoot $Root
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $path = Join-Path $dir ("{0}-{1}.json" -f $Name, (Get-Date).ToString('yyyyMMdd-HHmmss'))
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $path = Join-Path $dir ("{0}-{1}.json" -f $Name, (Get-Date).ToString('yyyyMMdd-HHmmss-fff'))
     @{ Name = $Name; Date = (Get-Date).ToString('s'); Values = $Values } | ConvertTo-Json -Depth 4 | Set-Content -Path $path -Encoding UTF8
     Write-WinForgeLog -Component "IIS" -Message "Valores anteriores de $Name guardados em $path ($($Values.Count) item(ns))."
     return $path
@@ -124,7 +137,7 @@ function Get-WinForgeIisSnapshot {
     .SYNOPSIS
         Devolve o backup mais recente de um item de IIS, ou $null se não houver nenhum.
     .DESCRIPTION
-        O nome do arquivo é '<Item>-<yyyyMMdd-HHmmss>.json': ordenar por nome em ordem decrescente
+        O nome do arquivo é '<Item>-<yyyyMMdd-HHmmss-fff>.json': ordenar por nome em ordem decrescente
         coloca o mais novo primeiro sem depender da data do sistema de arquivos (que uma cópia de
         pasta reescreve). Os valores voltam como hashtable, e não como o PSCustomObject do
         ConvertFrom-Json, porque quem restaura precisa iterar chave a chave.
@@ -135,8 +148,8 @@ function Get-WinForgeIisSnapshot {
     )
 
     $dir = Get-WinForgeIisSnapshotRoot $Root
-    if (-not (Test-Path $dir)) { return $null }
-    $file = Get-ChildItem -Path $dir -Filter "$Name-*.json" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+    if (-not (Test-Path -LiteralPath $dir)) { return $null }
+    $file = Get-ChildItem -LiteralPath $dir -Filter "$Name-*.json" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
     if (-not $file) { return $null }
     $o = Get-Content -Path $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     $values = @{}
@@ -177,14 +190,24 @@ function ConvertTo-WinForgeIisString {
         Converte o valor devolvido pelo WebAdministration em texto que o próprio WebAdministration
         aceita de volta ('00:00:00', 'True', '5000').
     .DESCRIPTION
-        Algumas propriedades voltam cruas (bool, int), outras dentro de um objeto de configuração
-        com .Value. TimeSpan é formatado à mão porque o ToString() padrão vira '1.00:00:00' quando
-        passa de um dia, formato que o IIS não aceita de volta.
+        Algumas propriedades voltam cruas (bool, número, TimeSpan), outras dentro de um objeto de
+        configuração com .Value. O desembrulho é por EXCLUSÃO: qualquer coisa que não seja string nem
+        tipo por valor é candidata, então um ConfigurationAttribute cai nele sem que a lista de tipos
+        crus precise ser mantida à mão (a versão anterior listava int/long e deixava uint32 escapar
+        para o desembrulho). Hashtable e dicionário entram pela chave 'Value', que não aparece em
+        PSObject.Properties - sem esse ramo, @{ Value = ... } viraria o texto 'System.Collections.
+        Hashtable' e o backup guardaria isso.
+
+        TimeSpan é formatado à mão porque o ToString() padrão vira '1.02:00:00' acima de um dia,
+        formato que o IIS não aceita de volta; aqui viram 26 horas ('26:00:00'). Essa mesma forma
+        normalizada é o que Test-WinForgeIisValueMatch compara.
     #>
     param($Value)
 
     if ($null -eq $Value) { return '' }
-    if ($Value -isnot [string] -and $Value -isnot [bool] -and $Value -isnot [int] -and $Value -isnot [long] -and $Value -isnot [System.TimeSpan]) {
+    if ($Value -is [System.Collections.IDictionary]) {
+        if ($Value.Contains('Value')) { $Value = $Value['Value'] }
+    } elseif ($Value -isnot [string] -and $Value -isnot [System.ValueType]) {
         $inner = $Value.PSObject.Properties['Value']
         if ($inner) { $Value = $inner.Value }
     }
@@ -194,17 +217,37 @@ function ConvertTo-WinForgeIisString {
     return [string]$Value
 }
 
+function Test-WinForgeIisValueMatch {
+    <#
+    .SYNOPSIS
+        Diz se o valor atual de uma chave já é o valor alvo.
+    .DESCRIPTION
+        Os dois lados passam por ConvertTo-WinForgeIisString antes da comparação, então TimeSpan cru
+        e o texto '00:00:00' que veio da config são a mesma coisa. Sem diferenciar maiúsculas:
+        'alwaysrunning' devolvido pelo IIS e 'AlwaysRunning' escrito aqui são o mesmo startMode, e
+        tratá-los como diferentes faria o item se reaplicar para sempre.
+    #>
+    param($Current, $Target)
+
+    $a = (ConvertTo-WinForgeIisString $Current).Trim()
+    $b = (ConvertTo-WinForgeIisString $Target).Trim()
+    return [string]::Equals($a, $b, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-WinForgeIisValue {
     <#
     .SYNOPSIS
         Lê o valor atual de uma chave de IIS, como texto.
+    .DESCRIPTION
+        -LiteralPath: com -Path, um pool chamado 'App [teste]' não casaria com nada e a leitura
+        voltaria vazia sem erro nenhum (nem com -ErrorAction Stop).
     #>
     param([Parameter(Mandatory)][string]$Key)
 
     $k = Split-WinForgeIisKey -Key $Key
     switch ($k.Kind) {
-        'pool'   { return (ConvertTo-WinForgeIisString (Get-ItemProperty -Path ("IIS:\AppPools\" + $k.Target) -Name $k.Property -ErrorAction Stop)) }
-        'site'   { return (ConvertTo-WinForgeIisString (Get-ItemProperty -Path ("IIS:\Sites\" + $k.Target) -Name $k.Property -ErrorAction Stop)) }
+        'pool'   { return (ConvertTo-WinForgeIisString (Get-ItemProperty -LiteralPath ("IIS:\AppPools\" + $k.Target) -Name $k.Property -ErrorAction Stop)) }
+        'site'   { return (ConvertTo-WinForgeIisString (Get-ItemProperty -LiteralPath ("IIS:\Sites\" + $k.Target) -Name $k.Property -ErrorAction Stop)) }
         'server' { return (ConvertTo-WinForgeIisString (Get-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter (Get-WinForgeIisFilter $k.Target) -Name $k.Property -ErrorAction Stop)) }
     }
     throw "Chave de IIS inválida: '$Key' (tipo '$($k.Kind)' desconhecido)."
@@ -214,6 +257,10 @@ function Set-WinForgeIisValue {
     <#
     .SYNOPSIS
         Escreve um valor numa chave de IIS. O valor vai como texto - é assim que ele sai do backup.
+    .DESCRIPTION
+        -LiteralPath pelo mesmo motivo da leitura, com consequência pior: com -Path, um nome com
+        colchetes não casa com nada, a escrita não acontece e nada reclama - a alteração entraria na
+        contagem de 'Changed' sem ter mexido em nada.
     #>
     param(
         [Parameter(Mandatory)][string]$Key,
@@ -222,8 +269,8 @@ function Set-WinForgeIisValue {
 
     $k = Split-WinForgeIisKey -Key $Key
     switch ($k.Kind) {
-        'pool'   { Set-ItemProperty -Path ("IIS:\AppPools\" + $k.Target) -Name $k.Property -Value $Value -ErrorAction Stop; return }
-        'site'   { Set-ItemProperty -Path ("IIS:\Sites\" + $k.Target) -Name $k.Property -Value $Value -ErrorAction Stop; return }
+        'pool'   { Set-ItemProperty -LiteralPath ("IIS:\AppPools\" + $k.Target) -Name $k.Property -Value $Value -ErrorAction Stop; return }
+        'site'   { Set-ItemProperty -LiteralPath ("IIS:\Sites\" + $k.Target) -Name $k.Property -Value $Value -ErrorAction Stop; return }
         'server' { Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter (Get-WinForgeIisFilter $k.Target) -Name $k.Property -Value $Value -ErrorAction Stop; return }
     }
     throw "Chave de IIS inválida: '$Key' (tipo '$($k.Kind)' desconhecido)."
@@ -287,17 +334,66 @@ function Get-WinForgeIisPrivateMemoryLimitKb {
         Limite de memória privada por pool, em KB: 60% da RAM dividido pelos pools, preso entre 1 GB
         e 8 GB. Sem essa faixa, um servidor com 4 GB e 10 pools recicla o tempo todo e um com 512 GB
         nunca recicla.
+    .PARAMETER TotalKb
+        RAM total em KB. Existe para o -SelfTest exercitar as duas pontas da faixa sem depender da
+        memória da máquina onde o teste roda; em uso normal fica de fora e a RAM vem do CIM.
     #>
-    param([int]$PoolCount = 1)
+    param(
+        [int]$PoolCount = 1,
+        [int64]$TotalKb = 0
+    )
 
-    $totalKb = 0
-    try { $totalKb = [int64](((Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory) / 1024) } catch { $totalKb = 0 }
+    $totalKb = $TotalKb
+    if ($totalKb -le 0) {
+        try { $totalKb = [int64](((Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory) / 1024) } catch { $totalKb = 0 }
+    }
     if ($PoolCount -lt 1) { $PoolCount = 1 }
     $limitKb = 1048576
     if ($totalKb -gt 0) { $limitKb = [int64][math]::Floor($totalKb * 0.6 / $PoolCount) }
     if ($limitKb -lt 1048576) { $limitKb = 1048576 }
     if ($limitKb -gt 8388608) { $limitKb = 8388608 }
     return [int64]$limitKb
+}
+
+function Get-WinForgeIisChangeSet {
+    <#
+    .SYNOPSIS
+        Decide, chave por chave, o que entra no backup e na escrita.
+    .DESCRIPTION
+        Recebe os alvos do plano e os valores ATUAIS já lidos (chave ausente = a leitura falhou) e
+        devolve as quatro listas. Fica separada de Invoke-WinForgeIisTweak porque é aqui que moram as
+        duas decisões que tornam o item reversível, e nenhuma delas precisa de IIS para ser testada:
+
+        - Valor vazio ou nulo conta como NÃO LIDO. Guardar '' no backup faria o Desfazer escrever
+          vazio na propriedade, e escrever vazio não é o mesmo que devolver o valor de antes.
+        - Chave que já está no alvo fica fora do backup E da escrita. Sem isso, aplicar duas vezes
+          gravaria um segundo backup com os valores já ajustados e o Desfazer - que pega o mais
+          novo - restauraria exatamente o que se queria desfazer.
+
+        Os valores do backup saem normalizados por ConvertTo-WinForgeIisString: é texto que vai para
+        o JSON e volta de lá para o Set-WinForgeIisValue.
+    .OUTPUTS
+        Hashtable com Previous (chave -> texto anterior, o que vai para o backup), Pending (chaves a
+        escrever, na ordem do plano), Unreadable e Already (listas de chaves).
+    #>
+    param(
+        [Parameter(Mandatory)]$Targets,
+        [Parameter(Mandatory)][hashtable]$Current
+    )
+
+    $previous = @{}
+    $pending = @()
+    $unreadable = @()
+    $already = @()
+    foreach ($key in @($Targets.Keys)) {
+        if (-not $Current.ContainsKey($key)) { $unreadable += $key; continue }
+        $text = ConvertTo-WinForgeIisString $Current[$key]
+        if ([string]::IsNullOrWhiteSpace($text)) { $unreadable += $key; continue }
+        if (Test-WinForgeIisValueMatch -Current $text -Target $Targets[$key]) { $already += $key; continue }
+        $previous[$key] = $text
+        $pending += $key
+    }
+    return @{ Previous = $previous; Pending = $pending; Unreadable = $unreadable; Already = $already }
 }
 
 function Get-WinForgeIisTweakPlan {
@@ -316,11 +412,11 @@ function Get-WinForgeIisTweakPlan {
     $sites = @()
 
     if ($Name -in @('AlwaysRunning', 'NoIdleTimeout', 'MemoryRecycling', 'Concurrency')) {
-        $pools = @(Get-ChildItem -Path 'IIS:\AppPools' -ErrorAction Stop | ForEach-Object { $_.Name })
+        $pools = @(Get-ChildItem -LiteralPath 'IIS:\AppPools' -ErrorAction Stop | ForEach-Object { $_.Name })
         if (-not $pools.Count) { $skipped += "IIS: nenhum pool de aplicativos encontrado." }
     }
     if ($Name -eq 'Preload') {
-        $sites = @(Get-ChildItem -Path 'IIS:\Sites' -ErrorAction Stop | ForEach-Object { $_.Name })
+        $sites = @(Get-ChildItem -LiteralPath 'IIS:\Sites' -ErrorAction Stop | ForEach-Object { $_.Name })
         if (-not $sites.Count) { $skipped += "IIS: nenhum site encontrado." }
     }
 
@@ -379,6 +475,11 @@ function Invoke-WinForgeIisTweak {
         Desfazer não tem "valor padrão" embutido: ele só reescreve o que o backup guardou. Sem
         backup (item nunca aplicado), não faz nada - é melhor que chutar o padrão da Microsoft por
         cima do que o administrador configurou.
+
+        Aplicar é IDEMPOTENTE: chave que já está no alvo fica fora do backup e da escrita, e um item
+        inteiro já aplicado não grava arquivo nenhum. É isso que mantém o Desfazer honesto - o
+        Desfazer pega o backup mais novo, então um segundo backup gravado com os valores já
+        ajustados restauraria exatamente o que se queria desfazer.
     .OUTPUTS
         [pscustomobject] Name, Changed (quantos valores mudaram), Skipped (motivo, se algo ficou de
         fora), Snapshot (caminho do backup usado ou gravado).
@@ -424,27 +525,43 @@ function Invoke-WinForgeIisTweak {
             return $result
         }
 
-        # Ler ANTES de escrever qualquer coisa: uma chave que nem existe (propriedade removida numa
-        # versão futura do IIS) fica de fora do backup e da escrita, em vez de virar um Desfazer
-        # que restaura vazio.
-        $previous = @{}
-        $unreadable = @()
+        # Ler tudo ANTES de escrever qualquer coisa. Chave que a leitura não deu conta nem entra no
+        # hashtable: para Get-WinForgeIisChangeSet, "ausente" é o mesmo que "não lida".
+        $current = @{}
         foreach ($key in $keys) {
-            try { $previous[$key] = Get-WinForgeIisValue -Key $key }
+            try { $current[$key] = Get-WinForgeIisValue -Key $key }
             catch {
-                $unreadable += $key
                 Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Não foi possível ler '$key': $($_.Exception.Message)"
             }
         }
-        if ($previous.Count -eq 0) {
-            $result.Skipped = ("IIS: nenhum valor de '$Name' pôde ser lido; nada foi alterado. " + $result.Skipped).Trim()
+        $set = Get-WinForgeIisChangeSet -Targets $plan.Targets -Current $current
+        $previous = $set.Previous
+        $pending = @($set.Pending)
+        $unreadable = @($set.Unreadable)
+        $already = @($set.Already).Count
+        # A leitura que falhou já foi registrada com a mensagem do erro; a que voltou vazia (chave
+        # presente no hashtable, valor sem conteúdo) precisa da linha dela.
+        foreach ($key in $unreadable) {
+            if ($current.ContainsKey($key)) {
+                Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Valor de '$key' voltou vazio: a propriedade fica fora do backup e não será alterada."
+            }
+        }
+        if ($pending.Count -eq 0) {
+            if ($already -gt 0) {
+                $result.Skipped = ("IIS: '$Name' já aplicado - $already valor(es) já estavam no alvo; nada foi alterado e nenhum backup foi gravado. " + $result.Skipped).Trim()
+            } else {
+                $result.Skipped = ("IIS: nenhum valor de '$Name' pôde ser lido; nada foi alterado. " + $result.Skipped).Trim()
+            }
+            if ($unreadable.Count) {
+                $result.Skipped = ($result.Skipped + " IIS: $($unreadable.Count) propriedade(s) não lida(s): $($unreadable -join ', ').").Trim()
+            }
+            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "$Name sem alterações: $($result.Skipped)"
             Write-Host $result.Skipped -ForegroundColor Yellow
             return $result
         }
         $result.Snapshot = New-WinForgeIisSnapshot -Name $Name -Values $previous -Root $Root
 
-        foreach ($key in $keys) {
-            if (-not $previous.ContainsKey($key)) { continue }
+        foreach ($key in $pending) {
             try {
                 Set-WinForgeIisValue -Key $key -Value $plan.Targets[$key]
                 $result.Changed++
@@ -452,6 +569,9 @@ function Invoke-WinForgeIisTweak {
                 Write-WinForgeLog -Component "IIS" -Level "ERROR" -Message "Falha ao ajustar '$key': $($_.Exception.Message)"
                 Write-Host "IIS: falha ao ajustar '$key' -> $($_.Exception.Message)" -ForegroundColor Red
             }
+        }
+        if ($already -gt 0) {
+            $result.Skipped = ($result.Skipped + " IIS: $already valor(es) já estavam no alvo e ficaram fora do backup.").Trim()
         }
         if ($unreadable.Count) {
             $result.Skipped = ($result.Skipped + " IIS: $($unreadable.Count) propriedade(s) não lida(s): $($unreadable -join ', ').").Trim()
