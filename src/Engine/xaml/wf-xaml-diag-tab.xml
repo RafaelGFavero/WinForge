@@ -78,6 +78,7 @@
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <Button Content="{Binding ActionLabel}" Tag="{Binding}" Visibility="{Binding ActionVisible}" ToolTip="{Binding ActionTip}"
+                                                        IsEnabled="{Binding ActionEnabled}" ToolTipService.ShowOnDisabled="True"
                                                         Margin="4,2" Padding="10,2" MinWidth="150" HorizontalAlignment="Left"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -116,7 +117,8 @@
                                     <DataGridTemplateColumn Header="Instalar" Width="Auto">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <Button Content="Instalar" Tag="{Binding}" ToolTip="Baixa e instala este driver pelo Windows Update."
+                                                <Button Content="Instalar" Tag="{Binding}" ToolTip="{Binding ActionTip}"
+                                                        IsEnabled="{Binding ActionEnabled}" ToolTipService.ShowOnDisabled="True"
                                                         Margin="4,2" Padding="10,2" MinWidth="100" HorizontalAlignment="Left"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>

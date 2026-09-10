@@ -6,6 +6,11 @@
 # O modelo de seções é montado uma vez (Get-WinForgeDiagSections) e serve tanto aos cartões da
 # janela quanto ao relatório HTML - sem isso os dois sairiam contando histórias diferentes.
 
+# Dica dos dois botões que exigem elevação (baixar driver NVIDIA, instalar pelo Windows Update).
+# Uma constante e não duas cópias: as duas tabelas dizem a mesma coisa, e é isso que o -SelfTest
+# cobra - o dia em que uma das duas mudar sozinha, a outra passa a mentir.
+$WinForgeElevationTip = 'Precisa de elevação (execute o WinForge como administrador)'
+
 function Format-WinForgeDiagValue {
     <#
     .SYNOPSIS
@@ -541,12 +546,20 @@ function Get-WinForgeDiagDriverRows {
         guardado no clique apontaria para a linha da rodada anterior. 'ActionVisible' é texto de
         Visibility ('Visible'/'Collapsed') e não booleano: é o que o XAML liga direto na propriedade,
         sem precisar de conversor.
+
+        'ActionEnabled' desabilita o botão de download quando o WinForge não está elevado. A pasta
+        %ProgramData%\WinForge\downloads é de SYSTEM/Administradores e Confirm-WinForgeDownloadRoot
+        recusa criá-la sem elevação - antes disso o botão aceitava o clique, confirmava com o
+        usuário e só então dizia que não dava. Abrir a página do fabricante continua habilitado:
+        isso é o navegador do usuário, não precisa de elevação nenhuma.
     .OUTPUTS
         ObservableCollection de PSCustomObject (o DataGrid liga direto nela).
     #>
     param($Profile)
 
     if ($null -eq $Profile) { $Profile = $sync.Profile }
+    # Uma pergunta só para a tabela inteira: a elevação não muda entre uma linha e outra.
+    $elevado = [bool](Test-WinForgeRepairElevated)
     $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
     foreach ($d in @($Profile.Drivers)) {
         if ($null -eq $d) { continue }
@@ -571,11 +584,12 @@ function Get-WinForgeDiagDriverRows {
             ActionLabel   = [string]$acao.Label
             ActionUrl     = $acao.Url
             ActionVisible = $(if ([string]$acao.Kind -eq 'none') { 'Collapsed' } else { 'Visible' })
-            ActionTip     = $(switch ([string]$acao.Kind) {
+            ActionEnabled = $([bool]($elevado -or [string]$acao.Kind -ne 'nvidia-download'))
+            ActionTip     = $(if (-not $elevado -and [string]$acao.Kind -eq 'nvidia-download') { $WinForgeElevationTip } else { switch ([string]$acao.Kind) {
                 'nvidia-download' { "Baixa o instalador oficial do driver $($acao.Label -replace '^Baixar ', '') do site da NVIDIA, confere a assinatura e abre o instalador." }
                 'vendor-page'     { "Abre a página de download do fabricante no navegador." }
                 default           { $null }
-            })
+            } })
         })
     }
     return ,$rows
@@ -880,6 +894,9 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
     #>
     if ($null -eq $sync -or $null -eq $sync.WPFDiagWU) { return }
 
+    # Instalar pelo Windows Update é o serviço COM baixando e instalando driver: sem elevação ele
+    # recusa. Mesma regra do botão de download da NVIDIA - o botão nasce desabilitado dizendo isso.
+    $elevado = [bool](Test-WinForgeRepairElevated)
     $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
     foreach ($u in @($sync.DiagWUResults)) {
         if ($null -eq $u) { continue }
@@ -892,6 +909,8 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
             # O id, e não o título, é o que identifica a atualização na hora de instalar: dois
             # drivers do mesmo dispositivo saem com títulos parecidos e ids diferentes.
             UpdateId = [string]$u.UpdateId
+            ActionEnabled = $elevado
+            ActionTip     = $(if ($elevado) { 'Baixa e instala este driver pelo Windows Update.' } else { $WinForgeElevationTip })
         })
     }
 

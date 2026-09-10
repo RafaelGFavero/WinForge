@@ -541,13 +541,23 @@ function Install-WinForgeNvidiaDriver {
         4. A pasta de destino é criada e conferida (Confirm-WinForgeDownloadRoot) - sem elevação,
            ela recusa e o download não começa.
         5. O arquivo baixa com nome '.parcial' e só depois vira o nome final: um download
-           interrompido não deixa para trás algo com cara de instalador pronto.
-        6. Gravado, ele é ENDURECIDO (dono Administradores, DACL SYSTEM+Administradores) e reconferido
-           (Test-WinForgeSnapshotFileTrusted) antes da assinatura. É isso que fecha a janela entre a
-           conferência e o Start-Process: depois desse ponto, um processo de integridade média da
-           mesma conta não consegue mais trocar o arquivo.
-        7. Só então a assinatura é conferida. Reprovou - ou qualquer passo acima falhou - o arquivo
-           é APAGADO, e a recusa vai para o log e para a barra de status.
+           interrompido não deixa para trás algo com cara de instalador pronto. O download não
+           segue redirecionamento (-MaximumRedirection 0): os links da NVIDIA são diretos, e um
+           redirecionamento levaria o arquivo para um host que a conferência de endereço já julgou.
+        6. Renomeado, o arquivo é FIXADO: um handle aberto com FileShare.Read fica preso nele até o
+           instalador subir. Renomear ou apagar exige DELETE, e DELETE só é concedido se o handle
+           aberto tiver compartilhado FILE_SHARE_DELETE - que este não compartilha. É o que fecha a
+           janela entre a conferência e o Start-Process. WRITE_DAC e WRITE_OWNER não passam pelo
+           modo de compartilhamento (ele só governa leitura, escrita de dados e exclusão), e leitura
+           está compartilhada: por isso o endurecimento e o Get-AuthenticodeSignature continuam
+           funcionando com o pino aberto.
+        7. Com o pino na mão: ENDURECIDO (dono Administradores, DACL SYSTEM+Administradores),
+           reconferido (Test-WinForgeSnapshotFileTrusted) e só então a assinatura. Reprovou - ou
+           qualquer passo acima falhou - o pino é solto, o arquivo é APAGADO, e a recusa vai para o
+           log e para a barra de status.
+        8. Imediatamente antes do Start-Process a cadeia de pastas é reconferida
+           (Test-WinForgeSnapshotRootPath): o pino prende o ARQUIVO, mas o Start-Process resolve o
+           CAMINHO de novo, e uma junção plantada no meio do caminho apontaria para outro arquivo.
 
         Quem instala é o usuário: o instalador da NVIDIA é interativo (licença, tipo de instalação,
         reinício), e fingir que o WinForge conduz isso seria mentira. O WinForge abre a janela dele.
@@ -597,42 +607,73 @@ function Install-WinForgeNvidiaDriver {
         Write-WinForgeLog -Component "Diag" -Message "Baixando o driver NVIDIA $Version de $Url"
         # -UseBasicParsing: sem ele o Invoke-WebRequest tenta o motor do Internet Explorer, que não
         # existe em instalação limpa. 600 s porque o instalador passa de 700 MB.
-        Invoke-WebRequest -Uri $Url -OutFile $parcial -UseBasicParsing -TimeoutSec 600 -ErrorAction Stop
+        # -MaximumRedirection 0: os links do catálogo da NVIDIA são diretos. Seguir um
+        # redirecionamento é aceitar um host que Test-WinForgeNvidiaDownloadUrl nunca viu.
+        Invoke-WebRequest -Uri $Url -OutFile $parcial -UseBasicParsing -TimeoutSec 600 -MaximumRedirection 0 -ErrorAction Stop
         Move-Item -LiteralPath $parcial -Destination $destino -Force -ErrorAction Stop
     } catch {
         Remove-Item -LiteralPath $parcial -Force -ErrorAction SilentlyContinue
-        $msg = "Download do driver NVIDIA $Version falhou: $($_.Exception.Message)"
+        $causa = [string]$_.Exception.Message
+        $codigo = $null
+        try { $codigo = [int]$_.Exception.Response.StatusCode } catch { $codigo = $null }
+        # 'redirec' pega tanto "redirection" quanto "redirecionamento": a mensagem do
+        # Invoke-WebRequest vem no idioma do Windows.
+        if ($causa -match 'redirec' -or ($codigo -ge 300 -and $codigo -lt 400)) {
+            $causa = "o servidor respondeu com um redirecionamento e os endereços da NVIDIA são diretos ($causa)"
+        }
+        $msg = "Download do driver NVIDIA $Version falhou: $causa"
         Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
         return @{ Path = $null; Verified = $false; Started = $false; Text = $msg }
     }
 
-    $recusa = $null
-    $prot = Protect-WinForgeSnapshotFile -Path $destino
-    if (-not $prot.Hardened) { $recusa = "o arquivo baixado não pôde ser protegido ($($prot.Reason))" }
-    if (-not $recusa) {
-        $conf = Test-WinForgeSnapshotFileTrusted -Path $destino
-        if (-not $conf.Trusted) { $recusa = "o arquivo baixado não passou na conferência de dono e permissões ($($conf.Reason))" }
-    }
-    if (-not $recusa -and -not (Test-WinForgeNvidiaSigner -Path $destino)) {
-        $recusa = "o arquivo baixado não está assinado pela NVIDIA Corporation"
-    }
-    if ($recusa) {
-        Remove-Item -LiteralPath $destino -Force -ErrorAction SilentlyContinue
-        $msg = "Driver NVIDIA $Version recusado: $recusa. O arquivo foi apagado."
-        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
-        return @{ Path = $null; Verified = $false; Started = $false; Text = $msg }
-    }
-
+    # O PINO. Daqui até o instalador subir o arquivo não pode ser renomeado nem apagado por ninguém
+    # - ver a nota 6 da descrição. Ele é solto no 'finally', depois de o Start-Process voltar.
+    $pino = $null
     try {
-        Start-Process -FilePath $destino -ErrorAction Stop
-    } catch {
-        $msg = "Driver NVIDIA $Version baixado e conferido em '$destino', mas o instalador não abriu: $($_.Exception.Message)"
-        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message $msg
-        return @{ Path = $destino; Verified = $true; Started = $false; Text = $msg }
+        $recusa = $null
+        try {
+            $pino = [System.IO.File]::Open($destino, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        } catch {
+            $recusa = "o arquivo baixado não pôde ser fixado para conferência ($($_.Exception.Message))"
+        }
+        if (-not $recusa) {
+            $prot = Protect-WinForgeSnapshotFile -Path $destino
+            if (-not $prot.Hardened) { $recusa = "o arquivo baixado não pôde ser protegido ($($prot.Reason))" }
+        }
+        if (-not $recusa) {
+            $conf = Test-WinForgeSnapshotFileTrusted -Path $destino
+            if (-not $conf.Trusted) { $recusa = "o arquivo baixado não passou na conferência de dono e permissões ($($conf.Reason))" }
+        }
+        if (-not $recusa -and -not (Test-WinForgeNvidiaSigner -Path $destino)) {
+            $recusa = "o arquivo baixado não está assinado pela NVIDIA Corporation"
+        }
+        # A última coisa antes de abrir: o pino prende o arquivo, não o caminho.
+        if (-not $recusa) {
+            $cadeia = Test-WinForgeSnapshotRootPath -Root (Split-Path -Parent $destino)
+            if (-not $cadeia.Trusted) { $recusa = "a pasta do download mudou entre a conferência e a abertura ($($cadeia.Reason))" }
+        }
+        if ($recusa) {
+            # O pino sai ANTES do Remove-Item: apagar exige DELETE, e é justamente isso que ele nega.
+            if ($pino) { $pino.Dispose(); $pino = $null }
+            Remove-Item -LiteralPath $destino -Force -ErrorAction SilentlyContinue
+            $msg = "Driver NVIDIA $Version recusado: $recusa. O arquivo foi apagado."
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
+            return @{ Path = $null; Verified = $false; Started = $false; Text = $msg }
+        }
+
+        try {
+            Start-Process -FilePath $destino -ErrorAction Stop
+        } catch {
+            $msg = "Driver NVIDIA $Version baixado e conferido em '$destino', mas o instalador não abriu: $($_.Exception.Message)"
+            Write-WinForgeLog -Component "Diag" -Level "WARN" -Message $msg
+            return @{ Path = $destino; Verified = $true; Started = $false; Text = $msg }
+        }
+        $msg = "Driver NVIDIA $Version baixado, assinatura conferida, instalador aberto: $destino"
+        Write-WinForgeLog -Component "Diag" -Message $msg
+        return @{ Path = $destino; Verified = $true; Started = $true; Text = $msg }
+    } finally {
+        if ($pino) { $pino.Dispose() }
     }
-    $msg = "Driver NVIDIA $Version baixado, assinatura conferida, instalador aberto: $destino"
-    Write-WinForgeLog -Component "Diag" -Message $msg
-    return @{ Path = $destino; Verified = $true; Started = $true; Text = $msg }
 }
 
 function Install-WinForgeWindowsUpdateDriver {

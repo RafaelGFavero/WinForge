@@ -2433,6 +2433,150 @@ if ($SelfTest) {
         Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- cadeia inteira da pasta protegida
+    # Conferir só a ÚLTIMA pasta deixava um caminho aberto: '%ProgramData%\WinForge' criado com a ACL
+    # herdada de %ProgramData% dá FILE_DELETE_CHILD a um processo de integridade média da mesma conta.
+    # Com ele, durante os minutos do download, dá para renomear 'downloads', plantar uma junção no
+    # lugar e trocar o instalador entre a conferência da assinatura e o Start-Process - sem que a
+    # última pasta jamais apareça como ponto de reanálise nem mude de dono.
+    #
+    # Então: a cadeia inteira nasce protegida (New-WinForgeSnapshotRoot) e a cadeia inteira é
+    # conferida (Test-WinForgeSnapshotRootTrusted), de %ProgramData%/%TEMP% (exclusive) até a última
+    # pasta (inclusive).
+    $wfCadBase = Join-Path $env:TEMP 'WinForge-SelfTest\seg'
+    try {
+        Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
+        $wfCadMeio = Join-Path $wfCadBase 'WinForge'
+        $wfCadFolha = Join-Path $wfCadMeio 'downloads'
+        New-WinForgeSnapshotRoot -Root $wfCadFolha | Out-Null
+        if (-not (Test-Path -LiteralPath $wfCadFolha)) {
+            Write-Host "  [ERRO] cadeia protegida: '$wfCadFolha' não foi criada" -ForegroundColor Red; $wbErrors++
+        } else {
+            # 1. Nenhuma pasta da cadeia herda a ACL do pai - nem as do meio, que antes nasciam de um
+            #    New-Item -Force com a herança de %ProgramData% inteira.
+            foreach ($wfCadDir in @($wfCadBase, $wfCadMeio, $wfCadFolha)) {
+                if (-not (Get-Acl -LiteralPath $wfCadDir).AreAccessRulesProtected) {
+                    Write-Host "  [ERRO] cadeia protegida: '$wfCadDir' nasceu herdando a ACL do pai" -ForegroundColor Red; $wbErrors++
+                }
+            }
+            # 2. Com as regras da pasta de teste (-ExplicitRoot, a identidade atual pode ser dona) a
+            #    cadeia recém-criada PASSA: a conferência dos ancestrais não pode estourar para fora
+            #    de %TEMP% e reprovar C:\ (que dá 'criar pasta/acrescentar dados' ao grupo Usuários).
+            $wfCadLimpa = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha -ExplicitRoot
+            if (-not $wfCadLimpa.Trusted) { Write-Host "  [ERRO] cadeia protegida: a cadeia de teste recém-criada deveria passar com -ExplicitRoot ('$($wfCadLimpa.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            # 3. Com as regras da pasta PADRÃO a mesma cadeia é recusada: sem elevação nada aqui
+            #    pertence a SYSTEM nem ao grupo Administradores.
+            $wfCadPadrao = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha
+            if ($wfCadPadrao.Trusted) { Write-Host "  [ERRO] cadeia protegida: a cadeia de teste passou com as regras da pasta padrão" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfCadPadrao.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] cadeia protegida: a recusa com as regras da pasta padrão não fala do dono ('$($wfCadPadrao.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            # 4. A PROVA de que os ancestrais são conferidos: só a pasta do MEIO ganha escrita para
+            #    'Todos'. A última pasta continua limpa (a ACL dela é protegida, a ACE nova não
+            #    desce até lá), então uma conferência que olhasse só a folha diria que está tudo bem.
+            # Só a seção DACL, por DirectoryInfo: Get-Acl/Set-Acl carregam a seção de AUDITORIA
+            # junto, e gravá-la exige SeSecurityPrivilege - o mesmo motivo de
+            # Repair-WinForgeSnapshotRootOwnerRight fazer assim.
+            $wfCadSecao = [System.Security.AccessControl.AccessControlSections]::Access
+            $wfCadPastaMeio = New-Object System.IO.DirectoryInfo $wfCadMeio
+            $wfCadAclMeio = $wfCadPastaMeio.GetAccessControl($wfCadSecao)
+            $wfCadAclMeio.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            $wfCadPastaMeio.SetAccessControl($wfCadAclMeio)
+            $wfCadFolhaSo = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha -ExplicitRoot
+            if ((Get-Acl -LiteralPath $wfCadFolha).Access | Where-Object { [string]$_.IdentityReference -match 'Todos|Everyone' }) {
+                Write-Host "  [ERRO] cadeia protegida: a ACE de 'Todos' desceu até a última pasta - o teste não prova mais nada sobre os ancestrais" -ForegroundColor Red; $wbErrors++
+            } elseif ($wfCadFolhaSo.Trusted) {
+                Write-Host "  [ERRO] cadeia protegida: escrita para 'Todos' na pasta do MEIO passou batida - os ancestrais não estão sendo conferidos" -ForegroundColor Red; $wbErrors++
+            } elseif ([string]$wfCadFolhaSo.Reason -notlike "*$wfCadMeio*") {
+                Write-Host "  [ERRO] cadeia protegida: a recusa não nomeia a pasta do meio ('$($wfCadFolhaSo.Reason)')" -ForegroundColor Red; $wbErrors++
+            }
+            # 5. E a pasta de downloads recusa pelo mesmo motivo, com um texto para a barra de status.
+            $wfCadConf = Confirm-WinForgeDownloadRoot -Root $wfCadFolha
+            if ($wfCadConf.Ok) { Write-Host "  [ERRO] cadeia protegida: Confirm-WinForgeDownloadRoot aceitou uma cadeia com ancestral aberto" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Cadeia da pasta protegida: 3 pasta(s) criadas sem herança; ancestral com escrita para 'Todos' recusado e nomeado"
+        }
+    } catch {
+        Write-Host "  [ERRO] cadeia protegida: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- pino do arquivo baixado
+    # Entre a conferência da assinatura e o Start-Process havia uma janela: o caminho era conferido,
+    # e depois RESOLVIDO de novo. O conserto é manter um handle aberto no arquivo final, com
+    # FileShare.Read, desde a renomeação até o instalador subir - quem tenta renomear ou apagar o
+    # arquivo nesse intervalo leva violação de compartilhamento.
+    #
+    # Este helper prova o mecanismo num arquivo de teste: com o pino aberto o rename FALHA, e mesmo
+    # assim as três leituras de que o caminho depende continuam funcionando.
+    function Test-WinForgeFilePinned {
+        <#
+        .SYNOPSIS
+            $true se um handle com FileShare.Read impede a renomeação do arquivo.
+        .DESCRIPTION
+            Renomear exige DELETE no arquivo, e DELETE só é concedido a um segundo open se o handle
+            já aberto tiver compartilhado FILE_SHARE_DELETE. FileShare.Read não compartilha, então a
+            renomeação tem de falhar - é essa a garantia em que Install-WinForgeNvidiaDriver se apoia.
+        #>
+        param([Parameter(Mandatory)][string]$Path)
+        $wfPinH = $null
+        $wfPinRenomeou = $false
+        $wfPinOutro = "$Path.trocado"
+        try {
+            $wfPinH = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            try { [System.IO.File]::Move($Path, $wfPinOutro); $wfPinRenomeou = $true } catch { }
+        } finally {
+            if ($wfPinH) { $wfPinH.Dispose() }
+        }
+        if ($wfPinRenomeou) { try { [System.IO.File]::Move($wfPinOutro, $Path) } catch { } }
+        return (-not $wfPinRenomeou)
+    }
+    $wfPinDir = Join-Path $env:TEMP 'WinForge-SelfTest\pino'
+    try {
+        New-Item -ItemType Directory -Path $wfPinDir -Force | Out-Null
+        $wfPinArq = Join-Path $wfPinDir 'instalador.exe'
+        Set-Content -LiteralPath $wfPinArq -Value 'MZ arquivo de teste do pino' -Encoding Ascii
+        if (-not (Test-WinForgeFilePinned -Path $wfPinArq)) {
+            Write-Host "  [ERRO] pino do arquivo: com o handle aberto a renomeação deveria falhar" -ForegroundColor Red; $wbErrors++
+        }
+        # Sem o pino a renomeação passa - senão o teste acima estaria provando o nada.
+        $wfPinSolto = Join-Path $wfPinDir 'solto.exe'
+        Set-Content -LiteralPath $wfPinSolto -Value 'MZ arquivo solto' -Encoding Ascii
+        $wfPinSoltoOk = $false
+        try { [System.IO.File]::Move($wfPinSolto, "$wfPinSolto.trocado"); $wfPinSoltoOk = $true } catch { }
+        if (-not $wfPinSoltoOk) { Write-Host "  [ERRO] pino do arquivo: sem pino a renomeação deveria passar - o teste do pino não prova nada" -ForegroundColor Red; $wbErrors++ }
+        # As três operações que acontecem COM o pino aberto em Install-WinForgeNvidiaDriver.
+        $wfPinH2 = $null
+        try {
+            $wfPinH2 = [System.IO.File]::Open($wfPinArq, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            # 1. Get-AuthenticodeSignature abre o arquivo por conta própria: com FileShare.Read ele lê.
+            try { Get-AuthenticodeSignature -LiteralPath $wfPinArq -ErrorAction Stop | Out-Null }
+            catch { Write-Host "  [ERRO] pino do arquivo: Get-AuthenticodeSignature não leu o arquivo com o pino aberto ($($_.Exception.Message))" -ForegroundColor Red; $wbErrors++ }
+            # 2. Get-Acl (a conferência de dono e permissões).
+            try { Get-Acl -LiteralPath $wfPinArq -ErrorAction Stop | Out-Null }
+            catch { Write-Host "  [ERRO] pino do arquivo: Get-Acl falhou com o pino aberto ($($_.Exception.Message))" -ForegroundColor Red; $wbErrors++ }
+            # 3. A gravação da DACL fechada (Protect-WinForgeSnapshotFile): WRITE_DAC não passa pelo
+            #    modo de compartilhamento, que só governa leitura, escrita de DADOS e exclusão.
+            try {
+                $wfPinDacl = New-Object System.Security.AccessControl.FileSecurity
+                $wfPinDacl.SetAccessRuleProtection($true, $false)
+                $wfPinDacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule ([System.Security.Principal.WindowsIdentity]::GetCurrent().User), 'FullControl', 'Allow'))
+                (New-Object System.IO.FileInfo $wfPinArq).SetAccessControl($wfPinDacl)
+            } catch { Write-Host "  [ERRO] pino do arquivo: a DACL não pôde ser fechada com o pino aberto ($($_.Exception.Message))" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            if ($wfPinH2) { $wfPinH2.Dispose() }
+        }
+        # O download em si não roda em SelfTest, então as duas travas que dependem dele são cobradas
+        # no corpo da função: o pino e a recusa de redirecionamento.
+        # Os padrões são o FORMATO DA CHAMADA, e não o nome solto: o bloco de ajuda da função
+        # explica as três travas com essas mesmas palavras, e procurar o nome acharia o comentário.
+        $wfPinDef = [string](Get-Command Install-WinForgeNvidiaDriver).Definition
+        if ($wfPinDef -notmatch 'Invoke-WebRequest[^\r\n]*-MaximumRedirection 0') { Write-Host "  [ERRO] pino do arquivo: o download não recusa redirecionamento (-MaximumRedirection 0)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPinDef -notmatch '\[System\.IO\.File\]::Open\(\$destino') { Write-Host "  [ERRO] pino do arquivo: Install-WinForgeNvidiaDriver não fixa o arquivo antes de conferir e abrir" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPinDef -notmatch 'Test-WinForgeSnapshotRootPath -Root \(Split-Path -Parent \$destino\)') { Write-Host "  [ERRO] pino do arquivo: a cadeia de pastas não é reconferida antes do Start-Process" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Pino do arquivo: renomeação bloqueada com o handle aberto, assinatura/ACL/DACL ainda acessíveis, redirecionamento recusado"
+    } catch {
+        Write-Host "  [ERRO] pino do arquivo: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wfPinDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     try {
         [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
         [xml]$wbXaml = $inputXML
@@ -2682,6 +2826,10 @@ if ($SelfTest) {
                 @('WPFDiagDrivers', 'Ação',     'ActionLabel', 'ActionVisible'),
                 @('WPFDiagWU',      'Instalar', $null,         $null)
             )
+            # As duas ligações que fazem o botão dizer que precisa de elevação: 'IsEnabled' e a
+            # dica. ToolTipService.ShowOnDisabled é o que falta em quase toda tela do Windows -
+            # sem ele o WPF esconde a dica justamente quando o botão está desabilitado, que é o
+            # único momento em que ela tem algo a explicar.
             foreach ($wfBtnCol in $wfBtnColunas) {
                 $wfBtnGrade = $sync[$wfBtnCol[0]]
                 $wfBtnColuna = @($wfBtnGrade.Columns | Where-Object { $_ -is [System.Windows.Controls.DataGridTemplateColumn] -and [string]$_.Header -eq [string]$wfBtnCol[1] })[0]
@@ -2698,6 +2846,11 @@ if ($SelfTest) {
                     $wfBtnVis = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.UIElement]::VisibilityProperty)
                     if ($null -eq $wfBtnVis -or [string]$wfBtnVis.Path.Path -ne [string]$wfBtnCol[3]) { Write-Host "  [ERRO] coluna de ação: a visibilidade do botão de '$($wfBtnCol[1])' não vem de $($wfBtnCol[3])" -ForegroundColor Red; $wbErrors++ }
                 }
+                $wfBtnHab = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.UIElement]::IsEnabledProperty)
+                if ($null -eq $wfBtnHab -or [string]$wfBtnHab.Path.Path -ne 'ActionEnabled') { Write-Host "  [ERRO] coluna de ação: o botão de '$($wfBtnCol[1])' não liga IsEnabled em ActionEnabled" -ForegroundColor Red; $wbErrors++ }
+                $wfBtnDica = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.FrameworkElement]::ToolTipProperty)
+                if ($null -eq $wfBtnDica -or [string]$wfBtnDica.Path.Path -ne 'ActionTip') { Write-Host "  [ERRO] coluna de ação: a dica do botão de '$($wfBtnCol[1])' não vem de ActionTip" -ForegroundColor Red; $wbErrors++ }
+                if (-not [System.Windows.Controls.ToolTipService]::GetShowOnDisabled($wfBtnConteudo)) { Write-Host "  [ERRO] coluna de ação: a dica do botão de '$($wfBtnCol[1])' não aparece com o botão desabilitado (ToolTipService.ShowOnDisabled)" -ForegroundColor Red; $wbErrors++ }
             }
             # A tabela do Windows Update tem de carregar o id: é ele, e não o título, que identifica
             # a atualização na hora de instalar.
@@ -2746,6 +2899,40 @@ if ($SelfTest) {
             Write-Host "  Colunas de ação: 'Ação' e 'Instalar' com Button ligado à linha; clique roteado pelas duas tabelas e recusado em SelfTest"
         } catch {
             Write-Host "  [ERRO] colunas de ação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # ---------------------------------------------------------------- botões que exigem elevação
+        # Sem elevação a pasta de downloads é recusada (ela é de SYSTEM/Administradores) e o Windows
+        # Update não instala nada. Um botão que só descobre isso DEPOIS do clique é uma promessa
+        # quebrada: ele nasce desabilitado, com a dica dizendo o que falta.
+        try {
+            $wfElevado = [bool](Test-WinForgeRepairElevated)
+            $wfElevDica = 'Precisa de elevação (execute o WinForge como administrador)'
+            $wfElevLinhas = @((Get-WinForgeDiagDriverRows -Profile @{ Drivers = @(
+                [pscustomobject]@{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'atualizar'; Latest = '616.92'; LatestUrl = 'https://us.download.nvidia.com/Windows/616.92/x.exe'; Url = 'https://www.nvidia.com/pt-br/drivers/' },
+                [pscustomobject]@{ Device = 'AMD Radeon'; Vendor = 'amd'; Class = 'DISPLAY'; Status = 'verificar'; Url = 'https://www.amd.com/pt/support/download/drivers.html' }
+            ) }) | ForEach-Object { $_ })
+            $wfElevNv = $wfElevLinhas[0]
+            $wfElevAmd = $wfElevLinhas[1]
+            if ([bool]$wfElevNv.ActionEnabled -ne $wfElevado) { Write-Host "  [ERRO] botão sem elevação: 'Baixar' deveria estar $(if ($wfElevado) { 'habilitado' } else { 'desabilitado' }), veio ActionEnabled '$($wfElevNv.ActionEnabled)'" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wfElevado -and [string]$wfElevNv.ActionTip -ne $wfElevDica) { Write-Host "  [ERRO] botão sem elevação: a dica do 'Baixar' deveria ser '$wfElevDica', veio '$($wfElevNv.ActionTip)'" -ForegroundColor Red; $wbErrors++ }
+            if ($wfElevado -and [string]$wfElevNv.ActionTip -eq $wfElevDica) { Write-Host "  [ERRO] botão sem elevação: com elevação a dica não pode ser a de elevação" -ForegroundColor Red; $wbErrors++ }
+            # Abrir a página do fabricante é o navegador do usuário: não precisa de elevação nenhuma.
+            if (-not $wfElevAmd.ActionEnabled) { Write-Host "  [ERRO] botão sem elevação: 'Página do fabricante' não depende de elevação e não pode nascer desabilitado" -ForegroundColor Red; $wbErrors++ }
+            # E o 'Instalar' do Windows Update segue a mesma regra.
+            $wfElevWuAntes = $sync.DiagWUResults
+            try {
+                $sync.DiagWUResults = @([pscustomobject]@{ Title = 'Driver de teste - 1.2.3.4'; Driver = 'Teste'; Provider = 'WinForge'; Version = '1.2.3.4'; Date = '2026-09-10'; UpdateId = 'id-de-teste' })
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+                $wfElevWu = @($sync.WPFDiagWU.ItemsSource)[0]
+                if ([bool]$wfElevWu.ActionEnabled -ne $wfElevado) { Write-Host "  [ERRO] botão sem elevação: 'Instalar' do Windows Update veio ActionEnabled '$($wfElevWu.ActionEnabled)'" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wfElevado -and [string]$wfElevWu.ActionTip -ne $wfElevDica) { Write-Host "  [ERRO] botão sem elevação: a dica do 'Instalar' deveria ser '$wfElevDica', veio '$($wfElevWu.ActionTip)'" -ForegroundColor Red; $wbErrors++ }
+            } finally {
+                $sync.DiagWUResults = $wfElevWuAntes
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+            }
+            Write-Host "  Botões que exigem elevação: este build roda $(if ($wfElevado) { 'ELEVADO' } else { 'SEM elevação' }) - 'Baixar' e 'Instalar' $(if ($wfElevado) { 'habilitados' } else { 'desabilitados, com a dica de elevação' })"
+        } catch {
+            Write-Host "  [ERRO] botões que exigem elevação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         # Checklist das recomendações + contador na tela. Uma linha por recomendação, e caixa de
         # marcar só nas que a aba de destino aceita marcar: Toggle aplica o tweak no clique, e
