@@ -493,21 +493,31 @@ function Test-WinForgeTrustedAppxPackage {
 
         Três perguntas, e as três precisam de sim:
 
-        1. PublisherId '8wekyb3d8bbwe'. Ele não é texto do manifesto: é o hash do editor, derivado do
-           certificado com que o pacote foi assinado, e é o mesmo em todo pacote da Microsoft Store
-           publicado pela Microsoft. Um pacote sideloaded assinado por outro certificado tem outro
-           hash, por mais que o Name copie o da Microsoft.
-        2. SignatureKind 'Store' ou 'System'. 'Developer', 'Enterprise' e 'None' ficam de fora: são
-           exatamente as origens que um usuário com modo desenvolvedor ligado consegue produzir.
+        1. PublisherId '8wekyb3d8bbwe'. CUIDADO com o que ele prova: é o hash do NOME do editor
+           declarado no manifesto ("CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond,
+           S=Washington, C=US"), e não do certificado que assinou o pacote. Quem copia o nome copia o
+           hash junto - sozinho, este item não separa nada. Ele fica como primeiro filtro barato, e o
+           que de fato tranca a porta é o item 2.
+        2. SignatureKind 'Store' ou 'System'. É AQUI que mora a garantia: o valor sai da assinatura
+           conferida pelo Windows na instalação, não de texto do manifesto. 'Developer', 'Enterprise'
+           e 'None' ficam de fora - são exatamente as origens que um usuário com modo desenvolvedor
+           ligado consegue produzir.
         3. InstallLocation dentro de %ProgramFiles%\WindowsApps. É a pasta que só o TrustedInstaller
            escreve; %LOCALAPPDATA%\...\WindowsApps é OUTRA coisa (aliases de execução, graváveis pelo
-           usuário). A comparação é por prefixo de caminho COMPLETO (GetFullPath), sem depender de
-           maiúsculas, e nenhum pedaço do caminho pode ser ponto de reanálise - uma junção plantada no
-           meio faria uma pasta gravável responder por um caminho que começa em WindowsApps.
+           usuário). A raiz vem de [Environment]::GetFolderPath(ProgramFiles), e não de
+           %ProgramFiles%: variável de ambiente nasce de HKCU\Environment, que um processo de
+           integridade MÉDIA da conta escreve - com ela apontando para uma pasta do perfil, o
+           "prefixo de WindowsApps" passaria a ser um caminho gravável. A comparação é por prefixo de
+           caminho COMPLETO (GetFullPath), sem depender de maiúsculas, e nenhum pedaço do caminho
+           pode ser ponto de reanálise - uma junção plantada no meio faria uma pasta gravável
+           responder por um caminho que começa em WindowsApps.
 
         Função pura no que decide: recebe o objeto do pacote, não lista nada. O único toque no disco
-        é a leitura de atributo de pasta, que só existe se a pasta existir - por isso o -SelfTest
-        consegue exercitá-la com objetos sintéticos.
+        é a leitura de atributo de pasta - e ela agora é FECHADA: pasta que não existe, ou que não
+        deixa ler o atributo, vale como reprovada. Antes o Get-Item nulo era simplesmente pulado, o
+        que é exatamente a resposta errada para a pergunta "este caminho é o que ele diz ser?". Isso
+        muda o que o -SelfTest consegue montar: a pasta dos casos positivos tem de existir de
+        verdade, e um caminho inventado dentro de WindowsApps é agora um caso NEGATIVO.
     .OUTPUTS
         $true ou $false. Tudo que não deu para confirmar é $false.
     #>
@@ -520,7 +530,8 @@ function Test-WinForgeTrustedAppxPackage {
     $local = [string]$Package.InstallLocation
     if ([string]::IsNullOrWhiteSpace($local)) { return $false }
 
-    $raiz = $env:ProgramFiles
+    $raiz = $null
+    try { $raiz = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles) } catch { $raiz = $null }
     if ([string]::IsNullOrWhiteSpace($raiz)) { return $false }
 
     try {
@@ -534,11 +545,18 @@ function Test-WinForgeTrustedAppxPackage {
 
     # Ponto de reanálise em QUALQUER nível, da pasta do pacote até a raiz de WindowsApps: uma junção
     # no meio do caminho manda a leitura para outro lugar sem mudar uma letra do texto do caminho.
+    #
+    # Get-Item nulo é REPROVA, e não "segue em frente". A varredura existe para responder se o
+    # caminho é mesmo o que o texto diz; um nível que não pôde ser lido é justamente o nível sobre o
+    # qual nada se sabe, e pular a pergunta é responder "sim". Na prática o nulo aparece quando a
+    # pasta não existe - InstallLocation apontando para um caminho que já foi removido, ou inventado
+    # - e nesses casos não há winget nenhum para rodar de lá.
     try {
         $atual = $localCheio
         while (-not [string]::IsNullOrWhiteSpace($atual) -and $atual.Length -ge ($raizCheia.Length - 1)) {
             $item = Get-Item -LiteralPath $atual -Force -ErrorAction SilentlyContinue
-            if ($null -ne $item -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+            if ($null -eq $item) { return $false }
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) { return $false }
             $pai = Split-Path -Parent $atual
             if ([string]::IsNullOrWhiteSpace($pai) -or $pai -eq $atual) { break }
             $atual = $pai

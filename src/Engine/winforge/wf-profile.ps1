@@ -349,7 +349,15 @@ function Get-WinForgeSystemProfile {
         # powercfg pode devolver linha em branco junto: só a primeira linha com conteúdo interessa.
         # A linha tem a forma "GUID da Configuração de Energia: <guid>  (<nome>)" - o GUID e o nome
         # ficam em campos separados, porque o texto antes deles muda com o idioma do Windows.
-        $schemeLine = [string](@(powercfg /getactivescheme) | Where-Object { $_ } | Select-Object -First 1)
+        #
+        # 'powercfg' pelo nome deixaria a escolha do binário com o PATH, e o WinForge roda elevado:
+        # o caminho sai de Get-WinForgeSystemExe e a leitura passa por Invoke-WinForgeNativeCommand,
+        # que ainda troca a code page para OEM - sem isso o NOME do plano ("Alto desempenho") chega
+        # com acento embaralhado ao relatório. As duas funções vivem em wf-commands.ps1, inserido
+        # DEPOIS deste bloco no motor gerado: a ordem de definição não importa, porque tudo já está
+        # definido quando o job de perfil roda.
+        $pcfg = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'powercfg.exe') -Arguments @('/getactivescheme')
+        $schemeLine = [string](@([string]$pcfg.Text -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
         $schemeGuid = $null
         $schemeName = $null
         if ($schemeLine -match '([0-9a-f-]{36})\s*\((.+)\)') {
@@ -401,11 +409,11 @@ function Get-WinForgeSystemProfile {
         # foi iniciado. (0x80070426)"), então filtrar o stderr não adianta e a mensagem de erro virava
         # a fonte de horário do relatório. Só o código de saída separa resposta de erro - e a leitura
         # passa por Invoke-WinForgeNativeCommand para a mensagem em português não chegar embaralhada
-        # (ele troca a code page para OEM). A função vive em wf-server.ps1, inserido depois deste
-        # bloco no build: a ordem de definição não importa, porque tudo já está definido quando o job
-        # de perfil roda.
+        # (ele troca a code page para OEM). O executável vai por CAMINHO COMPLETO, pelo mesmo motivo
+        # do powercfg acima: '-Command' compilaria o texto 'w32tm ...' e deixaria a escolha do binário
+        # com o PATH.
         try {
-            $ts = Invoke-WinForgeNativeCommand -Command 'w32tm /query /source'
+            $ts = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'w32tm.exe') -Arguments @('/query', '/source')
             $tsOut = @([string]$ts.Text -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
             $tsFirst = $(if (@($tsOut).Count) { ([string]@($tsOut)[0]).Trim() } else { '' })
             if ($ts.ExitCode -eq 0 -and $tsFirst) { $srv.TimeSource = $tsFirst }

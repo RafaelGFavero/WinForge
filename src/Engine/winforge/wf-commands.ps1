@@ -33,8 +33,15 @@ function Get-WinForgeSystemExe {
         chama passa o caminho inteiro para -FilePath.
 
         O 'Name' pode trazer subpasta: o winmgmt mora em System32\wbem, não em System32
-        ('wbem\winmgmt.exe'). Sem %SystemRoot% definido sobra o padrão 'C:\Windows' - é a raiz de
-        qualquer Windows instalado no disco do sistema.
+        ('wbem\winmgmt.exe').
+
+        A âncora é [Environment]::SystemDirectory, e NÃO %SystemRoot%. A diferença é a mesma história
+        do PATH, um passo adiante: variável de ambiente de processo nasce do bloco do usuário em
+        HKCU\Environment, que qualquer processo de integridade MÉDIA da conta escreve. Com
+        'SystemRoot' apontando para uma pasta do perfil, todo caminho montado aqui sairia de lá - e o
+        WinForge, elevado, abriria o 'chkdsk.exe' de quem plantou. [Environment]::SystemDirectory vem
+        da API GetSystemDirectory, que lê a pasta real do Windows e não passa por variável nenhuma.
+        Só se ela vier vazia sobra o padrão 'C:\Windows\System32'.
 
         Função pura: monta texto e não toca no disco. Quem confere se o arquivo existe é
         Test-WinForgeCommandRequirement, que aceita caminho absoluto.
@@ -43,9 +50,10 @@ function Get-WinForgeSystemExe {
     #>
     param([Parameter(Mandatory)][string]$Name)
 
-    $raiz = $env:SystemRoot
-    if ([string]::IsNullOrWhiteSpace($raiz)) { $raiz = 'C:\Windows' }
-    return (Join-Path $raiz (Join-Path 'System32' $Name))
+    $raiz = $null
+    try { $raiz = [string][Environment]::SystemDirectory } catch { $raiz = $null }
+    if ([string]::IsNullOrWhiteSpace($raiz)) { $raiz = 'C:\Windows\System32' }
+    return (Join-Path $raiz $Name)
 }
 
 function Test-WinForgeCommandRequirement {
@@ -254,6 +262,9 @@ function Invoke-WinForgeCommandCore {
            RECUSADA com exceção. É a trava que faltava quando um -DryRun engolido fez o instalador do
            DirectX rodar de verdade na máquina de quem compilava: aqui ela vale para toda a tabela,
            inclusive para uma linha nova cujo autor não tenha lembrado da trava.
+        6. Ainda em modo SelfTest, linha marcada com 'OpensExternal' também é recusada, mesmo sendo
+           'read'. Abrir uma página não altera o sistema, mas abre um navegador na máquina de quem
+           compila - e num build sem ninguém na frente isso é lixo na tela, no melhor caso.
     .PARAMETER Spec
         A linha da tabela: @{ Title; Command; Requires; Native; ... }.
     .PARAMETER Component
@@ -288,6 +299,16 @@ function Invoke-WinForgeCommandCore {
     if ([string]::IsNullOrWhiteSpace($tipo)) { $tipo = 'read' }
     if ($sync.SelfTest -and $tipo -ne 'read') {
         throw "Recusado: '$Name' é uma ação do tipo '$tipo', que altera o sistema, e o WinForge está em modo SelfTest."
+    }
+    # 'OpensExternal' é o outro lado da mesma trava, e o item 5 sozinho não o cobre: a linha do
+    # DirectX é 'read' (abrir uma página não altera o sistema) e mesmo assim não pode rodar num
+    # SelfTest, porque abriria o navegador na máquina de quem compila - sem ninguém para fechá-lo, e
+    # com o build pendurado. Até aqui isso era só uma convenção conferida no build ("nenhuma linha
+    # com OpensExternal está na lista que o SelfTest roda"); agora é recusa no próprio funil, e uma
+    # linha nova marcada assim chega barrada mesmo que alguém a acrescente àquela lista. O -DryRun
+    # não cai aqui: ele já retornou lá em cima, e simular continua permitido.
+    if ($sync.SelfTest -and $cmd.OpensExternal) {
+        throw "Recusado: '$Name' abre algo fora do WinForge (OpensExternal) e o WinForge está em modo SelfTest."
     }
 
     $inicio = Get-Date
