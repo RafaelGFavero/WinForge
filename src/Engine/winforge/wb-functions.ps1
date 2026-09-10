@@ -1,4 +1,4 @@
-#region ===== WinForge - funções adicionais =====
+﻿#region ===== WinForge - funções adicionais =====
 # Todas as funções levam "WinUtilBoost" no nome para serem importadas automaticamente
 # nos runspaces (Initialize-WinUtilRunspacePool importa tudo que casa com 'winutil|WPF').
 
