@@ -54,18 +54,22 @@ $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
 $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
+$serverConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-server-config.ps1")
 $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
 $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
+$serverBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-server.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 $xamlDiagNav    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-nav.xml")
 $xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
+$xamlServerNav  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-nav.xml")
+$xamlServerTab  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-tab.xml")
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -249,6 +253,7 @@ $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawU
 # ---------------------------------------------------------------- funções e configs
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
+$src = Insert-Before $src "`$inputXML = @'" ($serverConfig.TrimEnd() + "`n`n") "insert server config"
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 $src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
 
@@ -275,6 +280,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.Tr
 
 # ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
+
+# ---------------------------------------------------------------- aba Servidor (comandos e visibilidade das abas)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($serverBlock.TrimEnd() + "`n`n") "insert server"
 
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
@@ -534,6 +542,9 @@ $src = Replace-Once $src @'
         "Jogos" {
             Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos") -targetGridName "gamespanel" -columncount 2
         }
+        "Servidor" {
+            Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Servidor") -targetGridName "serverpanel" -columncount 2
+        }
         "Diagnostico" {
             Initialize-WinForgeDiagnosticsTab
         }
@@ -550,10 +561,12 @@ $src = Replace-Once $src @'
         Find-TweaksByNameOrDescription -SearchString ""
     } elseif ($sync.currentTab -eq "Jogos") {
         Find-TweaksByNameOrDescription -SearchString ""
+    } elseif ($sync.currentTab -eq "Servidor") {
+        Find-TweaksByNameOrDescription -SearchString ""
     }
 '@ "tab filter reset"
 
-$src = Replace-Once $src 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5) {' 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5 -or $tabNumber -eq 6) {' "search visibility"
+$src = Replace-Once $src 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5) {' 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5 -or $tabNumber -eq 6 -or $tabNumber -eq 8) {' "search visibility"
 
 $src = Replace-Once $src @'
     $panelName = "tweakspanel"
@@ -566,6 +579,8 @@ $src = Replace-Once $src @'
         $panelName = "appxpanel"
     } elseif ($null -ne $Sync.currentTab -and $Sync.currentTab -eq "Jogos") {
         $panelName = "gamespanel"
+    } elseif ($null -ne $Sync.currentTab -and $Sync.currentTab -eq "Servidor") {
+        $panelName = "serverpanel"
     }
 '@ "search panel"
 
@@ -582,6 +597,9 @@ $src = Replace-Once $src @'
         "Jogos" {
             Find-TweaksByNameOrDescription -SearchString $sync.SearchBar.Text
         }
+        "Servidor" {
+            Find-TweaksByNameOrDescription -SearchString $sync.SearchBar.Text
+        }
     }
 })
 '@ "search timer"
@@ -590,6 +608,7 @@ $src = Replace-Once $src '            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEv
             "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
             "J" { Invoke-WPFButton "WPFTab7BT"; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
             "D" { Invoke-WPFButton "WPFTab8BT"; $keyEventArgs.Handled = $true } # WinForge: aba Diagnóstico
+            "S" { Invoke-WPFButton "WPFTab9BT"; $keyEventArgs.Handled = $true } # WinForge: aba Servidor
 '@.TrimEnd() "alt+j"
 
 # ---------------------------------------------------------------- botões: lookup em tweaks + novos casos
@@ -601,10 +620,14 @@ $src = Replace-Once $src @'
     $buttonConfig = $null
     if ($sync.configs.feature.$Button) {
         $buttonConfig = $sync.configs.feature.$Button
-    } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button") {
+    } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button" -and $Button -notlike "WPFWFSrv*") {
         # WinForge: botões definidos na config de tweaks (aba Jogos)
         $buttonConfig = $sync.configs.tweaks.$Button
     }
+    # Os botões da aba Servidor (WPFWFSrv*) ficam de fora de propósito: eles declaram
+    # "function": "Invoke-WinForgeServerCommand" só para a config dizer quem responde por eles,
+    # mas o caminho acima chama a função SEM argumento nenhum - e ela precisa do -Name para saber
+    # qual comando rodar. Quem despacha esses botões é o switch, com o -Name explícito por caso.
     if ($buttonConfig) {
 
 '@ "button lookup"
@@ -620,6 +643,16 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
         "WPFSelectRecommended" {Select-WinForgeRecommended -Tab "Tweaks" | Out-Null}
         "WPFGamesSelectRecommended" {Select-WinForgeRecommended -Tab "Jogos" | Out-Null}
+        "WPFServerSelectRecommended" {Select-WinForgeRecommended -Tab "Servidor" | Out-Null}
+        "WPFClearServerSelection" {Invoke-WPFPresets -imported $true -checkboxfilterpattern "WPFTweak*"}
+        "WPFGetInstalledServer" {Invoke-WPFGetInstalled -CheckBox "tweaks"}
+        "WPFServerApplyButton" {Invoke-WPFtweaksbutton}
+        "WPFServerUndoButton" {Invoke-WPFundoall}
+        # Os botões da aba Servidor chegam aqui por nome: Invoke-WPFButton chama $buttonConfig.function
+        # sem argumento nenhum, então quem diz QUAL comando é este switch, não a config.
+        "WPFWFSrvTimeCheck" {Invoke-WinForgeServerCommand -Name TimeCheck}
+        "WPFWFSrvDefenderExclusions" {Invoke-WinForgeServerCommand -Name DefenderExclusions}
+        "WPFWFSrvTcpShow" {Invoke-WinForgeServerCommand -Name TcpShow}
         "WPFDiagRefresh" {Start-WinForgeProfileJob}
         "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
         "WPFDiagExport" {
@@ -628,7 +661,7 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         }
         "WPFDiagSelectRecommended" {
             $wfMarcados = Select-WinForgeRecommended -Tab "All"
-            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas Tweaks e Jogos.", "WinForge", "OK", "Information") | Out-Null
+            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas de ajustes.", "WinForge", "OK", "Information") | Out-Null
         }
 '@.TrimEnd() "button switch"
 
@@ -739,14 +772,16 @@ if ($SelfTest) {
     }
     $wbTweaksTab = Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab @("Jogos","Servidor") -Exclude
     $wbGamesTab  = Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos"
+    $wbServerTab = Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Servidor"
     $wbHidden = @($sync.configs.tweaks.PSObject.Properties | Where-Object { -not (Test-WinUtilBoostEntryCompatible $_.Value) } | ForEach-Object { $_.Name })
     $wbHiddenAppx = @($sync.configs.appx.PSObject.Properties | Where-Object { -not (Test-WinUtilBoostEntryCompatible $_.Value) } | ForEach-Object { $_.Name })
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
-    Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
+    Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
     if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbServerTab.PSObject.Properties).Count -ne 11) { Write-Host "  [ERRO] aba Servidor: esperado 11 entradas" -ForegroundColor Red; $wbErrors++ }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -765,6 +800,17 @@ if ($SelfTest) {
         }
     }
     if ($wbPresetViolations.Count) { Write-Host "  [ERRO] presets com itens não-Seguro: $($wbPresetViolations -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    # Preset é para máquina de usuário: um item de servidor num preset seria aplicado em massa numa
+    # máquina em produção por quem só clicou em "Standard". A auditoria não pega isso (item de
+    # servidor pode ser Seguro), então a trava é o platform.
+    $wbPresetServer = @()
+    foreach ($p in $sync.configs.preset.PSObject.Properties) {
+        foreach ($k in @($p.Value)) {
+            $e = $sync.configs.tweaks.$k
+            if ($e -and $e.PSObject.Properties['platform'] -and [string]$e.platform -eq 'server') { $wbPresetServer += "$($p.Name):$k" }
+        }
+    }
+    if ($wbPresetServer.Count) { Write-Host "  [ERRO] presets com itens de servidor: $($wbPresetServer -join ', ')" -ForegroundColor Red; $wbErrors++ }
     # a auditoria remove itens dos presets; um preset vazio depende da guarda em Invoke-WPFPresets para não estourar
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
         if (@($p.Value).Count -eq 0) { Write-Host "  [ERRO] preset vazio: $($p.Name)" -ForegroundColor Red; $wbErrors++ }
@@ -902,7 +948,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
@@ -951,16 +997,62 @@ if ($SelfTest) {
         } catch {
             Write-Host "  [ERRO] marcar recomendados antes das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
-        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico') {
+        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico','Servidor') {
             try {
                 Initialize-WinUtilTabContent -TabName $tab
-                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } 'Diagnostico' { 'WPFDiagCards' } }
+                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } 'Diagnostico' { 'WPFDiagCards' } 'Servidor' { 'serverpanel' } }
                 $grid = $wbWindow.FindName($panel)
                 $cbs = @($sync.Keys | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
                 Write-Host "  Aba $tab montada: $($grid.Children.Count) coluna(s), $cbs checkboxes/toggles no total até agora"
             } catch {
                 Write-Host "  [ERRO] montar aba $tab`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
             }
+        }
+        # Aba Servidor: no cliente ela monta VAZIA (todo item tem platform 'server' e o filtro de
+        # compatibilidade esconde tudo) e isso não pode virar exceção - a aba existe na janela em
+        # qualquer Windows, só o botão de navegação some. Sob WINFORGE_SIMULATE_SERVER as caixas
+        # têm de aparecer de verdade; sem esta metade, o SelfTest "de servidor" só provaria que a
+        # aba não explode vazia.
+        try {
+            $wfSrvGrid = $wbWindow.FindName('serverpanel')
+            $wfSrvKeys = @($wbServerTab.PSObject.Properties | Where-Object { [string]$_.Value.Type -ne 'Button' } | ForEach-Object { $_.Name })
+            $wfSrvCaixas = @($wfSrvKeys | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
+            if ($sync.IsServer) {
+                if ($wfSrvCaixas -lt 8) { Write-Host "  [ERRO] aba Servidor: esperado ao menos 8 caixas no servidor, veio $wfSrvCaixas" -ForegroundColor Red; $wbErrors++ }
+                if ($wfSrvGrid.Children.Count -eq 0) { Write-Host "  [ERRO] aba Servidor: painel vazio no servidor" -ForegroundColor Red; $wbErrors++ }
+            } else {
+                if ($wfSrvCaixas -ne 0) { Write-Host "  [ERRO] aba Servidor: $wfSrvCaixas caixa(s) criada(s) num cliente, esperado 0" -ForegroundColor Red; $wbErrors++ }
+                if ($wfSrvGrid.Children.Count -ne 0) { Write-Host "  [ERRO] aba Servidor: painel com $($wfSrvGrid.Children.Count) coluna(s) num cliente, esperado 0" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Aba Servidor: $wfSrvCaixas caixa(s), $($wfSrvGrid.Children.Count) coluna(s) | servidor=$($sync.IsServer)"
+        } catch {
+            Write-Host "  [ERRO] aba Servidor: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Visibilidade das abas: a MESMA função que roda antes do ShowDialog, chamada nos dois
+        # estados. Forçar $sync.IsServer aqui é o que permite testar o lado "servidor" num cliente
+        # (e o lado "cliente" quando o SelfTest roda sob WINFORGE_SIMULATE_SERVER).
+        try {
+            $wfEraServidor = $sync.IsServer
+            try {
+                $sync.IsServer = $true
+                Update-WinForgeTabVisibility | Out-Null
+                if ($sync.WPFTab7BT.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (servidor): WPFTab7BT (Jogos) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFTab5BT.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (servidor): WPFTab5BT (Win11ISO) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                # A aba AppX não tem botão na barra: o caminho até ela é o 'AppX Removal' da aba Tweaks.
+                if ($sync.WPFAppxRemoval.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (servidor): WPFAppxRemoval (AppX) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFTab9BT.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] abas (servidor): WPFTab9BT (Servidor) deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+                $sync.IsServer = $false
+                Update-WinForgeTabVisibility | Out-Null
+                if ($sync.WPFTab7BT.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] abas (cliente): WPFTab7BT (Jogos) deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFTab9BT.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (cliente): WPFTab9BT (Servidor) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFAppxRemoval.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] abas (cliente): WPFAppxRemoval (AppX) deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+            } finally {
+                $sync.IsServer = $wfEraServidor
+                Update-WinForgeTabVisibility | Out-Null
+            }
+            Write-Host "  Visibilidade das abas: OK nos dois estados (estado final: servidor=$($sync.IsServer))"
+        } catch {
+            Write-Host "  [ERRO] visibilidade das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         # Aba Diagnóstico: cartões, tabela de drivers, lista de recomendações e relatório HTML.
         # A contagem esperada de recomendações é recalculada aqui a partir de $sync.Recommended/
@@ -1040,8 +1132,12 @@ if ($SelfTest) {
         try {
             $wbSelTweaks = Select-WinForgeRecommended -Tab "Tweaks"
             $wbSelJogos  = Select-WinForgeRecommended -Tab "Jogos"
+            $wbSelServer = Select-WinForgeRecommended -Tab "Servidor"
             $wbSelAll    = Select-WinForgeRecommended -Tab "All"
-            if ($wbSelAll -ne ($wbSelTweaks + $wbSelJogos)) { Write-Host "  [ERRO] Select-WinForgeRecommended: All ($wbSelAll) != Tweaks ($wbSelTweaks) + Jogos ($wbSelJogos)" -ForegroundColor Red; $wbErrors++ }
+            # No cliente a aba Servidor não entra em 'All' (nem existe na janela): a soma esperada
+            # muda com $sync.IsServer, e é isso que a segunda rodada do SelfTest exercita.
+            $wbSelEsperado = $wbSelTweaks + $wbSelJogos + $(if ($sync.IsServer) { $wbSelServer } else { 0 })
+            if ($wbSelAll -ne $wbSelEsperado) { Write-Host "  [ERRO] Select-WinForgeRecommended: All ($wbSelAll) != Tweaks ($wbSelTweaks) + Jogos ($wbSelJogos) + Servidor ($wbSelServer, servidor=$($sync.IsServer))" -ForegroundColor Red; $wbErrors++ }
             if ($wbSelAll -le 0) { Write-Host "  [ERRO] Select-WinForgeRecommended: nenhuma caixa marcada no perfil real" -ForegroundColor Red; $wbErrors++ }
             foreach ($k in @($sync.Recommended.Keys)) {
                 if ($sync[$k] -isnot [System.Windows.Controls.CheckBox]) { continue }
@@ -1055,7 +1151,7 @@ if ($SelfTest) {
                 # marcar dispara o handler Checked, que é quem alimenta $sync.selectedTweaks
                 if ($k -like 'WPFTweaks*' -and -not $sync.selectedTweaks.Contains($k)) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não entrou em selectedTweaks" -ForegroundColor Red; $wbErrors++ }
             }
-            Write-Host "  Recomendados marcados: $wbSelAll (Tweaks $wbSelTweaks, Jogos $wbSelJogos) | selectedTweaks=$($sync.selectedTweaks.Count)"
+            Write-Host "  Recomendados marcados: $wbSelAll (Tweaks $wbSelTweaks, Jogos $wbSelJogos, Servidor $wbSelServer) | selectedTweaks=$($sync.selectedTweaks.Count)"
         } catch {
             Write-Host "  [ERRO] Select-WinForgeRecommended: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
@@ -1227,6 +1323,17 @@ $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windo
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null
 '@.TrimEnd() "restore prompt hook"
 
+# ---------------------------------------------------------------- abas por tipo de Windows (servidor x cliente)
+# Antes do ShowDialog e na thread da janela: em servidor somem Win11ISO, AppX e Jogos e aparece a
+# aba Servidor; no cliente é o contrário. Feito aqui, e não no Add_ContentRendered acima, para que
+# a barra de navegação já apareça certa - dentro do ContentRendered a janela já está desenhada e o
+# usuário veria as abas piscarem.
+$src = Insert-Before $src '$sync["Form"].ShowDialog() | out-null' @'
+# WinForge: esconde as abas que não fazem sentido neste Windows (servidor x cliente)
+Update-WinForgeTabVisibility | Out-Null
+
+'@ "tab visibility startup"
+
 # ---------------------------------------------------------------- falha ao carregar o XAML: libera o launcher e sai com 2
 $src = Replace-Once $src @'
     Write-Host "Quitting WinUtil..." -ForegroundColor Red
@@ -1264,12 +1371,23 @@ $src = Insert-Before $src @'
                     Background="{DynamicResource ButtonConfigBackgroundColor}"
 '@ $xamlDiagNav "xaml diag nav button"
 
+# Por último na mesma âncora: o botão da aba Servidor fica à direita do de Diagnóstico.
+$src = Insert-Before $src @'
+                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
+                    Background="{DynamicResource ButtonConfigBackgroundColor}"
+'@ $xamlServerNav "xaml server nav button"
+
 $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
 
 # Precisa vir DEPOIS do insert da aba Jogos: Invoke-WPFTab mapeia WPFTab<N>BT para Items[N-1], então
 # o TabItem do Diagnóstico (WPFTab8) tem de ser o oitavo do TabControl - e, na mesma âncora, quem
 # insere por último fica mais perto dela, ou seja, depois de Jogos.
 $src = Insert-Before $src "        </TabControl>`n" $xamlDiagTab "xaml diag tab"
+
+# Mesma regra: WPFTab9BT -> Items[8], então o TabItem da aba Servidor tem de ser o nono do
+# TabControl - e quem insere por último na âncora fica mais perto dela, ou seja, depois do
+# Diagnóstico.
+$src = Insert-Before $src "        </TabControl>`n" $xamlServerTab "xaml server tab"
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
@@ -1390,7 +1508,7 @@ function Sort-RowsByKeyOrdinal([object[]]$rows) {
 $auditSync  = Get-WinForgeAuditData
 $audit      = $auditSync.WinForgeAudit
 $configSync = Get-WinForgeConfigData
-$jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'))
+$jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'), (Get-JsonConfigBlock $src 'wfserver'))
 
 function Get-TweakEntry([string]$key) {
     foreach ($o in $jsonTweaks) {

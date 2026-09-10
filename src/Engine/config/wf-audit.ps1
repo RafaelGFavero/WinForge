@@ -117,6 +117,18 @@ $sync.WinForgeAudit = @{
     'WPFTweaksWBAmdShaderCache'                  = @{ Class = 'Seguro';  Reason = '' }
     'WPFTweaksWBAmdCrashDefender'                = @{ Class = 'Seguro';  Reason = '' }
 
+    # ---------------------------------------------------------------- aba Servidor (Windows Server)
+    # Nenhuma destas chaves entra em preset: preset é para máquina de usuário. As 'Cuidado' vão para
+    # a categoria CUIDADO dentro do painel 1 da aba Servidor, como em qualquer outra aba.
+    'WPFTweaksWFSrvNoServerManager'              = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvShutdownTracker'              = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvIEESC'                        = @{ Class = 'Cuidado'; Reason = 'reduz a proteção do navegador para administradores no servidor; use só se administra pelo navegador local' }
+    'WPFTweaksWFSrvHighPerf'                     = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvRdpNla'                       = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvSmb1Off'                      = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvSmbSigning'                   = @{ Class = 'Cuidado'; Reason = 'custo de CPU em servidores de arquivos e clientes antigos sem assinatura param de acessar' }
+    'WPFTweaksWFSrvTcpAutotuning'                = @{ Class = 'Seguro';  Reason = '' }
+
     # ---------------------------------------------------------------- serviços separados (criados em tarefa posterior)
     'WPFTweaksWBSvcSpooler'                      = @{ Class = 'Cuidado'; Reason = 'desliga o Spooler: impressão e impressoras PDF param de funcionar' }
     'WPFTweaksWBSvcBluetooth'                    = @{ Class = 'Cuidado'; Reason = 'desliga o Bluetooth (bthserv): mouses, teclados e fones Bluetooth param' }

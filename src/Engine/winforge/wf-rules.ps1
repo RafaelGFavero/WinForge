@@ -93,18 +93,21 @@ function Select-WinForgeRecommended {
         Marcar IsChecked dispara o handler Checked, que é quem atualiza $sync.selectedTweaks - por
         isso aqui não se toca nessa lista.
     .PARAMETER Tab
-        'Tweaks' (entradas sem tab 'Jogos'), 'Jogos' ou 'All' (as duas).
+        'Tweaks' (entradas sem tab própria), 'Jogos', 'Servidor' ou 'All'. Em 'All' a aba Servidor
+        só entra quando o Windows é servidor - no cliente ela nem existe na janela, e montá-la
+        criaria zero controle (todas as entradas têm platform 'server').
     .OUTPUTS
         Quantidade de caixas marcadas.
     #>
-    param([ValidateSet('Tweaks', 'Jogos', 'All')][string]$Tab = 'All')
+    param([ValidateSet('Tweaks', 'Jogos', 'Servidor', 'All')][string]$Tab = 'All')
 
     # o botão existe antes do diagnóstico terminar: sem regras rodadas não há nada para marcar
     if (-not $sync.Recommended) { return 0 }
 
     # Montar a aba é idempotente (Initialize-WinForgeTabContent sai na hora se ela já existe) e é o
     # mesmo custo que o usuário pagaria ao abrir a aba na mão.
-    foreach ($wfTab in $(if ($Tab -eq 'All') { @('Tweaks', 'Jogos') } else { @($Tab) })) {
+    $wfTabs = if ($Tab -eq 'All') { @('Tweaks', 'Jogos') + @(if ($sync.IsServer) { 'Servidor' }) } else { @($Tab) }
+    foreach ($wfTab in $wfTabs) {
         if (Get-Command Initialize-WinForgeTabContent -ErrorAction SilentlyContinue) {
             try { Initialize-WinForgeTabContent -TabName $wfTab } catch {
                 Write-WinForgeLog -Component "Rules" -Level "WARN" -Message "Não foi possível montar a aba $wfTab antes de marcar: $($_.Exception.Message)"
@@ -123,7 +126,7 @@ function Select-WinForgeRecommended {
         if ($key -like 'WPFToggle*' -or ($entry -and [string]$entry.Type -eq 'Toggle')) { continue }
 
         $entryTab = 'Tweaks'
-        if ($entry -and $entry.PSObject.Properties['tab'] -and [string]$entry.tab -eq 'Jogos') { $entryTab = 'Jogos' }
+        if ($entry -and $entry.PSObject.Properties['tab'] -and [string]$entry.tab -in @('Jogos', 'Servidor')) { $entryTab = [string]$entry.tab }
         if ($Tab -ne 'All' -and $entryTab -ne $Tab) { continue }
 
         $control.IsChecked = $true

@@ -1,0 +1,153 @@
+﻿#region ===== WinForge - configurações do servidor =====
+
+# ---------------------------------------------------------------------------
+# Ajustes gerais do Windows Server (mesclados em $sync.configs.tweaks)
+#   panel 1 = checkboxes | panel 2 = botões | tab "Servidor" = aba Servidor
+#   platform "server" = só aparece no Windows Server (ver Test-WinUtilBoostEntryCompatible)
+#   role "iis"/"ad"   = itens por função, adicionados nas tarefas seguintes
+# Nada daqui entra em preset: preset é para máquina de usuário, não para servidor em produção.
+# ---------------------------------------------------------------------------
+$sync.configs.wfserver = @'
+{
+  "WPFTweaksWFSrvNoServerManager": {
+    "Content": "Não abrir o Gerenciador do Servidor no logon",
+    "Description": "Impede que o Gerenciador do Servidor (Server Manager) abra sozinho a cada logon, para a máquina e para o usuário atual. O programa continua instalado e pode ser aberto pelo menu Iniciar. Desfazer volta a abrir no logon.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "registry": [
+      { "Path": "HKLM:\\SOFTWARE\\Microsoft\\ServerManager", "Name": "DoNotOpenServerManagerAtLogon", "Value": "1", "Type": "DWord", "OriginalValue": "0" },
+      { "Path": "HKCU:\\Software\\Microsoft\\ServerManager", "Name": "DoNotOpenServerManagerAtLogon", "Value": "1", "Type": "DWord", "OriginalValue": "<RemoveEntry>" }
+    ]
+  },
+  "WPFTweaksWFSrvShutdownTracker": {
+    "Content": "Desativar o Rastreador de Eventos de Desligamento",
+    "Description": "Desliga a caixa que pede o motivo a cada desligamento ou reinício do servidor (Shutdown Event Tracker). O motivo deixa de ser gravado no log de eventos; se a sua operação exige esse registro por auditoria, não marque. Desfazer remove a política e o rastreador volta.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "registry": [
+      { "Path": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Reliability", "Name": "ShutdownReasonOn", "Value": "0", "Type": "DWord", "OriginalValue": "<RemoveEntry>" },
+      { "Path": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Reliability", "Name": "ShutdownReasonUI", "Value": "0", "Type": "DWord", "OriginalValue": "<RemoveEntry>" }
+    ]
+  },
+  "WPFTweaksWFSrvIEESC": {
+    "Content": "Desativar a Configuração de Segurança Reforçada do IE (administradores)",
+    "Description": "Desliga a IE Enhanced Security Configuration para o grupo de administradores. Sem ela, o navegador do servidor deixa de bloquear scripts e downloads de sites não confiáveis. Desfazer religa a proteção.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "registry": [
+      { "Path": "HKLM:\\SOFTWARE\\Microsoft\\Active Setup\\Installed Components\\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}", "Name": "IsInstalled", "Value": "0", "Type": "DWord", "OriginalValue": "1" }
+    ]
+  },
+  "WPFTweaksWFSrvHighPerf": {
+    "Content": "Plano de energia Alto desempenho",
+    "Description": "Ativa o plano 'Alto desempenho' (o padrão recomendado para servidores: sem redução de clock em ocioso, latência menor). Aumenta o consumo de energia. Desfazer volta ao plano Equilibrado.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "InvokeScript": [
+      "powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+    ],
+    "UndoScript": [
+      "powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e"
+    ]
+  },
+  "WPFTweaksWFSrvRdpNla": {
+    "Content": "RDP: exigir Autenticação no Nível da Rede e tempo limite de sessão ociosa (30 min)",
+    "Description": "Exige NLA (autenticação antes de abrir a sessão) e camada de segurança TLS no RDP, e derruba sessões ociosas depois de 30 minutos. Clientes antigos sem suporte a NLA (Windows XP, thin clients velhos) deixam de conseguir conectar. Desfazer volta a aceitar conexão sem NLA e remove o tempo limite.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "registry": [
+      { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp", "Name": "UserAuthentication", "Value": "1", "Type": "DWord", "OriginalValue": "0" },
+      { "Path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp", "Name": "SecurityLayer", "Value": "2", "Type": "DWord", "OriginalValue": "1" },
+      { "Path": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services", "Name": "MaxIdleTime", "Value": "1800000", "Type": "DWord", "OriginalValue": "<RemoveEntry>" }
+    ]
+  },
+  "WPFTweaksWFSrvSmb1Off": {
+    "Content": "Desativar o SMB1 no servidor",
+    "Description": "Desliga o protocolo SMB1 no serviço de arquivos. Dispositivos antigos que só falam SMB1 (scanners e multifuncionais de rede, NAS velhos, Windows XP) param de acessar os compartilhamentos. O cartão de perfil da aba Diagnóstico mostra o estado atual do SMB1. Desfazer religa o SMB1.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "InvokeScript": [
+      "Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force"
+    ],
+    "UndoScript": [
+      "Set-SmbServerConfiguration -EnableSMB1Protocol $true -Force"
+    ]
+  },
+  "WPFTweaksWFSrvSmbSigning": {
+    "Content": "SMB: exigir assinatura",
+    "Description": "Passa a exigir assinatura digital em toda sessão SMB do servidor. Desfazer volta a aceitar sessões sem assinatura.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "InvokeScript": [
+      "Set-SmbServerConfiguration -RequireSecuritySignature $true -Force"
+    ],
+    "UndoScript": [
+      "Set-SmbServerConfiguration -RequireSecuritySignature $false -Force"
+    ]
+  },
+  "WPFTweaksWFSrvTcpAutotuning": {
+    "Content": "TCP: nível de ajuste automático 'normal'",
+    "Description": "Devolve o autotuning da janela de recepção TCP ao valor padrão 'normal'. Serve para desfazer o 'disabled' ou 'restricted' que scripts de otimização antigos deixam para trás e que derruba a taxa de transferência em rede rápida. 'Desfazer selecionados' também deixa em 'normal', porque esse é o padrão do Windows - use o botão 'Mostrar parâmetros TCP (netsh)' para conferir antes e depois.",
+    "category": "Servidor",
+    "panel": "1",
+    "tab": "Servidor",
+    "platform": "server",
+    "InvokeScript": [
+      "netsh int tcp set global autotuninglevel=normal"
+    ],
+    "UndoScript": [
+      "netsh int tcp set global autotuninglevel=normal"
+    ]
+  },
+
+  "WPFWFSrvTimeCheck": {
+    "Content": "Verificar fonte de horário (w32tm)",
+    "Description": "Mostra a fonte de horário configurada e o estado do serviço W32Time. Só lê, não altera nada.",
+    "category": "Servidor",
+    "panel": "2",
+    "tab": "Servidor",
+    "platform": "server",
+    "Type": "Button",
+    "ButtonWidth": "300",
+    "function": "Invoke-WinForgeServerCommand"
+  },
+  "WPFWFSrvDefenderExclusions": {
+    "Content": "Listar exclusões do Defender",
+    "Description": "Mostra as exclusões de caminho, extensão e processo do Microsoft Defender neste servidor. Só lê, não altera nada.",
+    "category": "Servidor",
+    "panel": "2",
+    "tab": "Servidor",
+    "platform": "server",
+    "Type": "Button",
+    "ButtonWidth": "300",
+    "function": "Invoke-WinForgeServerCommand"
+  },
+  "WPFWFSrvTcpShow": {
+    "Content": "Mostrar parâmetros TCP (netsh)",
+    "Description": "Mostra a saída de 'netsh int tcp show global' (autotuning, RSS, ECN e afins). Só lê, não altera nada.",
+    "category": "Servidor",
+    "panel": "2",
+    "tab": "Servidor",
+    "platform": "server",
+    "Type": "Button",
+    "ButtonWidth": "300",
+    "function": "Invoke-WinForgeServerCommand"
+  }
+}
+'@ | ConvertFrom-Json
+
+#endregion

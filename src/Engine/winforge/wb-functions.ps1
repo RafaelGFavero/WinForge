@@ -171,6 +171,12 @@ function Initialize-WinUtilBoostConfigs {
         $sync.configs.tweaks | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
     }
 
+    # aba Servidor: mesma config de tweaks, separada só pela propriedade 'tab' (e escondida no
+    # cliente pelo 'platform'). Entra depois de wbtweaks para que a auditoria veja todas as chaves.
+    foreach ($p in $sync.configs.wfserver.PSObject.Properties) {
+        $sync.configs.tweaks | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+
     foreach ($g in $sync.configs.wbgames) {
         $regs = @()
         foreach ($exe in $g.Exes) {
