@@ -214,7 +214,11 @@ function Invoke-WinForgeNativeCommand {
         1. A code page. w32tm, netsh, dcdiag e repadmin escrevem em OEM (850/437 no Brasil); o
            PowerShell decodifica pelo [Console]::OutputEncoding, que costuma estar em outra coisa - e
            toda palavra acentuada chega embaralhada. A troca é PROCESSO INTEIRO, então a janela é a
-           menor possível: muda, roda o comando, devolve no finally.
+           menor possível: muda, roda o comando, devolve no finally. E como é do processo inteiro,
+           duas runspaces do pool podem se atropelar (o levantamento do perfil e um botão da aba
+           Servidor rodam em paralelo): um mutex nomeado por processo serializa trocar-rodar-devolver,
+           no mesmo estilo do mutex de log. Sem o mutex a função roda assim mesmo - acento
+           embaralhado é melhor que botão travado.
         2. O código de saída. $LASTEXITCODE é global e sobrevive à chamada anterior: sem zerar antes,
            um comando que não é executável devolveria o código de outro. Ele é lido na linha seguinte
            ao comando, antes que qualquer outra coisa o sobrescreva.
@@ -231,7 +235,13 @@ function Invoke-WinForgeNativeCommand {
     $encodingAnterior = $null
     $texto = ''
     $codigo = $null
+    $mutex = $null
+    $preso = $false
+    try { $mutex = New-Object System.Threading.Mutex($false, "Local\WinForge.ConsoleEncoding.$PID") } catch { $mutex = $null }
     try {
+        if ($null -ne $mutex) {
+            try { $preso = $mutex.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $preso = $true } catch { $preso = $false }
+        }
         try {
             $encodingAnterior = [Console]::OutputEncoding
             [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -243,6 +253,8 @@ function Invoke-WinForgeNativeCommand {
         $codigo = $LASTEXITCODE
     } finally {
         if ($null -ne $encodingAnterior) { try { [Console]::OutputEncoding = $encodingAnterior } catch { } }
+        if ($preso) { try { $mutex.ReleaseMutex() } catch { } }
+        if ($null -ne $mutex) { try { $mutex.Dispose() } catch { } }
     }
 
     return @{ Text = [string]$texto; ExitCode = $codigo }

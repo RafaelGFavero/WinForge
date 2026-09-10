@@ -150,7 +150,7 @@ $sync.WinForgeRules = @(
         Recommend = @()
         Avoid     = @()
         Reason    = 'Controlador de domínio: use os botões de Active Directory (dcdiag, repadmin) na aba Servidor.'
-        Info      = '"Controlador de domínio: rode dcdiag e repadmin na aba Servidor; fonte de horário atual: $($p.Server.TimeSource)."'
+        Info      = '"Controlador de domínio: rode dcdiag e repadmin na aba Servidor; fonte de horário atual: $(if ($p.Server.TimeSource) { $p.Server.TimeSource } else { ''não disponível'' })."'
     }
 
     @{  Id        = 'dc-ntds-os-drive'
