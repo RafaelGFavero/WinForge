@@ -604,11 +604,15 @@ $src = Replace-Once $src @'
 })
 '@ "search timer"
 
+# O atalho segue a aba: Win11ISO e Jogos não existem no servidor e Servidor não existe no cliente.
+# Sem a guarda, Alt+W num servidor levaria a uma aba escondida (Invoke-WPFTab seleciona pelo índice,
+# não pela visibilidade) e o usuário ficaria numa tela sem botão de volta. O Handled = $true fica
+# nos três de qualquer jeito: a tecla foi tratada, mesmo quando a decisão é não ir a lugar nenhum.
 $src = Replace-Once $src '            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab' @'
-            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
-            "J" { Invoke-WPFButton "WPFTab7BT"; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
+            "W" { if (-not $sync.IsServer) { Invoke-WPFButton "WPFTab5BT" }; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
+            "J" { if (-not $sync.IsServer) { Invoke-WPFButton "WPFTab7BT" }; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
             "D" { Invoke-WPFButton "WPFTab8BT"; $keyEventArgs.Handled = $true } # WinForge: aba Diagnóstico
-            "S" { Invoke-WPFButton "WPFTab9BT"; $keyEventArgs.Handled = $true } # WinForge: aba Servidor
+            "S" { if ($sync.IsServer) { Invoke-WPFButton "WPFTab9BT" }; $keyEventArgs.Handled = $true } # WinForge: aba Servidor
 '@.TrimEnd() "alt+j"
 
 # ---------------------------------------------------------------- botões: lookup em tweaks + novos casos
@@ -620,14 +624,14 @@ $src = Replace-Once $src @'
     $buttonConfig = $null
     if ($sync.configs.feature.$Button) {
         $buttonConfig = $sync.configs.feature.$Button
-    } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button" -and $Button -notlike "WPFWFSrv*") {
+    } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button" -and $Button -notlike "WPFWFSrv*" -and $Button -notlike "WPFWFAd*") {
         # WinForge: botões definidos na config de tweaks (aba Jogos)
         $buttonConfig = $sync.configs.tweaks.$Button
     }
-    # Os botões da aba Servidor (WPFWFSrv*) ficam de fora de propósito: eles declaram
-    # "function": "Invoke-WinForgeServerCommand" só para a config dizer quem responde por eles,
-    # mas o caminho acima chama a função SEM argumento nenhum - e ela precisa do -Name para saber
-    # qual comando rodar. Quem despacha esses botões é o switch, com o -Name explícito por caso.
+    # Os botões da aba Servidor (WPFWFSrv*, WPFWFAd*) ficam de fora de propósito: este caminho chama
+    # $buttonConfig.function SEM argumento nenhum, e as funções deles precisam do -Name para saber
+    # qual comando rodar. Quem despacha esses botões é o switch abaixo, com o -Name explícito por
+    # caso - por isso a config deles também não declara "function": seria uma chave morta.
     if ($buttonConfig) {
 
 '@ "button lookup"
@@ -781,7 +785,7 @@ if ($SelfTest) {
     if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
-    if (@($wbServerTab.PSObject.Properties).Count -ne 11) { Write-Host "  [ERRO] aba Servidor: esperado 11 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbServerTab.PSObject.Properties).Count -ne 18) { Write-Host "  [ERRO] aba Servidor: esperado 18 entradas" -ForegroundColor Red; $wbErrors++ }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -919,6 +923,49 @@ if ($SelfTest) {
     Write-Host "    recomendar : $(@($wbRules.Recommended.Keys) -join ', ')"
     Write-Host "    evitar     : $(@($wbRules.Discouraged.Keys) -join ', ')"
     foreach ($wbInfo in @($wbRules.Infos)) { Write-Host "    info       : $wbInfo" }
+    # ---------------------------------------------------------------- IIS: backup dos valores anteriores
+    # O backup é o que torna os itens de IIS reversíveis: sem arquivo, "Desfazer" não tem para onde
+    # voltar. Numa máquina sem IIS dá para provar duas coisas, e são as duas cobradas aqui: o
+    # round-trip do arquivo (numa raiz temporária, nunca em %ProgramData%) e a recusa limpa de
+    # Invoke-WinForgeIisTweak quando o módulo WebAdministration não existe.
+    $wbIisRoot = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup'
+    try {
+        if (Test-Path $wbIisRoot) { Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        $wbIisFile = New-WinForgeIisSnapshot -Name 'SelfTest' -Values @{ 'pool:DefaultAppPool:startMode' = 'OnDemand' } -Root $wbIisRoot
+        if (-not $wbIisFile -or -not (Test-Path $wbIisFile)) { Write-Host "  [ERRO] IIS: New-WinForgeIisSnapshot não gravou arquivo ('$wbIisFile')" -ForegroundColor Red; $wbErrors++ }
+        $wbIisSnap = Get-WinForgeIisSnapshot -Name 'SelfTest' -Root $wbIisRoot
+        if ($null -eq $wbIisSnap) { Write-Host "  [ERRO] IIS: Get-WinForgeIisSnapshot não achou o backup recém-gravado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wbIisSnap.Values['pool:DefaultAppPool:startMode'] -ne 'OnDemand') { Write-Host "  [ERRO] IIS: valor do backup veio '$($wbIisSnap.Values['pool:DefaultAppPool:startMode'])', esperado 'OnDemand'" -ForegroundColor Red; $wbErrors++ }
+        # O nome do arquivo carrega o horário com precisão de segundo: sem esperar 1 s, o segundo
+        # backup cairia no MESMO arquivo e "o mais novo vence" passaria sem ser testado.
+        Start-Sleep -Seconds 1
+        $wbIisFile2 = New-WinForgeIisSnapshot -Name 'SelfTest' -Values @{ 'pool:DefaultAppPool:startMode' = 'AlwaysRunning' } -Root $wbIisRoot
+        if ($wbIisFile2 -eq $wbIisFile) { Write-Host "  [ERRO] IIS: o segundo backup sobrescreveu o primeiro ($wbIisFile2)" -ForegroundColor Red; $wbErrors++ }
+        $wbIisNovo = Get-WinForgeIisSnapshot -Name 'SelfTest' -Root $wbIisRoot
+        if ($null -eq $wbIisNovo -or $wbIisNovo.Values['pool:DefaultAppPool:startMode'] -ne 'AlwaysRunning') { Write-Host "  [ERRO] IIS: o backup mais novo deveria vencer (veio '$($wbIisNovo.Values['pool:DefaultAppPool:startMode'])')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  IIS: backup em $(Split-Path -Leaf $wbIisFile2) | round-trip OK, o mais novo vence"
+    } catch {
+        Write-Host "  [ERRO] IIS (backup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path (Split-Path -Parent $wbIisRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # Sem IIS instalado (todo cliente e boa parte dos servidores), aplicar um item de IIS não pode
+    # estourar: tem de sair 0 alteração e um motivo que diga que foi o IIS que faltou.
+    if (-not (Test-WinForgeIisAvailable)) {
+        try {
+            $wbIisRes = Invoke-WinForgeIisTweak -Name AlwaysRunning
+            if ($null -eq $wbIisRes) { Write-Host "  [ERRO] IIS ausente: Invoke-WinForgeIisTweak não devolveu resultado" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ($wbIisRes.Changed -ne 0) { Write-Host "  [ERRO] IIS ausente: esperado Changed = 0, veio $($wbIisRes.Changed)" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wbIisRes.Skipped -notmatch 'IIS') { Write-Host "  [ERRO] IIS ausente: o motivo não cita o IIS ('$($wbIisRes.Skipped)')" -ForegroundColor Red; $wbErrors++ }
+                Write-Host "  IIS ausente: recusa limpa -> $($wbIisRes.Skipped)"
+            }
+        } catch {
+            Write-Host "  [ERRO] IIS ausente: Invoke-WinForgeIisTweak lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+        }
+    } else {
+        Write-Host "  IIS presente: teste de recusa pulado (o módulo WebAdministration existe nesta máquina)"
+    }
     if ((ConvertTo-WinForgeNvidiaVersion '32.0.16.1656') -ne '616.56' -or (ConvertTo-WinForgeNvidiaVersion '32.0.15.6636') -ne '566.36') { Write-Host "  [ERRO] ConvertTo-WinForgeNvidiaVersion" -ForegroundColor Red; $wbErrors++ }
     # Consulta de drivers: a parte que não depende de rede roda sempre.
     foreach ($wbPair in @(@('NVIDIA GeForce RTX 3070', '30'), @('NVIDIA GeForce GTX 1660 SUPER', '16'), @('NVIDIA GeForce GTX 970M', '900M'), @('NVIDIA GeForce MX450', 'MX400'))) {
@@ -1020,6 +1067,14 @@ if ($SelfTest) {
             if ($sync.IsServer) {
                 if ($wfSrvCaixas -lt 8) { Write-Host "  [ERRO] aba Servidor: esperado ao menos 8 caixas no servidor, veio $wfSrvCaixas" -ForegroundColor Red; $wbErrors++ }
                 if ($wfSrvGrid.Children.Count -eq 0) { Write-Host "  [ERRO] aba Servidor: painel vazio no servidor" -ForegroundColor Red; $wbErrors++ }
+                # As 7 entradas de IIS têm role "iis": num servidor sem o papel elas somem, e é isso
+                # que se quer. A trava só vale quando o papel está presente - sem ela, o SelfTest
+                # "de servidor com IIS" passaria com a categoria IIS inteira invisível.
+                if ('iis' -in @($sync.ServerRoles)) {
+                    $wfIisCaixas = @($wfSrvKeys | Where-Object { $_ -like 'WPFTweaksWFIis*' -and $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
+                    if ($wfIisCaixas -ne 7) { Write-Host "  [ERRO] aba Servidor: esperado 7 caixas de IIS com o papel IIS presente, veio $wfIisCaixas" -ForegroundColor Red; $wbErrors++ }
+                    Write-Host "  Aba Servidor (IIS): $wfIisCaixas caixa(s) de IIS com o papel presente"
+                }
             } else {
                 if ($wfSrvCaixas -ne 0) { Write-Host "  [ERRO] aba Servidor: $wfSrvCaixas caixa(s) criada(s) num cliente, esperado 0" -ForegroundColor Red; $wbErrors++ }
                 if ($wfSrvGrid.Children.Count -ne 0) { Write-Host "  [ERRO] aba Servidor: painel com $($wfSrvGrid.Children.Count) coluna(s) num cliente, esperado 0" -ForegroundColor Red; $wbErrors++ }

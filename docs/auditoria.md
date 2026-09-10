@@ -11,9 +11,9 @@ a aplica ao carregar as configurações:
   da descrição, e nunca entra em preset.
 - **Removido** — saldo negativo; a entrada e qualquer referência a ela em preset somem.
 
-Total: **136 Seguro** · **29 Cuidado** · **2 Removido**.
+Total: **142 Seguro** · **30 Cuidado** · **2 Removido**.
 
-## Seguro (136)
+## Seguro (142)
 
 As chaves `WPFTweaksWBGame<Jogo>` (68 entradas, contadas a partir da lista de jogos) são a
 prioridade de CPU por jogo (IFEO): uma chave de registro por executável, removida ao desfazer.
@@ -148,6 +148,12 @@ prioridade de CPU por jogo (IFEO): uma chave de registro por executável, removi
 | `WPFTweaksWBSearchSuggestions` | Pesquisa - Sem histórico, sem sugestões da web e sem conteúdo da nuvem | — |
 | `WPFTweaksWBServicesSafe` | Serviços dispensáveis - Desativar (seleção segura) | — |
 | `WPFTweaksWBWin32PrioritySeparation` | Prioridade do programa em primeiro plano (Win32PrioritySeparation = 0x26) | — |
+| `WPFTweaksWFIisAlwaysRunning` | Pools: iniciar sempre (AlwaysRunning) | — |
+| `WPFTweaksWFIisCompression` | Compressão estática e dinâmica | — |
+| `WPFTweaksWFIisConcurrency` | Fila e requisições concorrentes (5000) | — |
+| `WPFTweaksWFIisNoIdleTimeout` | Pools: sem tempo limite de ociosidade | — |
+| `WPFTweaksWFIisOutputCache` | Cache de saída e cache de kernel | — |
+| `WPFTweaksWFIisPreload` | Sites: pré-carregar (preloadEnabled) | — |
 | `WPFTweaksWFSrvHighPerf` | Plano de energia Alto desempenho | — |
 | `WPFTweaksWFSrvNoServerManager` | Não abrir o Gerenciador do Servidor no logon | — |
 | `WPFTweaksWFSrvRdpNla` | RDP: exigir Autenticação no Nível da Rede e tempo limite de sessão ociosa (30 min) | — |
@@ -157,7 +163,7 @@ prioridade de CPU por jogo (IFEO): uma chave de registro por executável, removi
 | `WPFTweaksWPBT` | Windows Platform Binary Table (WPBT) - Disable | — |
 | `WPFTweaksWidget` | Widgets - Remove | — |
 
-## Cuidado (29)
+## Cuidado (30)
 
 O motivo abaixo é o mesmo texto que aparece como `CUIDADO: ...` no início da descrição do item
 na interface.
@@ -190,6 +196,7 @@ na interface.
 | `WPFTweaksWBTimerBcdedit` | Timer de alta precisão via bcdedit (CUIDADO) | altera timer do kernel via bcdedit; pode causar instabilidade, stutter ou consumo maior; exige reinício |
 | `WPFTweaksWBVBS` | VBS / Isolamento de Núcleo (HVCI) - Desativar | reduz a segurança contra malware de kernel (VBS/HVCI); ganho de FPS em alguns jogos; exige reinício |
 | `WPFTweaksWBXboxServices` | Serviços Xbox - Desativar | quebra login no app Xbox, Game Pass, Minecraft Bedrock e jogos com conta Xbox |
+| `WPFTweaksWFIisMemoryRecycling` | Pools: reciclar por memória, não por tempo | recicla o pool quando passa do limite de memória privada calculado (60% da RAM dividido pelos pools); pools com muitos dados em memória podem reciclar mais que hoje |
 | `WPFTweaksWFSrvIEESC` | Desativar a Configuração de Segurança Reforçada do IE (administradores) | reduz a proteção do navegador para administradores no servidor; use só se administra pelo navegador local |
 | `WPFTweaksWFSrvSmbSigning` | SMB: exigir assinatura | custo de CPU em servidores de arquivos e clientes antigos sem assinatura param de acessar |
 | `WPFTweaksWindowsAI` | Windows AI - Disable And Remove | remove o Copilot/Recall e componentes de IA (pacote CoreAI) do sistema; reinstalar exige atualização do Windows |
