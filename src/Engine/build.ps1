@@ -1096,7 +1096,10 @@ if ($SelfTest) {
         # proteção que impede um usuário comum de plantar um JSON que o Desfazer aplicaria elevado.
         $wbIisAcl = Get-Acl -LiteralPath $wbIisRoot
         if (-not $wbIisAcl.AreAccessRulesProtected) { Write-Host "  [ERRO] IIS: a pasta de backup nasceu herdando permissões" -ForegroundColor Red; $wbErrors++ }
-        $wbIisTrust = Test-WinForgeSnapshotRootTrusted -Root $wbIisRoot
+        # -ExplicitRoot porque esta pasta é a do teste, em %TEMP%: sem elevação ela nasce com a
+        # identidade atual como dona, e é justamente isso que a pasta PADRÃO recusa (ver o bloco de
+        # segurança mais abaixo, que cobra a recusa na mesma pasta sem esta chave).
+        $wbIisTrust = Test-WinForgeSnapshotRootTrusted -Root $wbIisRoot -ExplicitRoot
         if (-not $wbIisTrust.Trusted) { Write-Host "  [ERRO] IIS: a pasta recém-criada não passou na checagem de confiança ('$($wbIisTrust.Reason)')" -ForegroundColor Red; $wbErrors++ }
         # Pasta com escrita para 'Todos' (Everyone, S-1-1-0) é o cenário do ataque: tem de ser recusada.
         $wbIisRootMau = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup-aberto'
@@ -1145,6 +1148,117 @@ if ($SelfTest) {
         Write-Host "  [ERRO] IIS (backup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
         Remove-Item -Path (Split-Path -Parent $wbIisRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- backup: forma do valor, dono da pasta, crivo inteiro
+    # Segunda rodada de revisão de segurança. Os três buracos fechados aqui tinham o mesmo fim -
+    # escrita elevada a partir de um arquivo que outra conta plantou:
+    #   1. o valor do backup virava TEXTO DE COMANDO ('powercfg /setactive <valor do JSON>'), então
+    #      'x; algo' era compilado e executado como PowerShell no Desfazer;
+    #   2. o crivo de 'server:' aceitava a forma curta ('server:<atributo>'), e com ela QUALQUER
+    #      seção do applicationHost.config passava pelo Desfazer de um item que só mexe em uma;
+    #   3. a pasta padrão aceitava a conta atual como DONA, e dono guarda WRITE_DAC - um processo de
+    #      integridade média da mesma conta de administrador criava a pasta antes da primeira
+    #      execução, escrevia uma DACL de aparência correta e passava em todas as checagens.
+    foreach ($wbSecCaso in @(
+        @('ActiveSchemeGuid', 'x; echo pwned', $false),
+        @('ActiveSchemeGuid', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c', $true),
+        @('ActiveSchemeGuid', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c; calc', $false),
+        @('AutoTuningLevelLocal', 'Normal', $true),
+        @('AutoTuningLevelLocal', 'Normal; calc', $false),
+        @('EnableSMB1Protocol', 'False', $true),
+        @('EnableSMB1Protocol', 'False; calc', $false),
+        @('MaxIdleTime', '1800000', $true),
+        @('MaxIdleTime', '<RemoveEntry>', $true),
+        @('MaxIdleTime', '0; rm -rf', $false),
+        @('pool:A:startMode', 'OnDemand', $true),
+        @('pool:A:startMode', 'OnDemand & calc', $false),
+        @('pool:A:processModel.idleTimeout', '00:20:00', $true),
+        @('pool:A:processModel.idleTimeout', '30.00:00:00', $true),
+        @('pool:A:processModel.idleTimeout', '00:20:00; calc', $false),
+        @('pool:A:queueLength', '5000', $true),
+        @('pool:A:queueLength', '5000; calc', $false),
+        @('server:system.webServer/caching:enabled', 'True', $true),
+        @('server:system.webServer/caching:enabled', 'True; calc', $false),
+        @('pool:A:propriedadeQueNinguemEscreve', 'x', $false)
+    )) {
+        $wbSecVeio = [bool](Test-WinForgeSnapshotValue -Key $wbSecCaso[0] -Value $wbSecCaso[1])
+        if ($wbSecVeio -ne [bool]$wbSecCaso[2]) { Write-Host "  [ERRO] Backup (forma do valor): '$($wbSecCaso[0])' = '$($wbSecCaso[1])' deveria dar $($wbSecCaso[2]), veio $wbSecVeio" -ForegroundColor Red; $wbErrors++ }
+    }
+    # A recusa mora TAMBÉM no ponto de escrita: nada chega ao powercfg nem ao IIS com valor plantado.
+    foreach ($wbSecEscrita in @(
+        @('Servidor', { Set-WinForgeServerSettingValue -Key 'ActiveSchemeGuid' -Value 'x; echo pwned' }),
+        @('Servidor', { Set-WinForgeServerSettingValue -Key 'AutoTuningLevelLocal' -Value 'Normal; calc' }),
+        @('IIS', { Set-WinForgeIisValue -Key 'pool:A:startMode' -Value 'OnDemand; calc' })
+    )) {
+        $wbSecMsg = ''
+        try { & $wbSecEscrita[1] } catch { $wbSecMsg = [string]$_.Exception.Message }
+        if ($wbSecMsg -notmatch 'forma esperada') { Write-Host "  [ERRO] Backup ($($wbSecEscrita[0])): a escrita com valor plantado deveria ser recusada pela forma ('$wbSecMsg')" -ForegroundColor Red; $wbErrors++ }
+    }
+    # O crivo de 'server:' agora cobra a chave INTEIRA: seção e atributo.
+    $wbSecOc = Get-WinForgeIisAllowedKey -Name OutputCache
+    if (Test-WinForgeSnapshotKey -Key 'server:system.webServer/directoryBrowse:enabled' -AllowedKey $wbSecOc) { Write-Host "  [ERRO] Backup (crivo): OutputCache aceitou 'server:system.webServer/directoryBrowse:enabled' (forma curta)" -ForegroundColor Red; $wbErrors++ }
+    if (-not (Test-WinForgeSnapshotKey -Key 'server:system.webServer/caching:enabled' -AllowedKey $wbSecOc)) { Write-Host "  [ERRO] Backup (crivo): OutputCache recusou a própria chave 'server:system.webServer/caching:enabled'" -ForegroundColor Red; $wbErrors++ }
+    $wbSecRoot = Join-Path $env:TEMP 'WinForge-SelfTest\seguranca'
+    try {
+        if (Test-Path $wbSecRoot) { Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        # Backup plantado com um GUID que não é GUID: a chave sai da leitura (vai para Ignored) e o
+        # backup BOM gravado depois continua respondendo por ela - a tranca não pode comer o bom.
+        New-WinForgeSnapshot -Name 'setting-HighPerf' -Values @{ 'ActiveSchemeGuid' = 'x; echo pwned' } -Root $wbSecRoot | Out-Null
+        Start-Sleep -Milliseconds 20
+        New-WinForgeSnapshot -Name 'setting-HighPerf' -Values @{ 'ActiveSchemeGuid' = '381b4222-f694-41f0-9685-ff5bb260df2e' } -Root $wbSecRoot | Out-Null
+        $wbSecLido = Get-WinForgeSnapshot -Name 'setting-HighPerf' -Root $wbSecRoot -AllowedKey @{ 'ActiveSchemeGuid' = $true }
+        if ($null -eq $wbSecLido) { Write-Host "  [ERRO] Backup (valor plantado): Get-WinForgeSnapshot não leu nada" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if (@($wbSecLido.Ignored) -notcontains 'ActiveSchemeGuid') { Write-Host "  [ERRO] Backup (valor plantado): 'ActiveSchemeGuid' inválido não entrou na lista de recusados" -ForegroundColor Red; $wbErrors++ }
+            if ($wbSecLido.Values['ActiveSchemeGuid'] -ne '381b4222-f694-41f0-9685-ff5bb260df2e') { Write-Host "  [ERRO] Backup (valor plantado): esperado o GUID válido do segundo backup, veio '$($wbSecLido.Values['ActiveSchemeGuid'])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Desfazer que falhou não arquiva: o arquivo é a única cópia do valor anterior da chave.
+        $wbSecArq = New-WinForgeSnapshot -Name 'setting-RdpNla' -Values @{ 'MaxIdleTime' = '1800000' } -Root $wbSecRoot
+        if ((Complete-WinForgeSnapshot -Paths @($wbSecArq) -FailedKey @('MaxIdleTime')) -ne 0) { Write-Host "  [ERRO] Backup (arquivamento): com chave que falhou, nada podia ser arquivado" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wbSecArq)) { Write-Host "  [ERRO] Backup (arquivamento): o arquivo sumiu mesmo com uma chave que falhou" -ForegroundColor Red; $wbErrors++ }
+        if ((Complete-WinForgeSnapshot -Paths @($wbSecArq)) -ne 1) { Write-Host "  [ERRO] Backup (arquivamento): sem falha, o arquivo deveria ser arquivado" -ForegroundColor Red; $wbErrors++ }
+        # Dono da pasta: a MESMA pasta passa com -Root explícito (o caminho do teste) e é recusada
+        # pelas regras da pasta padrão. É a prova de que %ProgramData%\WinForge\iis-backup recusa
+        # pasta de usuário - sem escrever nada em %ProgramData%.
+        $wbSecEu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wbSecSystem = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+        $wbSecAdmin = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+        if ($wbSecEu.Value -eq $wbSecSystem.Value -or $wbSecEu.Value -eq $wbSecAdmin.Value) {
+            Write-Host "  Backup (dono): teste pulado - este build roda como SYSTEM ou como o próprio grupo Administradores"
+        } else {
+            $wbSecDono = Join-Path $wbSecRoot 'dono-usuario'
+            New-Item -ItemType Directory -Path $wbSecDono -Force | Out-Null
+            $wbSecAcl = New-Object System.Security.AccessControl.DirectorySecurity
+            $wbSecAcl.SetAccessRuleProtection($true, $false)
+            foreach ($wbSecSid in @($wbSecSystem, $wbSecAdmin, $wbSecEu)) {
+                $wbSecAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $wbSecSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            }
+            $wbSecAcl.SetOwner($wbSecEu)
+            Set-Acl -LiteralPath $wbSecDono -AclObject $wbSecAcl
+            $wbSecComRoot = Test-WinForgeSnapshotRootTrusted -Root $wbSecDono -ExplicitRoot
+            if (-not $wbSecComRoot.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta de teste com -Root explícito deveria passar ('$($wbSecComRoot.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wbSecPadrao = Test-WinForgeSnapshotRootTrusted -Root $wbSecDono
+            if ($wbSecPadrao.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta com dono fora de SYSTEM/Administradores passou nas regras da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wbSecPadrao.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Backup (dono): o motivo da recusa não fala do dono ('$($wbSecPadrao.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Aplicar numa pasta que qualquer um escreve: recusa antes de tudo, sem arquivo e sem
+        # alteração. -CaptureOnly porque é o único caminho de aplicação que roda num cliente, e ele
+        # só LÊ o registro do RDP.
+        $wbSecAberto = Join-Path $wbSecRoot 'aberta'
+        New-Item -ItemType Directory -Path $wbSecAberto -Force | Out-Null
+        $wbSecAclA = Get-Acl -LiteralPath $wbSecAberto
+        $wbSecAclA.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $wbSecAberto -AclObject $wbSecAclA
+        $wbSecCap = Invoke-WinForgeServerSetting -Name 'RdpNla' -CaptureOnly -Root $wbSecAberto
+        if ($wbSecCap.Changed -ne 0) { Write-Host "  [ERRO] Backup (pasta aberta): a captura alterou $($wbSecCap.Changed) valor(es)" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wbSecCap.Skipped -notmatch 'não confiável') { Write-Host "  [ERRO] Backup (pasta aberta): o motivo não diz que a pasta não é confiável ('$($wbSecCap.Skipped)')" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wbSecCap.Snapshot) { Write-Host "  [ERRO] Backup (pasta aberta): gravou backup numa pasta não confiável ('$($wbSecCap.Snapshot)')" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wbSecAberto -Filter '*.json' -ErrorAction SilentlyContinue).Count -ne 0) { Write-Host "  [ERRO] Backup (pasta aberta): sobrou arquivo JSON na pasta não confiável" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Backup (segurança): forma do valor cobrada na leitura e na escrita, crivo 'server:' inteiro, pasta padrão só de SYSTEM/Administradores, aplicação recusada em pasta aberta"
+    } catch {
+        Write-Host "  [ERRO] Backup (segurança): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     # O crivo do Desfazer tem de dizer o mesmo que o plano do item. Só dá para cobrar isso nos dois
     # itens de nível de servidor: o plano dos itens de pool/site precisa do provedor IIS:\ para

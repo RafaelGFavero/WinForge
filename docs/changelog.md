@@ -30,6 +30,15 @@
   Do arquivo só volta o que aquele item de fato escreve; qualquer outra chave é ignorada e vai para
   o log. Sem isso, um JSON plantado na pasta viraria escrita arbitrária no `applicationHost.config`
   no primeiro "Desfazer".
+- A checagem da pasta de backup ficou mais dura, e agora vale também na hora de **aplicar**: a pasta
+  padrão (`%ProgramData%\WinForge\iis-backup`) só é aceita se pertencer ao SYSTEM ou ao grupo
+  Administradores — antes a conta atual também servia, e um programa comum da mesma conta podia criar
+  a pasta antes da primeira execução e escolher o que o "Desfazer" aplicaria depois como
+  administrador. Pasta que não passa faz a aplicação ser recusada inteira, sem alterar nada no
+  servidor. Cada arquivo é conferido antes de ser lido, e todo valor que vem do backup tem de ter a
+  forma da propriedade dele (GUID, `True`/`False`, número, `hh:mm:ss`): nenhum valor de arquivo vira
+  texto de comando — o `powercfg` recebe o plano de energia como argumento. Um "Desfazer" em que
+  alguma chave falhou mantém os arquivos de backup para nova tentativa, em vez de arquivá-los.
 - Os ajustes de servidor que não moram no registro — SMB1, assinatura SMB, plano de energia, ajuste
   automático TCP e o item de RDP — passaram a **ler e guardar o estado atual antes de mudar**, no
   mesmo backup. "Desfazer" devolve o que estava lá em vez de escrever um valor fixo: num servidor

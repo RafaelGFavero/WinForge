@@ -233,6 +233,12 @@ function Invoke-WinForgeCommandText {
            saída normal. O .ToString() do registro é exatamente a linha que a ferramenta escreveu.
         2. $LASTEXITCODE é zerado ANTES e lido logo depois: ele é global e sobrevive à chamada
            anterior, então sem zerar um pipeline de cmdlet devolveria o código de outro comando.
+
+        REGRA: o texto é COMPILADO como PowerShell. Só entram aqui literais escritos no próprio
+        programa - hoje, a tabela de Get-WinForgeServerCommand. Nada que tenha vindo de um arquivo
+        de backup, do registro ou da saída de outro comando pode ser concatenado neste texto: seria
+        execução de código com a elevação do WinForge. Para isso existe
+        Invoke-WinForgeNativeCommand -FilePath/-Arguments, que passa cada argumento inteiro.
     .OUTPUTS
         @{ Text = <string>; ExitCode = <int> }.
     #>
@@ -272,10 +278,29 @@ function Invoke-WinForgeNativeCommand {
 
         Só para EXECUTÁVEL: é o w32tm/dcdiag/repadmin que escreve em OEM. Pipeline de cmdlet passa
         por Invoke-WinForgeCommandText, que não mexe na code page nem em código de saída.
+    .PARAMETER Command
+        Texto de comando, montado por [scriptblock]::Create. SÓ para literais do próprio programa
+        (a tabela de Get-WinForgeServerCommand). Dado que veio de arquivo, registro ou saída de
+        outro comando NUNCA entra aqui: use -FilePath/-Arguments.
+    .PARAMETER FilePath
+        Executável a chamar. Os argumentos vão num VETOR, um a um, sem passar por interpretador:
+        é o que impede um valor de backup ('x; algo-perigoso') de virar comando. Um GUID plantado
+        no JSON chega ao powercfg como um argumento só - inválido, e ele reclama.
     .OUTPUTS
         @{ Text = <string>; ExitCode = <int> }.
     #>
-    param([Parameter(Mandatory)][string]$Command)
+    param(
+        [string]$Command,
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Command) -and [string]::IsNullOrWhiteSpace($FilePath)) {
+        throw "Invoke-WinForgeNativeCommand precisa de -Command ou de -FilePath."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Command) -and -not [string]::IsNullOrWhiteSpace($FilePath)) {
+        throw "Invoke-WinForgeNativeCommand aceita -Command OU -FilePath, não os dois."
+    }
 
     $encodingAnterior = $null
     $texto = ''
@@ -293,9 +318,17 @@ function Invoke-WinForgeNativeCommand {
         } catch {
             $encodingAnterior = $null
         }
-        $bruto = Invoke-WinForgeCommandText -Command $Command
-        $texto = $bruto.Text
-        $codigo = $bruto.ExitCode
+        if (-not [string]::IsNullOrWhiteSpace($FilePath)) {
+            $global:LASTEXITCODE = 0
+            $texto = [string](& $FilePath @Arguments 2>&1 |
+                ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } } |
+                Out-String -Width 4096)
+            $codigo = $global:LASTEXITCODE
+        } else {
+            $bruto = Invoke-WinForgeCommandText -Command $Command
+            $texto = $bruto.Text
+            $codigo = $bruto.ExitCode
+        }
     } finally {
         if ($null -ne $encodingAnterior) { try { [Console]::OutputEncoding = $encodingAnterior } catch { } }
         if ($preso) { try { $mutex.ReleaseMutex() } catch { } }
@@ -658,27 +691,50 @@ function Get-WinForgeSnapshotRoot {
 function Get-WinForgeSnapshotTrustedSid {
     <#
     .SYNOPSIS
-        Os SIDs em que o backup pode confiar: SYSTEM, o grupo Administradores, CREATOR OWNER e a
-        própria identidade que está rodando o WinForge.
+        Os SIDs em que a pasta de backup pode confiar. São DUAS listas, e a diferença entre elas é o
+        que fecha o furo do UAC.
     .DESCRIPTION
-        A identidade atual entra na lista porque uma pasta que pertence a quem está desfazendo não é
-        caminho de elevação: essa conta já pode fazer tudo o que o Desfazer faz. O que a lista
-        rejeita é o cenário real - um usuário comum que cria %ProgramData%\WinForge\iis-backup antes
-        da primeira execução, vira dono dela e passa a poder plantar um JSON que o WinForge aplicaria
-        depois como administrador.
+        DONO (-Owner): só SYSTEM (S-1-5-18) e BUILTIN\Administradores (S-1-5-32-544). O dono guarda
+        WRITE_DAC implícito - pode devolver a si mesmo a permissão de escrita a qualquer momento -,
+        então dono é escrita. Aceitar a identidade atual como dona da pasta PADRÃO
+        (%ProgramData%\WinForge\iis-backup) reabriria o ataque: um processo de integridade MÉDIA da
+        MESMA conta de administrador cria a pasta antes da primeira execução, vira dono dela, escreve
+        uma DACL bonita (SYSTEM, Administradores e ele mesmo) e passa em todas as checagens - e o
+        Desfazer elevado depois aplica o JSON que ele plantou. Medium -> High é exatamente a fronteira
+        que o UAC existe para separar.
+
+        Por isso a identidade atual só entra quando quem chamou passou um -Root explícito
+        (-ExplicitRoot): aí o caminho não é o da máquina, é o do -SelfTest numa pasta em %TEMP%.
+
+        PERMISSÃO (padrão): as mesmas duas, mais CREATOR OWNER e OWNER RIGHTS, que são ACEs de molde
+        (só valem para quem vier a criar objeto lá dentro, e criar exige escrita, que ninguém de fora
+        das duas tem).
+    .PARAMETER Owner
+        Devolve a lista de DONO (mais curta), e não a de permissão.
+    .PARAMETER ExplicitRoot
+        Quem chamou passou -Root: a identidade atual entra nas duas listas.
     .OUTPUTS
         Hashtable com os SIDs (texto) como chave.
     #>
+    param(
+        [switch]$Owner,
+        [switch]$ExplicitRoot
+    )
+
+    $tipos = @('LocalSystemSid', 'BuiltinAdministratorsSid')
+    if (-not $Owner) { $tipos += 'CreatorOwnerSid' }
     $sids = @{}
-    foreach ($tipo in @('LocalSystemSid', 'BuiltinAdministratorsSid', 'CreatorOwnerSid')) {
+    foreach ($tipo in $tipos) {
         try {
             $sid = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::$tipo), $null
             $sids[$sid.Value] = $true
         } catch { }
     }
     # S-1-3-4 (OWNER RIGHTS) não tem WellKnownSidType em todas as versões do .NET Framework.
-    $sids['S-1-3-4'] = $true
-    try { $sids[([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)] = $true } catch { }
+    if (-not $Owner) { $sids['S-1-3-4'] = $true }
+    if ($ExplicitRoot) {
+        try { $sids[([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)] = $true } catch { }
+    }
     return $sids
 }
 
@@ -690,17 +746,27 @@ function Test-WinForgeSnapshotRootTrusted {
         O Desfazer roda elevado e reescreve o que o arquivo mandar. Três coisas desqualificam a pasta:
 
         1. Ser um ponto de reanálise (junção/link): o caminho conferido não seria o caminho lido.
-        2. Ter como dono alguém fora de SYSTEM, Administradores ou a identidade atual - dono guarda
-           WRITE_DAC implícito e pode devolver a si mesmo a permissão de escrita a qualquer momento.
-        3. Ter uma ACE de permissão que dê escrita, modificação ou controle total a um SID fora dessa
-           mesma lista.
+        2. Ter como dono alguém fora da lista de DONO - que na pasta padrão é SYSTEM e
+           Administradores, e só isso. Dono guarda WRITE_DAC implícito e pode devolver a si mesmo a
+           permissão de escrita a qualquer momento, então dono é escrita.
+        3. Ter uma ACE de permissão que dê escrita, modificação ou controle total a um SID fora da
+           lista de permissão.
 
         Pasta inexistente é confiável: não há nada para ler, e quem a criar será o próprio WinForge,
         com a DACL de New-WinForgeSnapshotRoot.
+    .PARAMETER ExplicitRoot
+        Quem chamou passou um -Root próprio (na prática, o -SelfTest com uma pasta em %TEMP%): a
+        identidade atual pode ser dona. SEM esta chave valem as regras da pasta padrão
+        (%ProgramData%\WinForge\iis-backup), onde dono fora de SYSTEM/Administradores é recusa - é o
+        que impede um processo de integridade média da mesma conta de plantar a pasta antes da
+        primeira execução.
     .OUTPUTS
         @{ Trusted = <bool>; Reason = <string> }.
     #>
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$ExplicitRoot
+    )
 
     if (-not (Test-Path -LiteralPath $Root)) { return @{ Trusted = $true; Reason = '' } }
     try {
@@ -709,22 +775,27 @@ function Test-WinForgeSnapshotRootTrusted {
             return @{ Trusted = $false; Reason = "'$Root' é um ponto de reanálise (junção ou link)" }
         }
         $acl = Get-Acl -LiteralPath $Root -ErrorAction Stop
-        $confiaveis = Get-WinForgeSnapshotTrustedSid
+        $confiaveis = Get-WinForgeSnapshotTrustedSid -ExplicitRoot:$ExplicitRoot
+        $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot:$ExplicitRoot
         $dono = $null
         try { $dono = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { }
         if ($null -eq $dono) { return @{ Trusted = $false; Reason = "não foi possível ler o dono de '$Root'" } }
-        if (-not $confiaveis.ContainsKey($dono.Value)) {
+        if (-not $donos.ContainsKey($dono.Value)) {
             $nome = $dono.Value
             try { $nome = $dono.Translate([System.Security.Principal.NTAccount]).Value } catch { }
             return @{ Trusted = $false; Reason = "'$Root' pertence a '$nome', fora de SYSTEM/Administradores" }
         }
-        $perigo = [System.Security.AccessControl.FileSystemRights]::Write -bor
-                  [System.Security.AccessControl.FileSystemRights]::Modify -bor
-                  [System.Security.AccessControl.FileSystemRights]::FullControl -bor
-                  [System.Security.AccessControl.FileSystemRights]::Delete -bor
-                  [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-                  [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                  [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+        # 0x40000000 (GENERIC_WRITE) e 0x10000000 (GENERIC_ALL) não têm nome em FileSystemRights e
+        # aparecem crus numa ACE gravada por uma API antiga: sem eles, uma ACE de escrita genérica
+        # passaria batida.
+        $perigo = [int][System.Security.AccessControl.FileSystemRights]::Write -bor
+                  [int][System.Security.AccessControl.FileSystemRights]::Modify -bor
+                  [int][System.Security.AccessControl.FileSystemRights]::FullControl -bor
+                  [int][System.Security.AccessControl.FileSystemRights]::Delete -bor
+                  [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                  [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                  [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+                  0x40000000 -bor 0x10000000
         foreach ($ace in $acl.Access) {
             if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
             if (-not ([int]$ace.FileSystemRights -band [int]$perigo)) { continue }
@@ -738,6 +809,47 @@ function Test-WinForgeSnapshotRootTrusted {
         return @{ Trusted = $true; Reason = '' }
     } catch {
         return @{ Trusted = $false; Reason = "não foi possível conferir '$Root': $($_.Exception.Message)" }
+    }
+}
+
+function Test-WinForgeSnapshotFileTrusted {
+    <#
+    .SYNOPSIS
+        Confere o arquivo de backup em si, antes de ele ser lido: dono e ponto de reanálise.
+    .DESCRIPTION
+        A pasta protegida já impede que alguém de fora escreva lá dentro. Esta checagem é a segunda
+        tranca, para o caso de a pasta ter sido protegida DEPOIS de um arquivo estranho já estar lá
+        (ou de um link apontando para fora). Um link é recusado porque o arquivo lido não seria o
+        arquivo conferido.
+
+        Aqui a identidade atual entra na lista de dono mesmo na pasta padrão, e por um motivo
+        prático: o Windows dá ao CRIADOR a propriedade do arquivo (a política "dono padrão dos
+        objetos criados por administradores" vem como "criador do objeto" desde o XP), então os
+        backups que o próprio WinForge grava elevado pertencem à conta do administrador, não ao
+        grupo. Recusá-los seria recusar o backup bom. Quem não pode entrar na pasta continua sem
+        conseguir plantar arquivo nenhum: é a DACL da pasta que responde por isso.
+    .OUTPUTS
+        @{ Trusted = <bool>; Reason = <string> }.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            return @{ Trusted = $false; Reason = "é um ponto de reanálise (link)" }
+        }
+        $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot
+        $dono = $null
+        try { $dono = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { }
+        if ($null -eq $dono) { return @{ Trusted = $false; Reason = "o dono não pôde ser lido" } }
+        if (-not $donos.ContainsKey($dono.Value)) {
+            $nome = $dono.Value
+            try { $nome = $dono.Translate([System.Security.Principal.NTAccount]).Value } catch { }
+            return @{ Trusted = $false; Reason = "pertence a '$nome', fora de SYSTEM/Administradores" }
+        }
+        return @{ Trusted = $true; Reason = '' }
+    } catch {
+        return @{ Trusted = $false; Reason = $_.Exception.Message }
     }
 }
 
@@ -794,6 +906,31 @@ function New-WinForgeSnapshotRoot {
             return (Test-Path -LiteralPath $Root)
         }
     }
+}
+
+function Confirm-WinForgeSnapshotRoot {
+    <#
+    .SYNOPSIS
+        Garante que a pasta de backup existe E é confiável, ANTES de qualquer alteração.
+    .DESCRIPTION
+        New-WinForgeSnapshotRoot só sabia criar: numa pasta que já existia ele devolvia $true sem
+        olhar para ela, e a aplicação gravava o backup ali mesmo - inclusive numa pasta plantada por
+        outra conta. Aplicar assim é o pior dos mundos: o servidor muda e o "Desfazer" passa a ser um
+        arquivo que outra pessoa escreve.
+
+        Então a ordem é esta: não existe -> cria com a DACL protegida; existe -> confere; não passou
+        -> quem chamou RECUSA a aplicação inteira, sem alterar nada.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <pasta> }.
+    #>
+    param([string]$Root)
+
+    $dir = Get-WinForgeSnapshotRoot $Root
+    $explicito = -not [string]::IsNullOrWhiteSpace($Root)
+    if (-not (Test-Path -LiteralPath $dir)) { New-WinForgeSnapshotRoot -Root $dir | Out-Null }
+    $t = Test-WinForgeSnapshotRootTrusted -Root $dir -ExplicitRoot:$explicito
+    if ($t.Trusted) { return @{ Ok = $true; Reason = ''; Path = $dir } }
+    return @{ Ok = $false; Reason = $t.Reason; Path = $dir }
 }
 
 function New-WinForgeSnapshot {
@@ -877,7 +1014,7 @@ function Get-WinForgeSnapshot {
     )
 
     $dir = Get-WinForgeSnapshotRoot $Root
-    $trust = Test-WinForgeSnapshotRootTrusted -Root $dir
+    $trust = Test-WinForgeSnapshotRootTrusted -Root $dir -ExplicitRoot:(-not [string]::IsNullOrWhiteSpace($Root))
     if (-not $trust.Trusted) { return @{ Blocked = $true; Reason = $trust.Reason } }
 
     $files = @(Get-WinForgeSnapshotFile -Name $Name -Root $Root)
@@ -887,6 +1024,13 @@ function Get-WinForgeSnapshot {
     $paths = @()
     $ignored = @()
     foreach ($file in $files) {
+        # O arquivo também é conferido, e antes de ser lido: pasta protegida depois de um arquivo
+        # estranho já estar lá, ou um link apontando para fora, não podem virar Desfazer.
+        $fileTrust = Test-WinForgeSnapshotFileTrusted -Path $file.FullName
+        if (-not $fileTrust.Trusted) {
+            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Backup não confiável, ignorado: $($file.FullName) -> $($fileTrust.Reason)"
+            continue
+        }
         $o = $null
         try { $o = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json } catch {
             Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Backup ilegível, ignorado: $($file.FullName) -> $($_.Exception.Message)"
@@ -909,6 +1053,11 @@ function Get-WinForgeSnapshot {
                 Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Valor de '$($p.Name)' no backup não é texto, ignorado no Desfazer ($($file.Name))."
                 continue
             }
+            if (-not (Test-WinForgeSnapshotValue -Key $p.Name -Value $p.Value)) {
+                $ignored += $p.Name
+                Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Valor de '$($p.Name)' no backup não tem a forma esperada, ignorado no Desfazer: '$([string]$p.Value)' ($($file.Name))."
+                continue
+            }
             $values[$p.Name] = [string]$p.Value
         }
     }
@@ -916,14 +1065,85 @@ function Get-WinForgeSnapshot {
     return @{ Name = $Name; Values = $values; Paths = $paths; Ignored = $ignored; Path = $paths[-1] }
 }
 
+function Test-WinForgeSnapshotValue {
+    <#
+    .SYNOPSIS
+        Diz se o valor lido de um backup tem a FORMA que aquela chave aceita.
+    .DESCRIPTION
+        O crivo de chave (Test-WinForgeSnapshotKey) responde "esta propriedade é minha"; este aqui
+        responde "este texto é um valor de verdade para ela". Faltava o segundo, e faltava caro: um
+        'ActiveSchemeGuid' com 'x; algo-perigoso' era montado num texto de comando e executado
+        elevado no Desfazer. O texto de comando saiu (agora o powercfg recebe o GUID como argumento),
+        mas a forma continua sendo cobrada nos DOIS pontos - ao ler o backup e antes de escrever -
+        porque uma tranca só é uma tranca que alguém remove sem perceber.
+
+        Cada padrão é ancorado nas duas pontas e só descreve o formato real do valor: GUID é
+        hexadecimal com hífen, booleano é True/False, DWORD é dígito, TimeSpan é hh:mm:ss (com o
+        'd.' opcional na frente, que o processModel.idleTimeout usa a partir de um dia), o nível do
+        TCP é um dos cinco nomes que o Windows aceita e o registro pode ainda trazer a sentinela
+        '<RemoveEntry>'. Chave sem padrão conhecido é recusada - o padrão é negar.
+    .OUTPUTS
+        $true se o valor serve.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        $Value
+    )
+
+    if ($Value -isnot [string]) { return $false }
+
+    $prop = $Key
+    if ($Key -match '^(pool|site|server):') {
+        $k = $null
+        try { $k = Split-WinForgeIisKey -Key $Key } catch { return $false }
+        $prop = $k.Property
+    }
+
+    $booleano = '^(True|False)$'
+    $dword    = '^\d{1,10}$'
+    $tempo    = '^(\d{1,5}\.)?\d{2,}:\d{2}:\d{2}$'
+    $padrao = switch ($prop) {
+        'EnableSMB1Protocol'                      { $booleano; break }
+        'RequireSecuritySignature'                { $booleano; break }
+        'ActiveSchemeGuid'                        { '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'; break }
+        'AutoTuningLevelLocal'                    { '^(Disabled|HighlyRestricted|Restricted|Normal|Experimental)$'; break }
+        'UserAuthentication'                      { '^(\d{1,10}|<RemoveEntry>)$'; break }
+        'SecurityLayer'                           { '^(\d{1,10}|<RemoveEntry>)$'; break }
+        'MaxIdleTime'                             { '^(\d{1,10}|<RemoveEntry>)$'; break }
+        'startMode'                               { '^(OnDemand|AlwaysRunning)$'; break }
+        'autoStart'                               { $booleano; break }
+        'applicationDefaults.preloadEnabled'      { $booleano; break }
+        'processModel.idleTimeout'                { $tempo; break }
+        'recycling.periodicRestart.time'          { $tempo; break }
+        'recycling.periodicRestart.privateMemory' { $dword; break }
+        'queueLength'                             { $dword; break }
+        'doStaticCompression'                     { $booleano; break }
+        'doDynamicCompression'                    { $booleano; break }
+        'enabled'                                 { $booleano; break }
+        'enableKernelCache'                       { $booleano; break }
+        default                                   { $null }
+    }
+    if (-not $padrao) { return $false }
+    return [bool][regex]::IsMatch($Value, [string]$padrao)
+}
+
 function Test-WinForgeSnapshotKey {
     <#
     .SYNOPSIS
         Diz se uma chave de backup está entre as que o item realmente escreve.
     .DESCRIPTION
-        Para IIS a comparação é '<tipo>:<propriedade>' - o ALVO (nome do pool ou do site) fica de
-        fora de propósito: o backup pode ter sido gravado quando existia um pool que já foi apagado,
-        e o que importa aqui é que ninguém consiga escrever uma propriedade que o item não mexe.
+        Para pool e site a comparação é 'pool:<propriedade>' - o ALVO (nome do pool ou do site) fica
+        de fora de propósito: o backup pode ter sido gravado quando existia um pool que já foi
+        apagado, e o que importa aqui é que ninguém consiga escrever uma propriedade que o item não
+        mexe. O pior que a forma curta permite é escrever uma propriedade que o item DE FATO mexe num
+        pool que talvez não exista mais.
+
+        Para 'server:' NÃO existe forma curta, e é uma correção de segurança: com
+        'server:<propriedade>' na tabela, um backup plantado com
+        'server:system.webServer/directoryBrowse:enabled' passava pelo crivo do OutputCache - a
+        seção, que é o que diz QUAL parte do applicationHost.config será escrita, ficava de fora da
+        comparação. Aqui a chave tem de bater inteira: seção e atributo.
+
         Para os ajustes de servidor a chave é o nome curto do valor ('EnableSMB1Protocol'), e a
         comparação é direta.
     #>
@@ -935,6 +1155,7 @@ function Test-WinForgeSnapshotKey {
     if ($AllowedKey.ContainsKey($Key)) { return $true }
     $k = $null
     try { $k = Split-WinForgeIisKey -Key $Key } catch { return $false }
+    if ($k.Kind -eq 'server') { return $false }
     return $AllowedKey.ContainsKey("$($k.Kind):$($k.Property)")
 }
 
@@ -947,11 +1168,25 @@ function Complete-WinForgeSnapshot {
         "o mais antigo vence" devolveria o estado de duas aplicações atrás. Renomear (em vez de
         apagar) mantém o histórico no disco para quem for investigar, e Get-WinForgeSnapshotFile
         deixa esses arquivos de fora.
+
+        "Já consumido" só vale se o Desfazer tiver dado certo INTEIRO. Com uma chave que falhou, o
+        arquivo é a única cópia do valor anterior dela: arquivá-lo é jogar fora a chance de tentar de
+        novo, e o servidor fica com metade do estado antigo e nenhum registro do resto. Nesse caso os
+        arquivos ficam onde estão e o log diz quais chaves seguram o arquivamento.
+    .PARAMETER FailedKey
+        Chaves que não puderam ser restauradas. Qualquer uma cancela o arquivamento.
     .OUTPUTS
         Quantidade de arquivos arquivados.
     #>
-    param([string[]]$Paths)
+    param(
+        [string[]]$Paths,
+        [string[]]$FailedKey = @()
+    )
 
+    if (@($FailedKey).Count) {
+        Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Backups mantidos (não arquivados): $(@($FailedKey).Count) chave(s) não puderam ser restauradas: $(@($FailedKey) -join ', ')."
+        return 0
+    }
     $n = 0
     foreach ($p in @($Paths)) {
         if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
@@ -1071,12 +1306,20 @@ function Set-WinForgeIisValue {
         -LiteralPath pelo mesmo motivo da leitura, com consequência pior: com -Path, um nome com
         colchetes não casa com nada, a escrita não acontece e nada reclama - a alteração entraria na
         contagem de 'Changed' sem ter mexido em nada.
+
+        A forma do valor é cobrada AQUI também, e não só na leitura do backup: quem escreve é esta
+        função, e uma checagem que mora longe do ponto de escrita é uma checagem que a próxima
+        alteração esquece de chamar.
     #>
     param(
         [Parameter(Mandatory)][string]$Key,
         [Parameter(Mandatory)]$Value
     )
 
+    $texto = ConvertTo-WinForgeIisString $Value
+    if (-not (Test-WinForgeSnapshotValue -Key $Key -Value $texto)) {
+        throw "Valor recusado para '$Key': '$texto' não tem a forma esperada para essa propriedade."
+    }
     $k = Split-WinForgeIisKey -Key $Key
     switch ($k.Kind) {
         'pool'   { Set-ItemProperty -LiteralPath ("IIS:\AppPools\" + $k.Target) -Name $k.Property -Value $Value -ErrorAction Stop; return }
@@ -1112,18 +1355,12 @@ function Get-WinForgeIisAllowedKey {
         'Concurrency'     { @('pool:queueLength') }
         default           { throw "Item de IIS desconhecido: '$Name'." }
     }
-    # As chaves de nível de servidor já vêm inteiras ('server:<seção>:<atributo>'): a seção faz parte
-    # do que o item mexe, e aceitar qualquer seção seria abrir de novo o buraco que este crivo fecha.
+    # As chaves de nível de servidor entram INTEIRAS ('server:<seção>:<atributo>') e só assim: a
+    # seção faz parte do que o item mexe. A versão anterior também gravava a forma curta
+    # ('server:<atributo>'), e era ela que desfazia o próprio crivo - Test-WinForgeSnapshotKey cai na
+    # forma curta quando a longa não bate, então 'server:<QUALQUER seção>:enabled' passava.
     $tabela = @{}
-    foreach ($par in $pares) {
-        if ($par -like 'server:*') {
-            $k = Split-WinForgeIisKey -Key $par
-            $tabela["$($k.Kind):$($k.Property)"] = $true
-            $tabela[$par] = $true
-        } else {
-            $tabela[$par] = $true
-        }
-    }
+    foreach ($par in $pares) { $tabela[$par] = $true }
     return $tabela
 }
 
@@ -1151,19 +1388,22 @@ function Restore-WinForgeIisSnapshot {
         return @{ Changed = 0; Skipped = $motivo; Snapshot = $null }
     }
     $restored = 0
+    $falhas = @()
     foreach ($key in @($snap.Values.Keys)) {
         try {
             Set-WinForgeIisValue -Key $key -Value $snap.Values[$key]
             $restored++
         } catch {
+            $falhas += $key
             Write-WinForgeLog -Component "IIS" -Level "ERROR" -Message "Falha ao restaurar '$key' -> $($_.Exception.Message)"
             Write-Host "IIS: falha ao restaurar '$key' -> $($_.Exception.Message)" -ForegroundColor Red
         }
     }
-    $arquivados = Complete-WinForgeSnapshot -Paths $snap.Paths
+    $arquivados = Complete-WinForgeSnapshot -Paths $snap.Paths -FailedKey $falhas
     Write-WinForgeLog -Component "IIS" -Message "Backup de $Name restaurado: $restored de $(@($snap.Values.Keys).Count) valor(es), de $(@($snap.Paths).Count) arquivo(s); $arquivados arquivado(s) como .restored.json."
     $skipped = ''
-    if (@($snap.Ignored).Count) { $skipped = "IIS: $(@($snap.Ignored).Count) chave(s) do backup ficaram de fora por não pertencerem a '$Name'." }
+    if (@($snap.Ignored).Count) { $skipped = "IIS: $(@($snap.Ignored).Count) chave(s) do backup ficaram de fora por não pertencerem a '$Name' ou por não terem a forma esperada." }
+    if (@($falhas).Count) { $skipped = ($skipped + " IIS: $(@($falhas).Count) chave(s) não puderam ser restauradas ($(@($falhas) -join ', ')); os backups foram mantidos para nova tentativa.").Trim() }
     return @{ Changed = $restored; Skipped = $skipped; Snapshot = $snap.Path }
 }
 
@@ -1378,6 +1618,17 @@ function Invoke-WinForgeIisTweak {
             return $result
         }
 
+        # Antes de qualquer leitura ou escrita: a pasta de backup tem de existir E ser confiável.
+        # Sem backup confiável não se mexe no servidor - um Desfazer que outra conta pode reescrever
+        # é pior que não aplicar.
+        $raiz = Confirm-WinForgeSnapshotRoot -Root $Root
+        if (-not $raiz.Ok) {
+            $result.Skipped = "pasta de backup não confiável: $($raiz.Reason)"
+            Write-WinForgeLog -Component "IIS" -Level "ERROR" -Message "$Name recusado: $($result.Skipped) Nada foi alterado."
+            Write-Host "IIS: $($result.Skipped) - nada foi alterado." -ForegroundColor Red
+            return $result
+        }
+
         $plan = Get-WinForgeIisTweakPlan -Name $Name
         $result.Skipped = [string]$plan.Skipped
         $keys = @($plan.Targets.Keys)
@@ -1549,7 +1800,7 @@ function Get-WinForgeServerSettingState {
         }
         'HighPerf' {
             try {
-                $saida = (Invoke-WinForgeNativeCommand -Command 'powercfg /getactivescheme').Text
+                $saida = (Invoke-WinForgeNativeCommand -FilePath 'powercfg.exe' -Arguments @('/getactivescheme')).Text
                 if ([string]$saida -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') { $estado['ActiveSchemeGuid'] = $Matches[1].ToLower() }
             } catch {
                 Write-WinForgeLog -Component "Server" -Level "WARN" -Message "Energia: plano ativo não pôde ser lido -> $($_.Exception.Message)"
@@ -1586,11 +1837,24 @@ function Set-WinForgeServerSettingValue {
     <#
     .SYNOPSIS
         Escreve um valor de ajuste de servidor. O valor vem como texto - é assim que ele sai do backup.
+    .DESCRIPTION
+        Texto que veio de um arquivo de backup é dado de FORA, mesmo quando o arquivo é nosso: quem
+        conseguir escrever lá dentro escolhe o que esta função recebe. Duas regras, as duas por causa
+        do mesmo estrago:
+
+        1. A forma do valor é conferida antes de qualquer escrita (Test-WinForgeSnapshotValue).
+        2. Nenhum valor vira TEXTO DE COMANDO. O powercfg recebe o GUID como argumento, num vetor -
+           antes ele era formatado dentro de "powercfg /setactive {0}" e compilado como PowerShell,
+           e um 'ActiveSchemeGuid' com ponto-e-vírgula plantado no JSON rodava elevado no Desfazer.
     #>
     param(
         [Parameter(Mandatory)][string]$Key,
         [Parameter(Mandatory)][string]$Value
     )
+
+    if (-not (Test-WinForgeSnapshotValue -Key $Key -Value $Value)) {
+        throw "Valor recusado para '$Key': '$Value' não tem a forma esperada para esse ajuste."
+    }
 
     switch ($Key) {
         'EnableSMB1Protocol' {
@@ -1602,8 +1866,8 @@ function Set-WinForgeServerSettingValue {
             return
         }
         'ActiveSchemeGuid' {
-            $r = Invoke-WinForgeNativeCommand -Command ("powercfg /setactive {0}" -f $Value)
-            if ($r.ExitCode -ne 0) { throw "powercfg /setactive $Value devolveu código $($r.ExitCode): $([string]$r.Text)" }
+            $r = Invoke-WinForgeNativeCommand -FilePath 'powercfg.exe' -Arguments @('/setactive', $Value)
+            if ($r.ExitCode -ne 0) { throw "powercfg.exe /setactive $Value devolveu código $($r.ExitCode): $([string]$r.Text)" }
             return
         }
         'AutoTuningLevelLocal' {
@@ -1680,19 +1944,37 @@ function Invoke-WinForgeServerSetting {
                 Write-Host $result.Skipped -ForegroundColor Yellow
                 return $result
             }
+            $falhas = @()
             foreach ($chave in @($snap.Values.Keys)) {
                 try {
                     Set-WinForgeServerSettingValue -Key $chave -Value $snap.Values[$chave]
                     $result.Changed++
                 } catch {
+                    $falhas += $chave
                     Write-WinForgeLog -Component "Server" -Level "ERROR" -Message "Falha ao restaurar '$chave' de '$Name' -> $($_.Exception.Message)"
                     Write-Host "Servidor: falha ao restaurar '$chave' -> $($_.Exception.Message)" -ForegroundColor Red
                 }
             }
+            if (@($snap.Ignored).Count) {
+                $result.Skipped = "Servidor: $(@($snap.Ignored).Count) chave(s) do backup ficaram de fora por não pertencerem a '$Name' ou por não terem a forma esperada."
+            }
+            if (@($falhas).Count) {
+                $result.Skipped = ($result.Skipped + " Servidor: $(@($falhas).Count) chave(s) não puderam ser restauradas ($(@($falhas) -join ', ')); os backups foram mantidos para nova tentativa.").Trim()
+            }
             $result.Snapshot = $snap.Path
-            Complete-WinForgeSnapshot -Paths $snap.Paths | Out-Null
+            Complete-WinForgeSnapshot -Paths $snap.Paths -FailedKey $falhas | Out-Null
             Write-WinForgeLog -Component "Server" -Message "'$Name' desfeito: $($result.Changed) valor(es) restaurado(s) de $(@($snap.Paths).Count) backup(s)."
             Write-Host "Servidor: '$Name' desfeito - $($result.Changed) valor(es) restaurado(s)."
+            return $result
+        }
+
+        # Aplicar (e capturar) exige pasta de backup confiável, pelo mesmo motivo do IIS: o arquivo
+        # que sai daqui é o que um Desfazer elevado vai reescrever no servidor.
+        $raiz = Confirm-WinForgeSnapshotRoot -Root $Root
+        if (-not $raiz.Ok) {
+            $result.Skipped = "pasta de backup não confiável: $($raiz.Reason)"
+            Write-WinForgeLog -Component "Server" -Level "ERROR" -Message "'$Name' recusado: $($result.Skipped) Nada foi alterado."
+            Write-Host "Servidor: $($result.Skipped) - nada foi alterado." -ForegroundColor Red
             return $result
         }
 
