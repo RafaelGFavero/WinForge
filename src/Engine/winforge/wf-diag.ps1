@@ -234,14 +234,14 @@ function Get-WinForgeDiagRecommendationItems {
         auditoria removeu, e mostrar o nome cru da chave não ajudaria ninguém. Recomendados primeiro,
         na ordem em que as regras os produziram.
     .OUTPUTS
-        Array de @{ Key; Content; Reason; Icon; Hex; Kind }.
+        Array de @{ Key; Content; Reason; Icon; Resource; Hex; Kind }.
     #>
     $items = [System.Collections.Generic.List[object]]::new()
     if ($null -eq $sync) { return @($items) }
 
     foreach ($group in @(
-        @{ Map = $sync.Recommended; Icon = '✔'; Hex = '#2E7D32'; Kind = 'recomendado' },
-        @{ Map = $sync.Discouraged; Icon = '⚠'; Hex = '#EF6C00'; Kind = 'evitar' }
+        @{ Map = $sync.Recommended; Icon = '✔'; Resource = 'RecommendedColor'; Hex = '#22C55E'; Kind = 'recomendado' },
+        @{ Map = $sync.Discouraged; Icon = '⚠'; Resource = 'DiscouragedColor'; Hex = '#F59E0B'; Kind = 'evitar' }
     )) {
         if (-not $group.Map) { continue }
         foreach ($key in @($group.Map.Keys)) {
@@ -253,6 +253,7 @@ function Get-WinForgeDiagRecommendationItems {
                 Content = $(if ($entry.Content) { [string]$entry.Content } else { [string]$key })
                 Reason  = [string]$group.Map[$key]
                 Icon    = [string]$group.Icon
+                Resource = [string]$group.Resource
                 Hex     = [string]$group.Hex
                 Kind    = [string]$group.Kind
             })
@@ -478,14 +479,13 @@ function New-WinForgeDiagRecRow {
     $row = New-Object System.Windows.Controls.DockPanel
     $row.LastChildFill = $true
     $row.Margin = New-Object System.Windows.Thickness(0, 2, 0, 2)
-    $brush = New-WinForgeRecoBrush -Hex $Item.Hex
 
     $key = [string]$Item.Key
     if ($Item.Kind -eq 'recomendado' -and -not (Test-WinForgeRecommendationToggle -Key $key)) {
         $head = New-Object System.Windows.Controls.CheckBox
         $head.Tag = $key
         $head.Content = "$($Item.Icon) $($Item.Content)"
-        $head.Foreground = $brush
+        Set-WinForgeStatusBrush -Element $head -Property ([System.Windows.Controls.Control]::ForegroundProperty) -Resource ([string]$Item.Resource) -Fallback ([string]$Item.Hex)
         $head.VerticalAlignment = 'Center'
         $head.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
         # A disponibilidade é perguntada AGORA, na hora de desenhar, e não no clique: a linha de uma
@@ -514,7 +514,7 @@ function New-WinForgeDiagRecRow {
     } else {
         $head = New-Object System.Windows.Controls.TextBlock
         $head.Text = "$($Item.Icon) $($Item.Content)"
-        $head.Foreground = $brush
+        Set-WinForgeStatusBrush -Element $head -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -Resource ([string]$Item.Resource) -Fallback ([string]$Item.Hex)
         $head.VerticalAlignment = 'Center'
         $head.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
         $head.SetResourceReference([System.Windows.Controls.TextBlock]::FontSizeProperty, "FontSize")

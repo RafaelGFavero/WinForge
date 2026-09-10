@@ -69,6 +69,73 @@ function Replace-Between([string]$text, [string]$startAnchor, [string]$endAnchor
     return $text.Substring(0, $s) + $new + $text.Substring($e)
 }
 
+function Get-WinForgeStyleSection([string]$styles, [string]$name) {
+    # Recorta um pedaço de xaml\wf-xaml-styles.xml. O arquivo é uma coleção de <Style>, não um XML
+    # com raiz única: cada pedaço começa numa linha "@secao: <nome>" e vai até a próxima (ou até o
+    # fim). Pedaço que não existe ESTOURA - é o que denuncia um nome trocado no build.
+    $ini = "@secao: $name`n"
+    $i = $styles.IndexOf($ini, [StringComparison]::Ordinal)
+    if ($i -lt 0) { throw "estilos: seção '$name' não existe em wf-xaml-styles.xml" }
+    if ($styles.IndexOf($ini, $i + 1, [StringComparison]::Ordinal) -ge 0) { throw "estilos: seção '$name' aparece mais de uma vez" }
+    $i += $ini.Length
+    $j = $styles.IndexOf("`n@secao: ", $i, [StringComparison]::Ordinal)
+    if ($j -lt 0) { $j = $styles.Length }
+    return $styles.Substring($i, $j - $i).Trim("`n")
+}
+
+function Set-WinForgeThemeTokens([string]$text, $tokens, $novos) {
+    # Reescreve os VALORES do bloco de temas da base ($sync.configs.themes) token a token.
+    #
+    # Substituição por linha, e não por bloco inteiro: o bloco da base tem dezenas de tokens que o
+    # WinForge não muda, e trocar o JSON inteiro faria o build engolir calado qualquer token novo
+    # que a base passasse a usar. Aqui, token que sumiu ESTOURA (a base mudou de nome) e token novo
+    # que já existe também ESTOURA (a base passou a ter o que o WinForge estava acrescentando).
+    $blocoIni = "`$sync.configs.themes = @'`n"
+    $s = $text.IndexOf($blocoIni, [StringComparison]::Ordinal)
+    if ($s -lt 0) { throw "tema: bloco `$sync.configs.themes não encontrado" }
+    if ($text.IndexOf($blocoIni, $s + 1, [StringComparison]::Ordinal) -ge 0) { throw "tema: bloco `$sync.configs.themes ambíguo" }
+    $s += $blocoIni.Length
+    $e = $text.IndexOf("`n'@ | ConvertFrom-Json", $s, [StringComparison]::Ordinal)
+    if ($e -lt 0) { throw "tema: fim do bloco `$sync.configs.themes não encontrado" }
+
+    $json = $text.Substring($s, $e - $s)
+    $contagem = 0
+    foreach ($secao in @('shared', 'Light', 'Dark')) {
+        $secIni = "  `"$secao`": {`n"
+        $i = $json.IndexOf($secIni, [StringComparison]::Ordinal)
+        if ($i -lt 0) { throw "tema: seção '$secao' não encontrada no bloco de temas" }
+        if ($json.IndexOf($secIni, $i + 1, [StringComparison]::Ordinal) -ge 0) { throw "tema: seção '$secao' ambígua" }
+        $corpoIni = $i + $secIni.Length
+        $j = $json.IndexOf("`n  }", $corpoIni, [StringComparison]::Ordinal)
+        if ($j -lt 0) { throw "tema: fim da seção '$secao' não encontrado" }
+        $corpo = $json.Substring($corpoIni, $j - $corpoIni)
+
+        foreach ($nome in @($tokens[$secao].Keys)) {
+            $marca = "    `"$nome`": `""
+            $k = $corpo.IndexOf($marca, [StringComparison]::Ordinal)
+            if ($k -lt 0) { throw "tema: token '$nome' não existe na seção '$secao' da base" }
+            if ($corpo.IndexOf($marca, $k + 1, [StringComparison]::Ordinal) -ge 0) { throw "tema: token '$nome' aparece mais de uma vez na seção '$secao'" }
+            $vIni = $k + $marca.Length
+            $vFim = $corpo.IndexOf('"', $vIni)
+            if ($vFim -lt 0) { throw "tema: valor de '$nome' na seção '$secao' sem aspas de fechamento" }
+            $corpo = $corpo.Substring(0, $vIni) + $tokens[$secao][$nome] + $corpo.Substring($vFim)
+            $contagem++
+        }
+
+        if ($novos -and $novos[$secao]) {
+            foreach ($nome in @($novos[$secao].Keys)) {
+                if ($corpo.IndexOf("    `"$nome`": ", [StringComparison]::Ordinal) -ge 0) { throw "tema: token novo '$nome' já existe na seção '$secao' da base" }
+                $corpo = $corpo.TrimEnd() + ",`n    `"$nome`": `"$($novos[$secao][$nome])`""
+                $contagem++
+            }
+        }
+
+        $json = $json.Substring(0, $corpoIni) + $corpo + $json.Substring($j)
+    }
+    Write-Host "Tema: $contagem token(s) aplicado(s) em shared/Light/Dark"
+    return $text.Substring(0, $s) + $json + $text.Substring($e)
+}
+
 $src            = Read-Lf $Source
 $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
 $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
@@ -81,6 +148,7 @@ $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
+$themeFuncs     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-theme-functions.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
 $commandsBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-commands.ps1")
 $repairBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-repair.ps1")
@@ -91,6 +159,7 @@ $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 $xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
 $xamlServerTab  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-tab.xml")
+$xamlStyles     = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-styles.xml")
 $appsData       = Read-Lf (Join-Path $PSScriptRoot "config\wf-apps.ps1")
 $i18nConfigs    = Read-Lf (Join-Path $PSScriptRoot "config\wf-i18n-configs.ps1")
 
@@ -98,6 +167,10 @@ $i18nConfigs    = Read-Lf (Join-Path $PSScriptRoot "config\wf-i18n-configs.ps1")
 # arquivo não serve (o PowerShell 5.1 lê .ps1 pela code page ANSI quando não há BOM); ler o texto em
 # UTF-8 e rodar um scriptblock mantém os acentos independentemente do BOM.
 . ([scriptblock]::Create([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "config\wf-i18n-strings.ps1"), [System.Text.Encoding]::UTF8)))
+
+# Tabela de tokens do sistema visual: também é código, e pelo mesmo motivo (BOM/code page) entra
+# por scriptblock em vez de dot-source do arquivo.
+. ([scriptblock]::Create([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "config\wf-theme.ps1"), [System.Text.Encoding]::UTF8)))
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -308,6 +381,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.Tri
 
 # ---------------------------------------------------------------- recomendações na interface (contornos, dicas, job)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.TrimEnd() + "`n`n") "insert reco ui"
+
+# ---------------------------------------------------------------- sistema visual (contraste dos tokens)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($themeFuncs.TrimEnd() + "`n`n") "insert theme functions"
 
 # ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
@@ -893,6 +969,90 @@ if ($SelfTest) {
     if ([string]$sync.configs.applications.WPFInstallplexdesktop.Category -ne 'Multimídia') { Write-Host "  [ERRO] aba Instalar: WPFInstallplexdesktop deveria estar em Multimídia, está em '$($sync.configs.applications.WPFInstallplexdesktop.Category)'" -ForegroundColor Red; $wbErrors++ }
     if ([string]$sync.configs.applications.WPFInstalllocalsend.Category -ne 'Utilitários') { Write-Host "  [ERRO] aba Instalar: WPFInstalllocalsend deveria estar em Utilitários, está em '$($sync.configs.applications.WPFInstalllocalsend.Category)'" -ForegroundColor Red; $wbErrors++ }
     if ($sync.currentTab -ne "Diagnostico") { Write-Host "  [ERRO] aba de abertura: `$sync.currentTab = '$($sync.currentTab)', esperado 'Diagnostico'" -ForegroundColor Red; $wbErrors++ }
+    # ---- Sistema visual: tokens, tipografia e contraste
+    # A fonte é o MESMO bloco que a janela lê ($sync.configs.themes), e não uma cópia da tabela:
+    # assim a trava cobre o que a interface vai pintar de verdade. Trocar um hexadecimal é a
+    # mudança mais fácil de fazer no projeto e a mais difícil de enxergar sem abrir o programa.
+    # Toda cor de TEXTO contra toda superfície onde esse texto pode cair: fundo da janela, cartão
+    # e dica. É produto cartesiano de propósito - a lista escrita à mão sempre esquece a
+    # combinação que aparece numa aba só, e foi assim que o verde de "recomendado" ficou em 3,6:1
+    # sobre o fundo escuro sem ninguém notar.
+    $wfTemaFundos = @('MainBackgroundColor', 'CardBackgroundColor', 'ToolTipBackgroundColor')
+    $wfTemaTextos = @('MainForegroundColor', 'LabelboxForegroundColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor')
+    $wfTemaPares = @()
+    foreach ($wfBgNome in $wfTemaFundos) {
+        foreach ($wfFgNome in $wfTemaTextos) { $wfTemaPares += @{ Fg = $wfFgNome; Bg = $wfBgNome; Nome = "$wfFgNome sobre $wfBgNome" } }
+    }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundColor';         Bg = 'ButtonBackgroundColor';          Nome = 'texto do botão' }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundColor';         Bg = 'ButtonBackgroundMouseoverColor'; Nome = 'texto do botão sob o mouse' }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundColor';         Bg = 'ButtonBackgroundPressedColor';   Nome = 'texto do botão pressionado' }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundSelectedColor'; Bg = 'ButtonBackgroundSelectedColor';  Nome = 'texto do botão selecionado' }
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'AppInstallUnselectedColor';      Nome = 'nome do aplicativo' }
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'AppInstallSelectedColor';        Nome = 'nome do aplicativo marcado' }
+    foreach ($wfTemaNome in @('Dark', 'Light')) {
+        $wfTemaSec = $sync.configs.themes.$wfTemaNome
+        if ($null -eq $wfTemaSec) { Write-Host "  [ERRO] tema: seção '$wfTemaNome' não existe no bloco de temas" -ForegroundColor Red; $wbErrors++; continue }
+        $wfPiorNome = ''; $wfPiorRazao = 99
+        foreach ($wfPar in $wfTemaPares) {
+            $wfFg = [string]$wfTemaSec.($wfPar.Fg)
+            $wfBg = [string]$wfTemaSec.($wfPar.Bg)
+            if (-not $wfFg -or -not $wfBg) {
+                Write-Host "  [ERRO] tema $wfTemaNome ($($wfPar.Nome)): token ausente ($($wfPar.Fg)='$wfFg', $($wfPar.Bg)='$wfBg')" -ForegroundColor Red; $wbErrors++; continue
+            }
+            $wfRazao = Get-WinForgeContrastRatio -Fg $wfFg -Bg $wfBg
+            if ($wfRazao -lt $wfPiorRazao) { $wfPiorRazao = $wfRazao; $wfPiorNome = $wfPar.Nome }
+            if ($wfRazao -lt 4.5) {
+                Write-Host "  [ERRO] contraste $wfTemaNome ($($wfPar.Nome)): $wfFg sobre $wfBg dá ${wfRazao}:1, mínimo 4,5:1" -ForegroundColor Red; $wbErrors++
+            }
+        }
+        Write-Host "  Contraste $wfTemaNome : $($wfTemaPares.Count) par(es) conferido(s), pior caso ${wfPiorRazao}:1 ($wfPiorNome), mínimo 4,5:1"
+    }
+    # Tipografia: Segoe UI no corpo, Segoe UI Semibold nos títulos. O Consolas da base era a fonte
+    # dos títulos de categoria; a única monoespaçada que sobra é a da janela de saída de comandos.
+    $wfTipografia = [ordered]@{
+        FontFamily                 = 'Segoe UI'
+        ButtonFontFamily           = 'Segoe UI'
+        HeaderFontFamily           = 'Segoe UI Semibold'
+        FontSize                   = '13'
+        HeaderFontSize             = '15'
+        ButtonHeight               = '32'
+        TabButtonWidth             = '118'
+        TabButtonHeight            = '32'
+        CheckBoxBulletDecoratorSize = '16'
+        ButtonCornerRadius         = '4'
+    }
+    foreach ($wfTipoChave in @($wfTipografia.Keys)) {
+        $wfTipoValor = [string]$sync.configs.themes.shared.$wfTipoChave
+        if ($wfTipoValor -ne $wfTipografia[$wfTipoChave]) {
+            Write-Host "  [ERRO] token compartilhado '$wfTipoChave': esperado '$($wfTipografia[$wfTipoChave])', veio '$wfTipoValor'" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    if ($inputXML -match 'Consolas') { Write-Host "  [ERRO] tipografia: sobrou 'Consolas' no XAML - a única monoespaçada do WinForge é a da janela de saída" -ForegroundColor Red; $wbErrors++ }
+    if ($inputXML -match 'Arial')    { Write-Host "  [ERRO] tipografia: sobrou 'Arial' no XAML" -ForegroundColor Red; $wbErrors++ }
+    $wfMonoDef = [string](Get-Command Show-WinForgeOutputWindow).Definition
+    if ($wfMonoDef -notmatch "FontFamily 'Consolas'") { Write-Host "  [ERRO] tipografia: a janela de saída de comandos perdeu a fonte monoespaçada (Consolas)" -ForegroundColor Red; $wbErrors++ }
+    # Estilos: um dicionário de recursos não aceita duas entradas com a mesma chave (nem dois
+    # estilos implícitos para o mesmo TargetType). Um estilo do WinForge ADICIONADO em vez de
+    # SUBSTITUIR o da base estouraria só na hora de carregar o XAML - aqui a contagem denuncia.
+    $wfEstilosUnicos = [ordered]@{
+        'x:Key="TabToggleButton"'    = 1
+        '<Style TargetType="Button">' = 1
+        '<Style TargetType="CheckBox">' = 1
+        'x:Key="BorderStyle"'        = 1
+        'TargetType="DataGridRow"'   = 1
+    }
+    foreach ($wfEstiloChave in @($wfEstilosUnicos.Keys)) {
+        $wfEstiloQtd = ([regex]::Matches($inputXML, [regex]::Escape($wfEstiloChave))).Count
+        if ($wfEstiloQtd -ne $wfEstilosUnicos[$wfEstiloChave]) {
+            Write-Host "  [ERRO] estilos: '$wfEstiloChave' aparece $wfEstiloQtd vez(es) no XAML, esperado $($wfEstilosUnicos[$wfEstiloChave])" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    foreach ($wfEstiloMarca in @('Name="WFHoverOverlay"', 'Name="WFSelectedAccent"', 'Name="WFFocusRing"')) {
+        if ($inputXML.IndexOf($wfEstiloMarca, [StringComparison]::Ordinal) -lt 0) {
+            Write-Host "  [ERRO] estilos: falta '$wfEstiloMarca' nos gabaritos de botão/aba" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    Write-Host "  Estilos: gabaritos únicos de Button/CheckBox/TabToggleButton/BorderStyle/DataGridRow, com realce, foco e faixa de aba"
     # Trava de idioma. A lista de termos é injetada pelo build logo acima ($sync.WinForgeEnglishSweep),
     # DEPOIS do dicionário de tradução - se ela viesse antes, o próprio dicionário a traduziria e a
     # trava passaria por não ter mais o que procurar. Aqui a varredura é sobre o XAML gerado; a
@@ -2605,6 +2765,20 @@ if ($SelfTest) {
         $sync["Form"] = $wbWindow
         $wbXaml.SelectNodes("//*[@Name]") | ForEach-Object { $sync["$($_.Name)"] = $sync["Form"].FindName($_.Name) }
         $sync.InitializedTabs = @{}
+        # Aplica o tema de verdade nesta janela, como a inicialização faz. Sem isto o -SelfTest
+        # montaria as abas com o dicionário de recursos VAZIO: toda referência dinâmica cairia no
+        # nada e o teste ficaria cego justamente para o que a Tarefa 6 mudou. De quebra, é aqui
+        # que um token com valor que o aplicador não converte (um Thickness torto, por exemplo)
+        # aparece, porque Set-ThemeResourceProperty avisa e segue.
+        foreach ($wfTemaAplicar in @('Light', 'Dark')) {
+            $wfTemaAviso = @(Invoke-WinForgeThemeChange -theme $wfTemaAplicar 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+            if ($wfTemaAviso.Count) { Write-Host "  [ERRO] tema $wfTemaAplicar : $($wfTemaAviso.Count) token(s) recusado(s) pelo aplicador -> $(@($wfTemaAviso | ForEach-Object { $_.Message }) -join '; ')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Fica no Escuro: é o tema em que as fotos de QA são tiradas e o padrão da máquina de teste.
+        $wfTemaFaltando = @('MainBackgroundColor', 'CardBackgroundColor', 'ButtonForegroundSelectedColor', 'TabAccentColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor', 'FontFamily', 'HeaderFontFamily') |
+            Where-Object { $null -eq $sync.Form.TryFindResource($_) }
+        if ($wfTemaFaltando.Count) { Write-Host "  [ERRO] tema: recurso(s) que o XAML pede e o tema não define -> $($wfTemaFaltando -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Tema aplicado na janela: Claro e Escuro sem recusa, tokens novos resolvidos" }
         # Antes do diagnóstico terminar, $sync.Recommended/$sync.Discouraged são nulos - é o estado
         # real da janela recém-aberta. Enumerar .Keys de $null dava uma chave nula e uma exceção por
         # montagem de aba ("não é possível indexar em uma matriz nula"), com zero contornos.
@@ -2751,7 +2925,13 @@ if ($SelfTest) {
             try {
                 $null = Invoke-WinForgeRules -Profile $wbSims['server-iis']
                 Update-WinForgeRecommendationVisuals | Out-Null
-                $wfSrvVerdes = @($wfSrvKeys | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush -and [string]$_.Border.BorderBrush.Color -eq '#FF2E7D32' }).Count
+                # A cor vem do tema (RecommendedColor), não de um hexadecimal fixo: o verde do tema
+                # Claro é outro. Comparar com o pincel que o tema aplicado nesta janela devolve é o
+                # que mantém a trava válida nos dois temas - e ela quebra se a linha voltar a ser
+                # pintada com cor fixa.
+                $wfVerdeTema = [string]([System.Windows.Media.SolidColorBrush]$sync.Form.TryFindResource('RecommendedColor')).Color
+                if (-not $wfVerdeTema) { Write-Host "  [ERRO] aba Servidor (contornos): o tema não define RecommendedColor" -ForegroundColor Red; $wbErrors++ }
+                $wfSrvVerdes = @($wfSrvKeys | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush -and [string]$_.Border.BorderBrush.Color -eq $wfVerdeTema }).Count
                 if ($wfSrvVerdes -lt 5) { Write-Host "  [ERRO] aba Servidor: esperado ao menos 5 contornos verdes em serverpanel, veio $wfSrvVerdes" -ForegroundColor Red; $wbErrors++ }
                 else { Write-Host "  Aba Servidor (contornos): $wfSrvVerdes linha(s) verde(s) com as regras de server-iis" }
             } catch {
@@ -3325,6 +3505,76 @@ $src = Replace-Once $src '    $winutilTextBlock.Text = "WinUtil"' '    $winutilT
 # links file:// nos diálogos (NOTICE.txt dos Créditos): abre pelo caminho local, sem %20 na URL
 $src = Replace-Once $src 'Start-Process $eventSender.NavigateUri.AbsoluteUri' 'if ($eventSender.NavigateUri.IsFile) { Start-Process $eventSender.NavigateUri.LocalPath } else { Start-Process $eventSender.NavigateUri.AbsoluteUri }' "dialog file link"
 
+# ---------------------------------------------------------------- sistema visual: tokens de tema
+# Antes dos estilos e do XAML: os gabaritos abaixo só referenciam nomes de token, e é aqui que os
+# valores por trás desses nomes deixam de ser os da base.
+$src = Set-WinForgeThemeTokens $src $WinForgeTheme $WinForgeThemeNovos
+
+# ---------------------------------------------------------------- sistema visual: estilos
+# Cada gabarito reescrito entra NO LUGAR do original. Acrescentar no fim do dicionário não serve:
+# duas entradas com a mesma chave (ou dois estilos implícitos para o mesmo TargetType) estouram ao
+# carregar o XAML, e mover o Button implícito para o fim quebraria o FilterChipStyle, que o
+# referencia por StaticResource algumas linhas acima.
+$src = Replace-Between $src @'
+        <Style TargetType="Label">
+'@ @'
+        <Style x:Key="TabToggleButton"
+'@ ((Get-WinForgeStyleSection $xamlStyles 'texto') + "`n`n") "estilos: rótulo e texto"
+
+$src = Replace-Between $src @'
+        <Style x:Key="TabToggleButton" TargetType="{x:Type ToggleButton}">
+'@ @'
+        <Style x:Key="ToggleButtonStyle" TargetType="ToggleButton">
+'@ ((Get-WinForgeStyleSection $xamlStyles 'abas-e-botoes') + "`n`n") "estilos: abas e botões"
+
+$src = Replace-Between $src @'
+        <Style TargetType="CheckBox">
+'@ @'
+        <Style TargetType="RadioButton">
+'@ ((Get-WinForgeStyleSection $xamlStyles 'caixas') + "`n") "estilos: caixas de seleção"
+
+$src = Replace-Between $src @'
+        <Style x:Key="BorderStyle" TargetType="Border">
+'@ @'
+        <Style TargetType="TextBox">
+'@ ((Get-WinForgeStyleSection $xamlStyles 'cartoes') + "`n`n") "estilos: cartões"
+
+# Estilos que a base não tem entram no fim do dicionário - não há chave para colidir.
+$src = Insert-Before $src "    </Window.Resources>" ((Get-WinForgeStyleSection $xamlStyles 'novos') + "`n") "estilos: tabelas"
+
+# Botões declarados nas configs (barra lateral da aba Instalar, painéis de Config e Atualizações)
+# nasciam alinhados à esquerda e, sem a largura fixa de 200 px que o estilo da base impunha,
+# cada um passou a ter a largura do próprio rótulo - uma coluna com a borda direita serrilhada.
+# Esticados, a coluna volta a ter uma borda só.
+$src = Replace-Once $src '                        $button.HorizontalAlignment = "Left"' '                        $button.HorizontalAlignment = "Stretch"' "alinhamento dos botões das configs"
+# Exceção: botão com largura declarada na config (ButtonWidth) continua à esquerda. Largura fixa
+# com alinhamento "Stretch" o WPF trata como "Center", e a coluna inteira ficaria com os botões
+# flutuando no meio - foi o que apareceu na aba Configurações na primeira leva de fotos.
+$src = Replace-Once $src @'
+                        if ($entryInfo.ButtonWidth) {
+                            $baseWidth = [int]$entryInfo.ButtonWidth
+                            $button.Width = [math]::Max($baseWidth, 350)
+                        }
+'@ @'
+                        if ($entryInfo.ButtonWidth) {
+                            $baseWidth = [int]$entryInfo.ButtonWidth
+                            $button.Width = [math]::Max($baseWidth, 350)
+                            $button.HorizontalAlignment = "Left"
+                        }
+'@ "largura declarada continua à esquerda"
+
+# O hover do rótulo de categoria pintava a letra de branco fixo: no tema Claro é branco sobre
+# fundo claro, ou seja, some. A cor de título serve nos dois temas.
+$src = Replace-Once $src @'
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="White" />
+                </Trigger>
+'@ @'
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource LabelboxForegroundColor}" />
+                </Trigger>
+'@ "hover do rótulo de categoria"
+
 # ---------------------------------------------------------------- XAML
 $src = Replace-Once $src '        Title="WinUtil">' '        Title="WinForge">' "xaml title"
 $src = Replace-Once $src 'Header="Sponsors" Name="SponsorMenuItem"' 'Header="Créditos" Name="SponsorMenuItem"' "xaml sponsors"
@@ -3530,6 +3780,33 @@ foreach ($wfEsperado in @('$sync.currentTab = "Diagnostico"', 'Invoke-WPFTab "WP
 }
 if ($final.IndexOf('Invoke-WPFTab "WPFTab1BT"', [StringComparison]::Ordinal) -ge 0) { throw "Motor gerado ainda abre na aba Instalar (Invoke-WPFTab `"WPFTab1BT`")" }
 Write-Host "Aba de abertura: Diagnóstico"
+
+# Tipografia. A única fonte monoespaçada do WinForge é a da janela de saída de comandos, montada
+# em código - o XAML e a tabela de temas não podem ter nenhuma. A conferência é sobre os DOIS
+# blocos de texto que viram interface, e não sobre o arquivo inteiro: as mensagens do -SelfTest
+# falam de 'Consolas' de propósito e não são fonte de coisa nenhuma.
+function Get-WinForgeGeneratedBlock([string]$text, [string]$startAnchor, [string]$endAnchor, [string]$what) {
+    $s = $text.IndexOf($startAnchor, [StringComparison]::Ordinal)
+    if ($s -lt 0) { throw "Motor gerado: bloco '$what' não encontrado" }
+    if ($text.IndexOf($startAnchor, $s + 1, [StringComparison]::Ordinal) -ge 0) { throw "Motor gerado: bloco '$what' ambíguo" }
+    $s += $startAnchor.Length
+    $e = $text.IndexOf($endAnchor, $s, [StringComparison]::Ordinal)
+    if ($e -lt 0) { throw "Motor gerado: fim do bloco '$what' não encontrado" }
+    return $text.Substring($s, $e - $s)
+}
+$wfXamlFinal  = Get-WinForgeGeneratedBlock $final "`$inputXML = @'`r`n" "`r`n'@" 'XAML'
+$wfTemaFinal  = Get-WinForgeGeneratedBlock $final "`$sync.configs.themes = @'`r`n" "`r`n'@" 'temas'
+foreach ($wfFonteRuim in @('Consolas', 'Arial')) {
+    foreach ($wfBloco in @(@{ Nome = 'XAML'; Texto = $wfXamlFinal }, @{ Nome = 'tabela de temas'; Texto = $wfTemaFinal })) {
+        $wfQtd = ([regex]::Matches($wfBloco.Texto, $wfFonteRuim)).Count
+        if ($wfQtd -ne 0) { throw "Motor gerado: '$wfFonteRuim' aparece $wfQtd vez(es) no bloco $($wfBloco.Nome)" }
+    }
+}
+$wfMono = ([regex]::Matches($final, [regex]::Escape("New-Object System.Windows.Media.FontFamily 'Consolas'"))).Count
+if ($wfMono -ne 1) { throw "Motor gerado: esperado exatamente 1 fonte monoespaçada (a janela de saída), achei $wfMono" }
+if ($wfTemaFinal -notmatch '"HeaderFontFamily": "Segoe UI Semibold"') { throw "Motor gerado: HeaderFontFamily não é 'Segoe UI Semibold'" }
+if ($wfTemaFinal -notmatch '"FontFamily": "Segoe UI"') { throw "Motor gerado: FontFamily não é 'Segoe UI'" }
+Write-Host "Tipografia: Segoe UI no XAML e nos temas, Consolas só na janela de saída de comandos"
 
 # ---------------------------------------------------------------- teste de marca no motor gerado
 # Antes de gerar o doc: uma falha de marca no motor e sobre o produto e tem de aparecer primeiro.

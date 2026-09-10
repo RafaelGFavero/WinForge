@@ -54,6 +54,26 @@ function New-WinForgeRecoBrush {
     return $brush
 }
 
+function Set-WinForgeStatusBrush {
+    <#
+    .SYNOPSIS
+        Liga uma propriedade de pincel a um token de cor de situação do tema, com plano B.
+    .DESCRIPTION
+        Referência de recurso, e não pincel pronto: a cor de "recomendado" muda entre o tema Claro
+        e o Escuro, e quem troca de tema com a lista já desenhada não redesenha a lista - só os
+        recursos da janela mudam. Se o token não existir (janela sem tema aplicado), cai no
+        hexadecimal do plano B para nunca deixar o contorno invisível.
+    #>
+    param(
+        [Parameter(Mandatory)]$Element,
+        [Parameter(Mandatory)]$Property,
+        [Parameter(Mandatory)][string]$Resource,
+        [Parameter(Mandatory)][string]$Fallback
+    )
+    $Element.SetResourceReference($Property, $Resource)
+    if ($null -eq $Element.GetValue($Property)) { $Element.SetValue($Property, (New-WinForgeRecoBrush -Hex $Fallback)) }
+}
+
 function Update-WinForgeRecommendationVisuals {
     <#
     .SYNOPSIS
@@ -75,7 +95,9 @@ function Update-WinForgeRecommendationVisuals {
         $row = Get-WinForgeRecoRow -Key $key
         if ($null -eq $row) { continue }
         $row.Border.BorderThickness = New-Object System.Windows.Thickness(0)
-        $row.Border.BorderBrush = $null
+        # ClearValue, e não '= $null': a cor entrou como referência de recurso (Set-WinForgeStatusBrush)
+        # e um nulo local por cima deixaria a linha presa nesse nulo na próxima pintura.
+        $row.Border.ClearValue([System.Windows.Controls.Border]::BorderBrushProperty)
         $row.Tip.ToolTip = $orig[$key]
     }
 
@@ -88,25 +110,23 @@ function Update-WinForgeRecommendationVisuals {
     if ($sync.Recommended) {
         foreach ($key in @($sync.Recommended.Keys)) {
             if (-not $key) { continue }
-            $plan[$key] = @{ Hex = "#2E7D32"; Prefix = "✔ Recomendado: "; Reason = [string]$sync.Recommended[$key] }
+            $plan[$key] = @{ Resource = "RecommendedColor"; Hex = "#22C55E"; Prefix = "✔ Recomendado: "; Reason = [string]$sync.Recommended[$key] }
         }
     }
     if ($sync.Discouraged) {
         foreach ($key in @($sync.Discouraged.Keys)) {
             if (-not $key) { continue }
-            $plan[$key] = @{ Hex = "#EF6C00"; Prefix = "⚠ Não recomendado neste sistema: "; Reason = [string]$sync.Discouraged[$key] }
+            $plan[$key] = @{ Resource = "DiscouragedColor"; Hex = "#F59E0B"; Prefix = "⚠ Não recomendado neste sistema: "; Reason = [string]$sync.Discouraged[$key] }
         }
     }
 
-    $brushes = @{}
     $painted = 0
     foreach ($key in @($plan.Keys)) {
         $row = Get-WinForgeRecoRow -Key $key
         if ($null -eq $row) { continue }
 
         $item = $plan[$key]
-        if (-not $brushes.ContainsKey($item.Hex)) { $brushes[$item.Hex] = New-WinForgeRecoBrush -Hex $item.Hex }
-        $row.Border.BorderBrush = $brushes[$item.Hex]
+        Set-WinForgeStatusBrush -Element $row.Border -Property ([System.Windows.Controls.Border]::BorderBrushProperty) -Resource $item.Resource -Fallback $item.Hex
         $row.Border.BorderThickness = New-Object System.Windows.Thickness(1.5)
 
         if (-not $orig.ContainsKey($key)) { $orig[$key] = $row.Tip.ToolTip }
