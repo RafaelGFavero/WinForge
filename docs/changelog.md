@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.3.0 (2026-09-10)
+
+- Nova aba "Servidor" (`Alt+S`), só no Windows Server: ajustes gerais do servidor, IIS e Active
+  Directory. No servidor, as abas Jogos, AppX e Win11 Creator saem da navegação; no cliente a aba
+  Servidor não existe. A troca acontece antes de a janela ser montada, a partir da edição do Windows
+  e dos papéis instalados (IIS, Active Directory e se a máquina é controlador de domínio, Hyper-V,
+  DNS, DHCP, servidor de arquivos, RDS).
+- Ajustes de servidor: não abrir o Gerenciador do Servidor no logon, desativar o Rastreador de
+  Eventos de Desligamento, plano de energia Alto desempenho, RDP com NLA obrigatório e tempo limite
+  de sessão ociosa, desativar o SMB1 e devolver o ajuste automático TCP ao padrão 'normal'. Desativar
+  a Configuração de Segurança Reforçada do IE e exigir assinatura SMB são `Cuidado`: vão para
+  "Avançado (CUIDADO)" e ficam de fora de qualquer marcação automática.
+- Ajustes de IIS, aplicados a todos os pools e sites: iniciar sempre (`AlwaysRunning`), sem tempo
+  limite de ociosidade, reciclagem por memória no lugar da reciclagem por tempo (`Cuidado`),
+  pré-carregar os sites, compressão estática e dinâmica, cache de saída e de kernel, e fila de 5000
+  com as requisições concorrentes do ASP.NET liberadas nas chaves de 64 e de 32 bits.
+- Antes de qualquer mudança no IIS, os valores anteriores vão para um JSON em
+  `%ProgramData%\WinForge\iis-backup`; "Desfazer" lê o backup mais recente daquele item e devolve
+  pool por pool o que estava lá. Aplicar de novo não faz nada quando o valor já está no lugar, e o
+  backup só é gravado quando há algo a mudar. Pré-carregar e a compressão dinâmica dependem dos
+  recursos `Web-AppInit` e `Web-Dyn-Compression`: sem eles o item avisa e não altera aquela parte —
+  o WinForge não instala recurso do Windows.
+- Botões de leitura na aba, nenhum deles altera nada: fonte de horário (`w32tm`), exclusões do
+  Microsoft Defender, parâmetros TCP (`netsh int tcp show global`) e, num controlador de domínio,
+  `dcdiag /q`, `repadmin /replsummary`, limpeza de registros DNS (scavenging) e a localização de
+  NTDS e SYSVOL. A saída abre em uma janela à parte, que não trava a principal, com "Copiar" e
+  "Abrir arquivo", e fica salva em `%LocalAppData%\WinForge\logs\server-<nome>-<data-hora>.txt`.
+  Ferramenta ausente vira mensagem na janela, não erro; o código de saída do comando vai no topo do
+  texto, para "falhou" e "não achou nada" não se parecerem.
+- Diagnóstico: cartão "Servidor" com papéis detectados, estado do SMB1, assinatura SMB, ajuste
+  automático TCP, fonte de horário, pools/sites e pasta de logs do IIS, e os caminhos de NTDS e
+  SYSVOL num controlador de domínio. O cartão também entra no relatório HTML.
+- Cinco regras novas de recomendação, e a regra de servidor passou a sugerir os ajustes da aba: o
+  SMB1 ligado é apontado, o IIS instalado sugere o conjunto de pools e cache, e logs do IIS ou banco
+  do AD no disco do sistema viram aviso informativo, junto de um lembrete de `dcdiag`/`repadmin` no
+  controlador de domínio.
+- Nada da aba Servidor entra em preset: preset é para máquina de usuário, e em servidor de produção
+  cada item se marca à mão. A aba tem seu próprio "Marcar recomendados", que mostra a seleção antes
+  de você aplicar.
+- Build: o SelfTest roda duas vezes, a segunda com `WINFORGE_SIMULATE_SERVER=iis,ad`, porque a aba
+  Servidor não existe na máquina de quem compila. A variável aceita os papéis a simular e vale
+  também para rodar o motor gerado à mão.
+
 ## 1.2.0 (2026-09-09)
 
 - Nova aba "Diagnóstico" (`Alt+D`): nove cartões com o que foi detectado — Sistema, Máquina,

@@ -51,10 +51,12 @@ Parâmetros de linha de comando:
 - **Updates** — política de atualizações do Windows (padrão, adiada ou desligada).
 - **Win11 Creator** — criação de mídia de instalação do Windows 11.
 - **AppX** — remoção de aplicativos pré-instalados.
+- **Servidor** — só no Windows Server: ajustes gerais do servidor, IIS e Active Directory.
 - **Diagnóstico** — o que foi detectado na máquina, as recomendações e os drivers instalados.
 
 A janela se adapta ao sistema: no Windows 10, os itens que só existem no Windows 11 não são
-exibidos; os tweaks marcados para uma marca de GPU só aparecem se aquela GPU for detectada.
+exibidos; os tweaks marcados para uma marca de GPU só aparecem se aquela GPU for detectada; e no
+Windows Server as abas de consumidor dão lugar à aba Servidor.
 
 ## Diagnóstico e recomendações
 
@@ -79,8 +81,9 @@ uma vez. Nos três casos dá para desmarcar item por item antes de aplicar. Os t
 eles aplicam o tweak no instante em que são ligados, e recomendação não muda o sistema.
 
 A aba **Diagnóstico** (`Alt+D`) reúne isso em nove cartões — Sistema, Máquina, Processador,
-Memória, Placa de vídeo, Armazenamento, Rede, Energia, e Segurança e estado —, a lista das
-recomendações com seus motivos e a tabela dos drivers instalados. Os botões:
+Memória, Placa de vídeo, Armazenamento, Rede, Energia, e Segurança e estado —, mais um décimo,
+Servidor, no Windows Server, a lista das recomendações com seus motivos e a tabela dos drivers
+instalados. Os botões:
 
 | Botão | O que faz |
 |---|---|
@@ -104,6 +107,73 @@ antes de mandá-lo para outra pessoa.
 
 Cada etapa do diagnóstico vai para o log da sessão, em `%LocalAppData%\WinForge\logs`. Ao abrir, o
 WinForge mantém ali as 30 sessões mais recentes e apaga as anteriores.
+
+## Windows Server
+
+Se o Windows for Server, a janela muda de forma sozinha: aparece a aba **Servidor** (`Alt+S`) e
+somem as abas que não fazem sentido ali — Jogos, AppX e Win11 Creator. A detecção acontece antes
+de a janela ser montada e lê a edição do Windows e os papéis instalados; hoje o WinForge reconhece
+IIS, Active Directory (inclusive se a máquina é controlador de domínio), Hyper-V, DNS, DHCP,
+servidor de arquivos e RDS.
+
+A aba reúne os ajustes por assunto. Os itens de servidor valem para qualquer Server; os de IIS e de
+Active Directory só aparecem quando o papel está instalado.
+
+**Servidor** — ajustes gerais, cada um com seu Desfazer:
+
+| Item | O que faz |
+|---|---|
+| Não abrir o Gerenciador do Servidor no logon | Tira o Server Manager da abertura automática, para a máquina e para o usuário atual. |
+| Desativar o Rastreador de Eventos de Desligamento | Desliga a caixa que pede o motivo a cada desligamento. O motivo deixa de ir para o log de eventos. |
+| Plano de energia Alto desempenho | Ativa o plano recomendado para servidor, sem redução de clock em ocioso. |
+| RDP: exigir NLA e tempo limite de sessão ociosa (30 min) | Exige autenticação antes de abrir a sessão e derruba sessões paradas. Clientes antigos sem NLA param de conectar. |
+| Desativar o SMB1 no servidor | Desliga o protocolo obsoleto. Dispositivos que só falam SMB1 (multifuncionais, NAS velhos) perdem o acesso. |
+| TCP: nível de ajuste automático 'normal' | Devolve o autotuning da janela TCP ao padrão do Windows, desfazendo o `disabled` que scripts antigos deixam para trás. |
+
+**IIS** — todos os pools e sites de uma vez: iniciar sempre (`AlwaysRunning`), sem tempo limite de
+ociosidade, reciclar por memória em vez de por tempo, pré-carregar os sites (`preloadEnabled`),
+compressão estática e dinâmica, cache de saída e de kernel, e fila de 5000 com as requisições
+concorrentes do ASP.NET liberadas.
+
+**Avançado (CUIDADO)** — os três itens que cobram um preço ficam aqui, como no resto do programa, e
+não entram em nada automaticamente: desativar a Configuração de Segurança Reforçada do IE, exigir
+assinatura SMB e a reciclagem de pool por memória.
+
+Antes de mexer em qualquer configuração do IIS, o WinForge grava os valores anteriores em
+`%ProgramData%\WinForge\iis-backup\<item>-<data-hora>.json`. O **Desfazer** lê o backup mais
+recente daquele item e devolve pool por pool o que estava lá. Aplicar duas vezes não muda nada na
+segunda: o que já está no valor desejado é pulado, e o backup só é gravado quando há mesmo algo a
+mudar. Os dois itens que dependem de recurso do Windows — pré-carregar (Inicialização de
+Aplicativos, `Web-AppInit`) e a parte dinâmica da compressão (`Web-Dyn-Compression`) — avisam e
+seguem sem alterar aquilo quando o recurso não está instalado. **O WinForge não instala recurso
+nenhum do Windows.**
+
+Os botões só leem, nunca alteram:
+
+| Botão | O que mostra |
+|---|---|
+| Verificar fonte de horário (w32tm) | A fonte de horário configurada e o estado do serviço W32Time. |
+| Listar exclusões do Defender | As exclusões de caminho, extensão e processo do Microsoft Defender. |
+| Mostrar parâmetros TCP (netsh) | A saída de `netsh int tcp show global` (autotuning, RSS, ECN). |
+| Executar dcdiag /q | Só o que está errado no controlador de domínio. Sem saída significa sem erro. |
+| Resumo de replicação (repadmin) | Atrasos e falhas de replicação por parceiro (`repadmin /replsummary`). |
+| Limpeza de registros DNS (scavenging) | A configuração de limpeza automática de registros DNS antigos. |
+| Onde estão NTDS e SYSVOL | Em que disco e pasta estão o banco do AD, os logs de transação e o SYSVOL, marcando o que está no disco do sistema. |
+
+A saída abre em uma janela à parte, que não trava a principal, com **Copiar** e **Abrir arquivo**;
+o mesmo texto fica salvo em `%LocalAppData%\WinForge\logs\server-<nome>-<data-hora>.txt`. Quando a
+ferramenta não existe na máquina (dcdiag e repadmin só vêm com as ferramentas de AD), a janela diz
+isso em vez de falhar.
+
+O que foi detectado no servidor aparece no cartão **Servidor** da aba Diagnóstico e no relatório
+HTML — papéis, estado do SMB1, assinatura SMB, ajuste automático TCP, fonte de horário, quantidade
+de pools e sites do IIS com a pasta de logs, e os caminhos de NTDS e SYSVOL num controlador de
+domínio. As recomendações também levam o servidor em conta: itens de jogos e de consumidor ficam
+laranja, o SMB1 ligado é apontado, e logs do IIS ou banco do AD no disco do sistema viram aviso.
+
+**Nada da aba Servidor entra em preset.** Preset é para máquina de usuário; em servidor de produção
+cada item se marca à mão, e o botão "Marcar recomendados" da aba deixa tudo visível antes de você
+aplicar.
 
 ## Classificação de risco
 
@@ -133,8 +203,9 @@ Requer o .NET SDK 8. Na raiz do repositório:
 build.cmd
 ```
 
-O script gera o motor em `dist\engine\WinForge.ps1`, roda o SelfTest, compila o launcher e deixa
-o executável final em `dist\WinForge.exe`.
+O script gera o motor em `dist\engine\WinForge.ps1`, roda o SelfTest duas vezes — a segunda com um
+servidor simulado, porque a aba Servidor não existe na máquina de quem compila —, compila o
+launcher e deixa o executável final em `dist\WinForge.exe`.
 
 Para rodar só a validação do motor já gerado:
 
@@ -142,9 +213,12 @@ Para rodar só a validação do motor já gerado:
 powershell -NoProfile -ExecutionPolicy Bypass -File dist\engine\WinForge.ps1 -SelfTest
 ```
 
-O SelfTest lê a versão real do Windows. Para conferir o comportamento em outra versão sem
-trocar de máquina, defina `WINFORGE_SIMULATE_BUILD` com o número do build antes de rodar — por
-exemplo `WINFORGE_SIMULATE_BUILD=19045` para simular o Windows 10 22H2.
+O SelfTest lê a versão real do Windows. Para conferir o comportamento em outro sistema sem trocar
+de máquina, defina antes de rodar:
+
+- `WINFORGE_SIMULATE_BUILD` com o número do build — por exemplo `19045` para o Windows 10 22H2.
+- `WINFORGE_SIMULATE_SERVER` com os papéis desejados — por exemplo `iis,ad` para um Windows Server
+  com IIS e Active Directory. É o que a segunda rodada do `build.cmd` usa.
 
 ## Estrutura
 
@@ -153,7 +227,7 @@ src/Engine/         gerador do motor PowerShell/WPF
   base/             cópia intocada do utilitário de origem
   winforge/         blocos de código do WinForge (funções, assets, launcher)
   config/           tweaks, jogos e presets do WinForge
-  xaml/             trechos de interface (aba Jogos e sua navegação)
+  xaml/             trechos de interface (abas Jogos, Diagnóstico e Servidor, com sua navegação)
   build.ps1         aplica os blocos sobre a base e escreve dist/engine/WinForge.ps1
 src/Launcher/       WinForge.exe (C# net48): splash, elevação e hospedagem do motor
 src/Launcher.Tests/ testes do launcher
@@ -164,12 +238,11 @@ docs/               changelog e documentação
 
 ## Roadmap
 
-Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)) e a
-detecção de hardware, drivers e papéis de servidor, com as recomendações da aba Diagnóstico.
+Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)), a
+detecção de hardware, drivers e papéis de servidor com as recomendações da aba Diagnóstico, e a aba
+Servidor com os ajustes de Windows Server, IIS e Active Directory.
 
 - Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
-- Tweaks próprios de Windows Server, IIS e Active Directory — hoje os papéis são detectados e
-  entram nas recomendações, mas não há ajustes específicos para eles.
 - Reparo de componentes do Windows (DISM/SFC e correção de repositório).
 
 ## Licença
