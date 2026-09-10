@@ -256,6 +256,247 @@ function Get-WinForgeDiagRecommendationItems {
     return @($items)
 }
 
+function Get-WinForgeRecommendationTab {
+    <#
+    .SYNOPSIS
+        Aba em que mora a caixa de verdade de uma chave recomendada ('Tweaks', 'Jogos' ou 'Servidor').
+    .DESCRIPTION
+        Mesma leitura que Select-WinForgeRecommended faz do campo 'tab' da entrada: sem esse campo (ou
+        com um valor que não é aba própria) a entrada aparece na aba Ajustes.
+    #>
+    param([Parameter(Mandatory)][string]$Key)
+
+    $entry = $sync.configs.tweaks.$Key
+    if ($entry -and $entry.PSObject.Properties['tab'] -and [string]$entry.tab -in @('Jogos', 'Servidor')) { return [string]$entry.tab }
+    return 'Tweaks'
+}
+
+function Test-WinForgeRecommendationToggle {
+    <#
+    .SYNOPSIS
+        Diz se a chave recomendada é um Toggle (interruptor que aplica o tweak no clique).
+    .DESCRIPTION
+        Toggle não entra no checklist do Diagnóstico pelo mesmo motivo que Select-WinForgeRecommended
+        o pula: marcar um Toggle APLICA a mudança na hora, e recomendar não é aplicar. A linha dele
+        continua na lista, só sem caixa de marcar.
+    #>
+    param([Parameter(Mandatory)][string]$Key)
+
+    if ($Key -like 'WPFToggle*') { return $true }
+    $entry = $sync.configs.tweaks.$Key
+    return ($entry -and [string]$entry.Type -eq 'Toggle')
+}
+
+function Get-WinForgeRecommendationControl {
+    <#
+    .SYNOPSIS
+        Caixa de verdade de uma chave recomendada, montando a aba de destino se ela ainda não existir.
+    .DESCRIPTION
+        As abas nascem sob demanda: enquanto Ajustes/Jogos/Servidor não forem abertas, $sync[<chave>]
+        é nulo e o espelho não teria em que mexer. Montar é idempotente e custa o mesmo que abrir a
+        aba na mão. A aba Servidor só é montada em Windows Server - num cliente todas as entradas dela
+        têm platform 'server' e a montagem criaria zero controle.
+    .OUTPUTS
+        O CheckBox, ou $null quando o filtro de compatibilidade escondeu a entrada nesta máquina.
+    #>
+    param([Parameter(Mandatory)][string]$Key)
+
+    $tab = Get-WinForgeRecommendationTab -Key $Key
+    if ($tab -eq 'Servidor' -and -not $sync.IsServer) { return $null }
+    if (-not ($sync.InitializedTabs -and $sync.InitializedTabs[$tab])) {
+        if (Get-Command Initialize-WinForgeTabContent -ErrorAction SilentlyContinue) {
+            try { Initialize-WinForgeTabContent -TabName $tab } catch {
+                Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Não foi possível montar a aba $tab para o espelho de '$Key': $($_.Exception.Message)"
+            }
+        }
+    }
+    $control = $sync[$Key]
+    if ($control -isnot [System.Windows.Controls.CheckBox]) { return $null }
+    return $control
+}
+
+function Update-WinForgeDiagRecommendationCount {
+    <#
+    .SYNOPSIS
+        Reescreve o contador "N de M recomendados marcados" da aba Diagnóstico.
+    .DESCRIPTION
+        Conta os espelhos, não os controles reais: a lista é o que o usuário está olhando, e uma
+        linha que não se aplica a esta máquina fica desabilitada e nunca entra no N.
+    #>
+    if ($null -eq $sync -or $null -eq $sync.WPFDiagRecCount) { return }
+
+    $total = 0
+    $marcados = 0
+    if ($sync.WinForgeDiagMirrors) {
+        foreach ($key in @($sync.WinForgeDiagMirrors.Keys)) {
+            $mirror = $sync.WinForgeDiagMirrors[$key]
+            if ($null -eq $mirror) { continue }
+            $total++
+            if ($mirror.IsChecked) { $marcados++ }
+        }
+    }
+    $sync.WPFDiagRecCount.Text = "$marcados de $total recomendados marcados"
+}
+
+function Set-WinForgeRecommendationMirror {
+    <#
+    .SYNOPSIS
+        Leva a marca de uma linha do checklist do Diagnóstico para a caixa de verdade da aba de destino.
+    .DESCRIPTION
+        Chamada pelos eventos Checked/Unchecked da linha. A trava $sync.WinForgeMirrorBusy existe
+        porque o caminho de volta também existe: mexer no controle real dispara o handler que reescreve
+        a linha, e sem a trava os dois ficariam se avisando em laço.
+        Chave sem controle depois de montar a aba é entrada que o filtro de compatibilidade escondeu
+        nesta máquina: a linha fica desabilitada, com a dica dizendo isso, em vez de mentir que marcou.
+        A saída antecipada quando a caixa de verdade JÁ está no estado pedido não é otimização: é o
+        que mantém esta função sem escrever em $sync quando ela é chamada de dentro do laço de
+        Reset-WPFCheckBoxes, que enumera $sync - ver o comentário em Sync-WinForgeRecommendationMirror.
+    .OUTPUTS
+        $true se a caixa de verdade já está (ou acabou de ficar) no estado pedido.
+    #>
+    param([Parameter(Mandatory)][string]$Key, [bool]$Checked)
+
+    if ($sync.WinForgeMirrorBusy) { return $false }
+
+    $mirror = if ($sync.WinForgeDiagMirrors) { $sync.WinForgeDiagMirrors[$Key] } else { $null }
+    $control = Get-WinForgeRecommendationControl -Key $Key
+
+    if ($null -eq $control) {
+        if ($mirror) {
+            $mirror.IsEnabled = $false
+            $mirror.ToolTip = "não se aplica a este computador"
+            if ($mirror.IsChecked) { $mirror.IsChecked = $false }
+        }
+        Update-WinForgeDiagRecommendationCount
+        return $false
+    }
+
+    if ([bool]$control.IsChecked -eq $Checked) {
+        Update-WinForgeDiagRecommendationCount
+        return $true
+    }
+
+    $sync.WinForgeMirrorBusy = $true
+    try { $control.IsChecked = $Checked } finally { $sync.WinForgeMirrorBusy = $false }
+    Update-WinForgeDiagRecommendationCount
+    return $true
+}
+
+function Sync-WinForgeRecommendationMirror {
+    <#
+    .SYNOPSIS
+        Caminho de volta: a caixa marcada na aba Ajustes/Jogos/Servidor reescreve a linha do checklist.
+    .DESCRIPTION
+        Ligada uma vez por controle em Update-WinForgeRecommendationVisuals. Sai calada quando a
+        recomendação não tem linha (a aba Diagnóstico ainda não foi redesenhada, ou a chave deixou de
+        ser recomendada no último diagnóstico).
+        ESTA FUNÇÃO NÃO ESCREVE EM $sync, nem para ligar a trava. Ela roda dentro dos eventos
+        Checked/Unchecked da caixa de verdade, e um deles é disparado de dentro de Reset-WPFCheckBoxes,
+        que percorre $sync com GetEnumerator(). Qualquer escrita em $sync ali - inclusive trocar o
+        valor de uma chave que já existe - invalida o enumerador e derruba a aplicação de presets com
+        "coleção foi modificada". O laço de volta se fecha sozinho: marcar a linha dispara
+        Set-WinForgeRecommendationMirror, que vê a caixa de verdade já no estado pedido e para.
+    #>
+    param([Parameter(Mandatory)][string]$Key, [bool]$Checked)
+
+    if ($sync.WinForgeMirrorBusy) { return }
+    $mirror = if ($sync.WinForgeDiagMirrors) { $sync.WinForgeDiagMirrors[$Key] } else { $null }
+    if ($null -eq $mirror -or [bool]$mirror.IsChecked -eq $Checked) { return }
+
+    $mirror.IsChecked = $Checked
+    Update-WinForgeDiagRecommendationCount
+}
+
+function Set-WinForgeDiagRecommendationSelection {
+    <#
+    .SYNOPSIS
+        Marca ou desmarca todas as linhas do checklist do Diagnóstico (botões "Marcar todos" e
+        "Desmarcar todos").
+    .DESCRIPTION
+        Mexe nas linhas, não nos controles reais: o evento de cada linha é que leva a marca para a aba
+        de destino, montando-a se preciso. Linha desabilitada (entrada que não existe nesta máquina)
+        fica de fora.
+    .OUTPUTS
+        Quantidade de linhas que terminaram no estado pedido.
+    #>
+    param([bool]$Checked)
+
+    if ($null -eq $sync.WinForgeDiagMirrors) { return 0 }
+
+    $count = 0
+    foreach ($key in @($sync.WinForgeDiagMirrors.Keys)) {
+        $mirror = $sync.WinForgeDiagMirrors[$key]
+        if ($null -eq $mirror -or -not $mirror.IsEnabled) { continue }
+        $mirror.IsChecked = $Checked
+        if ([bool]$mirror.IsChecked -eq $Checked) { $count++ }
+    }
+    Update-WinForgeDiagRecommendationCount
+    Write-WinForgeLog -Component "Diag" -Message "Checklist do Diagnóstico: $count linha(s) $(if ($Checked) { 'marcada(s)' } else { 'desmarcada(s)' })."
+    return $count
+}
+
+function New-WinForgeDiagRecRow {
+    <#
+    .SYNOPSIS
+        Uma linha da lista de recomendações: caixa de marcar (quando dá para marcar) + o motivo.
+    .DESCRIPTION
+        Recomendação comum vira CheckBox espelhada na aba de destino. Item a evitar e Toggle viram
+        texto: o primeiro não é para marcar, e o segundo aplicaria a mudança no clique.
+        DockPanel, e não StackPanel horizontal: o motivo é a última filha e precisa quebrar linha
+        dentro do espaço que sobra, senão a lista sai da largura da janela.
+    #>
+    param([Parameter(Mandatory)]$Item)
+
+    $row = New-Object System.Windows.Controls.DockPanel
+    $row.LastChildFill = $true
+    $row.Margin = New-Object System.Windows.Thickness(0, 2, 0, 2)
+    $brush = New-WinForgeRecoBrush -Hex $Item.Hex
+
+    $key = [string]$Item.Key
+    if ($Item.Kind -eq 'recomendado' -and -not (Test-WinForgeRecommendationToggle -Key $key)) {
+        $head = New-Object System.Windows.Controls.CheckBox
+        $head.Tag = $key
+        $head.Content = "$($Item.Icon) $($Item.Content)"
+        $head.Foreground = $brush
+        $head.VerticalAlignment = 'Center'
+        $head.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
+        $head.ToolTip = "Marca também a caixa correspondente na aba $(Get-WinForgeRecommendationTab -Key $key)."
+        $head.SetResourceReference([System.Windows.Controls.Control]::FontSizeProperty, "FontSize")
+        [System.Windows.Automation.AutomationProperties]::SetName($head, [string]$Item.Content)
+        # O handler lê a chave da Tag do controle que disparou: a lista é redesenhada a cada
+        # diagnóstico, e um scriptblock que guardasse $key apontaria para a linha da rodada anterior.
+        $head.Add_Checked({
+            [System.Object]$Sender = $args[0]
+            Set-WinForgeRecommendationMirror -Key ([string]$Sender.Tag) -Checked $true | Out-Null
+        })
+        $head.Add_Unchecked({
+            [System.Object]$Sender = $args[0]
+            Set-WinForgeRecommendationMirror -Key ([string]$Sender.Tag) -Checked $false | Out-Null
+        })
+        if ($null -eq $sync.WinForgeDiagMirrors) { $sync.WinForgeDiagMirrors = @{} }
+        $sync.WinForgeDiagMirrors[$key] = $head
+    } else {
+        $head = New-Object System.Windows.Controls.TextBlock
+        $head.Text = "$($Item.Icon) $($Item.Content)"
+        $head.Foreground = $brush
+        $head.VerticalAlignment = 'Center'
+        $head.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
+        $head.SetResourceReference([System.Windows.Controls.TextBlock]::FontSizeProperty, "FontSize")
+    }
+    [System.Windows.Controls.DockPanel]::SetDock($head, 'Left')
+    $row.Children.Add($head) | Out-Null
+
+    $reason = New-Object System.Windows.Controls.TextBlock
+    $reason.Text = "— $($Item.Reason)"
+    $reason.TextWrapping = 'Wrap'
+    $reason.VerticalAlignment = 'Center'
+    $reason.SetResourceReference([System.Windows.Controls.TextBlock]::FontSizeProperty, "FontSize")
+    $reason.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, "MainForegroundColor")
+    $row.Children.Add($reason) | Out-Null
+
+    return $row
+}
+
 function Get-WinForgeDiagDriverRows {
     <#
     .SYNOPSIS
@@ -362,7 +603,7 @@ function Update-WinForgeDiagnosticsTab {
     # Todos os controles da aba nascem com o XAML, muito antes de a aba ser aberta: a guarda pega a
     # janela que ainda não carregou (e o -SelfTest antes de $sync.Form existir), não a aba fechada.
     if ($null -eq $sync) { return }
-    foreach ($wfCtl in @('WPFDiagCards', 'WPFDiagRecs', 'WPFDiagInfos', 'WPFDiagDrivers', 'WPFDiagStatus')) {
+    foreach ($wfCtl in @('WPFDiagCards', 'WPFDiagRecs', 'WPFDiagRecCount', 'WPFDiagInfos', 'WPFDiagDrivers', 'WPFDiagStatus')) {
         if ($null -eq $sync[$wfCtl]) { return }
     }
 
@@ -378,18 +619,24 @@ function Update-WinForgeDiagnosticsTab {
         $sync.WPFDiagCards.Children.Add((New-WinForgeDiagCard -Section $section)) | Out-Null
     }
 
-    # ---- recomendações
+    # ---- recomendações (checklist espelhado nas abas Ajustes/Jogos/Servidor)
+    # O mapa de espelhos é refeito junto com a lista: as caixas antigas foram descartadas com os
+    # Items, e um mapa velho faria o caminho de volta escrever em controle que saiu da tela.
     $sync.WPFDiagRecs.Items.Clear()
+    $sync.WinForgeDiagMirrors = @{}
     $recItems = @(Get-WinForgeDiagRecommendationItems)
     foreach ($item in $recItems) {
-        $tb = New-Object System.Windows.Controls.TextBlock
-        $tb.Text = "$($item.Icon) $($item.Content) — $($item.Reason)"
-        $tb.TextWrapping = 'Wrap'
-        $tb.Margin = New-Object System.Windows.Thickness(0, 2, 0, 2)
-        $tb.Foreground = New-WinForgeRecoBrush -Hex $item.Hex
-        $tb.SetResourceReference([System.Windows.Controls.TextBlock]::FontSizeProperty, "FontSize")
-        $sync.WPFDiagRecs.Items.Add($tb) | Out-Null
+        $sync.WPFDiagRecs.Items.Add((New-WinForgeDiagRecRow -Item $item)) | Out-Null
     }
+    # A lista nasce desmarcada, mas a aba de destino pode já ter caixas marcadas (preset, importação,
+    # o próprio usuário): sem esta passada o checklist abriria mentindo. Marcar a linha dispara
+    # Set-WinForgeRecommendationMirror, que encontra a caixa de verdade já marcada e não faz nada.
+    foreach ($key in @($sync.WinForgeDiagMirrors.Keys)) {
+        $control = $sync[$key]
+        if ($control -isnot [System.Windows.Controls.CheckBox] -or -not $control.IsChecked) { continue }
+        $sync.WinForgeDiagMirrors[$key].IsChecked = $true
+    }
+    Update-WinForgeDiagRecommendationCount
 
     # ---- informações das regras + falhas de coleta
     $infos = [System.Collections.Generic.List[string]]::new()
@@ -528,12 +775,33 @@ function Initialize-WinForgeDiagnosticsTab {
         Monta a aba Diagnóstico (chamada por Initialize-WinForgeTabContent na primeira vez que a aba
         é aberta).
     .DESCRIPTION
-        Os botões já são ligados a Invoke-WPFButton pelo laço geral da janela; o que falta aqui é o
-        clique nos links da coluna "Fabricante", que é evento roteado de Hyperlink e não de Button.
-        O handler é registrado uma única vez - a aba pode ser redesenhada muitas vezes, e um handler
-        por redesenho abriria o navegador várias vezes no mesmo clique.
+        Os botões já são ligados a Invoke-WPFButton pelo laço geral da janela; o que falta aqui são
+        dois eventos roteados: o clique nos links da coluna "Fabricante" (Hyperlink, não Button) e a
+        roda do mouse sobre as tabelas.
+        Os dois handlers são registrados uma única vez - a aba pode ser redesenhada muitas vezes, e um
+        handler por redesenho abriria o navegador várias vezes no mesmo clique e rolaria a página
+        várias vezes por giro da roda.
     #>
     if ($null -eq $sync -or $null -eq $sync.WPFDiagDrivers) { return }
+
+    # Roda do mouse sobre as tabelas. O DataGrid tem ScrollViewer próprio e marca o evento como
+    # tratado mesmo com as barras desligadas: o giro morria ali e a aba inteira ficava parada.
+    # PreviewMouseWheel chega antes desse ScrollViewer interno; daqui o evento é repassado ao
+    # ScrollViewer da aba, que é quem tem o que rolar.
+    if (-not $sync.WinForgeDiagWheelHooked -and $sync.WPFDiagScroll) {
+        foreach ($wfGrade in @($sync.WPFDiagDrivers, $sync.WPFDiagWU)) {
+            if ($null -eq $wfGrade) { continue }
+            $wfGrade.Add_PreviewMouseWheel({
+                param($eventSender, $eventArgs)
+                $eventArgs.Handled = $true
+                $wfRoda = New-Object System.Windows.Input.MouseWheelEventArgs($eventArgs.MouseDevice, $eventArgs.Timestamp, $eventArgs.Delta)
+                $wfRoda.RoutedEvent = [System.Windows.UIElement]::MouseWheelEvent
+                $wfRoda.Source = $eventSender
+                $sync.WPFDiagScroll.RaiseEvent($wfRoda)
+            })
+        }
+        $sync.WinForgeDiagWheelHooked = $true
+    }
 
     if (-not $sync.DiagNavigateHandlerWired) {
         $handler = [System.Windows.Navigation.RequestNavigateEventHandler] {

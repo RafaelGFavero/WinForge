@@ -737,10 +737,10 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
             $wfRelatorio = Export-WinForgeDiagnosticsReport
             if (-not $wfRelatorio) { [System.Windows.MessageBox]::Show("O diagnóstico ainda não terminou. Tente de novo em alguns segundos.", "WinForge", "OK", "Warning") | Out-Null }
         }
-        "WPFDiagSelectRecommended" {
-            $wfMarcados = Select-WinForgeRecommended -Tab "All"
-            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas de ajustes.", "WinForge", "OK", "Information") | Out-Null
-        }
+        # Marcar/desmarcar tudo pela lista do Diagnóstico. Sem caixa de mensagem: quem conta o
+        # resultado é o contador ao lado dos botões, e ele fica na tela depois do clique.
+        "WPFDiagSelectRecommended" {Set-WinForgeDiagRecommendationSelection -Checked $true | Out-Null}
+        "WPFDiagClearRecommended" {Set-WinForgeDiagRecommendationSelection -Checked $false | Out-Null}
 '@.TrimEnd() "button switch"
 
 # ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
@@ -2275,7 +2275,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','WPFDiagClearRecommended','WPFDiagRecCount','WPFDiagScroll','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # Ordem da barra de navegação: é a ordem de leitura da ferramenta (diagnosticar, ajustar,
@@ -2341,6 +2341,32 @@ if ($SelfTest) {
             else { Write-Host "  Aba Instalar: $($wfGrupos.Count) grupo(s) fechados na montagem" }
         } catch {
             Write-Host "  [ERRO] aba Instalar (grupos fechados): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Espelho da lista de recomendações do Diagnóstico: marcar a linha da lista tem de marcar a
+        # caixa de verdade na aba de destino, e desmarcar a caixa de verdade tem de desmarcar a linha.
+        # Roda ANTES do teste de "marcar recomendados" e de propósito com uma chave da aba Ajustes:
+        # a aba Jogos continua desmontada aqui, então a trava seguinte ("as abas não foram montadas
+        # sob demanda") não perde o dente.
+        try {
+            $wfEspelhos = $sync.WinForgeDiagMirrors
+            if ($null -eq $wfEspelhos -or @($wfEspelhos.Keys).Count -eq 0) { throw "a lista do Diagnóstico não tem nenhuma caixa de espelho" }
+            $wfEspChave = @(@($wfEspelhos.Keys) | Where-Object { (Get-WinForgeRecommendationTab -Key $_) -eq 'Tweaks' })[0]
+            if (-not $wfEspChave) { throw "nenhuma recomendação da aba Ajustes para exercitar o espelho" }
+            if ($sync.InitializedTabs['Tweaks']) { throw "a aba Ajustes já estava montada - o teste de montagem sob demanda não provaria nada" }
+            $wfEspCaixa = $wfEspelhos[$wfEspChave]
+            $wfEspCaixa.IsChecked = $true
+            if (-not $sync.InitializedTabs['Tweaks']) { Write-Host "  [ERRO] espelho: a aba Ajustes não foi montada sob demanda" -ForegroundColor Red; $wbErrors++ }
+            if ($sync[$wfEspChave] -isnot [System.Windows.Controls.CheckBox]) { Write-Host "  [ERRO] espelho: '$wfEspChave' não virou CheckBox depois da montagem" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $sync[$wfEspChave].IsChecked) { Write-Host "  [ERRO] espelho: marcar na lista do Diagnóstico não marcou '$wfEspChave' na aba Ajustes" -ForegroundColor Red; $wbErrors++ }
+            # volta: quem desmarca na aba de destino tem de apagar a marca da lista do Diagnóstico
+            if ($sync[$wfEspChave] -is [System.Windows.Controls.CheckBox]) {
+                $sync[$wfEspChave].IsChecked = $false
+                if ($wfEspCaixa.IsChecked) { Write-Host "  [ERRO] espelho: desmarcar '$wfEspChave' na aba Ajustes não desmarcou a linha da lista" -ForegroundColor Red; $wbErrors++ }
+            }
+            if ($sync.WinForgeMirrorBusy) { Write-Host "  [ERRO] espelho: `$sync.WinForgeMirrorBusy ficou ligado depois do vaivém" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Espelho das recomendações: OK ('$wfEspChave' nos dois sentidos, aba Ajustes montada sob demanda)"
+        } catch {
+            Write-Host "  [ERRO] espelho das recomendações: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         try {
             $wfMarcadosCedo = Select-WinForgeRecommended -Tab All
@@ -2481,6 +2507,89 @@ if ($SelfTest) {
             }
         } catch {
             Write-Host "  [ERRO] aba Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Checklist das recomendações + contador na tela. Uma linha por recomendação, e caixa de
+        # marcar só nas que a aba de destino aceita marcar: Toggle aplica o tweak no clique, e
+        # recomendação não muda o sistema (mesma regra de Select-WinForgeRecommended).
+        try {
+            # A conta esperada NÃO passa por Test-WinForgeRecommendationToggle: usar a mesma função
+            # que o checklist usa faria a trava concordar consigo mesma. A regra é escrita aqui do
+            # mesmo jeito que Select-WinForgeRecommended a escreve.
+            $wfChkEsperado = @(@($sync.Recommended.Keys) | Where-Object { $_ -and $sync.configs.tweaks.PSObject.Properties[$_] -and $_ -notlike 'WPFToggle*' -and [string]$sync.configs.tweaks.$_.Type -ne 'Toggle' }).Count
+            $wfChkCaixas = 0
+            foreach ($wfLinha in @($sync.WPFDiagRecs.Items)) {
+                foreach ($wfFilho in @($wfLinha.Children)) { if ($wfFilho -is [System.Windows.Controls.CheckBox]) { $wfChkCaixas++ } }
+            }
+            if ($wfChkCaixas -ne $wfChkEsperado) { Write-Host "  [ERRO] checklist: $wfChkCaixas caixa(s) na lista do Diagnóstico, esperado $wfChkEsperado" -ForegroundColor Red; $wbErrors++ }
+            if (@($sync.WinForgeDiagMirrors.Keys).Count -ne $wfChkEsperado) { Write-Host "  [ERRO] checklist: $(@($sync.WinForgeDiagMirrors.Keys).Count) espelho(s) registrado(s), esperado $wfChkEsperado" -ForegroundColor Red; $wbErrors++ }
+            # "Marcar todos" / "Desmarcar todos": sem caixa de mensagem, com o contador na tela
+            $wfChkTodos = Set-WinForgeDiagRecommendationSelection -Checked $true
+            if ($sync.WPFDiagRecCount.Text -notmatch '^\d+ de \d+ recomendados marcados$') { Write-Host "  [ERRO] contador: texto '$($sync.WPFDiagRecCount.Text)' fora do formato 'N de M recomendados marcados'" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WPFDiagRecCount.Text -ne "$wfChkTodos de $wfChkEsperado recomendados marcados") { Write-Host "  [ERRO] contador depois de Marcar todos: '$($sync.WPFDiagRecCount.Text)', esperado '$wfChkTodos de $wfChkEsperado recomendados marcados'" -ForegroundColor Red; $wbErrors++ }
+            $wfChkMarcadosReais = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] -and $sync[$_].IsChecked }).Count
+            if ($wfChkMarcadosReais -ne $wfChkTodos) { Write-Host "  [ERRO] Marcar todos: $wfChkMarcadosReais caixa(s) real(is) marcada(s), esperado $wfChkTodos" -ForegroundColor Red; $wbErrors++ }
+            $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+            if ($sync.WPFDiagRecCount.Text -ne "0 de $wfChkEsperado recomendados marcados") { Write-Host "  [ERRO] contador depois de Desmarcar todos: '$($sync.WPFDiagRecCount.Text)'" -ForegroundColor Red; $wbErrors++ }
+            $wfChkSobraram = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] -and $sync[$_].IsChecked })
+            if ($wfChkSobraram.Count) { Write-Host "  [ERRO] Desmarcar todos: continuam marcadas: $($wfChkSobraram -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WinForgeMirrorBusy) { Write-Host "  [ERRO] checklist: `$sync.WinForgeMirrorBusy ficou ligado" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Checklist do Diagnóstico: $wfChkCaixas caixa(s), Marcar todos = $wfChkTodos, contador '$($sync.WPFDiagRecCount.Text)'"
+        } catch {
+            Write-Host "  [ERRO] checklist do Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Roda do mouse sobre as tabelas: o DataGrid tem rolagem própria e engolia a roda, deixando a
+        # aba inteira parada. O conserto repassa o evento ao ScrollViewer da aba - e é isso que se
+        # prova aqui, sem depender de a janela estar na tela.
+        try {
+            if (-not $sync.WinForgeDiagWheelHooked) { Write-Host "  [ERRO] roda do mouse: `$sync.WinForgeDiagWheelHooked não foi ligado por Initialize-WinForgeDiagnosticsTab" -ForegroundColor Red; $wbErrors++ }
+            $sync.WinForgeTesteRoda = 0
+            $wfRodaHandler = [System.Windows.Input.MouseWheelEventHandler] { param($eventSender, $eventArgs) $sync.WinForgeTesteRoda = $sync.WinForgeTesteRoda + 1 }
+            # handledEventsToo: o próprio ScrollViewer trata MouseWheelEvent num class handler (é ele
+            # que rola a aba, que é o que se quer) e marca o evento como tratado ANTES de qualquer
+            # handler de instância. Sem o terceiro argumento esta sonda nunca seria chamada.
+            $sync.WPFDiagScroll.AddHandler([System.Windows.UIElement]::MouseWheelEvent, $wfRodaHandler, $true)
+            try {
+                foreach ($wfGradeRoda in @($sync.WPFDiagDrivers, $sync.WPFDiagWU)) {
+                    $wfRodaArgs = New-Object System.Windows.Input.MouseWheelEventArgs([System.Windows.Input.Mouse]::PrimaryDevice, 0, -120)
+                    $wfRodaArgs.RoutedEvent = [System.Windows.UIElement]::PreviewMouseWheelEvent
+                    $wfGradeRoda.RaiseEvent($wfRodaArgs)
+                }
+            } finally {
+                $sync.WPFDiagScroll.RemoveHandler([System.Windows.UIElement]::MouseWheelEvent, $wfRodaHandler)
+            }
+            if ($sync.WinForgeTesteRoda -ne 2) { Write-Host "  [ERRO] roda do mouse: o ScrollViewer da aba recebeu $($sync.WinForgeTesteRoda) evento(s), esperado 2 (tabela de drivers e tabela do Windows Update)" -ForegroundColor Red; $wbErrors++ }
+            # Rolagem de verdade: a janela nunca foi mostrada, então o layout é forçado na mão. Onde
+            # o WPF sem tela não produz conteúdo mais alto que a viewport, a conferência acima (o
+            # evento chegou ao ScrollViewer) é o que resta - e é ela que pega a regressão.
+            $wfRodaOffset = 'sem layout (o WPF sem janela na tela não gerou conteúdo maior que a viewport)'
+            try {
+                $sync.WPFTabNav.SelectedItem = $sync.WPFTab8
+                $sync.Form.Width = 1200
+                $sync.Form.Height = 400
+                # Layout na mão: a janela do SelfTest nunca é mostrada, então nada dispara Measure/
+                # Arrange sozinho. Medir o ScrollViewer direto é o que dá extensão ao conteúdo e faz
+                # ScrollableHeight deixar de ser zero.
+                $sync.Form.Measure((New-Object System.Windows.Size(1200, 400)))
+                $sync.Form.Arrange((New-Object System.Windows.Rect(0, 0, 1200, 400)))
+                $sync.WPFDiagScroll.Measure((New-Object System.Windows.Size(1160, 300)))
+                $sync.WPFDiagScroll.Arrange((New-Object System.Windows.Rect(0, 0, 1160, 300)))
+                $sync.WPFDiagScroll.UpdateLayout()
+                if ($sync.WPFDiagScroll.ScrollableHeight -gt 0) {
+                    $sync.WPFDiagScroll.ScrollToVerticalOffset(0)
+                    $sync.WPFDiagScroll.UpdateLayout()
+                    $wfRodaArgs2 = New-Object System.Windows.Input.MouseWheelEventArgs([System.Windows.Input.Mouse]::PrimaryDevice, 0, -120)
+                    $wfRodaArgs2.RoutedEvent = [System.Windows.UIElement]::PreviewMouseWheelEvent
+                    $sync.WPFDiagDrivers.RaiseEvent($wfRodaArgs2)
+                    $sync.WPFDiagScroll.UpdateLayout()
+                    $wfRodaOffset = [string]$sync.WPFDiagScroll.VerticalOffset
+                    if ($sync.WPFDiagScroll.VerticalOffset -le 0) { Write-Host "  [ERRO] roda do mouse: a roda sobre a tabela não rolou a aba (VerticalOffset = $($sync.WPFDiagScroll.VerticalOffset))" -ForegroundColor Red; $wbErrors++ }
+                }
+            } catch {
+                $wfRodaOffset = "layout sem tela indisponível ($($_.Exception.Message))"
+            }
+            Write-Host "  Roda do mouse sobre as tabelas: repassada ao ScrollViewer da aba ($($sync.WinForgeTesteRoda) evento(s)) | rolagem: $wfRodaOffset"
+        } catch {
+            Write-Host "  [ERRO] roda do mouse: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         $wbLogo = Invoke-WinForgeAssets -Type "logo" -Size 25
         if ($null -eq $wbLogo -or @($wbLogo.Child.Children).Count -ne 4) { Write-Host "  [ERRO] logo: esperado 4 paths no canvas" -ForegroundColor Red; $wbErrors++ } else { Write-Host "  Logo: OK" }

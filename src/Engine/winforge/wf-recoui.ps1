@@ -117,6 +117,30 @@ function Update-WinForgeRecommendationVisuals {
         $painted++
     }
 
+    # Caminho de volta do checklist do Diagnóstico: a caixa marcada aqui, na aba Ajustes/Jogos/
+    # Servidor, tem de acender a linha correspondente lá. É aqui porque esta função roda no fim de
+    # toda montagem de aba - é o primeiro momento em que os controles existem.
+    # Um handler por controle, e não por passada: esta função também roda a cada diagnóstico, e um
+    # handler novo por rodada escreveria N vezes na mesma linha.
+    if ($null -eq $sync.WinForgeMirrorHooked) { $sync.WinForgeMirrorHooked = @{} }
+    if ($sync.Recommended -and (Get-Command Sync-WinForgeRecommendationMirror -ErrorAction SilentlyContinue)) {
+        foreach ($key in @($sync.Recommended.Keys)) {
+            if (-not $key -or $sync.WinForgeMirrorHooked[$key]) { continue }
+            $control = $sync[$key]
+            if ($control -isnot [System.Windows.Controls.CheckBox]) { continue }
+            if (Test-WinForgeRecommendationToggle -Key $key) { continue }
+            $control.Add_Checked({
+                [System.Object]$Sender = $args[0]
+                Sync-WinForgeRecommendationMirror -Key ([string]$Sender.Name) -Checked $true
+            })
+            $control.Add_Unchecked({
+                [System.Object]$Sender = $args[0]
+                Sync-WinForgeRecommendationMirror -Key ([string]$Sender.Name) -Checked $false
+            })
+            $sync.WinForgeMirrorHooked[$key] = $true
+        }
+    }
+
     # Só registra quando o número muda: esta função roda no fim de cada montagem de aba e a cada
     # diagnóstico, e cinco linhas iguais no log só atrapalham quem lê depois.
     if ($painted -ne $sync.LastOutlineCount) {

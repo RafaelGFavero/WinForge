@@ -161,9 +161,9 @@ function Invoke-Click([string]$id) {
     return $true
 }
 
-function Invoke-Scroll([int]$ticks) {
+function Invoke-Scroll([int]$ticks, [int]$delta = -120) {
     1..$ticks | ForEach-Object {
-        [WfWin]::mouse_event($MOUSE_WHEEL, 0, 0, -120, 0)
+        [WfWin]::mouse_event($MOUSE_WHEEL, 0, 0, $delta, 0)
         Start-Sleep -Milliseconds 80
     }
 }
@@ -204,15 +204,18 @@ if (Invoke-Click 'WPFTab8BT') {
     Start-Sleep -Seconds 1
     Save-Shot '10-diagnostico-rolado-2'
 
-    # Com o cursor parado sobre a tabela de drivers: o DataGrid tem rolagem própria e engole a roda,
-    # então a página inteira para de rolar. É o caso que a foto tem de registrar.
+    # Com o cursor parado sobre a tabela de drivers. O DataGrid tem rolagem própria e engolia a roda,
+    # deixando a página inteira parada; hoje o evento é repassado ao ScrollViewer da aba. A foto rola
+    # PARA CIMA de propósito: na foto anterior a página já está no fim, e mais rolagem para baixo não
+    # mudaria nada nem com o repasse funcionando. Subindo, a diferença entre a foto 10 e a 11 é a
+    # prova de que a roda sobre a tabela move a página.
     $grid = Find-ById 'WPFDiagDrivers'
     if ($grid) {
         $b = $grid.Current.BoundingRectangle
         Write-Log "  tabela de drivers em $b"
         if ($b.Height -gt 0) {
             [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point ([int]($b.X + $b.Width / 2)), ([int]($b.Y + [Math]::Min(80, $b.Height / 2)))
-            Invoke-Scroll 8
+            Invoke-Scroll 8 120
             Start-Sleep -Seconds 1
             Save-Shot '11-diagnostico-roda-sobre-a-tabela'
         }

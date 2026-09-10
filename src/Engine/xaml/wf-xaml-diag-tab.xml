@@ -10,11 +10,14 @@
                             <Button Name="WPFDiagRefresh" Content="Atualizar diagnóstico" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Coleta o perfil do sistema de novo e reavalia as recomendações."/>
                             <Button Name="WPFDiagWUDrivers" Content="Buscar drivers no Windows Update" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Pergunta ao Windows Update quais drivers ele tem para este computador (pode levar até um minuto)."/>
                             <Button Name="WPFDiagExport" Content="Exportar relatório HTML" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Gera um relatório HTML com tudo desta aba e abre no navegador."/>
-                            <Button Name="WPFDiagSelectRecommended" Content="Marcar todos os recomendados" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca nas abas Ajustes e Jogos os itens recomendados para este PC."/>
+                            <Button Name="WPFDiagSelectRecommended" Content="Marcar todos" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca todos os itens da lista de recomendações abaixo (e as caixas correspondentes nas abas Ajustes, Jogos e Servidor)."/>
+                            <Button Name="WPFDiagClearRecommended" Content="Desmarcar todos" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Desmarca todos os itens da lista de recomendações abaixo (e as caixas correspondentes nas abas Ajustes, Jogos e Servidor)."/>
+                            <TextBlock Name="WPFDiagRecCount" Text="0 de 0 recomendados marcados" Margin="10,5,5,5" VerticalAlignment="Center"
+                                       FontSize="{DynamicResource FontSize}" Foreground="{DynamicResource LabelboxForegroundColor}"/>
                         </WrapPanel>
                     </Border>
 
-                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="{DynamicResource TabContentMargin}">
+                    <ScrollViewer Name="WPFDiagScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="{DynamicResource TabContentMargin}">
                         <StackPanel Background="Transparent" Margin="5">
                             <TextBlock Name="WPFDiagStatus" Text="Coletando informações do sistema..." TextWrapping="Wrap" Margin="5,0,5,5"
                                        FontSize="{DynamicResource FontSize}" Foreground="{DynamicResource MainForegroundColor}"/>
