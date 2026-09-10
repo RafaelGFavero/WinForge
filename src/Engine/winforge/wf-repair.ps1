@@ -457,6 +457,64 @@ function Select-WinForgeNewestPackage {
     } -Descending | Select-Object -First 1)
 }
 
+function Split-WinForgeCertificateSubject {
+    <#
+    .SYNOPSIS
+        Quebra o 'Subject' de um certificado nos seus RDNs (tipo e valor).
+    .DESCRIPTION
+        Existe para a conferência do titular parar de ser uma busca de texto solto dentro do Subject.
+        'O=Microsoft Corporation' aparece DENTRO de 'O=Microsoft Corporation Ltda' - e é assim que uma
+        empresa com nome parecido passaria por uma porteira feita de '-like'. Separando os RDNs, a
+        pergunta vira "existe um RDN de tipo O cujo valor é exatamente este?", que não tem meio-termo.
+
+        A separação respeita as duas fugas que a RFC 4514 permite no meio de um valor: a vírgula
+        escapada com barra invertida ('O=Empresa\, Ltda') e o valor entre aspas ('O="Empresa, Ltda"').
+        Sem isso, um valor com vírgula viraria dois RDNs e o segundo pedaço entraria na lista sem tipo.
+
+        Função pura, sem tocar na máquina: o -SelfTest a exercita com texto sintético.
+    .OUTPUTS
+        Lista de hashtables @{ Type = 'O'; Value = 'Microsoft Corporation' }, na ordem em que aparecem.
+    #>
+    param([string]$Subject)
+
+    $rdns = New-Object System.Collections.Generic.List[hashtable]
+    if ([string]::IsNullOrWhiteSpace($Subject)) { return $rdns }
+
+    $texto = [string]$Subject
+    $atual = New-Object System.Text.StringBuilder
+    $partes = New-Object System.Collections.Generic.List[string]
+    $aspas = $false
+    for ($i = 0; $i -lt $texto.Length; $i++) {
+        $c = $texto[$i]
+        if ($c -eq '\' -and $i -lt ($texto.Length - 1)) {
+            # A barra invertida some e o caractere seguinte entra literal: é o que impede a vírgula
+            # escapada de virar separador.
+            [void]$atual.Append($texto[$i + 1])
+            $i++
+            continue
+        }
+        if ($c -eq '"') { $aspas = -not $aspas; continue }
+        if (-not $aspas -and ($c -eq ',' -or $c -eq ';')) {
+            $partes.Add($atual.ToString())
+            [void]$atual.Clear()
+            continue
+        }
+        [void]$atual.Append($c)
+    }
+    $partes.Add($atual.ToString())
+
+    foreach ($parte in $partes) {
+        $p = [string]$parte
+        $igual = $p.IndexOf('=')
+        if ($igual -lt 1) { continue }
+        $tipo = $p.Substring(0, $igual).Trim()
+        $valor = $p.Substring($igual + 1).Trim()
+        if ([string]::IsNullOrWhiteSpace($tipo)) { continue }
+        $rdns.Add(@{ Type = $tipo; Value = $valor })
+    }
+    return $rdns
+}
+
 function Test-WinForgeMicrosoftSigner {
     <#
     .SYNOPSIS
@@ -469,15 +527,23 @@ function Test-WinForgeMicrosoftSigner {
         passaria pela conferência, que é exatamente o buraco que um proxy de inspeção HTTPS explora
         ao reassinar o download com o próprio certificado.
 
-        A comparação é pelo nome comum da organização dentro do Subject, que vem como
-        'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'.
+        A conferência é pelo RDN de ORGANIZAÇÃO (O=), com valor EXATAMENTE 'Microsoft Corporation', e
+        não por texto solto dentro do Subject. A diferença não é estilo: 'O=Microsoft Corporation'
+        está contido em 'O=Microsoft Corporation Ltda', e um certificado emitido para uma empresa com
+        esse nome passaria por uma comparação de substring. O Subject vem como
+        'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; quem
+        separa os RDNs (inclusive com vírgula escapada ou valor entre aspas) é
+        Split-WinForgeCertificateSubject.
     .OUTPUTS
         $true ou $false.
     #>
     param([string]$Subject)
 
     if ([string]::IsNullOrWhiteSpace($Subject)) { return $false }
-    return ([string]$Subject -like '*O=Microsoft Corporation*')
+    foreach ($rdn in (Split-WinForgeCertificateSubject -Subject $Subject)) {
+        if ([string]$rdn.Type -eq 'O' -and [string]$rdn.Value -eq 'Microsoft Corporation') { return $true }
+    }
+    return $false
 }
 
 function Test-WinForgeMicrosoftSignature {
@@ -548,6 +614,81 @@ function Get-WinForgeWingetPath {
     return $null
 }
 
+function Assert-WinForgeNotSelfTest {
+    <#
+    .SYNOPSIS
+        Lança quando o WinForge está em modo SelfTest. É a trava que nenhuma função que ESCREVE pula.
+    .DESCRIPTION
+        Nasceu de um estrago real: durante o desenvolvimento, uma chamada de teste a um ajudante que
+        ainda não tinha bloco param() engoliu o -DryRun em $args, e o instalador web do DirectX foi
+        baixado e ABERTO na máquina de quem estava compilando; o winget rodou os doze pacotes do
+        Visual C++ na mesma rodada. Uma função PowerShell sem param() aceita qualquer switch em
+        silêncio - não há erro, não há aviso, e a "simulação" mexe no sistema.
+
+        A resposta tem duas camadas, e esta é a segunda: mesmo que o -DryRun se perca outra vez, toda
+        função que altera a máquina pergunta se o programa está em modo SelfTest e RECUSA. O build
+        marca $sync.SelfTest = $true na primeira linha do bloco de teste; uma execução normal nunca
+        define a chave, e uma chave ausente num hashtable é $null - ou seja, falso.
+
+        A ordem dentro de cada ajudante importa e é sempre a mesma: param() primeiro, o retorno de
+        -DryRun em seguida, esta trava DEPOIS. Assim a simulação continua funcionando dentro do
+        SelfTest (é ela que exercita as tabelas) e só o caminho que escreve é barrado.
+    .PARAMETER Name
+        Nome da função que está sendo barrada, para a mensagem dizer QUEM foi recusado. Quando não
+        vem, sai da pilha de chamadas.
+    #>
+    param([string]$Name)
+
+    if (-not $sync.SelfTest) { return }
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        try {
+            $pilha = @(Get-PSCallStack)
+            if ($pilha.Count -gt 1) { $Name = [string]$pilha[1].FunctionName }
+        } catch { $Name = '(desconhecida)' }
+    }
+    throw "Recusado: '$Name' altera o sistema e o WinForge está em modo SelfTest."
+}
+
+function Test-WinForgeWingetInstalled {
+    <#
+    .SYNOPSIS
+        Lê a resposta de 'winget list --id <id> -e' e diz se o pacote já está na máquina.
+    .DESCRIPTION
+        O código de saída sozinho não basta: em algumas versões do winget uma origem que responde
+        devagar também sai com 0 e um texto de "nenhum pacote encontrado". Mas procurar o id INTEIRO
+        na saída é o erro oposto - a listagem do winget é uma TABELA de largura fixa, e um id longo
+        como 'Microsoft.VCRedist.2015+.x64' sai cortado com reticências na coluna Id. O id inteiro
+        nunca aparece, o pacote instalado é dado como ausente e o botão manda instalar de novo os doze
+        redistribuíveis - minutos de winget para não mudar nada.
+
+        Por isso a busca é pelo PREFIXO do id: até o último ponto ('Microsoft.VCRedist.2015+' para o
+        exemplo acima) e, se ainda assim ele passar de 20 caracteres, só os 20 primeiros - a coluna
+        corta em largura, não em ponto. O que se perde é o fim do id; o que se ganha é a leitura
+        funcionar. Quando o id não tem ponto, vale ele inteiro (limitado do mesmo jeito).
+
+        Perder o fim do id não afrouxa a conferência tanto quanto parece: a pergunta foi feita com
+        '--id <id> -e', que é busca EXATA - a saída ou é o pacote pedido, ou é o texto de "nenhum
+        pacote encontrado". O prefixo serve para distinguir esses dois casos, não para escolher entre
+        pacotes.
+
+        Função pura: recebe o código e o texto, não chama nada.
+    .OUTPUTS
+        $true ou $false.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Id,
+        [int]$ExitCode,
+        [string]$Text
+    )
+
+    if ($ExitCode -ne 0) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    $ponto = $Id.LastIndexOf('.')
+    $prefixo = if ($ponto -gt 0) { $Id.Substring(0, $ponto) } else { $Id }
+    if ($prefixo.Length -gt 20) { $prefixo = $prefixo.Substring(0, 20) }
+    return ([string]$Text -match [regex]::Escape($prefixo))
+}
+
 function Invoke-WinForgeWmiRepair {
     <#
     .SYNOPSIS
@@ -569,9 +710,17 @@ function Invoke-WinForgeWmiRepair {
         aconteceu. Por isso, sem elevação, o texto diz que precisa de elevação e para aí.
 
         A saída de cada passo entra inteira no relatório: é ela que alguém vai colar num chamado.
+    .PARAMETER DryRun
+        Diz o que faria e não chama o winmgmt. Existe em toda função que escreve, e não só nas que o
+        -SelfTest simula: uma função sem param() engole o switch em silêncio e roda de verdade.
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return '[simulação] winmgmt /verifyrepository e, se o repositório estiver inconsistente e o WinForge estiver elevado, winmgmt /salvagerepository seguido de nova verificação.' }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
     $linhas = New-Object System.Collections.Generic.List[string]
 
     $ver = Invoke-WinForgeNativeCommand -FilePath 'winmgmt.exe' -Arguments @('/verifyrepository')
@@ -638,9 +787,16 @@ function Invoke-WinForgeStoreReregister {
 
         Cada pacote tem seu try/catch: um que não existe nesta edição do Windows não pode derrubar os
         outros dois.
+    .PARAMETER DryRun
+        Devolve os pacotes que seriam registrados, sem listar nem registrar nada.
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return '[simulação] Add-AppxPackage -Register do AppXManifest.xml de Microsoft.WindowsStore, Microsoft.DesktopAppInstaller e Microsoft.StorePurchaseApp, para o usuário atual.' }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
     $alvos = @('Microsoft.WindowsStore', 'Microsoft.DesktopAppInstaller', 'Microsoft.StorePurchaseApp')
     $linhas = New-Object System.Collections.Generic.List[string]
 
@@ -698,9 +854,16 @@ function Enable-WinForgeDotNet35 {
         Os arquivos do 3.5 não vêm na imagem instalada: o DISM os busca no Windows Update, então isto
         exige internet e pode demorar minutos. -All traz junto as sub-features (WCF), e -NoRestart
         deixa a decisão de reiniciar com quem clicou.
+    .PARAMETER DryRun
+        Diz o que faria e não chama o DISM (nem a consulta ao recurso, que já carrega módulo).
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return '[simulação] Enable-WindowsOptionalFeature -Online -FeatureName NetFx3 -All -NoRestart, quando o recurso não estiver habilitado.' }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
     $linhas = New-Object System.Collections.Generic.List[string]
 
     $atual = $null
@@ -768,6 +931,7 @@ function Install-WinForgeVcRedist {
         'Microsoft.VCRedist.2015+.x86', 'Microsoft.VCRedist.2015+.x64'
     )
     if ($DryRun) { return $ids }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
 
     $winget = Get-WinForgeWingetPath
     if (-not $winget) {
@@ -780,11 +944,12 @@ function Install-WinForgeVcRedist {
     $instalados = 0
 
     foreach ($id in $ids) {
-        # 'winget list --id <id> -e' devolve 0 quando achou. O código sozinho não basta: em algumas
-        # versões do winget uma origem que responde devagar também sai com 0 e um texto de "nenhum
-        # pacote encontrado", então o id tem de aparecer na saída para a linha contar como instalado.
+        # 'winget list --id <id> -e' devolve 0 quando achou, e o código sozinho não basta (uma origem
+        # lenta também sai com 0 e um texto de "nenhum pacote encontrado"). Quem lê a resposta é
+        # Test-WinForgeWingetInstalled: a saída é uma tabela de largura fixa e o id sai CORTADO na
+        # coluna, então a busca é pelo prefixo dele até o último ponto.
         $lista = Invoke-WinForgeNativeCommand -FilePath $winget -Arguments @('list', '--id', $id, '-e', '--accept-source-agreements')
-        if ([int]$lista.ExitCode -eq 0 -and [string]$lista.Text -match [regex]::Escape($id)) {
+        if (Test-WinForgeWingetInstalled -Id $id -ExitCode ([int]$lista.ExitCode) -Text ([string]$lista.Text)) {
             $linhas.Add("$id`: já instalado (nada a fazer)")
             $instalados++
             continue
@@ -816,9 +981,16 @@ function Install-WinForgePowerShell7 {
     .DESCRIPTION
         Instalação lado a lado: o Windows PowerShell 5.1 continua onde está, e é ele que roda o
         WinForge. O 7 aparece como "PowerShell 7" no menu Iniciar (pwsh.exe).
+    .PARAMETER DryRun
+        Devolve o comando que seria dado ao winget, sem chamá-lo.
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return '[simulação] winget install --id Microsoft.PowerShell -e --silent --accept-package-agreements --accept-source-agreements' }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
     $winget = Get-WinForgeWingetPath
     if (-not $winget) {
         return "winget não encontrado: use 'WinGet - Reinstall' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
@@ -872,6 +1044,7 @@ function Install-WinForgeDirectX {
     $destino = Join-Path $pasta 'dxwebsetup.exe'
 
     if ($DryRun) { return @{ Url = $url; Path = $destino } }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
 
     try {
         if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
@@ -932,9 +1105,17 @@ function Invoke-WinForgeChkdskSchedule {
 
         Depois de marcar, 'fsutil dirty query' confirma o estado: o relatório termina dizendo o que
         vai acontecer no próximo boot, não o que se pretendia fazer.
+    .PARAMETER DryRun
+        Diz qual volume seria marcado e não chama o fsutil. A marca é de mão única: não existe
+        'fsutil dirty clear', então esta é a função em que um -DryRun engolido custa mais caro.
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return "[simulação] fsutil dirty set $(if ([string]::IsNullOrWhiteSpace($env:SystemDrive)) { 'C:' } else { $env:SystemDrive }) - marcaria o volume para o chkdsk rodar na próxima reinicialização." }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
     $unidade = $env:SystemDrive
     if ([string]::IsNullOrWhiteSpace($unidade)) { $unidade = 'C:' }
 
@@ -976,9 +1157,16 @@ function Invoke-WinForgeMemoryDiagSchedule {
         isso o caminho de "não achei" não manda ninguém "conferir o resultado acima": ele imprime o
         /enum inteiro, que é onde a resposta está em qualquer idioma. Quem decide se deu certo é o
         código de saída do /bootsequence, já conferido acima; esta parte é só a leitura de apoio.
+    .PARAMETER DryRun
+        Diz o que faria e não chama o bcdedit.
     .OUTPUTS
         Texto pronto para a janela de saída.
     #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return '[simulação] bcdedit /bootsequence {memdiag} - colocaria o Diagnóstico de Memória na próxima inicialização, uma vez só.' }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
     $linhas = New-Object System.Collections.Generic.List[string]
     $set = Invoke-WinForgeNativeCommand -FilePath 'bcdedit.exe' -Arguments @('/bootsequence', '{memdiag}')
     $linhas.Add("bcdedit /bootsequence {memdiag} - código de saída: $($set.ExitCode)")
@@ -1113,13 +1301,31 @@ function Invoke-WinForgeRepairCommand {
             Write-WinForgeLog -Component "Repair" -Message "$Name não despachado: ação do tipo '$kind' precisa de confirmação e não há ninguém para confirmar."
             return @{ Dispatched = $false; Reason = 'confirmação'; Kind = $kind }
         }
-        $resposta = [System.Windows.MessageBox]::Show(
-            (Get-WinForgeRepairConfirmText -Name $Name),
-            "WinForge",
-            [System.Windows.MessageBoxButton]::YesNo,
-            [System.Windows.MessageBoxImage]::Warning,
-            [System.Windows.MessageBoxResult]::No
-        )
+        # Segunda camada da trava de SelfTest: com -NoUI o caminho já morreu acima, mas quem chamar
+        # sem -NoUI durante um SelfTest não pode abrir caixa nenhuma (não há ninguém para responder e
+        # o build ficaria pendurado) nem despachar coisa alguma.
+        Assert-WinForgeNotSelfTest -Name "Invoke-WinForgeRepairCommand ($Name)"
+        # A caixa nasce DONA da janela do WinForge quando ela existe: sem dono, ela pode aparecer
+        # atrás do programa - e uma confirmação escondida é uma confirmação que alguém vai fechar no
+        # susto. Sem $sync.Form (SelfTest, ou antes de a janela existir) vai a versão sem dono.
+        $resposta = if ($sync.Form) {
+            [System.Windows.MessageBox]::Show(
+                $sync.Form,
+                (Get-WinForgeRepairConfirmText -Name $Name),
+                "WinForge",
+                [System.Windows.MessageBoxButton]::YesNo,
+                [System.Windows.MessageBoxImage]::Warning,
+                [System.Windows.MessageBoxResult]::No
+            )
+        } else {
+            [System.Windows.MessageBox]::Show(
+                (Get-WinForgeRepairConfirmText -Name $Name),
+                "WinForge",
+                [System.Windows.MessageBoxButton]::YesNo,
+                [System.Windows.MessageBoxImage]::Warning,
+                [System.Windows.MessageBoxResult]::No
+            )
+        }
         if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
             Write-WinForgeLog -Component "Repair" -Message "$Name cancelado na confirmação. Nada foi alterado."
             return

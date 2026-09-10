@@ -200,6 +200,10 @@ function Invoke-WinForgeCommandCore {
            ferramenta tem efeito colateral (carregar módulo), e uma simulação que carrega módulo não
            é simulação. Ele existe para o -SelfTest poder passar por toda linha de uma tabela -
            inclusive a que repara o sistema - sem tocar na máquina de quem compila.
+        5. Em modo SelfTest ($sync.SelfTest), linha com 'Kind' diferente de 'read' e sem -DryRun é
+           RECUSADA com exceção. É a trava que faltava quando um -DryRun engolido fez o instalador do
+           DirectX rodar de verdade na máquina de quem compilava: aqui ela vale para toda a tabela,
+           inclusive para uma linha nova cujo autor não tenha lembrado da trava.
     .PARAMETER Spec
         A linha da tabela: @{ Title; Command; Requires; Native; ... }.
     .PARAMETER Component
@@ -224,6 +228,16 @@ function Invoke-WinForgeCommandCore {
     $cmd = $Spec
     if ($DryRun) {
         return @{ Name = $Name; Title = [string]$cmd.Title; Text = "[simulação] " + [string]$cmd.Command; Path = $null; ExitCode = $null }
+    }
+
+    # A trava de SelfTest fica aqui, no funil por onde TODA linha de tabela passa, e não só dentro de
+    # cada ajudante: uma linha nova que altere o sistema chega barrada de nascença, sem depender de
+    # quem a escreveu ter lembrado da trava. Linha sem 'Kind' conta como 'read' - é o caso da tabela
+    # do servidor, que só lê e que o -SelfTest roda de verdade.
+    $tipo = [string]$cmd.Kind
+    if ([string]::IsNullOrWhiteSpace($tipo)) { $tipo = 'read' }
+    if ($sync.SelfTest -and $tipo -ne 'read') {
+        throw "Recusado: '$Name' é uma ação do tipo '$tipo', que altera o sistema, e o WinForge está em modo SelfTest."
     }
 
     $inicio = Get-Date

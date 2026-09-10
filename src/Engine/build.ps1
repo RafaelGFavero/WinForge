@@ -773,6 +773,10 @@ Initialize-WinUtilBoostConfigs
 Initialize-WinForgeAudit
 
 if ($SelfTest) {
+    # PRIMEIRA linha do bloco, antes de qualquer teste: daqui para baixo toda função que ESCREVE no
+    # sistema se recusa a rodar (Assert-WinForgeNotSelfTest e a trava de Invoke-WinForgeCommandCore).
+    # A execução normal do WinForge nunca define esta chave, e chave ausente em hashtable é $null.
+    $sync.SelfTest = $true
     Write-Host "== WinForge SelfTest =="
     $wbErrors = 0
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
@@ -1706,11 +1710,23 @@ if ($SelfTest) {
             if ($wfRepConf.Length -lt 120) { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: texto curto demais ($($wfRepConf.Length) caractere(s)) para explicar o que muda" -ForegroundColor Red; $wbErrors++ }
             $wfRepConfOk++
         }
+        # A descrição da caixa TEM de ser a mesma frase que o usuário lê ao lado do botão na aba
+        # Config. Sem esta conferência, alguém trocaria a fonte por um texto escrito só para a caixa e
+        # os dois envelheceriam separados - a aba prometendo uma coisa e a confirmação outra.
+        $wfRepDescWmi = [string]$sync.configs.feature.WPFWFRepWmiRepair.Description
+        if ([string]::IsNullOrWhiteSpace($wfRepDescWmi)) { Write-Host "  [ERRO] Reparo (confirmação): WPFWFRepWmiRepair sem Description na config" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string](Get-WinForgeRepairConfirmText -Name WmiRepair) -notmatch [regex]::Escape($wfRepDescWmi.Trim())) { Write-Host "  [ERRO] Reparo (confirmação): o texto de WmiRepair não veio da Description da config" -ForegroundColor Red; $wbErrors++ }
         # A caixa é de Sim/Não com ícone de aviso: um "OK" não é confirmação, é aviso, e o botão
         # rodaria de qualquer jeito.
         $wfRepFonte = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
         if ($wfRepFonte -notmatch 'YesNo') { Write-Host "  [ERRO] Reparo (confirmação): a caixa deveria ser YesNo" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Reparo (confirmação): $wfRepConfOk texto(s) com título, descrição e uma pergunta"
+        # Dona da janela: sem owner a caixa pode nascer ATRÁS do programa, e uma confirmação escondida
+        # é uma confirmação que alguém fecha no susto para achar o que sumiu.
+        # Não basta o texto '$sync.Form' aparecer na função: ele tem de ser a CONDIÇÃO do ramo que
+        # chama a caixa E o primeiro argumento dela. Um 'if ($false)' na frente deixaria a linha lá,
+        # bonita e morta.
+        if ($wfRepFonte -notmatch '(?s)if \(\$sync\.Form\).{0,200}?MessageBox\]::Show\(\s*\$sync\.Form') { Write-Host "  [ERRO] Reparo (confirmação): a caixa deveria ter `$sync.Form como dona quando a janela existe" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (confirmação): $wfRepConfOk texto(s) com título, descrição da config e uma pergunta"
     } catch {
         Write-Host "  [ERRO] Reparo (confirmação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
@@ -1778,6 +1794,15 @@ if ($SelfTest) {
             @('CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US',     $true),
             @('CN=Outra Empresa Ltda, O=Outra Empresa Ltda, L=São Paulo, C=BR',                   $false),
             @('CN=Microsoft Corporation Fake, O=Empresa Qualquer, C=BR',                          $false),
+            # O motivo de a conferência ser por RDN e não por '-like': 'O=Microsoft Corporation' está
+            # DENTRO de 'O=Microsoft Corporation Ltd', e uma empresa com nome parecido passaria.
+            @('CN=Microsoft Corporation, O=Microsoft Corporation Ltd, L=Redmond, C=US',           $false),
+            @('CN=Qualquer, O=A Microsoft Corporation, C=BR',                                     $false),
+            # Vírgula dentro do valor, das duas formas que a RFC 4514 permite: sem tratar as duas, o
+            # valor quebraria em dois e o pedaço 'Inc' entraria na lista como se fosse outro RDN.
+            @('CN=Qualquer, O="Microsoft Corporation, Inc", C=US',                                $false),
+            @('CN=Qualquer, O=Microsoft Corporation\, Inc, C=US',                                 $false),
+            @('O=Microsoft Corporation',                                                          $true),
             @('', $false)
         )
         $wfRepTitOk = 0
@@ -1786,9 +1811,114 @@ if ($SelfTest) {
             if ($wfRepTitVeio -ne [bool]$wfRepTit[1]) { Write-Host "  [ERRO] Reparo (titular): '$($wfRepTit[0])' deveria dar $($wfRepTit[1]), deu $wfRepTitVeio" -ForegroundColor Red; $wbErrors++ }
             else { $wfRepTitOk++ }
         }
-        Write-Host "  Reparo (titular): $wfRepTitOk de $($wfRepTitulares.Count) titular(es) classificados (só O=Microsoft Corporation passa)"
+        # O separador de RDNs por baixo, direto: tipo e valor de cada pedaço, com a vírgula escapada
+        # ficando DENTRO do valor.
+        $wfRepRdns = @(Split-WinForgeCertificateSubject -Subject 'CN=Microsoft Corporation, O=Microsoft Corporation\, Inc, L=Redmond, S=Washington, C=US')
+        if ($wfRepRdns.Count -ne 5) { Write-Host "  [ERRO] Reparo (titular): o Subject deveria virar 5 RDNs, veio $($wfRepRdns.Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfRepRdns[1].Type -ne 'O' -or [string]$wfRepRdns[1].Value -ne 'Microsoft Corporation, Inc') { Write-Host "  [ERRO] Reparo (titular): segundo RDN veio '$($wfRepRdns[1].Type)'='$($wfRepRdns[1].Value)'" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfRepRdns[4].Type -ne 'C' -or [string]$wfRepRdns[4].Value -ne 'US') { Write-Host "  [ERRO] Reparo (titular): último RDN veio '$($wfRepRdns[4].Type)'='$($wfRepRdns[4].Value)'" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (titular): $wfRepTitOk de $($wfRepTitulares.Count) titular(es) classificados (só um RDN O= exatamente 'Microsoft Corporation' passa)"
     } catch {
         Write-Host "  [ERRO] Reparo (titular): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Recusa em modo SelfTest. Esta parte nasceu de um estrago real: uma chamada de teste a um
+    # ajudante que ainda não tinha bloco param() engoliu o '-DryRun' em $args, e o instalador web do
+    # DirectX foi baixado e ABERTO na máquina de quem estava compilando - com o winget instalando os
+    # doze redistribuíveis na mesma rodada. Uma função PowerShell sem param() aceita qualquer switch
+    # em silêncio. A resposta tem duas camadas, e as duas são provadas aqui: TODA função que escreve
+    # declara -DryRun de verdade, e TODA função que escreve recusa quando $sync.SelfTest está ligado.
+    $wfRepEscrevem = @(
+        'Invoke-WinForgeWmiRepair', 'Invoke-WinForgeStoreReregister', 'Enable-WinForgeDotNet35',
+        'Install-WinForgeVcRedist', 'Install-WinForgeDirectX', 'Install-WinForgePowerShell7',
+        'Invoke-WinForgeChkdskSchedule', 'Invoke-WinForgeMemoryDiagSchedule'
+    )
+    try {
+        if (-not $sync.SelfTest) { Write-Host "  [ERRO] Reparo (trava): `$sync.SelfTest deveria estar ligado dentro do SelfTest" -ForegroundColor Red; $wbErrors++ }
+        $wfRepSemParam = @($wfRepEscrevem | Where-Object {
+            $wfRepInfo = Get-Command $_ -ErrorAction SilentlyContinue
+            ($null -eq $wfRepInfo) -or (-not $wfRepInfo.Parameters.ContainsKey('DryRun'))
+        })
+        if ($wfRepSemParam.Count) { Write-Host "  [ERRO] Reparo (trava): função que escreve sem bloco param() com -DryRun: $($wfRepSemParam -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        # Com -DryRun elas continuam respondendo DENTRO do SelfTest: a trava vem depois do retorno da
+        # simulação de propósito, senão o próprio SelfTest não conseguiria exercitar as tabelas.
+        $wfRepSecoOk = 0
+        foreach ($wfRepFn in $wfRepEscrevem) {
+            try {
+                $wfRepSecoR = & $wfRepFn -DryRun
+                if ($null -eq $wfRepSecoR) { Write-Host "  [ERRO] Reparo (trava): $wfRepFn -DryRun não devolveu nada" -ForegroundColor Red; $wbErrors++ }
+                else { $wfRepSecoOk++ }
+            } catch {
+                Write-Host "  [ERRO] Reparo (trava): $wfRepFn -DryRun lançou '$($_.Exception.Message)' - a simulação tem de funcionar em SelfTest" -ForegroundColor Red; $wbErrors++
+            }
+        }
+        if ($wfRepSecoOk -ne $wfRepEscrevem.Count) { Write-Host "  [ERRO] Reparo (trava): $wfRepSecoOk de $($wfRepEscrevem.Count) simulação(ões) responderam" -ForegroundColor Red; $wbErrors++ }
+        # A trava direta, na função compartilhada: a mensagem tem de dizer QUEM foi recusado.
+        $wfRepAssert = $null
+        try { Assert-WinForgeNotSelfTest -Name 'FuncaoDeTeste'; } catch { $wfRepAssert = [string]$_.Exception.Message }
+        if ($null -eq $wfRepAssert) { Write-Host "  [ERRO] Reparo (trava): Assert-WinForgeNotSelfTest não recusou com `$sync.SelfTest ligado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepAssert -notmatch 'SelfTest' -or $wfRepAssert -notmatch 'FuncaoDeTeste') { Write-Host "  [ERRO] Reparo (trava): mensagem sem o nome da função ou sem 'SelfTest': '$wfRepAssert'" -ForegroundColor Red; $wbErrors++ }
+        # O chkdsk é o caso que mais dói: não existe 'fsutil dirty clear', e um bit ligado por engano
+        # faz o Windows verificar o disco em TODA reinicialização até o autochk se dar por satisfeito.
+        # Por isso a prova é nele - e o estado do volume antes e depois tem de ser o mesmo. A leitura
+        # ('fsutil dirty query') costuma exigir elevação; sem ela, a prova fica só na recusa.
+        $wfRepVolume = if ([string]::IsNullOrWhiteSpace($env:SystemDrive)) { 'C:' } else { $env:SystemDrive }
+        $wfRepSujoAntes = Invoke-WinForgeNativeCommand -FilePath 'fsutil.exe' -Arguments @('dirty', 'query', $wfRepVolume)
+        $wfRepRecusa = $null
+        try { Invoke-WinForgeChkdskSchedule | Out-Null } catch { $wfRepRecusa = [string]$_.Exception.Message }
+        if ($null -eq $wfRepRecusa) { Write-Host "  [ERRO] Reparo (trava): Invoke-WinForgeChkdskSchedule sem -DryRun deveria recusar em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Reparo (trava): a recusa do chkdsk não fala em SelfTest: '$wfRepRecusa'" -ForegroundColor Red; $wbErrors++ }
+        $wfRepSujoDepois = Invoke-WinForgeNativeCommand -FilePath 'fsutil.exe' -Arguments @('dirty', 'query', $wfRepVolume)
+        if ([int]$wfRepSujoAntes.ExitCode -eq 0 -and [int]$wfRepSujoDepois.ExitCode -eq 0) {
+            if ([string]$wfRepSujoAntes.Text -ne [string]$wfRepSujoDepois.Text) { Write-Host "  [ERRO] Reparo (trava): o estado de '$wfRepVolume' mudou depois da recusa do chkdsk" -ForegroundColor Red; $wbErrors++ }
+            $wfRepSujoNota = 'estado do volume inalterado'
+        } else {
+            $wfRepSujoNota = "estado do volume não conferível sem elevação (fsutil dirty query saiu com $($wfRepSujoAntes.ExitCode))"
+        }
+        # O funil genérico: linha de tabela com Kind que não é 'read' e sem -DryRun morre aqui, antes
+        # de qualquer coisa. A linha é sintética e o comando é inofensivo de propósito - se a trava
+        # cair, o que roda é um Get-Date, e não um instalador.
+        $wfRepNucleoSpec = @{ Title = 'Trava de SelfTest'; Command = 'Get-Date'; Kind = 'install'; Native = $false; Requires = $null }
+        $wfRepNucleoRecusa = $null
+        try { Invoke-WinForgeCommandCore -Spec $wfRepNucleoSpec -Name 'TravaSelfTest' -Component Repair -Prefix repair | Out-Null } catch { $wfRepNucleoRecusa = [string]$_.Exception.Message }
+        if ($null -eq $wfRepNucleoRecusa) { Write-Host "  [ERRO] Reparo (trava): o núcleo rodou uma linha 'install' em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepNucleoRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Reparo (trava): a recusa do núcleo não fala em SelfTest: '$wfRepNucleoRecusa'" -ForegroundColor Red; $wbErrors++ }
+        # E a mesma linha COM -DryRun continua passando: a trava não pode cegar a simulação.
+        $wfRepNucleoSeco = Invoke-WinForgeCommandCore -Spec $wfRepNucleoSpec -Name 'TravaSelfTestSeco' -Component Repair -Prefix repair -DryRun
+        if (-not ([string]$wfRepNucleoSeco.Text).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Reparo (trava): -DryRun de uma linha 'install' deveria continuar simulando em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        # O clique sem -NoUI também não pode abrir caixa nenhuma durante o SelfTest: não há ninguém
+        # para responder e o build ficaria pendurado. A ordem é conferida na fonte (chamar a função
+        # sem -NoUI aqui abriria a caixa se a trava estivesse quebrada, o que é justamente o risco).
+        $wfRepOrdem = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        $wfRepIdxTrava = $wfRepOrdem.IndexOf('Assert-WinForgeNotSelfTest')
+        $wfRepIdxCaixa = $wfRepOrdem.IndexOf('YesNo')
+        if ($wfRepIdxTrava -lt 0) { Write-Host "  [ERRO] Reparo (trava): Invoke-WinForgeRepairCommand sem a trava de SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepIdxCaixa -lt 0 -or $wfRepIdxTrava -gt $wfRepIdxCaixa) { Write-Host "  [ERRO] Reparo (trava): a trava de SelfTest tem de vir ANTES da caixa de confirmação" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (trava): $($wfRepEscrevem.Count) função(ões) com -DryRun e recusando em SelfTest; núcleo recusa 'install'; $wfRepSujoNota"
+    } catch {
+        Write-Host "  [ERRO] Reparo (trava): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Leitura de 'winget list': a saída é uma TABELA de largura fixa e o id longo sai cortado na
+    # coluna. Procurar o id inteiro dá "não instalado" para um pacote que está lá, e o botão reinstala
+    # os doze redistribuíveis à toa - minutos de winget para não mudar nada.
+    try {
+        $wfRepWgCasos = @(
+            @('Microsoft.VCRedist.2015+.x64', 0, "Nome    Id                       Versão`r`nMicrosoft Visual C++    Microsoft.VCRedist.2015…  14.40.33810.0", $true),
+            @('Microsoft.VCRedist.2015+.x64', 0, "Nome    Id    Versão`r`nMicrosoft.VCRedist.2015+.x64  14.40.33810.0", $true),
+            @('Microsoft.VCRedist.2005.x86',  0, 'Nenhum pacote instalado encontrado com os critérios de entrada.', $false),
+            @('Microsoft.VCRedist.2005.x86',  1, 'Microsoft.VCRedist.2005.x86', $false),
+            @('Microsoft.PowerShell',         0, '', $false)
+        )
+        $wfRepWgOk = 0
+        foreach ($wfRepWgCaso in $wfRepWgCasos) {
+            $wfRepWgVeio = [bool](Test-WinForgeWingetInstalled -Id $wfRepWgCaso[0] -ExitCode $wfRepWgCaso[1] -Text $wfRepWgCaso[2])
+            if ($wfRepWgVeio -ne [bool]$wfRepWgCaso[3]) { Write-Host "  [ERRO] Reparo (winget list): '$($wfRepWgCaso[0])' código $($wfRepWgCaso[1]) deveria dar $($wfRepWgCaso[3]), deu $wfRepWgVeio" -ForegroundColor Red; $wbErrors++ }
+            else { $wfRepWgOk++ }
+        }
+        # O prefixo usado na busca não pode ser o id inteiro: seria voltar ao caso que quebra.
+        if ((Test-WinForgeWingetInstalled -Id 'Microsoft.VCRedist.2015+.x64' -ExitCode 0 -Text 'Microsoft.VCRedist.2') -ne $true) { Write-Host "  [ERRO] Reparo (winget list): a busca deveria caber nos 20 primeiros caracteres do id" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (winget list): $wfRepWgOk de $($wfRepWgCasos.Count) leitura(s) - id cortado na coluna conta como instalado, código diferente de 0 não"
+    } catch {
+        Write-Host "  [ERRO] Reparo (winget list): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # A guarda do lookup de Invoke-WPFButton: sem ela o caminho da config chamaria $buttonConfig.function
     # (inexistente nestas entradas) e o clique morreria antes de chegar ao switch que passa o -Name.
