@@ -55,6 +55,7 @@ $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
 $serverConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-server-config.ps1")
+$repairConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-repair-config.ps1")
 $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
 $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
@@ -62,6 +63,7 @@ $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
 $commandsBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-commands.ps1")
+$repairBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-repair.ps1")
 $serverBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-server.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
@@ -255,6 +257,7 @@ $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawU
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
 $src = Insert-Before $src "`$inputXML = @'" ($serverConfig.TrimEnd() + "`n`n") "insert server config"
+$src = Insert-Before $src "`$inputXML = @'" ($repairConfig.TrimEnd() + "`n`n") "insert repair config"
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 $src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
 
@@ -287,6 +290,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.Trim
 # entra logo acima dela - então quem insere primeiro fica mais ACIMA no arquivo gerado. É o núcleo
 # genérico que os invólucros da aba Servidor chamam, e ele nasce antes deles.
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($commandsBlock.TrimEnd() + "`n`n") "insert commands"
+
+# ---------------------------------------------------------------- reparo de componentes (aba Config)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($repairBlock.TrimEnd() + "`n`n") "insert repair"
 
 # ---------------------------------------------------------------- aba Servidor (comandos e visibilidade das abas)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($serverBlock.TrimEnd() + "`n`n") "insert server"
@@ -629,16 +635,17 @@ $src = Replace-Once $src @'
 
 '@ @'
     $buttonConfig = $null
-    if ($sync.configs.feature.$Button) {
+    if ($sync.configs.feature.$Button -and $Button -notlike "WPFWFRep*") {
         $buttonConfig = $sync.configs.feature.$Button
     } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button" -and $Button -notlike "WPFWFSrv*" -and $Button -notlike "WPFWFAd*") {
         # WinForge: botões definidos na config de tweaks (aba Jogos)
         $buttonConfig = $sync.configs.tweaks.$Button
     }
-    # Os botões da aba Servidor (WPFWFSrv*, WPFWFAd*) ficam de fora de propósito: este caminho chama
-    # $buttonConfig.function SEM argumento nenhum, e as funções deles precisam do -Name para saber
-    # qual comando rodar. Quem despacha esses botões é o switch abaixo, com o -Name explícito por
-    # caso - por isso a config deles também não declara "function": seria uma chave morta.
+    # Os botões da aba Servidor (WPFWFSrv*, WPFWFAd*) e os do reparo de componentes (WPFWFRep*, na
+    # config de Config) ficam de fora de propósito: este caminho chama $buttonConfig.function SEM
+    # argumento nenhum, e as funções deles precisam do -Name para saber qual comando rodar. Quem
+    # despacha esses botões é o switch abaixo, com o -Name explícito por caso - por isso a config
+    # deles também não declara "function": seria uma chave morta.
     if ($buttonConfig) {
 
 '@ "button lookup"
@@ -668,6 +675,20 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFAdReplSummary" {Invoke-WinForgeServerCommand -Name ReplSummary}
         "WPFWFAdDnsScavenging" {Invoke-WinForgeServerCommand -Name DnsScavenging}
         "WPFWFAdNtdsLocation" {Invoke-WinForgeServerCommand -Name NtdsLocation}
+        # Reparo de componentes (aba Config): mesma regra dos botões da aba Servidor - o nome curto do
+        # comando é dito AQUI, porque o caminho da config não passaria argumento nenhum.
+        "WPFWFRepSecurityStatus" {Invoke-WinForgeRepairCommand -Name SecurityStatus}
+        "WPFWFRepSmartReport" {Invoke-WinForgeRepairCommand -Name SmartReport}
+        "WPFWFRepDotNetStatus" {Invoke-WinForgeRepairCommand -Name DotNetStatus}
+        "WPFWFRepChkdskScan" {Invoke-WinForgeRepairCommand -Name ChkdskScan}
+        "WPFWFRepWmiRepair" {Invoke-WinForgeRepairCommand -Name WmiRepair}
+        "WPFWFRepStoreReregister" {Invoke-WinForgeRepairCommand -Name StoreReregister}
+        "WPFWFRepChkdskSchedule" {Invoke-WinForgeRepairCommand -Name ChkdskSchedule}
+        "WPFWFRepMemoryDiag" {Invoke-WinForgeRepairCommand -Name MemoryDiag}
+        "WPFWFRepDotNet35Enable" {Invoke-WinForgeRepairCommand -Name DotNet35Enable}
+        "WPFWFRepVcRedist" {Invoke-WinForgeRepairCommand -Name VcRedist}
+        "WPFWFRepPowerShell7" {Invoke-WinForgeRepairCommand -Name PowerShell7}
+        "WPFWFRepDirectX" {Invoke-WinForgeRepairCommand -Name DirectX}
         "WPFDiagRefresh" {Start-WinForgeProfileJob}
         "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
         "WPFDiagExport" {
@@ -793,7 +814,7 @@ if ($SelfTest) {
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
-    if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 54) { Write-Host "  [ERRO] Config: esperado 54 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
@@ -1554,6 +1575,116 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Comandos (simulação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # Reparo de componentes: a tabela INTEIRA passa pela simulação, inclusive as linhas que reparam e
+    # instalam. É o único jeito de o SelfTest provar que cada linha tem título, comando que compila e
+    # tipo válido sem tocar na máquina de quem compila - e a contagem de arquivos antes/depois é o
+    # que sustenta o "não tocou": um -DryRun quebrado gravaria o arquivo do mesmo jeito.
+    $wfRepNomes = @('SecurityStatus','SmartReport','DotNetStatus','ChkdskScan','WmiRepair','StoreReregister','ChkdskSchedule','MemoryDiag','DotNet35Enable','VcRedist','PowerShell7','DirectX')
+    try {
+        $wfRepDir = Split-Path -Parent $sync.logPath
+        $wfRepAntes = @(Get-ChildItem -LiteralPath $wfRepDir -Filter 'repair-*.txt' -ErrorAction SilentlyContinue).Count
+        $wfRepPorTipo = @{}
+        foreach ($wfRepNome in $wfRepNomes) {
+            $wfRepSpec = Get-WinForgeRepairCommand -Name $wfRepNome
+            if ([string]::IsNullOrWhiteSpace($wfRepSpec.Title)) { Write-Host "  [ERRO] Reparo $wfRepNome`: sem título" -ForegroundColor Red; $wbErrors++ }
+            if ([string]::IsNullOrWhiteSpace($wfRepSpec.Command)) { Write-Host "  [ERRO] Reparo $wfRepNome`: sem comando" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfRepSpec.Kind -notin @('read','repair','install')) { Write-Host "  [ERRO] Reparo $wfRepNome`: tipo inválido '$($wfRepSpec.Kind)'" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepSpec.Native) { Write-Host "  [ERRO] Reparo $wfRepNome`: toda linha chama função do WinForge, Native tem de ser falso" -ForegroundColor Red; $wbErrors++ }
+            # Ação que muda a máquina sem texto de confirmação seria uma pergunta em branco na etapa
+            # seguinte do plano - a hora de pegar isso é agora, na tabela.
+            if ([string]$wfRepSpec.Kind -ne 'read' -and [string]::IsNullOrWhiteSpace($wfRepSpec.Confirm)) { Write-Host "  [ERRO] Reparo $wfRepNome`: ação '$($wfRepSpec.Kind)' sem texto de confirmação" -ForegroundColor Red; $wbErrors++ }
+            try { [scriptblock]::Create($wfRepSpec.Command) | Out-Null } catch { Write-Host "  [ERRO] Reparo $wfRepNome`: comando não compila: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
+            # O comando é o nome de uma função do próprio programa: se ela não existir, o botão só
+            # falharia no clique de quem estivesse com o problema que ele conserta.
+            $wfRepFuncao = ([string]$wfRepSpec.Command -split '\s+')[0]
+            if (-not (Get-Command $wfRepFuncao -ErrorAction SilentlyContinue)) { Write-Host "  [ERRO] Reparo $wfRepNome`: função '$wfRepFuncao' não existe" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepSpec.Requires -and -not ($wfRepSpec.Requires -is [string])) { Write-Host "  [ERRO] Reparo $wfRepNome`: Requires deveria ser texto" -ForegroundColor Red; $wbErrors++ }
+            # Nome inédito por linha: o nome do arquivo de saída tem os segundos, então uma simulação
+            # que gravasse com o nome do comando poderia sobrescrever um arquivo do mesmo segundo e a
+            # contagem não mudaria.
+            $wfRepSeco = Invoke-WinForgeCommandCore -Spec $wfRepSpec -Name "SimulacaoRep$wfRepNome" -Component Repair -Prefix repair -DryRun
+            if (-not ([string]$wfRepSeco.Text).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Reparo $wfRepNome`: -DryRun deveria devolver '[simulação] <comando>', veio '$([string]$wfRepSeco.Text)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfRepSeco.Text -notmatch [regex]::Escape([string]$wfRepSpec.Command)) { Write-Host "  [ERRO] Reparo $wfRepNome`: -DryRun não trouxe o texto do comando" -ForegroundColor Red; $wbErrors++ }
+            if ($null -ne $wfRepSeco.Path) { Write-Host "  [ERRO] Reparo $wfRepNome`: -DryRun não pode devolver caminho de arquivo (veio '$($wfRepSeco.Path)')" -ForegroundColor Red; $wbErrors++ }
+            $wfRepPorTipo[[string]$wfRepSpec.Kind] = 1 + [int]$wfRepPorTipo[[string]$wfRepSpec.Kind]
+        }
+        $wfRepDepois = @(Get-ChildItem -LiteralPath $wfRepDir -Filter 'repair-*.txt' -ErrorAction SilentlyContinue).Count
+        if ($wfRepDepois -ne $wfRepAntes) { Write-Host "  [ERRO] Reparo: -DryRun gravou arquivo na pasta de logs ($wfRepAntes -> $wfRepDepois)" -ForegroundColor Red; $wbErrors++ }
+        $wfRepDesconhecido = $false
+        try { Get-WinForgeRepairCommand -Name 'NaoExisteEsteComando' | Out-Null } catch { $wfRepDesconhecido = $true }
+        if (-not $wfRepDesconhecido) { Write-Host "  [ERRO] Reparo: nome desconhecido deveria lançar" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (simulação): $($wfRepNomes.Count) comando(s) - $(@($wfRepPorTipo.Keys | Sort-Object | ForEach-Object { "$_=$($wfRepPorTipo[$_])" }) -join ', ') - sem rodar nada e sem gravar arquivo"
+    } catch {
+        Write-Host "  [ERRO] Reparo (simulação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Despacho: nesta etapa só leitura vai para o runspace, e com -NoUI nem isso. O SelfTest roda sem
+    # ninguém na frente - se um destes botões despachasse aqui, o build repararia a máquina de quem
+    # compila (ou abriria uma janela num processo sem laço de mensagens).
+    try {
+        $wfRepTravaAntes = $sync.CommandRunning
+        foreach ($wfRepNome in $wfRepNomes) {
+            $wfRepDec = Invoke-WinForgeRepairCommand -Name $wfRepNome -NoUI
+            if ($null -eq $wfRepDec) { Write-Host "  [ERRO] Reparo $wfRepNome`: -NoUI deveria devolver a decisão" -ForegroundColor Red; $wbErrors++; continue }
+            if ($wfRepDec.Dispatched) { Write-Host "  [ERRO] Reparo $wfRepNome`: -NoUI não pode despachar nada" -ForegroundColor Red; $wbErrors++ }
+            if ([string]::IsNullOrWhiteSpace($wfRepDec.Reason)) { Write-Host "  [ERRO] Reparo $wfRepNome`: -NoUI sem motivo da recusa" -ForegroundColor Red; $wbErrors++ }
+            $wfRepEsperado = if ([string]$wfRepDec.Kind -eq 'read') { 'NoUI' } else { 'confirmação' }
+            if ([string]$wfRepDec.Reason -ne $wfRepEsperado) { Write-Host "  [ERRO] Reparo $wfRepNome`: motivo '$($wfRepDec.Reason)', esperado '$wfRepEsperado'" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfRepDecRuim = Invoke-WinForgeRepairCommand -Name 'NaoExisteEsteComando' -NoUI
+        if ($wfRepDecRuim.Dispatched -or [string]$wfRepDecRuim.Reason -ne 'desconhecido') { Write-Host "  [ERRO] Reparo: nome desconhecido deveria recusar com motivo 'desconhecido'" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.CommandRunning -ne $wfRepTravaAntes) { Write-Host "  [ERRO] Reparo: a trava de comando em andamento mudou sem nenhum despacho" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (despacho): $($wfRepNomes.Count) botão(ões) recusados com -NoUI, nada rodou"
+    } catch {
+        Write-Host "  [ERRO] Reparo (despacho): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # As três leituras rodam DE VERDADE nesta máquina: são o conteúdo dos únicos botões que esta
+    # etapa despacha, e uma função que devolve texto vazio (ou lança sem elevação) seria uma janela
+    # em branco na cara de quem clicou. Sem admin as partes que exigem elevação viram 'n/d' - o texto
+    # continua saindo.
+    foreach ($wfRepPar in @(@('Get-WinForgeSecurityStatus','segurança'), @('Get-WinForgeSmartReport','discos'), @('Get-WinForgeDotNetStatus','.NET'))) {
+        try {
+            $wfRepTexto = [string](& $wfRepPar[0])
+            if ([string]::IsNullOrWhiteSpace($wfRepTexto)) { Write-Host "  [ERRO] Reparo (leitura $($wfRepPar[1])): $($wfRepPar[0]) devolveu texto vazio" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Reparo (leitura $($wfRepPar[1])): $($wfRepTexto.Length) caractere(s), $(@($wfRepTexto -split "`r?`n").Count) linha(s)" }
+        } catch {
+            Write-Host "  [ERRO] Reparo (leitura $($wfRepPar[1])): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    # Uma linha da tabela rodando de verdade pelo núcleo, de ponta a ponta: é o que prova que o
+    # invólucro do reparo amarra 'Repair'/'repair' ao núcleo e que o arquivo de saída sai com o
+    # prefixo certo. Só SecurityStatus: é leitura pura e responde em milissegundos (o chkdsk /scan,
+    # que também é leitura, levaria minutos e não cabe num build).
+    try {
+        $wfRepReal = Invoke-WinForgeRepairCommandCore -Name SecurityStatus
+        if ([string]::IsNullOrWhiteSpace($wfRepReal.Text)) { Write-Host "  [ERRO] Reparo (execução): SecurityStatus voltou sem texto" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfRepReal.Text -match 'Código de saída') { Write-Host "  [ERRO] Reparo (execução): SecurityStatus não é executável e não pode trazer linha de código de saída" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfRepReal.Path -or -not (Test-Path -LiteralPath $wfRepReal.Path)) { Write-Host "  [ERRO] Reparo (execução): SecurityStatus não gravou o arquivo ('$($wfRepReal.Path)')" -ForegroundColor Red; $wbErrors++ }
+        elseif ((Split-Path -Leaf $wfRepReal.Path) -notlike 'repair-*') { Write-Host "  [ERRO] Reparo (execução): arquivo fora do prefixo 'repair' ($(Split-Path -Leaf $wfRepReal.Path))" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (execução): SecurityStatus -> $(([string]$wfRepReal.Text).Length) caractere(s) em $(Split-Path -Leaf $wfRepReal.Path)" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (execução): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # winget fora do PATH é o caso normal logo depois de um logon novo, e é por isso que a busca não
+    # é um Get-Command: o que ela não pode é lançar.
+    try {
+        $wfRepWinget = Get-WinForgeWingetPath
+        Write-Host "  Reparo (winget): $(if ($wfRepWinget) { $wfRepWinget } else { 'não encontrado nesta máquina' })"
+    } catch {
+        Write-Host "  [ERRO] Reparo (winget): Get-WinForgeWingetPath lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+    }
+    # A guarda do lookup de Invoke-WPFButton: sem ela o caminho da config chamaria $buttonConfig.function
+    # (inexistente nestas entradas) e o clique morreria antes de chegar ao switch que passa o -Name.
+    try {
+        $wfRepLookup = [string](Get-Command Invoke-WPFButton).ScriptBlock
+        if ($wfRepLookup -notmatch '\$Button -notlike "WPFWFRep\*"') { Write-Host "  [ERRO] Reparo: o lookup de Invoke-WPFButton não exclui as chaves WPFWFRep*" -ForegroundColor Red; $wbErrors++ }
+        $wfRepSemEntrada = @($wfRepNomes | Where-Object { $null -eq $sync.configs.feature."WPFWFRep$_" })
+        if ($wfRepSemEntrada.Count) { Write-Host "  [ERRO] Reparo: sem entrada na config da aba Config: $($wfRepSemEntrada -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        $wfRepComFuncao = @($wfRepNomes | Where-Object { $wfRepEntrada = $sync.configs.feature."WPFWFRep$_"; $wfRepEntrada -and $wfRepEntrada.PSObject.Properties['function'] })
+        if ($wfRepComFuncao.Count) { Write-Host "  [ERRO] Reparo: entradas com chave 'function' morta: $($wfRepComFuncao -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (lookup): WPFWFRep* fora do caminho da config, despacho pelo switch com -Name" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (lookup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     # A janela de saída é montada em código, sem XAML: o -NoShow existe para o SelfTest provar que o
     # TextBox nasce com o texto certo sem abrir nada na tela (ShowDialog aqui travaria o build).
     try {
@@ -1658,6 +1789,17 @@ if ($SelfTest) {
             } catch {
                 Write-Host "  [ERRO] montar aba $tab`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
             }
+        }
+        # Aba Config: os botões de reparo têm de existir DEPOIS de a aba ser montada de verdade. A
+        # trava é sobre o controle na janela, não sobre a config: uma entrada com categoria ou painel
+        # errado continuaria na config e nunca apareceria na tela.
+        try {
+            $wfRepChaves = @($wfRepNomes | ForEach-Object { "WPFWFRep$_" })
+            $wfRepFaltando = @($wfRepChaves | Where-Object { $sync[$_] -isnot [System.Windows.Controls.Button] })
+            if ($wfRepFaltando.Count) { Write-Host "  [ERRO] aba Config (reparo): botão(ões) ausentes: $($wfRepFaltando -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Aba Config (reparo): $($wfRepChaves.Count) botão(ões) na tela" }
+        } catch {
+            Write-Host "  [ERRO] aba Config (reparo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         # Aba Servidor: no cliente ela monta VAZIA (todo item tem platform 'server' e o filtro de
         # compatibilidade esconde tudo) e isso não pode virar exceção - a aba existe na janela em

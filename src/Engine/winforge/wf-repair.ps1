@@ -1,0 +1,881 @@
+﻿#region ===== WinForge - reparo de componentes =====
+# Os botões do grupo "WinForge - Reparo de componentes" da aba Config. Cada botão cai em
+# Invoke-WinForgeRepairCommand -Name <nome curto>: o nome curto é a única coisa que a interface
+# conhece, o QUE roda mora na tabela de Get-WinForgeRepairCommand e o COMO roda mora na máquina
+# genérica de comandos (wf-commands.ps1) - núcleo síncrono Invoke-WinForgeCommandCore, despacho em
+# runspace Invoke-WinForgeCommandButton e a janela de saída montada em código.
+#
+# A diferença para a aba Servidor é o 'Kind' de cada linha:
+#   read    - só lê o estado da máquina; pode ser clicado a qualquer hora, inclusive em produção.
+#   repair  - mexe no sistema (repositório WMI, registro de aplicativos, agendamento de disco).
+#   install - baixa e instala componente (DISM, winget, instalador da Microsoft).
+#
+# Nesta etapa só 'read' é despachado de fato. 'repair' e 'install' têm o helper escrito e a linha na
+# tabela, mas o clique responde "Disponível na próxima etapa": a confirmação antes de mexer na
+# máquina é a próxima tarefa do plano, e um botão que repara sem perguntar é pior que um botão que
+# ainda não faz nada.
+#
+# Nenhum comando desta tabela é montado com texto vindo de fora do programa. O que chama executável
+# usa Invoke-WinForgeNativeCommand -FilePath/-Arguments, que entrega cada argumento inteiro, sem
+# interpretador no meio.
+# ---------------------------------------------------------------------------
+
+function Get-WinForgeRepairCommand {
+    <#
+    .SYNOPSIS
+        Tabela do reparo de componentes: título, texto do comando, ferramenta exigida e tipo de ação.
+    .DESCRIPTION
+        Dado puro, separado da execução: o -SelfTest passa por todas as linhas (título, comando que
+        compila, tipo válido) e simula cada uma em qualquer máquina, sem reparar nem instalar nada.
+
+        'Requires' é o nome de um executável ou de um cmdlet resolvido com Get-Command. Ausente, o
+        comando não roda: vira uma frase dizendo qual ferramenta falta.
+
+        'Native' é sempre $false aqui: toda linha chama uma função do próprio WinForge, e é ela que
+        chama o executável (com -FilePath/-Arguments) quando existe executável. Marcar 'Native' faria
+        o núcleo trocar a code page para um pipeline de cmdlet e inventar um "Código de saída: 0".
+
+        'Kind' e 'Confirm' são lidos por Invoke-WinForgeRepairCommand, não pelo núcleo genérico.
+    .OUTPUTS
+        Hashtable com Title, Command, Requires, Native, Kind e (fora de 'read') Confirm.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    switch ($Name) {
+        'SecurityStatus' {
+            return @{
+                Title    = 'Estado de TPM, Secure Boot e BitLocker'
+                Command  = 'Get-WinForgeSecurityStatus'
+                Requires = $null
+                Native   = $false
+                Kind     = 'read'
+            }
+        }
+        'SmartReport' {
+            return @{
+                Title    = 'Saúde dos discos (SMART)'
+                Command  = 'Get-WinForgeSmartReport'
+                Requires = 'Get-PhysicalDisk'
+                Native   = $false
+                Kind     = 'read'
+            }
+        }
+        'DotNetStatus' {
+            return @{
+                Title    = 'Estado do .NET Framework 3.5 e 4.8'
+                Command  = 'Get-WinForgeDotNetStatus'
+                Requires = $null
+                Native   = $false
+                Kind     = 'read'
+            }
+        }
+        'ChkdskScan' {
+            # 'chkdsk /scan' é o modo online e somente leitura do chkdsk: varre o volume com o
+            # Windows rodando e não repara nada. Demora minutos num disco cheio - por isso roda em
+            # runspace, como todo comando desta máquina.
+            return @{
+                Title    = 'Verificar disco do sistema agora (chkdsk /scan)'
+                Command  = 'Invoke-WinForgeChkdskScan'
+                Requires = 'chkdsk.exe'
+                Native   = $false
+                Kind     = 'read'
+            }
+        }
+        'WmiRepair' {
+            return @{
+                Title    = 'Repositório WMI: verificar e recuperar'
+                Command  = 'Invoke-WinForgeWmiRepair'
+                Requires = 'winmgmt.exe'
+                Native   = $false
+                Kind     = 'repair'
+                Confirm  = 'Verificar o repositório WMI e, se ele estiver inconsistente, tentar recuperá-lo. Programas que consultam o WMI podem falhar durante a recuperação. Continuar?'
+            }
+        }
+        'StoreReregister' {
+            return @{
+                Title    = 'Microsoft Store e App Installer: registrar de novo'
+                Command  = 'Invoke-WinForgeStoreReregister'
+                Requires = 'Get-AppxPackage'
+                Native   = $false
+                Kind     = 'repair'
+                Confirm  = 'Registrar de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App para todos os usuários. Os aplicativos fecham durante o registro. Continuar?'
+            }
+        }
+        'ChkdskSchedule' {
+            return @{
+                Title    = 'Agendar chkdsk /f na próxima reinicialização'
+                Command  = 'Invoke-WinForgeChkdskSchedule'
+                Requires = 'fsutil.exe'
+                Native   = $false
+                Kind     = 'repair'
+                Confirm  = 'Marcar o disco do sistema como "sujo": na próxima reinicialização o Windows roda o chkdsk antes de carregar, e isso pode demorar bastante. Continuar?'
+            }
+        }
+        'MemoryDiag' {
+            return @{
+                Title    = 'Diagnóstico de memória na próxima reinicialização'
+                Command  = 'Invoke-WinForgeMemoryDiagSchedule'
+                Requires = 'bcdedit.exe'
+                Native   = $false
+                Kind     = 'repair'
+                Confirm  = 'Colocar o Diagnóstico de Memória do Windows na sequência de inicialização: a próxima reinicialização vai testar a memória antes de carregar o Windows. Continuar?'
+            }
+        }
+        'DotNet35Enable' {
+            return @{
+                Title    = '.NET Framework 3.5: habilitar (DISM)'
+                Command  = 'Enable-WinForgeDotNet35'
+                Requires = $null
+                Native   = $false
+                Kind     = 'install'
+                Confirm  = 'Habilitar o recurso NetFx3 (.NET Framework 3.5) pelo DISM. Os arquivos vêm do Windows Update: precisa de internet e pode demorar. Continuar?'
+            }
+        }
+        'VcRedist' {
+            # Sem 'Requires': quem procura o winget é Get-WinForgeWingetPath, que também olha a pasta
+            # do App Installer quando ele não está no PATH (é o caso logo depois de um logon novo).
+            # 'Requires = winget.exe' recusaria o botão justamente nessa máquina, que é onde ele mais
+            # serve. Winget ausente vira texto na janela, com o que fazer a respeito.
+            return @{
+                Title    = 'Visual C++ 2005–2022 (x86/x64) via winget'
+                Command  = 'Install-WinForgeVcRedist'
+                Requires = $null
+                Native   = $false
+                Kind     = 'install'
+                Confirm  = 'Instalar (ou atualizar) os pacotes redistribuíveis do Visual C++ de 2005 a 2022, x86 e x64, pelo winget. São vários downloads e pode demorar. Continuar?'
+            }
+        }
+        'PowerShell7' {
+            return @{
+                Title    = 'PowerShell 7 via winget'
+                Command  = 'Install-WinForgePowerShell7'
+                Requires = $null
+                Native   = $false
+                Kind     = 'install'
+                Confirm  = 'Instalar o PowerShell 7 (Microsoft.PowerShell) pelo winget. O Windows PowerShell 5.1 continua instalado e é ele que o WinForge usa. Continuar?'
+            }
+        }
+        'DirectX' {
+            return @{
+                Title    = 'DirectX (instalador web da Microsoft)'
+                Command  = 'Install-WinForgeDirectX'
+                Requires = $null
+                Native   = $false
+                Kind     = 'install'
+                Confirm  = 'Baixar o instalador web do DirectX (dxwebsetup.exe) da Microsoft e abri-lo. O instalador é interativo: quem conduz as telas é você. Continuar?'
+            }
+        }
+    }
+    throw "Comando de reparo desconhecido: '$Name'."
+}
+
+function Test-WinForgeRepairElevated {
+    <#
+    .SYNOPSIS
+        Diz se o processo está elevado.
+    .DESCRIPTION
+        Existe porque as leituras de segurança se comportam diferente sem elevação: Get-Tpm e
+        Get-BitLockerVolume não devolvem "nada", devolvem "Acesso negado" depois de segundos cada um.
+        Perguntar antes evita a espera e deixa o texto dizer o motivo real ("sem elevação") em vez de
+        despejar a mensagem de erro do cmdlet.
+    #>
+    try {
+        return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Get-WinForgeSecurityStatus {
+    <#
+    .SYNOPSIS
+        TPM, Secure Boot, BitLocker e segurança baseada em virtualização (VBS), em texto.
+    .DESCRIPTION
+        As quatro respostas que aparecem juntas em toda conversa sobre "esta máquina roda o Windows
+        11 / está criptografada / está com o Core Isolation ligado". Cada uma vem de uma fonte
+        diferente e cada uma falha de um jeito diferente - daí um try/catch por item, e nunca uma
+        exceção subindo: o botão é de leitura, e "n/d" é uma resposta legítima.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $elevado = Test-WinForgeRepairElevated
+    $linhas = New-Object System.Collections.Generic.List[string]
+    $linhas.Add("Computador: $env:COMPUTERNAME")
+    $linhas.Add('')
+
+    # ---- TPM
+    if ($elevado) {
+        try {
+            $tpm = Get-Tpm -ErrorAction Stop
+            $linhas.Add("TPM presente: $(if ($tpm.TpmPresent) { 'sim' } else { 'não' })")
+            $linhas.Add("TPM pronto para uso: $(if ($tpm.TpmReady) { 'sim' } else { 'não' })")
+            $linhas.Add("TPM habilitado: $(if ($tpm.TpmEnabled) { 'sim' } else { 'não' }) | ativado: $(if ($tpm.TpmActivated) { 'sim' } else { 'não' })")
+            $versao = $null
+            try { $versao = ((Get-CimInstance -Namespace root\cimv2\security\microsofttpm -ClassName Win32_Tpm -ErrorAction Stop).SpecVersion -split ',')[0].Trim() } catch { $versao = $null }
+            if ($versao) { $linhas.Add("Versão da especificação do TPM: $versao") }
+        } catch {
+            $linhas.Add("TPM: n/d ($($_.Exception.Message))")
+        }
+    } else {
+        $linhas.Add('TPM: n/d (sem elevação)')
+    }
+
+    # ---- Secure Boot: em BIOS legado o cmdlet lança "não há suporte nesta plataforma", e essa é a
+    # resposta - não um erro a esconder.
+    try {
+        $sb = Confirm-SecureBootUEFI -ErrorAction Stop
+        $linhas.Add("Secure Boot: $(if ($sb) { 'ligado' } else { 'desligado' })")
+    } catch {
+        $linhas.Add("Secure Boot: n/d ($($_.Exception.Message))")
+    }
+
+    # ---- BitLocker
+    if ($elevado) {
+        try {
+            $vols = @(Get-BitLockerVolume -ErrorAction Stop)
+            if ($vols.Count -eq 0) {
+                $linhas.Add('BitLocker: nenhum volume reportado.')
+            } else {
+                foreach ($v in $vols) {
+                    $linhas.Add("BitLocker $($v.MountPoint): proteção $($v.ProtectionStatus), estado $($v.VolumeStatus), criptografado $($v.EncryptionPercentage)%")
+                }
+            }
+        } catch {
+            $linhas.Add("BitLocker: n/d ($($_.Exception.Message))")
+        }
+    } else {
+        $linhas.Add('BitLocker: n/d (sem elevação)')
+    }
+
+    # ---- VBS / Credential Guard: os dois números que interessam são o que está CONFIGURADO e o que
+    # está RODANDO. Máquina com VBS configurado e não rodando é o caso comum de "liguei e não fez
+    # efeito"; por isso os dois aparecem, com o significado do código ao lado.
+    try {
+        $dg = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop
+        $estado = switch ([int]$dg.VirtualizationBasedSecurityStatus) {
+            0 { 'desligada' }
+            1 { 'ligada, mas não rodando' }
+            2 { 'ligada e rodando' }
+            default { "código $($dg.VirtualizationBasedSecurityStatus)" }
+        }
+        $linhas.Add("Segurança baseada em virtualização (VBS): $estado")
+        # O zero da lista não é um serviço: é como o WMI diz "nenhum". Sem tirá-lo, o relatório de uma
+        # máquina com VBS desligada trazia a linha "serviço 0: configurado sim | rodando sim".
+        $conf = @(@($dg.SecurityServicesConfigured) | Where-Object { [int]$_ -ne 0 })
+        $rod  = @(@($dg.SecurityServicesRunning) | Where-Object { [int]$_ -ne 0 })
+        $nomes = @{ 1 = 'Credential Guard'; 2 = 'Integridade de código protegida por hipervisor (HVCI)'; 3 = 'Inicialização segura do System Guard'; 4 = 'Proteção de DMA por SMM' }
+        $servicos = @(@($conf + $rod) | Sort-Object -Unique)
+        if ($servicos.Count -eq 0) {
+            $linhas.Add('  Nenhum serviço de segurança baseado em virtualização configurado.')
+        } else {
+            foreach ($s in $servicos) {
+                $rotulo = if ($nomes.ContainsKey([int]$s)) { $nomes[[int]$s] } else { "serviço $s" }
+                $linhas.Add("  $rotulo`: configurado $(if ($s -in $conf) { 'sim' } else { 'não' }) | rodando $(if ($s -in $rod) { 'sim' } else { 'não' })")
+            }
+        }
+    } catch {
+        $linhas.Add("Segurança baseada em virtualização (VBS): n/d ($($_.Exception.Message))")
+    }
+
+    return ($linhas -join "`r`n")
+}
+
+function Get-WinForgeSmartReport {
+    <#
+    .SYNOPSIS
+        Saúde dos discos: modelo, tipo, tamanho, estado e os contadores SMART de cada um.
+    .DESCRIPTION
+        Get-PhysicalDisk responde em qualquer Windows 8+ e não exige elevação; os contadores de
+        confiabilidade (Get-StorageReliabilityCounter), sim - e num disco USB ou num controlador RAID
+        eles simplesmente não existem. Cada disco vai no seu try/catch: um disco sem contador não
+        pode tirar do relatório os outros que têm.
+
+        Os campos escolhidos são os que respondem "este disco está morrendo?": Wear (desgaste do
+        SSD), ReadErrorsUncorrected/WriteErrorsUncorrected (erro que o disco não conseguiu corrigir)
+        e PowerOnHours.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $linhas = New-Object System.Collections.Generic.List[string]
+    $discos = @()
+    try {
+        $discos = @(Get-PhysicalDisk -ErrorAction Stop)
+    } catch {
+        return "Não foi possível listar os discos: $($_.Exception.Message)"
+    }
+    if ($discos.Count -eq 0) { return 'Nenhum disco físico reportado por Get-PhysicalDisk.' }
+
+    $linhas.Add(($discos |
+        Select-Object DeviceId,
+                      FriendlyName,
+                      MediaType,
+                      BusType,
+                      @{ Name = 'TamanhoGB'; Expression = { [math]::Round($_.Size / 1GB, 1) } },
+                      HealthStatus,
+                      OperationalStatus |
+        Format-Table -AutoSize | Out-String -Width 4096).TrimEnd())
+    $linhas.Add('')
+    $linhas.Add('Contadores SMART por disco')
+    $linhas.Add('-' * 78)
+
+    foreach ($d in $discos) {
+        $linhas.Add('')
+        $linhas.Add("Disco $($d.DeviceId) - $($d.FriendlyName)")
+        try {
+            $c = $d | Get-StorageReliabilityCounter -ErrorAction Stop
+            if ($null -eq $c) {
+                $linhas.Add('  Sem contadores de confiabilidade para este disco.')
+                continue
+            }
+            $linhas.Add("  Temperatura: $(if ($null -ne $c.Temperature) { "$($c.Temperature) °C" } else { 'n/d' }) (máxima registrada: $(if ($null -ne $c.TemperatureMax) { "$($c.TemperatureMax) °C" } else { 'n/d' }))")
+            $linhas.Add("  Horas ligado: $(if ($null -ne $c.PowerOnHours) { $c.PowerOnHours } else { 'n/d' })")
+            $linhas.Add("  Desgaste (Wear): $(if ($null -ne $c.Wear) { $c.Wear } else { 'n/d' })")
+            $linhas.Add("  Erros de leitura não corrigidos: $(if ($null -ne $c.ReadErrorsUncorrected) { $c.ReadErrorsUncorrected } else { 'n/d' })")
+            $linhas.Add("  Erros de escrita não corrigidos: $(if ($null -ne $c.WriteErrorsUncorrected) { $c.WriteErrorsUncorrected } else { 'n/d' })")
+        } catch {
+            $linhas.Add("  Contadores indisponíveis: $($_.Exception.Message)")
+        }
+    }
+
+    $linhas.Add('')
+    $linhas.Add('Desgaste alto, erros não corrigidos acima de zero ou estado diferente de "Healthy" pedem backup imediato e troca do disco.')
+    return ($linhas -join "`r`n")
+}
+
+function Get-WinForgeDotNetStatus {
+    <#
+    .SYNOPSIS
+        Estado do .NET Framework 3.5 (recurso NetFx3) e da linha 4.x instalada.
+    .DESCRIPTION
+        São duas perguntas diferentes com duas fontes diferentes:
+
+        - O 3.5 é um RECURSO opcional do Windows: quem responde é Get-WindowsOptionalFeature, que
+          exige elevação. Sem admin o texto diz "n/d (sem elevação)" em vez de despejar o erro do
+          DISM.
+        - O 4.x é INSTALADO, não é recurso: quem responde é o valor 'Release' em
+          HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full, que é um número crescente por
+          versão (528040 = 4.8). Ler o registro não exige elevação.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $linhas = New-Object System.Collections.Generic.List[string]
+
+    if (Test-WinForgeRepairElevated) {
+        try {
+            $f = Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop
+            $linhas.Add(".NET Framework 3.5 (NetFx3): $($f.State)")
+            if ([string]$f.State -ne 'Enabled') {
+                $linhas.Add('  Use o botão ".NET Framework 3.5: habilitar (DISM)" para instalá-lo (precisa de internet).')
+            }
+        } catch {
+            $linhas.Add(".NET Framework 3.5 (NetFx3): n/d ($($_.Exception.Message))")
+        }
+    } else {
+        $linhas.Add('.NET Framework 3.5 (NetFx3): n/d (sem elevação)')
+    }
+
+    # A tabela vai do maior para o menor: o 'Release' é um piso, não um valor exato (uma atualização
+    # do 4.8 sobe o número), então a primeira faixa que couber é a versão instalada.
+    $faixas = @(
+        @{ Release = 533320; Nome = '4.8.1' },
+        @{ Release = 528040; Nome = '4.8' },
+        @{ Release = 461808; Nome = '4.7.2' },
+        @{ Release = 461308; Nome = '4.7.1' },
+        @{ Release = 460798; Nome = '4.7' },
+        @{ Release = 394802; Nome = '4.6.2' },
+        @{ Release = 394254; Nome = '4.6.1' },
+        @{ Release = 393295; Nome = '4.6' },
+        @{ Release = 379893; Nome = '4.5.2' },
+        @{ Release = 378675; Nome = '4.5.1' },
+        @{ Release = 378389; Nome = '4.5' }
+    )
+    $release = $null
+    try { $release = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -Name Release -ErrorAction Stop).Release } catch { $release = $null }
+    if ($null -eq $release) {
+        $linhas.Add('.NET Framework 4.x: não encontrado (chave NDP\v4\Full ausente).')
+    } else {
+        $nome = 'anterior a 4.5'
+        foreach ($f in $faixas) {
+            if ([int]$release -ge $f.Release) { $nome = $f.Nome; break }
+        }
+        $linhas.Add(".NET Framework 4.x: $nome (Release $release)")
+        if ([int]$release -lt 528040) {
+            $linhas.Add('  Abaixo de 4.8 (Release 528040): vale atualizar pelo Windows Update.')
+        }
+    }
+
+    $linhas.Add('')
+    $linhas.Add('O 3.5 e o 4.x convivem: programas antigos pedem o 3.5 mesmo com o 4.8 instalado.')
+    return ($linhas -join "`r`n")
+}
+
+function Invoke-WinForgeChkdskScan {
+    <#
+    .SYNOPSIS
+        Verificação online e somente leitura do disco do sistema (chkdsk /scan).
+    .DESCRIPTION
+        '/scan' é o modo online do chkdsk: varre o volume com o Windows rodando, não desmonta nada e
+        não repara nada - o que ele acha vira relatório, e o reparo fica para o botão de agendamento.
+        Por isso este é o único comando do grupo classificado como leitura.
+    .OUTPUTS
+        Texto com o código de saída na primeira linha.
+    #>
+    $unidade = $env:SystemDrive
+    if ([string]::IsNullOrWhiteSpace($unidade)) { $unidade = 'C:' }
+    $r = Invoke-WinForgeNativeCommand -FilePath 'chkdsk.exe' -Arguments @($unidade, '/scan')
+    return "chkdsk $unidade /scan - código de saída: $($r.ExitCode)`r`n`r`n$($r.Text)"
+}
+
+function Get-WinForgeWingetPath {
+    <#
+    .SYNOPSIS
+        Caminho do winget.exe, ou $null quando ele não existe nesta máquina.
+    .DESCRIPTION
+        O PATH é a primeira resposta, mas não é a única: o winget mora dentro do pacote do App
+        Installer e o atalho em WindowsApps só aparece no PATH depois de um logon novo. Numa máquina
+        recém-instalada (ou logo depois de registrar o pacote de novo) o executável existe e o PATH
+        ainda não sabe disso - daí a segunda tentativa, pela pasta de instalação do pacote.
+
+        -AllUsers exige elevação: sem admin ele lança, e o catch cai no caminho do usuário atual.
+    .OUTPUTS
+        Caminho completo do winget.exe, ou $null.
+    #>
+    $cmd = Get-Command 'winget.exe' -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return [string]$cmd.Source }
+
+    $pacote = $null
+    try {
+        $pacote = Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop | Sort-Object Version -Descending | Select-Object -First 1
+    } catch {
+        try { $pacote = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop | Sort-Object Version -Descending | Select-Object -First 1 } catch { $pacote = $null }
+    }
+    if ($null -eq $pacote -or [string]::IsNullOrWhiteSpace($pacote.InstallLocation)) { return $null }
+
+    $caminho = Join-Path $pacote.InstallLocation 'winget.exe'
+    if (Test-Path -LiteralPath $caminho) { return $caminho }
+    return $null
+}
+
+function Invoke-WinForgeWmiRepair {
+    <#
+    .SYNOPSIS
+        Verifica o repositório WMI e só tenta recuperá-lo quando ele está inconsistente.
+    .DESCRIPTION
+        A ordem importa e é o que separa este botão de um "resetrepository" às cegas:
+
+        1. 'winmgmt /verifyrepository' diz se o repositório está consistente.
+        2. Consistente: para aqui. Recuperar um repositório saudável é trabalho inútil com risco de
+           perder registros de classes de programas instalados.
+        3. Inconsistente: 'winmgmt /salvagerepository', que tenta reconstruir a partir do que dá para
+           aproveitar (o /resetrepository, que joga tudo fora, fica de fora de propósito).
+        4. Verifica de novo, para o texto terminar dizendo se resolveu.
+
+        A saída de cada passo entra inteira no relatório: é ela que alguém vai colar num chamado.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $linhas = New-Object System.Collections.Generic.List[string]
+
+    $ver = Invoke-WinForgeNativeCommand -FilePath 'winmgmt.exe' -Arguments @('/verifyrepository')
+    $linhas.Add("winmgmt /verifyrepository - código de saída: $($ver.ExitCode)")
+    $linhas.Add([string]$ver.Text)
+
+    # Código 0 é a resposta boa do /verifyrepository; qualquer outro é "inconsistente" (ou o serviço
+    # não respondeu). O texto muda com o idioma do Windows, o código não.
+    if ($ver.ExitCode -eq 0) {
+        $linhas.Add('Repositório consistente: nada a recuperar.')
+        return ($linhas -join "`r`n")
+    }
+
+    $linhas.Add('')
+    $linhas.Add('Repositório inconsistente: tentando recuperar (winmgmt /salvagerepository).')
+    $sal = Invoke-WinForgeNativeCommand -FilePath 'winmgmt.exe' -Arguments @('/salvagerepository')
+    $linhas.Add("winmgmt /salvagerepository - código de saída: $($sal.ExitCode)")
+    $linhas.Add([string]$sal.Text)
+
+    $linhas.Add('')
+    $ver2 = Invoke-WinForgeNativeCommand -FilePath 'winmgmt.exe' -Arguments @('/verifyrepository')
+    $linhas.Add("winmgmt /verifyrepository (depois) - código de saída: $($ver2.ExitCode)")
+    $linhas.Add([string]$ver2.Text)
+    if ($ver2.ExitCode -eq 0) {
+        $linhas.Add('Repositório consistente depois da recuperação.')
+    } else {
+        $linhas.Add('O repositório continua inconsistente. O próximo passo costuma ser reinstalar o Windows por cima (upgrade in-place), preservando programas e arquivos.')
+    }
+    return ($linhas -join "`r`n")
+}
+
+function Invoke-WinForgeStoreReregister {
+    <#
+    .SYNOPSIS
+        Registra de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App.
+    .DESCRIPTION
+        É o reparo padrão de "a Store não abre" e de "o winget sumiu": o pacote continua no disco, só
+        o registro do usuário se perdeu. Add-AppxPackage -Register aponta para o AppXManifest.xml da
+        própria pasta de instalação e refaz esse registro, sem baixar nada.
+
+        -AllUsers em Get-AppxPackage exige elevação; sem admin, cai para os pacotes do usuário atual,
+        que é justamente o registro que costuma estar quebrado. Cada pacote tem seu try/catch: um que
+        não existe nesta edição do Windows não pode derrubar os outros dois.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $alvos = @('Microsoft.WindowsStore', 'Microsoft.DesktopAppInstaller', 'Microsoft.StorePurchaseApp')
+    $linhas = New-Object System.Collections.Generic.List[string]
+
+    foreach ($alvo in $alvos) {
+        $linhas.Add('')
+        $linhas.Add("== $alvo")
+        $pacotes = @()
+        try {
+            $pacotes = @(Get-AppxPackage -AllUsers -Name $alvo -ErrorAction Stop)
+        } catch {
+            try { $pacotes = @(Get-AppxPackage -Name $alvo -ErrorAction Stop) } catch { $pacotes = @() }
+        }
+        if ($pacotes.Count -eq 0) {
+            $linhas.Add('  Pacote não encontrado nesta máquina.')
+            continue
+        }
+        foreach ($p in $pacotes) {
+            if ([string]::IsNullOrWhiteSpace($p.InstallLocation)) {
+                $linhas.Add("  $($p.PackageFullName): sem pasta de instalação (pacote provisionado, nada a registrar).")
+                continue
+            }
+            $manifesto = Join-Path $p.InstallLocation 'AppXManifest.xml'
+            if (-not (Test-Path -LiteralPath $manifesto)) {
+                $linhas.Add("  $($p.PackageFullName): AppXManifest.xml não encontrado em $($p.InstallLocation).")
+                continue
+            }
+            try {
+                Add-AppxPackage -DisableDevelopmentMode -Register $manifesto -ErrorAction Stop
+                $linhas.Add("  $($p.PackageFullName): registrado.")
+            } catch {
+                $linhas.Add("  $($p.PackageFullName): falhou - $($_.Exception.Message)")
+            }
+        }
+    }
+
+    $linhas.Add('')
+    $linhas.Add('Se a Store continuar sem abrir, reinicie o computador antes de tentar de novo: o registro só vale a partir do próximo logon em alguns casos.')
+    return (($linhas -join "`r`n").Trim())
+}
+
+function Enable-WinForgeDotNet35 {
+    <#
+    .SYNOPSIS
+        Habilita o recurso NetFx3 (.NET Framework 3.5) pelo DISM, se já não estiver habilitado.
+    .DESCRIPTION
+        Os arquivos do 3.5 não vêm na imagem instalada: o DISM os busca no Windows Update, então isto
+        exige internet e pode demorar minutos. -All traz junto as sub-features (WCF), e -NoRestart
+        deixa a decisão de reiniciar com quem clicou.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $linhas = New-Object System.Collections.Generic.List[string]
+
+    $atual = $null
+    try {
+        $atual = Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop
+    } catch {
+        return "Não foi possível consultar o recurso NetFx3: $($_.Exception.Message)`r`n`r`nGet-WindowsOptionalFeature exige o WinForge aberto como administrador."
+    }
+
+    $linhas.Add("Estado atual do NetFx3: $($atual.State)")
+    if ([string]$atual.State -eq 'Enabled') {
+        $linhas.Add('O .NET Framework 3.5 já está habilitado: nada a fazer.')
+        return ($linhas -join "`r`n")
+    }
+
+    $linhas.Add('Habilitando pelo DISM (os arquivos vêm do Windows Update; pode demorar).')
+    try {
+        $r = Enable-WindowsOptionalFeature -Online -FeatureName NetFx3 -All -NoRestart -ErrorAction Stop
+        $linhas.Add("Reinicialização necessária: $(if ($r.RestartNeeded) { 'sim' } else { 'não' })")
+    } catch {
+        $linhas.Add("Falhou: $($_.Exception.Message)")
+        $linhas.Add('Erro 0x800F0954 costuma ser uma política de WSUS bloqueando o Windows Update: nesse caso o recurso precisa da mídia de instalação do Windows (-Source).')
+        return ($linhas -join "`r`n")
+    }
+
+    try {
+        $depois = Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop
+        $linhas.Add("Estado depois: $($depois.State)")
+    } catch { }
+    return ($linhas -join "`r`n")
+}
+
+function Install-WinForgeVcRedist {
+    <#
+    .SYNOPSIS
+        Instala (ou atualiza) os redistribuíveis do Visual C++ de 2005 a 2022, x86 e x64, pelo winget.
+    .DESCRIPTION
+        Programa que abre com "VCRUNTIME140.dll não encontrada" quer exatamente esta lista. As duas
+        arquiteturas entram sempre: num Windows x64 os programas de 32 bits são a maioria dos que
+        pedem o pacote.
+
+        O winget é chamado com -FilePath/-Arguments (nunca com texto montado), um id por vez, e o
+        código de saída de cada um vira uma linha do relatório - um pacote que falha não interrompe
+        os outros. Código 0 é sucesso; -1978335189 é "nenhuma atualização aplicável", que aqui
+        significa "já está instalado e atualizado".
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $winget = Get-WinForgeWingetPath
+    if (-not $winget) {
+        return "winget não encontrado: use 'WinGet - Reinstall' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
+    }
+
+    $ids = @(
+        'Microsoft.VCRedist.2005.x86', 'Microsoft.VCRedist.2005.x64',
+        'Microsoft.VCRedist.2008.x86', 'Microsoft.VCRedist.2008.x64',
+        'Microsoft.VCRedist.2010.x86', 'Microsoft.VCRedist.2010.x64',
+        'Microsoft.VCRedist.2012.x86', 'Microsoft.VCRedist.2012.x64',
+        'Microsoft.VCRedist.2013.x86', 'Microsoft.VCRedist.2013.x64',
+        'Microsoft.VCRedist.2015+.x86', 'Microsoft.VCRedist.2015+.x64'
+    )
+    $linhas = New-Object System.Collections.Generic.List[string]
+    $linhas.Add("winget: $winget")
+
+    foreach ($id in $ids) {
+        $r = Invoke-WinForgeNativeCommand -FilePath $winget -Arguments @(
+            'install', '--id', $id, '-e', '--silent',
+            '--accept-package-agreements', '--accept-source-agreements'
+        )
+        $situacao = switch ([int]$r.ExitCode) {
+            0 { 'instalado' }
+            -1978335189 { 'já instalado e atualizado' }
+            -1978335212 { 'pacote não encontrado na origem' }
+            default { "código $($r.ExitCode)" }
+        }
+        $linhas.Add("$id`: $situacao")
+    }
+
+    $linhas.Add('')
+    $linhas.Add('Reinicie os programas que reclamavam de DLL depois da instalação.')
+    return ($linhas -join "`r`n")
+}
+
+function Install-WinForgePowerShell7 {
+    <#
+    .SYNOPSIS
+        Instala o PowerShell 7 (Microsoft.PowerShell) pelo winget.
+    .DESCRIPTION
+        Instalação lado a lado: o Windows PowerShell 5.1 continua onde está, e é ele que roda o
+        WinForge. O 7 aparece como "PowerShell 7" no menu Iniciar (pwsh.exe).
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $winget = Get-WinForgeWingetPath
+    if (-not $winget) {
+        return "winget não encontrado: use 'WinGet - Reinstall' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
+    }
+
+    $r = Invoke-WinForgeNativeCommand -FilePath $winget -Arguments @(
+        'install', '--id', 'Microsoft.PowerShell', '-e', '--silent',
+        '--accept-package-agreements', '--accept-source-agreements'
+    )
+    $cabecalho = "winget: $winget`r`nMicrosoft.PowerShell - código de saída: $($r.ExitCode)"
+    if ([int]$r.ExitCode -eq -1978335189) { $cabecalho += ' (já instalado e atualizado)' }
+    return "$cabecalho`r`n`r`n$([string]$r.Text)"
+}
+
+function Install-WinForgeDirectX {
+    <#
+    .SYNOPSIS
+        Baixa o instalador web do DirectX da Microsoft e o abre.
+    .DESCRIPTION
+        O dxwebsetup.exe é o instalador das bibliotecas ANTIGAS do DirectX (d3dx9, xinput, o que
+        jogos de 2005-2012 pedem); o DirectX do sistema em si vem pelo Windows Update e não é
+        atualizado por aqui.
+
+        Ele é INTERATIVO e não tem modo silencioso confiável: o WinForge baixa e abre, e quem conduz
+        as telas é o usuário. Por isso a função devolve na hora, sem esperar o instalador terminar -
+        segurar a runspace enquanto alguém lê uma tela de licença não ajudaria ninguém.
+
+        O download vai para %TEMP%\WinForge e tem tempo limite: sem ele, uma rede que aceita a
+        conexão e não responde deixaria o botão pendurado até o usuário fechar o programa.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $url = 'https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe'
+    $pasta = Join-Path $env:TEMP 'WinForge'
+    $destino = Join-Path $pasta 'dxwebsetup.exe'
+
+    try {
+        if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
+    } catch {
+        return "Não foi possível criar a pasta '$pasta': $($_.Exception.Message)"
+    }
+
+    try {
+        # -UseBasicParsing: sem ele o Invoke-WebRequest do PowerShell 5.1 tenta usar o motor do
+        # Internet Explorer, que não existe em instalação limpa do Windows 11.
+        $progresso = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $destino -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop
+        } finally {
+            $ProgressPreference = $progresso
+        }
+    } catch {
+        return "Falha ao baixar o instalador do DirectX: $($_.Exception.Message)`r`n`r`nOrigem: $url"
+    }
+
+    $tamanho = 0
+    try { $tamanho = [math]::Round((Get-Item -LiteralPath $destino).Length / 1KB, 0) } catch { $tamanho = 0 }
+
+    try {
+        Start-Process -FilePath $destino -ErrorAction Stop | Out-Null
+    } catch {
+        return "O instalador foi baixado em '$destino' ($tamanho KB), mas não pôde ser aberto: $($_.Exception.Message)"
+    }
+
+    return "Instalador do DirectX baixado em '$destino' ($tamanho KB) e aberto.`r`n`r`nEle é interativo: siga as telas do instalador da Microsoft. Ele instala as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua sendo atualizado pelo Windows Update."
+}
+
+function Invoke-WinForgeChkdskSchedule {
+    <#
+    .SYNOPSIS
+        Marca o disco do sistema para o chkdsk /f rodar na próxima reinicialização.
+    .DESCRIPTION
+        'fsutil dirty set' liga o bit de "volume sujo": é exatamente o que o chkdsk /f faz quando não
+        consegue bloquear o volume em uso, e é a forma sem interação de agendar a verificação com
+        reparo - 'chkdsk /f' direto faria uma pergunta no console, e não há console nenhum na frente
+        do usuário aqui.
+
+        Depois de marcar, 'fsutil dirty query' confirma o estado: o relatório termina dizendo o que
+        vai acontecer no próximo boot, não o que se pretendia fazer.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $unidade = $env:SystemDrive
+    if ([string]::IsNullOrWhiteSpace($unidade)) { $unidade = 'C:' }
+
+    $linhas = New-Object System.Collections.Generic.List[string]
+    $set = Invoke-WinForgeNativeCommand -FilePath 'fsutil.exe' -Arguments @('dirty', 'set', $unidade)
+    $linhas.Add("fsutil dirty set $unidade - código de saída: $($set.ExitCode)")
+    $linhas.Add([string]$set.Text)
+    if ($set.ExitCode -ne 0) {
+        $linhas.Add('')
+        $linhas.Add('Marcar o volume exige o WinForge aberto como administrador.')
+        return ($linhas -join "`r`n")
+    }
+
+    $linhas.Add('')
+    $query = Invoke-WinForgeNativeCommand -FilePath 'fsutil.exe' -Arguments @('dirty', 'query', $unidade)
+    $linhas.Add("fsutil dirty query $unidade - código de saída: $($query.ExitCode)")
+    $linhas.Add([string]$query.Text)
+    $linhas.Add('')
+    $linhas.Add("Na próxima reinicialização o Windows roda o chkdsk em $unidade antes de carregar. Num disco grande isso pode demorar bastante - não desligue a máquina no meio.")
+    return ($linhas -join "`r`n")
+}
+
+function Invoke-WinForgeMemoryDiagSchedule {
+    <#
+    .SYNOPSIS
+        Coloca o Diagnóstico de Memória do Windows na sequência da próxima inicialização.
+    .DESCRIPTION
+        'bcdedit /bootsequence {memdiag}' é uma ordem de UMA vez: a próxima inicialização vai para o
+        teste de memória e a seguinte volta ao normal sozinha - diferente de mudar o item padrão do
+        gerenciador de inicialização, que ficaria valendo para sempre.
+
+        A confirmação sai de 'bcdedit /enum {bootmgr}': a linha 'bootsequence' só existe quando a
+        ordem foi aceita, então o relatório mostra a linha real em vez de repetir a intenção.
+    .OUTPUTS
+        Texto pronto para a janela de saída.
+    #>
+    $linhas = New-Object System.Collections.Generic.List[string]
+    $set = Invoke-WinForgeNativeCommand -FilePath 'bcdedit.exe' -Arguments @('/bootsequence', '{memdiag}')
+    $linhas.Add("bcdedit /bootsequence {memdiag} - código de saída: $($set.ExitCode)")
+    $linhas.Add([string]$set.Text)
+    if ($set.ExitCode -ne 0) {
+        $linhas.Add('')
+        $linhas.Add('Alterar a sequência de inicialização exige o WinForge aberto como administrador.')
+        return ($linhas -join "`r`n")
+    }
+
+    $enum = Invoke-WinForgeNativeCommand -FilePath 'bcdedit.exe' -Arguments @('/enum', '{bootmgr}')
+    $sequencia = @([string]$enum.Text -split "`r?`n" | Where-Object { $_ -match '(?i)bootsequence' })
+    $linhas.Add('')
+    if ($sequencia.Count) {
+        $linhas.Add('Sequência de inicialização atual:')
+        foreach ($l in $sequencia) { $linhas.Add("  $($l.Trim())") }
+    } else {
+        $linhas.Add('O bcdedit não reportou linha de bootsequence: confira o resultado acima.')
+    }
+    $linhas.Add('')
+    $linhas.Add('Reinicie para o teste começar. Ele roda antes do Windows carregar e o resultado aparece no Visualizador de Eventos (origem MemoryDiagnostics-Results) depois do próximo logon.')
+    return ($linhas -join "`r`n")
+}
+
+function Invoke-WinForgeRepairCommandCore {
+    <#
+    .SYNOPSIS
+        Invólucro do reparo sobre o núcleo genérico: resolve o nome curto na tabela e roda, síncrono.
+    .DESCRIPTION
+        Existe para o resto do programa (e o -SelfTest) continuar falando por nome curto. Todo o
+        comportamento - ferramenta ausente virando texto, arquivo gravado em
+        repair-<Nome>-<aaaaMMdd-HHmmss>.txt na pasta de logs - mora em Invoke-WinForgeCommandCore.
+
+        Não olha o 'Kind': quem chama aqui já decidiu rodar. A decisão é de Invoke-WinForgeRepairCommand.
+    .OUTPUTS
+        Hashtable com Name, Title, Text, Path e ExitCode.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [switch]$DryRun
+    )
+
+    return Invoke-WinForgeCommandCore -Spec (Get-WinForgeRepairCommand -Name $Name) -Name $Name -Component 'Repair' -Prefix 'repair' -DryRun:$DryRun
+}
+
+function Invoke-WinForgeRepairCommand {
+    <#
+    .SYNOPSIS
+        Ação dos botões de reparo: só despacha o que é leitura; o resto ainda não roda.
+    .DESCRIPTION
+        Nome desconhecido morre AQUI, no clique, e não dentro do runspace: a tabela é deste grupo de
+        botões, e uma caixa de mensagem dizendo qual botão está errado vale mais que uma linha de log
+        que ninguém vai ler.
+
+        'Kind read' segue para Invoke-WinForgeCommandButton, que é quem tem a trava de um comando por
+        vez, o runspace do pool e a janela de saída. 'repair' e 'install' param aqui com um aviso: a
+        confirmação antes de mexer na máquina é a próxima etapa do plano, e despachar sem ela agora
+        seria reparar o sistema de quem só clicou para ver o que o botão faz.
+    .PARAMETER NoUI
+        Devolve a decisão em vez de mostrar janela ou caixa de mensagem, e não despacha nada. É o que
+        o -SelfTest usa: ele roda sem ninguém na frente e não pode abrir nada na tela nem sair
+        reparando a máquina de quem compila.
+    .OUTPUTS
+        Com -NoUI: @{ Dispatched = <bool>; Reason = <string>; Kind = <string> }. Sem -NoUI: nada.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [switch]$NoUI
+    )
+
+    try {
+        $cmd = Get-WinForgeRepairCommand -Name $Name
+    } catch {
+        Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message $_.Exception.Message
+        if ($NoUI) { return @{ Dispatched = $false; Reason = 'desconhecido'; Kind = $null } }
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "WinForge", "OK", "Error") | Out-Null
+        return
+    }
+
+    $kind = [string]$cmd.Kind
+    if ([string]::IsNullOrWhiteSpace($kind)) { $kind = 'read' }
+
+    if ($kind -ne 'read') {
+        $aviso = "$($cmd.Title)`r`n`r`nDisponível na próxima etapa: este botão altera o sistema e ainda não pede confirmação."
+        Write-WinForgeLog -Component "Repair" -Message "$Name não despachado: ação do tipo '$kind' ainda depende da confirmação."
+        if ($NoUI) { return @{ Dispatched = $false; Reason = 'confirmação'; Kind = $kind } }
+        [System.Windows.MessageBox]::Show($aviso, "WinForge", "OK", "Information") | Out-Null
+        return
+    }
+
+    if ($NoUI) { return @{ Dispatched = $false; Reason = 'NoUI'; Kind = $kind } }
+
+    Invoke-WinForgeCommandButton -Spec $cmd -Name $Name -Component 'Repair' -Prefix 'repair'
+}
+
+#endregion

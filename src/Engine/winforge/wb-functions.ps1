@@ -242,6 +242,12 @@ function Initialize-WinUtilBoostConfigs {
         $sync.configs.feature | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
     }
 
+    # Reparo de componentes: mesma aba Config, grupo próprio. Entra depois de wbfeatures porque é a
+    # ordem em que os grupos aparecem na tela.
+    foreach ($p in $sync.configs.wfrepair.PSObject.Properties) {
+        $sync.configs.feature | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+
     foreach ($p in $sync.configs.wbpresets.PSObject.Properties) {
         $sync.configs.preset | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
     }
