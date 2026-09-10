@@ -2,11 +2,54 @@
 # Todas as funções levam "WinUtilBoost" no nome para serem importadas automaticamente
 # nos runspaces (Initialize-WinUtilRunspacePool importa tudo que casa com 'winutil|WPF').
 
+function Get-WinForgeWindowsProductType {
+    <#
+    .SYNOPSIS
+        Diz se este Windows é cliente ou servidor, lendo o registro; o CIM só entra se o registro falhar.
+    .DESCRIPTION
+        HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions\ProductType responde em 12 ms aqui,
+        contra 100-190 ms de um Get-CimInstance Win32_OperatingSystem quente (e muito mais com o
+        winmgmt frio). Mais importante: num servidor com o repositório WMI corrompido a chamada CIM
+        lança, $sync.IsServer ficava $false e a aba Servidor inteira sumia sem uma palavra.
+
+        'WinNT' = cliente; 'ServerNT' (servidor membro) e 'LanmanNT' (controlador de domínio) =
+        servidor. Falhando os dois caminhos, a resposta é 'cliente' com um WARN no log: esconder a
+        aba Servidor num servidor é chato, mostrar itens de servidor num cliente é pior.
+    .OUTPUTS
+        @{ IsServer = <bool>; Source = 'registry'|'cim'|'nenhum'; ProductType = <texto ou $null> }.
+    #>
+    try {
+        $pt = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions' -Name 'ProductType' -ErrorAction Stop).ProductType
+        if (-not [string]::IsNullOrWhiteSpace($pt)) {
+            return @{ IsServer = ($pt -ne 'WinNT'); Source = 'registry'; ProductType = $pt }
+        }
+    } catch { }
+    try {
+        $osTipo = [int](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).ProductType
+        return @{ IsServer = ($osTipo -ne 1); Source = 'cim'; ProductType = [string]$osTipo }
+    } catch { }
+    try { Write-WinForgeLog -Component "Server" -Level "WARN" -Message "Tipo de produto do Windows não pôde ser lido (nem pelo registro nem pelo CIM): assumindo cliente." } catch { }
+    return @{ IsServer = $false; Source = 'nenhum'; ProductType = $null }
+}
+
+function Test-WinForgeRealServer {
+    <#
+    .SYNOPSIS
+        $true só num Windows Server de verdade - WINFORGE_SIMULATE_SERVER não conta.
+    .DESCRIPTION
+        A simulação existe para montar a aba e exercitar as regras num cliente. O que ela NÃO pode
+        fazer é liberar a escrita em SMB, plano de energia, TCP ou RDP da máquina de quem está
+        testando: por isso quem mexe de verdade pergunta aqui, e não a $sync.IsServer.
+    #>
+    return [bool](Get-WinForgeWindowsProductType).IsServer
+}
+
 function Get-WinUtilBoostSystemInfo {
     <#
     .SYNOPSIS
-        Detecta a versão do Windows (10/11) e os fabricantes de GPU presentes.
-        Usado para ocultar recursos que não se aplicam ao sistema atual.
+        Detecta a versão do Windows (10/11/Server), os papéis de servidor instalados e os
+        fabricantes de GPU presentes. Usado para ocultar recursos que não se aplicam ao
+        sistema atual. Roda antes da janela abrir, então tudo aqui tem de ser barato.
     #>
     $build = [System.Environment]::OSVersion.Version.Build
     if ($env:WINFORGE_SIMULATE_BUILD) { $build = [int]$env:WINFORGE_SIMULATE_BUILD }   # só para testes (ex.: 19045 = Windows 10 22H2)
@@ -18,6 +61,33 @@ function Get-WinUtilBoostSystemInfo {
     } catch {
         $sync.OSDisplayVersion = ""
     }
+
+    # ---- Servidor e papéis (barato: ProductType + presença de serviços; o perfil completo vem depois)
+    $sync.IsServer = $false; $sync.ServerRoles = @(); $sync.IsDC = $false
+    if ($null -ne $env:WINFORGE_SIMULATE_SERVER) {
+        # só para testes: "iis,ad" simula um servidor com esses papéis; "none" simula servidor sem
+        # papel nenhum. String vazia não serve como sentinela: no Windows, $env:X = '' APAGA a
+        # variável, então "servidor sem papel" era um estado inalcançável.
+        $sync.IsServer = $true
+        $sync.ServerRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -and $_ -ne 'none' })
+        $sync.IsDC = ('ad' -in $sync.ServerRoles)
+    } else {
+        $sync.IsServer = [bool](Get-WinForgeWindowsProductType).IsServer
+        if ($sync.IsServer) {
+            $roles = [System.Collections.Generic.List[string]]::new()
+            $wfSvc = @{}
+            foreach ($s in (Get-Service -ErrorAction SilentlyContinue)) { $wfSvc[$s.Name] = $true }
+            if ($wfSvc['W3SVC'])  { $roles.Add('iis') }
+            if ($wfSvc['NTDS'])   { $roles.Add('ad') }
+            if ($wfSvc['vmms'])   { $roles.Add('hyperv') }
+            if ($wfSvc['DNS'])    { $roles.Add('dns') }
+            if ($wfSvc['DHCPServer']) { $roles.Add('dhcp') }
+            $sync.ServerRoles = @($roles)
+            try { $sync.IsDC = ([int](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).DomainRole -ge 4) } catch { }
+            if ($sync.IsDC -and 'ad' -notin $sync.ServerRoles) { $sync.ServerRoles += 'ad' }
+        }
+    }
+    if ($sync.IsServer) { $sync.OSName = "Windows Server" }
 
     $vendors = [System.Collections.Generic.List[string]]::new()
     $names = [System.Collections.Generic.List[string]]::new()
@@ -42,8 +112,16 @@ function Test-WinUtilBoostEntryCompatible {
     .SYNOPSIS
         Retorna $true se a entrada (tweak/feature/appx) se aplica ao sistema atual.
         Campos opcionais na entrada:
-          "os"  : "win11" ou "win10"  -> só aparece nessa versão
-          "gpu" : "nvidia" | "amd" | "intel" (ou lista) -> só aparece se a GPU foi detectada
+          "os"       : "win11" ou "win10"  -> só aparece nessa versão
+          "gpu"      : "nvidia" | "amd" | "intel" (ou lista) -> só aparece se a GPU foi detectada
+          "platform" : "server" -> só no Windows Server; "client" -> só no Windows 10/11
+          "role"     : "iis" | "ad" | "hyperv" | "dns" | "dhcp" (ou lista) -> só aparece se
+                       QUALQUER um dos papéis listados estiver presente no servidor
+
+        ATENÇÃO ao "os": ele é decidido por BUILD (>= 22000 = win11), não por família. O Server
+        2022 é build 20348 e conta como "win10"; o Server 2025 é build 26100 e conta como "win11".
+        Entrada nova de servidor deve usar "platform"/"role" - "os" ali separa geração de kernel,
+        não cliente de servidor.
     #>
     param($Entry)
 
@@ -61,6 +139,19 @@ function Test-WinUtilBoostEntryCompatible {
         }
     }
 
+    $platform = $null; $role = $null
+    if ($Entry.PSObject.Properties['platform']) { $platform = ([string]$Entry.platform).ToLower() }
+    if ($Entry.PSObject.Properties['role'])     { $role = $Entry.role }
+    if ($platform -eq 'server' -and -not $sync.IsServer) { return $false }
+    if ($platform -eq 'client' -and $sync.IsServer)      { return $false }
+    if ($role) {
+        $wanted = @($role | ForEach-Object { ([string]$_).ToLower() })
+        $have = @($sync.ServerRoles)
+        $ok = $false
+        foreach ($w in $wanted) { if ($have -contains $w) { $ok = $true } }
+        if (-not $ok) { return $false }
+    }
+
     if ($gpu) {
         $wanted = @($gpu | ForEach-Object { ([string]$_).ToLower() })
         $have = @($sync.GPUVendors)
@@ -76,19 +167,20 @@ function Test-WinUtilBoostEntryCompatible {
 function Get-WinUtilBoostConfigSubset {
     <#
     .SYNOPSIS
-        Retorna um PSCustomObject só com as entradas cuja propriedade 'tab' é igual a -Tab
-        (ou diferente, quando -Exclude). Usado para separar a aba "Jogos" da aba "Tweaks".
+        Retorna um PSCustomObject só com as entradas cuja propriedade 'tab' está em -Tab
+        (ou fora dela, quando -Exclude). Usado para separar as abas "Jogos" e "Servidor"
+        da aba "Tweaks".
     #>
     param(
         [Parameter(Mandatory)]$Config,
-        [string]$Tab,
+        [string[]]$Tab,
         [switch]$Exclude
     )
     $out = [PSCustomObject]@{}
     foreach ($p in $Config.PSObject.Properties) {
         $entryTab = ""
         if ($p.Value -and $p.Value.PSObject.Properties['tab']) { $entryTab = [string]$p.Value.tab }
-        $match = ($entryTab -eq $Tab)
+        $match = ($entryTab -in $Tab)
         if ($Exclude) { $match = -not $match }
         if ($match) { $out | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
     }
@@ -115,6 +207,12 @@ function Initialize-WinUtilBoostConfigs {
     }
 
     foreach ($p in $sync.configs.wbtweaks.PSObject.Properties) {
+        $sync.configs.tweaks | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+
+    # aba Servidor: mesma config de tweaks, separada só pela propriedade 'tab' (e escondida no
+    # cliente pelo 'platform'). Entra depois de wbtweaks para que a auditoria veja todas as chaves.
+    foreach ($p in $sync.configs.wfserver.PSObject.Properties) {
         $sync.configs.tweaks | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
     }
 

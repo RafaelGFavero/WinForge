@@ -95,7 +95,32 @@ function Get-WinForgeSystemProfile {
     #>
     param([switch]$SkipNetwork)
 
-    $p = [ordered]@{ GeneratedAt = (Get-Date).ToString('s'); Errors = @() }
+    $p = [ordered]@{ GeneratedAt = (Get-Date).ToString('s'); Errors = @(); Simulated = $null }
+
+    # ---- Servidor simulado (WINFORGE_SIMULATE_SERVER): o mesmo override que o banner usa vale aqui.
+    # Sem isto a janela dizia "Windows Server" e o perfil devolvia OS.IsServer=$false e Server=$null:
+    # todo cartão e toda regra da aba Servidor caía em null exatamente na execução que deveria
+    # exercitá-los. Os papéis vêm de $sync (já normalizados por Get-WinUtilBoostSystemInfo); fora da
+    # janela - perfil chamado solto -, lê a variável direto, com a mesma normalização.
+    # Detecção real fica intacta quando a variável não existe.
+    $wfSimServer = ($null -ne $env:WINFORGE_SIMULATE_SERVER)
+    $wfSimRoles  = @()
+    $wfSimIsDC   = $false
+    if ($wfSimServer) {
+        $wfSyncRef = $null
+        try { $wfSyncRef = Get-Variable -Name sync -ValueOnly -ErrorAction Stop } catch { }
+        if ($wfSyncRef -and $wfSyncRef.ServerRoles) {
+            $wfSimRoles = @($wfSyncRef.ServerRoles)
+            $wfSimIsDC  = [bool]$wfSyncRef.IsDC
+        } else {
+            $wfSimRoles = @($env:WINFORGE_SIMULATE_SERVER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -and $_ -ne 'none' })
+            $wfSimIsDC  = ('ad' -in $wfSimRoles)
+        }
+        # O relatório HTML e o cartão Servidor passam a dizer de onde veio esse "servidor": sob
+        # simulação o perfil relata ProductType 3 numa máquina que é ProductType 1, e um relatório
+        # que afirma isso sem ressalva vira uma informação errada quando alguém o abre depois.
+        $p.Simulated = 'env:WINFORGE_SIMULATE_SERVER'
+    }
 
     # ---- SO
     try {
@@ -106,8 +131,10 @@ function Get-WinForgeSystemProfile {
             Build          = [int][Environment]::OSVersion.Version.Build
             DisplayVersion = [string]$cv.DisplayVersion
             IsWin11        = ([Environment]::OSVersion.Version.Build -ge 22000)
-            IsServer       = ($os.ProductType -ne 1)
-            ProductType    = [int]$os.ProductType
+            IsServer       = ($wfSimServer -or ($os.ProductType -ne 1))
+            # 3 = servidor membro; sob simulação num cliente (ProductType 1) o perfil relata 3 para
+            # não ficar com IsServer=$true e ProductType=1, combinação que não existe em máquina real.
+            ProductType    = $(if ($wfSimServer -and [int]$os.ProductType -eq 1) { 3 } else { [int]$os.ProductType })
             InstallDate    = $os.InstallDate.ToString('yyyy-MM-dd')
             UptimeHours    = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1)
             Architecture   = $os.OSArchitecture
@@ -115,8 +142,29 @@ function Get-WinForgeSystemProfile {
     } catch { $p.Errors += "OS: $($_.Exception.Message)" }
 
     # ---- Papéis (só no Server: Get-WindowsFeature não existe no cliente)
-    $p.Roles = [ordered]@{ IIS = $false; AD = $false; HyperV = $false; DNS = $false; DHCP = $false; FileServer = $false; RDS = $false }
-    if ($p.OS.IsServer -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
+    # IsDC/DomainRole/Domain valem para qualquer SO: um cliente ingressado no domínio também
+    # interessa às regras, e DomainRole >= 4 é o que separa controlador de domínio de membro.
+    $p.Roles = [ordered]@{ IIS = $false; AD = $false; HyperV = $false; DNS = $false; DHCP = $false; FileServer = $false; RDS = $false
+                           IsDC = $false; DomainRole = $null; Domain = $null }
+    # $csRole é consultado uma vez só e reaproveitado pela área Máquina mais abaixo - eram duas
+    # chamadas à mesma classe, e Win32_ComputerSystem não é barato.
+    $csRole = $null
+    try {
+        $csRole = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        $p.Roles.DomainRole = [int]$csRole.DomainRole
+        $p.Roles.Domain     = [string]$csRole.Domain
+        $p.Roles.IsDC       = ($p.Roles.DomainRole -ge 4)
+    } catch { $p.Errors += "DomainRole: $($_.Exception.Message)" }
+    if ($wfSimServer) {
+        # Simulação: os papéis vêm da lista, e não do Get-WindowsFeature que não existe no cliente.
+        # FileServer/RDS não têm sigla na simulação e ficam $false.
+        $p.Roles.IIS    = ('iis'    -in $wfSimRoles)
+        $p.Roles.AD     = ('ad'     -in $wfSimRoles)
+        $p.Roles.HyperV = ('hyperv' -in $wfSimRoles)
+        $p.Roles.DNS    = ('dns'    -in $wfSimRoles)
+        $p.Roles.DHCP   = ('dhcp'   -in $wfSimRoles)
+        $p.Roles.IsDC   = $wfSimIsDC
+    } elseif ($p.OS.IsServer -and (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) {
         try {
             $f = Get-WindowsFeature | Where-Object Installed | Select-Object -ExpandProperty Name
             $p.Roles.IIS        = 'Web-Server' -in $f
@@ -131,7 +179,8 @@ function Get-WinForgeSystemProfile {
 
     # ---- Máquina
     try {
-        $cs = Get-CimInstance Win32_ComputerSystem
+        # reaproveita a consulta do bloco Papéis; só refaz se aquela tiver falhado
+        $cs = $(if ($csRole) { $csRole } else { Get-CimInstance Win32_ComputerSystem })
         $enc = Get-CimInstance Win32_SystemEnclosure
         $chassis = @($enc.ChassisTypes)
         $laptopTypes = 8, 9, 10, 11, 12, 14, 30, 31, 32
@@ -330,6 +379,66 @@ function Get-WinForgeSystemProfile {
         }
     } catch { $p.Errors += "State: $($_.Exception.Message)" }
 
+    # ---- Servidor (só no Server; no cliente fica $null e os cartões/regras ignoram)
+    $p.Server = $null
+    if ($p.OS -and $p.OS.IsServer) {
+        $srv = [ordered]@{ Smb1Enabled = $null; SmbSigningRequired = $null; TcpAutotuning = $null; TimeSource = $null
+                           Iis = [ordered]@{ Installed = [bool]$p.Roles.IIS; PoolCount = $null; SiteCount = $null; LogDirectory = $null; LogOnOsDrive = $null; AppInitInstalled = $null; DynCompressionInstalled = $null }
+                           Ad  = [ordered]@{ NtdsPath = $null; SysvolPath = $null; NtdsOnOsDrive = $null; SysvolOnOsDrive = $null } }
+        try { $smb = Get-SmbServerConfiguration -ErrorAction Stop; $srv.Smb1Enabled = [bool]$smb.EnableSMB1Protocol; $srv.SmbSigningRequired = [bool]$smb.RequireSecuritySignature } catch { $p.Errors += "SMB: $($_.Exception.Message)" }
+        # Get-NetTCPSetting, e não 'netsh int tcp show global': o netsh escreve UTF-8 quando a saída é
+        # um cano (e OEM quando é console), então no processo sem janela que o lançador usa o texto
+        # chegava embaralhado e a linha em português nunca casava com a expressão regular - o campo
+        # ficava $null em toda máquina localizada, e é justamente o campo que o item
+        # WPFTweaksWFSrvTcpAutotuning existe para corrigir. O cmdlet devolve objeto, existe desde o
+        # Server 2012 e não depende de idioma; AutoTuningLevelLocal é o que o antigo
+        # 'netsh int tcp set global autotuninglevel' escrevia.
+        try {
+            $nivelTcp = [string](Get-NetTCPSetting -SettingName Internet -ErrorAction Stop).AutoTuningLevelLocal
+            if (-not [string]::IsNullOrWhiteSpace($nivelTcp)) { $srv.TcpAutotuning = $nivelTcp.ToLower() }
+        } catch { $p.Errors += "TCP: $($_.Exception.Message)" }
+        # O w32tm escreve a FALHA no stdout, não no stderr ("Ocorreu o seguinte erro: O serviço não
+        # foi iniciado. (0x80070426)"), então filtrar o stderr não adianta e a mensagem de erro virava
+        # a fonte de horário do relatório. Só o código de saída separa resposta de erro - e a leitura
+        # passa por Invoke-WinForgeNativeCommand para a mensagem em português não chegar embaralhada
+        # (ele troca a code page para OEM). A função vive em wf-server.ps1, inserido depois deste
+        # bloco no build: a ordem de definição não importa, porque tudo já está definido quando o job
+        # de perfil roda.
+        try {
+            $ts = Invoke-WinForgeNativeCommand -Command 'w32tm /query /source'
+            $tsOut = @([string]$ts.Text -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            $tsFirst = $(if (@($tsOut).Count) { ([string]@($tsOut)[0]).Trim() } else { '' })
+            if ($ts.ExitCode -eq 0 -and $tsFirst) { $srv.TimeSource = $tsFirst }
+            elseif ($tsFirst) { $p.Errors += "Horário: $tsFirst" }
+            else { $p.Errors += "Horário: w32tm /query /source não respondeu (código $($ts.ExitCode))" }
+        } catch { $p.Errors += "Horário: $($_.Exception.Message)" }
+        if ($p.Roles.IIS) {
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $srv.Iis.PoolCount = @(Get-ChildItem IIS:\AppPools -ErrorAction Stop).Count
+                $sites = @(Get-ChildItem IIS:\Sites -ErrorAction Stop)
+                $srv.Iis.SiteCount = $sites.Count
+                $dir = [string]($sites | Select-Object -First 1).logFile.directory
+                if ($dir) { $dir = [Environment]::ExpandEnvironmentVariables($dir); $srv.Iis.LogDirectory = $dir; $srv.Iis.LogOnOsDrive = ($dir -like "$($env:SystemDrive)*") }
+                if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+                    $srv.Iis.AppInitInstalled = [bool](Get-WindowsFeature Web-AppInit -ErrorAction SilentlyContinue).Installed
+                    $srv.Iis.DynCompressionInstalled = [bool](Get-WindowsFeature Web-Dyn-Compression -ErrorAction SilentlyContinue).Installed
+                }
+            } catch { $p.Errors += "IIS: $($_.Exception.Message)" }
+        }
+        if ($p.Roles.IsDC) {
+            try {
+                $ntds = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -ErrorAction Stop
+                $srv.Ad.NtdsPath = [string]$ntds.'DSA Database file'
+                $srv.Ad.NtdsOnOsDrive = ($srv.Ad.NtdsPath -like "$($env:SystemDrive)*")
+                $sysvol = [string](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -ErrorAction Stop).SysVol
+                $srv.Ad.SysvolPath = $sysvol
+                $srv.Ad.SysvolOnOsDrive = ($sysvol -like "$($env:SystemDrive)*")
+            } catch { $p.Errors += "AD: $($_.Exception.Message)" }
+        }
+        $p.Server = $srv
+    }
+
     # ---- Drivers (sempre array, mesmo vazio)
     try { $p.Drivers = @(Get-WinForgeDriverInventory) } catch { $p.Errors += "Drivers: $($_.Exception.Message)"; $p.Drivers = @() }
 
@@ -344,9 +453,10 @@ function Get-WinForgeSimulatedProfile {
     <#
     .SYNOPSIS
         Perfil desta máquina com uma característica forçada, para exercitar as regras sem precisar
-        do hardware correspondente (notebook, máquina virtual, servidor com IIS, HDD, Windows 10).
+        do hardware correspondente (notebook, máquina virtual, servidor com IIS, controlador de
+        domínio, HDD, Windows 10).
     #>
-    param([Parameter(Mandatory)][ValidateSet('laptop', 'vm', 'server-iis', 'hdd', 'win10')][string]$Name)
+    param([Parameter(Mandatory)][ValidateSet('laptop', 'vm', 'server-iis', 'server-ad', 'hdd', 'win10')][string]$Name)
     $base = Get-WinForgeSystemProfile -SkipNetwork
     # Cada área pode ter vindo $null (coleta falhou). A simulação não pode explodir por causa disso:
     # sobrescreve o que existe e ignora o resto - o SelfTest já acusa a área faltando em separado.
@@ -364,7 +474,23 @@ function Get-WinForgeSimulatedProfile {
                 $base.OS.IsServer = $true
                 $base.OS.ProductType = 3
             }
-            if ($base.Roles) { $base.Roles.IIS = $true }
+            if ($base.Roles) { $base.Roles.IIS = $true; $base.Roles.IsDC = $false }
+            $base.Server = [ordered]@{ Smb1Enabled = $true; SmbSigningRequired = $false; TcpAutotuning = 'disabled'; TimeSource = 'Local CMOS Clock'
+                                       Iis = [ordered]@{ Installed = $true; PoolCount = 3; SiteCount = 2; LogDirectory = 'C:\inetpub\logs\LogFiles'; LogOnOsDrive = $true; AppInitInstalled = $false; DynCompressionInstalled = $true }
+                                       Ad  = [ordered]@{ NtdsPath = $null; SysvolPath = $null; NtdsOnOsDrive = $null; SysvolOnOsDrive = $null } }
+        }
+        'server-ad' {
+            if ($base.OS) {
+                $base.OS.IsServer = $true
+                $base.OS.ProductType = 2
+            }
+            # IIS = $false explícito: sob WINFORGE_SIMULATE_SERVER=iis,ad o perfil base já vem com o
+            # papel IIS, e um "DC com IIS" não exercitaria o que esta simulação existe para provar -
+            # que as recomendações de IIS não vazam para um controlador de domínio sem IIS.
+            if ($base.Roles) { $base.Roles.AD = $true; $base.Roles.IsDC = $true; $base.Roles.DNS = $true; $base.Roles.IIS = $false }
+            $base.Server = [ordered]@{ Smb1Enabled = $false; SmbSigningRequired = $true; TcpAutotuning = 'normal'; TimeSource = 'time.windows.com,0x9'
+                                       Iis = [ordered]@{ Installed = $false; PoolCount = $null; SiteCount = $null; LogDirectory = $null; LogOnOsDrive = $null; AppInitInstalled = $null; DynCompressionInstalled = $null }
+                                       Ad  = [ordered]@{ NtdsPath = 'C:\Windows\NTDS\ntds.dit'; SysvolPath = 'C:\Windows\SYSVOL\sysvol'; NtdsOnOsDrive = $true; SysvolOnOsDrive = $true } }
         }
         'hdd' {
             if ($base.Storage) {

@@ -117,6 +117,30 @@ $sync.WinForgeAudit = @{
     'WPFTweaksWBAmdShaderCache'                  = @{ Class = 'Seguro';  Reason = '' }
     'WPFTweaksWBAmdCrashDefender'                = @{ Class = 'Seguro';  Reason = '' }
 
+    # ---------------------------------------------------------------- aba Servidor (Windows Server)
+    # Nenhuma destas chaves entra em preset: preset é para máquina de usuário. As 'Cuidado' vão para
+    # a categoria CUIDADO dentro do painel 1 da aba Servidor, como em qualquer outra aba.
+    'WPFTweaksWFSrvNoServerManager'              = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvShutdownTracker'              = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvIEESC'                        = @{ Class = 'Cuidado'; Reason = 'reduz a proteção do navegador para administradores no servidor; use só se administra pelo navegador local' }
+    'WPFTweaksWFSrvHighPerf'                     = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvRdpNla'                       = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvSmb1Off'                      = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFSrvSmbSigning'                   = @{ Class = 'Cuidado'; Reason = 'custo de CPU em servidores de arquivos e clientes antigos sem assinatura param de acessar' }
+    'WPFTweaksWFSrvTcpAutotuning'                = @{ Class = 'Seguro';  Reason = '' }
+
+    # ---------------------------------------------------------------- aba Servidor (IIS)
+    # Seguro porque são reversíveis de verdade: antes de mudar qualquer coisa, os valores anteriores
+    # de cada pool/site vão para um JSON em %ProgramData%\WinForge\iis-backup, e o Desfazer reescreve
+    # o que está lá - não um padrão chutado.
+    'WPFTweaksWFIisAlwaysRunning'                = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFIisNoIdleTimeout'                = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFIisMemoryRecycling'              = @{ Class = 'Cuidado'; Reason = 'recicla o pool quando passa do limite de memória privada calculado (60% da RAM dividido pelos pools); pools com muitos dados em memória podem reciclar mais que hoje' }
+    'WPFTweaksWFIisPreload'                      = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFIisCompression'                  = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFIisOutputCache'                  = @{ Class = 'Seguro';  Reason = '' }
+    'WPFTweaksWFIisConcurrency'                  = @{ Class = 'Seguro';  Reason = '' }
+
     # ---------------------------------------------------------------- serviços separados (criados em tarefa posterior)
     'WPFTweaksWBSvcSpooler'                      = @{ Class = 'Cuidado'; Reason = 'desliga o Spooler: impressão e impressoras PDF param de funcionar' }
     'WPFTweaksWBSvcBluetooth'                    = @{ Class = 'Cuidado'; Reason = 'desliga o Bluetooth (bthserv): mouses, teclados e fones Bluetooth param' }

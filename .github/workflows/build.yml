@@ -24,6 +24,13 @@ jobs:
       - name: SelfTest
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File dist\engine\WinForge.ps1 -SelfTest
+      # A aba Servidor so existe quando o Windows e servidor. O runner e cliente, entao a segunda
+      # rodada simula um servidor com IIS e AD - sem ela, nada da aba Servidor seria exercitado.
+      - name: SelfTest (servidor simulado)
+        shell: powershell
+        env:
+          WINFORGE_SIMULATE_SERVER: "iis,ad"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File dist\engine\WinForge.ps1 -SelfTest
       - name: Launcher tests
         run: dotnet test src\Launcher.Tests\Launcher.Tests.csproj -c Release -nologo
       - name: Launcher

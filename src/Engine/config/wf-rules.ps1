@@ -94,10 +94,27 @@ $sync.WinForgeRules = @(
 
     @{  Id        = 'server'
         When      = '$p.OS.IsServer'
-        Recommend = @()
+        Recommend = @('WPFTweaksTelemetry', 'WPFTweaksDeliveryOptimization', 'WPFTweaksHiber',
+                      'WPFTweaksWFSrvNoServerManager', 'WPFTweaksWFSrvShutdownTracker', 'WPFTweaksWFSrvHighPerf',
+                      'WPFTweaksWFSrvRdpNla', 'WPFTweaksWFSrvTcpAutotuning')
         Avoid     = @('WPFTweaksWBGameDVR', 'WPFTweaksWBXboxServices', 'WPFTweaksWBMMCSSGames',
                       'WPFTweaksWBWin32PrioritySeparation', 'WPFTweaksWidget', 'WPFTweaksWBAds')
         Reason    = 'Servidor: itens de consumidor/jogos não se aplicam.'
+    }
+
+    @{  Id        = 'smb1-enabled'
+        When      = '$p.OS.IsServer -and $p.Server -and $p.Server.Smb1Enabled -eq $true'
+        Recommend = @('WPFTweaksWFSrvSmb1Off')
+        Avoid     = @()
+        Reason    = 'SMB1 ativo: protocolo inseguro e obsoleto.'
+    }
+
+    @{  Id        = 'iis'
+        When      = '$p.OS.IsServer -and $p.Roles.IIS'
+        Recommend = @('WPFTweaksWFIisAlwaysRunning', 'WPFTweaksWFIisNoIdleTimeout', 'WPFTweaksWFIisPreload',
+                      'WPFTweaksWFIisCompression', 'WPFTweaksWFIisOutputCache')
+        Avoid     = @()
+        Reason    = 'IIS instalado: sites e pools sempre prontos e resposta comprimida/cacheada.'
     }
 
     # ------------------------------------------------------------------ só informação (não marcam nada)
@@ -120,6 +137,30 @@ $sync.WinForgeRules = @(
 
     # Só vídeo, rede, áudio e Bluetooth: chipset, USB e controladora de disco vêm com INF de anos
     # de fábrica e continuam corretos - contá-los aqui enchia a aba de aviso sem informação.
+    @{  Id        = 'iis-logs-os-drive'
+        When      = '$p.OS.IsServer -and $p.Server -and $p.Server.Iis.LogOnOsDrive -eq $true'
+        Recommend = @()
+        Avoid     = @()
+        Reason    = 'Logs do IIS no disco do sistema.'
+        Info      = '"Logs do IIS em $($p.Server.Iis.LogDirectory) (disco do sistema): mova para outro disco no Gerenciador do IIS > Log."'
+    }
+
+    @{  Id        = 'ad-dc'
+        When      = '$p.OS.IsServer -and $p.Roles.IsDC'
+        Recommend = @()
+        Avoid     = @()
+        Reason    = 'Controlador de domínio: use os botões de Active Directory (dcdiag, repadmin) na aba Servidor.'
+        Info      = '"Controlador de domínio: rode dcdiag e repadmin na aba Servidor; fonte de horário atual: $(if ($p.Server.TimeSource) { $p.Server.TimeSource } else { ''não disponível'' })."'
+    }
+
+    @{  Id        = 'dc-ntds-os-drive'
+        When      = '$p.OS.IsServer -and $p.Roles.IsDC -and $p.Server -and $p.Server.Ad.NtdsOnOsDrive -eq $true'
+        Recommend = @()
+        Avoid     = @()
+        Reason    = 'NTDS no disco do sistema.'
+        Info      = '"Banco do AD ($($p.Server.Ad.NtdsPath)) no disco do sistema: em produção prefira um disco separado."'
+    }
+
     @{  Id        = 'old-drivers'
         When      = '@($p.Drivers | Where-Object { $_.Old -and $_.Class -in "DISPLAY", "NET", "MEDIA", "BLUETOOTH" }).Count -gt 0'
         Recommend = @()

@@ -1,0 +1,48 @@
+﻿            <TabItem Header="Servidor" Visibility="Collapsed" Name="WPFTab9">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Grid.Row="0" Margin="{DynamicResource TabContentMargin}">
+                        <Grid Background="Transparent">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <StackPanel Background="{DynamicResource MainBackgroundColor}" Orientation="Vertical" Grid.Row="0" Grid.Column="0" Margin="5">
+                                <Label Content="Seleções recomendadas (WinForge):" FontSize="{DynamicResource FontSize}" VerticalAlignment="Center" Margin="2"/>
+                                <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,2,0,0">
+                                    <Button Name="WPFServerSelectRecommended" Content=" Marcar recomendados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca os itens que o diagnóstico recomenda para este servidor (contorno verde)."/>
+                                    <Button Name="WPFClearServerSelection" Content=" Limpar seleção " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Desmarca todos os tweaks (desta aba e da aba Tweaks)."/>
+                                    <Button Name="WPFGetInstalledServer" Content=" Detectar aplicados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca o que já está aplicado no sistema (lê o registro e os serviços)."/>
+                                </WrapPanel>
+                            </StackPanel>
+
+                            <Grid Name="serverpanel" Grid.Row="1">
+                            </Grid>
+
+                            <Border Grid.Row="2" Style="{StaticResource BorderStyle}" Margin="5,15,5,5">
+                                <StackPanel Background="{DynamicResource MainBackgroundColor}" Orientation="Horizontal" HorizontalAlignment="Left">
+                                    <TextBlock Padding="10" TextWrapping="Wrap" Foreground="{DynamicResource MainForegroundColor}">
+                                        Esquerda: ajustes gerais do servidor. Direita: IIS (só com a função Servidor Web instalada) e Active Directory (só em controlador de domínio).
+                                        <LineBreak/>Itens do IIS guardam os valores anteriores em %ProgramData%\WinForge\iis-backup antes de mudar e 'Desfazer selecionados' os restaura.
+                                        <LineBreak/>Nenhum item desta aba entra em preset.
+                                        <LineBreak/>Windows Update: em servidor prefira o canal de atualizações de segurança (política 'Configurar Atualizações Automáticas' + WSUS/Intune); o WinForge não muda essa política.
+                                    </TextBlock>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </ScrollViewer>
+
+                    <Border Grid.Row="1" Background="{DynamicResource MainBackgroundColor}" BorderBrush="{DynamicResource BorderColor}" BorderThickness="1" CornerRadius="5" HorizontalAlignment="Stretch" Padding="10">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                            <Button Name="WPFServerApplyButton" Content="Aplicar selecionados" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>
+                            <Button Name="WPFServerUndoButton" Content="Desfazer selecionados" Margin="5" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>
+                        </WrapPanel>
+                    </Border>
+                </Grid>
+            </TabItem>

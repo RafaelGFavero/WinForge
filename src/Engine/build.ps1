@@ -54,18 +54,22 @@ $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
 $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
+$serverConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-server-config.ps1")
 $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
 $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
+$serverBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-server.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
 $xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 $xamlDiagNav    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-nav.xml")
 $xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
+$xamlServerNav  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-nav.xml")
+$xamlServerTab  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-tab.xml")
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -249,6 +253,7 @@ $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawU
 # ---------------------------------------------------------------- funções e configs
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
+$src = Insert-Before $src "`$inputXML = @'" ($serverConfig.TrimEnd() + "`n`n") "insert server config"
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 $src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
 
@@ -275,6 +280,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.Tr
 
 # ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
+
+# ---------------------------------------------------------------- aba Servidor (comandos e visibilidade das abas)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($serverBlock.TrimEnd() + "`n`n") "insert server"
 
 # troca os três paths do logo original pelos quatro paths do WinForge (caso 'logo' de Invoke-WinUtilAssets)
 $src = Replace-Between $src '          $LogoPathData1 = @"' '          $canvas.Children.Add($LogoPath1) | Out-Null' @'
@@ -529,10 +537,13 @@ $src = Replace-Once $src @'
         }
 '@ @'
         "Tweaks" {
-            Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos" -Exclude) -targetGridName "tweakspanel" -columncount 2
+            Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab @("Jogos","Servidor") -Exclude) -targetGridName "tweakspanel" -columncount 2
         }
         "Jogos" {
             Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos") -targetGridName "gamespanel" -columncount 2
+        }
+        "Servidor" {
+            Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Servidor") -targetGridName "serverpanel" -columncount 2
         }
         "Diagnostico" {
             Initialize-WinForgeDiagnosticsTab
@@ -550,10 +561,12 @@ $src = Replace-Once $src @'
         Find-TweaksByNameOrDescription -SearchString ""
     } elseif ($sync.currentTab -eq "Jogos") {
         Find-TweaksByNameOrDescription -SearchString ""
+    } elseif ($sync.currentTab -eq "Servidor") {
+        Find-TweaksByNameOrDescription -SearchString ""
     }
 '@ "tab filter reset"
 
-$src = Replace-Once $src 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5) {' 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5 -or $tabNumber -eq 6) {' "search visibility"
+$src = Replace-Once $src 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5) {' 'if ($tabNumber -eq 0 -or $tabNumber -eq 1 -or $tabNumber -eq 5 -or $tabNumber -eq 6 -or $tabNumber -eq 8) {' "search visibility"
 
 $src = Replace-Once $src @'
     $panelName = "tweakspanel"
@@ -566,6 +579,8 @@ $src = Replace-Once $src @'
         $panelName = "appxpanel"
     } elseif ($null -ne $Sync.currentTab -and $Sync.currentTab -eq "Jogos") {
         $panelName = "gamespanel"
+    } elseif ($null -ne $Sync.currentTab -and $Sync.currentTab -eq "Servidor") {
+        $panelName = "serverpanel"
     }
 '@ "search panel"
 
@@ -582,14 +597,22 @@ $src = Replace-Once $src @'
         "Jogos" {
             Find-TweaksByNameOrDescription -SearchString $sync.SearchBar.Text
         }
+        "Servidor" {
+            Find-TweaksByNameOrDescription -SearchString $sync.SearchBar.Text
+        }
     }
 })
 '@ "search timer"
 
+# O atalho segue a aba: Win11ISO e Jogos não existem no servidor e Servidor não existe no cliente.
+# Sem a guarda, Alt+W num servidor levaria a uma aba escondida (Invoke-WPFTab seleciona pelo índice,
+# não pela visibilidade) e o usuário ficaria numa tela sem botão de volta. O Handled = $true fica
+# nos três de qualquer jeito: a tecla foi tratada, mesmo quando a decisão é não ir a lugar nenhum.
 $src = Replace-Once $src '            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab' @'
-            "W" { Invoke-WPFButton "WPFTab5BT"; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
-            "J" { Invoke-WPFButton "WPFTab7BT"; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
+            "W" { if (-not $sync.IsServer) { Invoke-WPFButton "WPFTab5BT" }; $keyEventArgs.Handled = $true } # Navigate to Win11ISO tab
+            "J" { if (-not $sync.IsServer) { Invoke-WPFButton "WPFTab7BT" }; $keyEventArgs.Handled = $true } # WinForge: aba Jogos
             "D" { Invoke-WPFButton "WPFTab8BT"; $keyEventArgs.Handled = $true } # WinForge: aba Diagnóstico
+            "S" { if ($sync.IsServer) { Invoke-WPFButton "WPFTab9BT" }; $keyEventArgs.Handled = $true } # WinForge: aba Servidor
 '@.TrimEnd() "alt+j"
 
 # ---------------------------------------------------------------- botões: lookup em tweaks + novos casos
@@ -601,10 +624,14 @@ $src = Replace-Once $src @'
     $buttonConfig = $null
     if ($sync.configs.feature.$Button) {
         $buttonConfig = $sync.configs.feature.$Button
-    } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button") {
+    } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button" -and $Button -notlike "WPFWFSrv*" -and $Button -notlike "WPFWFAd*") {
         # WinForge: botões definidos na config de tweaks (aba Jogos)
         $buttonConfig = $sync.configs.tweaks.$Button
     }
+    # Os botões da aba Servidor (WPFWFSrv*, WPFWFAd*) ficam de fora de propósito: este caminho chama
+    # $buttonConfig.function SEM argumento nenhum, e as funções deles precisam do -Name para saber
+    # qual comando rodar. Quem despacha esses botões é o switch abaixo, com o -Name explícito por
+    # caso - por isso a config deles também não declara "function": seria uma chave morta.
     if ($buttonConfig) {
 
 '@ "button lookup"
@@ -620,6 +647,20 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFAppxWinForgeSelection" {Invoke-WPFPresets "AppxWinForge" -checkboxfilterpattern "WPFAppx*"}
         "WPFSelectRecommended" {Select-WinForgeRecommended -Tab "Tweaks" | Out-Null}
         "WPFGamesSelectRecommended" {Select-WinForgeRecommended -Tab "Jogos" | Out-Null}
+        "WPFServerSelectRecommended" {Select-WinForgeRecommended -Tab "Servidor" | Out-Null}
+        "WPFClearServerSelection" {Invoke-WPFPresets -imported $true -checkboxfilterpattern "WPFTweak*"}
+        "WPFGetInstalledServer" {Invoke-WPFGetInstalled -CheckBox "tweaks"}
+        "WPFServerApplyButton" {Invoke-WPFtweaksbutton}
+        "WPFServerUndoButton" {Invoke-WPFundoall}
+        # Os botões da aba Servidor chegam aqui por nome: Invoke-WPFButton chama $buttonConfig.function
+        # sem argumento nenhum, então quem diz QUAL comando é este switch, não a config.
+        "WPFWFSrvTimeCheck" {Invoke-WinForgeServerCommand -Name TimeCheck}
+        "WPFWFSrvDefenderExclusions" {Invoke-WinForgeServerCommand -Name DefenderExclusions}
+        "WPFWFSrvTcpShow" {Invoke-WinForgeServerCommand -Name TcpShow}
+        "WPFWFAdDcdiag" {Invoke-WinForgeServerCommand -Name Dcdiag}
+        "WPFWFAdReplSummary" {Invoke-WinForgeServerCommand -Name ReplSummary}
+        "WPFWFAdDnsScavenging" {Invoke-WinForgeServerCommand -Name DnsScavenging}
+        "WPFWFAdNtdsLocation" {Invoke-WinForgeServerCommand -Name NtdsLocation}
         "WPFDiagRefresh" {Start-WinForgeProfileJob}
         "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
         "WPFDiagExport" {
@@ -628,7 +669,7 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         }
         "WPFDiagSelectRecommended" {
             $wfMarcados = Select-WinForgeRecommended -Tab "All"
-            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas Tweaks e Jogos.", "WinForge", "OK", "Information") | Out-Null
+            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas de ajustes.", "WinForge", "OK", "Information") | Out-Null
         }
 '@.TrimEnd() "button switch"
 
@@ -665,6 +706,7 @@ $src = Insert-After $src '    Invoke-WinUtilTweaks $restorePointTweak' "`n    `$
 $src = Replace-Between $src "Write-Host @`"`n    CCCCCCCCCCCCC" "# Load the configuration files" @'
 Get-WinUtilBoostSystemInfo
 $wbGpuText = if ($sync.GPUNames -and $sync.GPUNames.Count -gt 0) { $sync.GPUNames -join ' | ' } else { 'não detectada' }
+$wbServerText = if ($sync.IsServer) { "  Papéis: $(if (@($sync.ServerRoles).Count) { @($sync.ServerRoles) -join ', ' } else { 'nenhum' })" } else { '' }
 Write-Host @"
 
 __        __ _         _____
@@ -675,7 +717,7 @@ __        __ _         _____
                                            |___/
 
   WinForge $($sync.version)  -  base: $($sync.baseVersion) (MIT, ver NOTICE)
-  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) (build $($sync.OSBuild))
+  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) (build $($sync.OSBuild))$wbServerText
   GPU    : $wbGpuText
   Log    : $($sync.logPath)
 
@@ -736,16 +778,18 @@ if ($SelfTest) {
             try { [scriptblock]::Create($s) | Out-Null } catch { Write-Host "  [ERRO] feature $($t.Name): script inválido: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
         }
     }
-    $wbTweaksTab = Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos" -Exclude
+    $wbTweaksTab = Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab @("Jogos","Servidor") -Exclude
     $wbGamesTab  = Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Jogos"
+    $wbServerTab = Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab "Servidor"
     $wbHidden = @($sync.configs.tweaks.PSObject.Properties | Where-Object { -not (Test-WinUtilBoostEntryCompatible $_.Value) } | ForEach-Object { $_.Name })
     $wbHiddenAppx = @($sync.configs.appx.PSObject.Properties | Where-Object { -not (Test-WinUtilBoostEntryCompatible $_.Value) } | ForEach-Object { $_.Name })
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
-    Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
+    Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
     if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -764,6 +808,17 @@ if ($SelfTest) {
         }
     }
     if ($wbPresetViolations.Count) { Write-Host "  [ERRO] presets com itens não-Seguro: $($wbPresetViolations -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    # Preset é para máquina de usuário: um item de servidor num preset seria aplicado em massa numa
+    # máquina em produção por quem só clicou em "Standard". A auditoria não pega isso (item de
+    # servidor pode ser Seguro), então a trava é o platform.
+    $wbPresetServer = @()
+    foreach ($p in $sync.configs.preset.PSObject.Properties) {
+        foreach ($k in @($p.Value)) {
+            $e = $sync.configs.tweaks.$k
+            if ($e -and $e.PSObject.Properties['platform'] -and [string]$e.platform -eq 'server') { $wbPresetServer += "$($p.Name):$k" }
+        }
+    }
+    if ($wbPresetServer.Count) { Write-Host "  [ERRO] presets com itens de servidor: $($wbPresetServer -join ', ')" -ForegroundColor Red; $wbErrors++ }
     # a auditoria remove itens dos presets; um preset vazio depende da guarda em Invoke-WPFPresets para não estourar
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
         if (@($p.Value).Count -eq 0) { Write-Host "  [ERRO] preset vazio: $($p.Name)" -ForegroundColor Red; $wbErrors++ }
@@ -780,18 +835,75 @@ if ($SelfTest) {
     # (nada de objeto CIM escondido) e as simulações têm de devolver o mesmo formato.
     $wbProfile = Get-WinForgeSystemProfile -SkipNetwork
     foreach ($area in 'OS','Machine','CPU','RAM','GPU','Storage','Network','Power','State','Drivers') { if ($null -eq $wbProfile[$area]) { Write-Host "  [ERRO] perfil sem área $area" -ForegroundColor Red; $wbErrors++ } }
+    # A área Servidor existe sempre, mas no cliente o valor é $null: o que se cobra é a CHAVE,
+    # senão os cartões da aba Servidor teriam de adivinhar se o perfil é velho ou é cliente.
+    if (-not $wbProfile.Contains('Server')) { Write-Host "  [ERRO] perfil sem a chave Server" -ForegroundColor Red; $wbErrors++ }
+    if ($wbProfile.Roles.IsDC -isnot [bool]) { Write-Host "  [ERRO] perfil: Roles.IsDC deveria ser booleano (veio '$($wbProfile.Roles.IsDC)')" -ForegroundColor Red; $wbErrors++ }
+    # Perfil x banner sob WINFORGE_SIMULATE_SERVER: os dois têm de contar a mesma história. Enquanto
+    # o perfil ignorava a variável, o SelfTest "de servidor" rodava com Server = $null e não exercitava
+    # nada da aba Servidor - o cartão só quebraria na máquina de verdade.
+    if ($null -ne $env:WINFORGE_SIMULATE_SERVER) {
+        $wbSimRoles = @($sync.ServerRoles)
+        if ($wbProfile.OS.IsServer -ne $true) { Write-Host "  [ERRO] perfil simulado: OS.IsServer deveria ser true sob WINFORGE_SIMULATE_SERVER" -ForegroundColor Red; $wbErrors++ }
+        if (('iis' -in $wbSimRoles) -and $wbProfile.Roles.IIS -ne $true) { Write-Host "  [ERRO] perfil simulado: Roles.IIS deveria ser true (papéis: $($wbSimRoles -join ','))" -ForegroundColor Red; $wbErrors++ }
+        if (('ad' -in $wbSimRoles) -and $wbProfile.Roles.IsDC -ne $true) { Write-Host "  [ERRO] perfil simulado: Roles.IsDC deveria ser true (papéis: $($wbSimRoles -join ','))" -ForegroundColor Red; $wbErrors++ }
+        # a hashtable Server tem de existir; os campos podem ser $null (os cmdlets de servidor não
+        # existem no cliente), e nesse caso o que se cobra é a linha em .Errors, não a exceção
+        # Sob simulação o perfil relata ProductType 3 numa máquina que é 1: sem esta marca, o
+        # relatório HTML afirmaria um tipo de produto que não é o da máquina, sem ressalva nenhuma.
+        if ($wbProfile.Simulated -ne 'env:WINFORGE_SIMULATE_SERVER') { Write-Host "  [ERRO] perfil simulado: esperado Simulated = 'env:WINFORGE_SIMULATE_SERVER', veio '$($wbProfile.Simulated)'" -ForegroundColor Red; $wbErrors++ }
+        if ($null -eq $wbProfile.Server) { Write-Host "  [ERRO] perfil simulado: Server não deveria ser null sob WINFORGE_SIMULATE_SERVER" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Perfil simulado: servidor=$($wbProfile.OS.IsServer) IIS=$($wbProfile.Roles.IIS) DC=$($wbProfile.Roles.IsDC) | Server.TimeSource=$(if ($null -eq $wbProfile.Server.TimeSource) { '(null)' } else { $wbProfile.Server.TimeSource })" }
+    } elseif ($wbProfile.OS.IsServer -ne $true -and $null -ne $wbProfile.Server) {
+        Write-Host "  [ERRO] perfil: Server deveria ser null num cliente sem simulação" -ForegroundColor Red; $wbErrors++
+    } elseif ($null -ne $wbProfile.Simulated) {
+        Write-Host "  [ERRO] perfil: Simulated deveria ser null sem simulação (veio '$($wbProfile.Simulated)')" -ForegroundColor Red; $wbErrors++
+    }
+    # Detecção do tipo de Windows: o registro responde primeiro (12 ms contra 100-190 ms do CIM) e é
+    # o único caminho que sobrevive a um repositório WMI corrompido, onde a aba Servidor sumia calada.
+    $wbProdTipo = Get-WinForgeWindowsProductType
+    if ($wbProdTipo.Source -ne 'registry') { Write-Host "  [ERRO] detecção: o tipo de produto deveria vir do registro, veio de '$($wbProdTipo.Source)'" -ForegroundColor Red; $wbErrors++ }
+    if ($wbProdTipo.IsServer -ne ([int](Get-CimInstance Win32_OperatingSystem).ProductType -ne 1)) { Write-Host "  [ERRO] detecção: registro e CIM discordam sobre ser servidor (registro '$($wbProdTipo.ProductType)')" -ForegroundColor Red; $wbErrors++ }
+    # A simulação monta a aba, mas não pode liberar escrita no SMB/energia/TCP/RDP da máquina real.
+    if ((Test-WinForgeRealServer) -ne $wbProdTipo.IsServer) { Write-Host "  [ERRO] detecção: Test-WinForgeRealServer não acompanha o ProductType real" -ForegroundColor Red; $wbErrors++ }
+    # TimeSource guarda a fonte de horário, não a mensagem do w32tm: com o serviço W32Time parado o
+    # comando escreve "Ocorreu o seguinte erro..." no stdout e com código != 0 - isso vai para .Errors.
+    if ($wbProfile.Server -and $wbProfile.Server.TimeSource -and ([string]$wbProfile.Server.TimeSource -match '(?i)erro|error')) {
+        Write-Host "  [ERRO] perfil: Server.TimeSource guardou uma mensagem de erro ('$($wbProfile.Server.TimeSource)')" -ForegroundColor Red; $wbErrors++
+    }
     if ($wbProfile.Errors.Count) { Write-Host "  Perfil: avisos -> $($wbProfile.Errors -join '; ')" }
     $null = $wbProfile | ConvertTo-Json -Depth 6 -Compress   # serializável
     Write-Host "  Perfil: $($wbProfile.OS.Caption) | $($wbProfile.CPU.Name) | RAM $($wbProfile.RAM.TotalGB) GB | GPU $(@($wbProfile.GPU | ForEach-Object { $_.Name }) -join ', ') | SSD=$($wbProfile.Storage.HasSSD) HDD=$($wbProfile.Storage.HasHDD) | laptop=$($wbProfile.Machine.IsLaptop) vm=$($wbProfile.Machine.IsVirtual) | drivers=$($wbProfile.Drivers.Count)"
     # Cada simulação monta o perfil inteiro de novo (~3 s): guarda para reusar nas regras e nos drivers.
     $wbSims = @{}
-    foreach ($sim in 'laptop','vm','server-iis','hdd','win10') {
+    foreach ($sim in 'laptop','vm','server-iis','server-ad','hdd','win10') {
         try {
             $sp = Get-WinForgeSimulatedProfile -Name $sim
             if ($sp.Simulated -ne $sim) { Write-Host "  [ERRO] simulação $sim" -ForegroundColor Red; $wbErrors++ }
             $wbSims[$sim] = $sp
         } catch { Write-Host "  [ERRO] simulação $sim`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
     }
+    # As simulações de servidor são a única forma de exercitar a área Servidor num cliente:
+    # se elas pararem de preencher IIS/DC, os cartões e regras da aba Servidor ficam sem teste.
+    if ($wbSims['server-iis'] -and $wbSims['server-iis'].Server.Iis.Installed -ne $true) { Write-Host "  [ERRO] simulação server-iis: Server.Iis.Installed deveria ser true" -ForegroundColor Red; $wbErrors++ }
+    if ($wbSims['server-ad'] -and $wbSims['server-ad'].Roles.IsDC -ne $true) { Write-Host "  [ERRO] simulação server-ad: Roles.IsDC deveria ser true" -ForegroundColor Red; $wbErrors++ }
+    # Compatibilidade platform/role: força os dois estados e devolve o que estava, para o teste
+    # valer igual no cliente e sob WINFORGE_SIMULATE_SERVER.
+    $wbWasServer = $sync.IsServer; $wbWasRoles = $sync.ServerRoles
+    try {
+        $sync.IsServer = $false; $sync.ServerRoles = @()
+        if (Test-WinUtilBoostEntryCompatible ([pscustomobject]@{ platform = 'server' })) { Write-Host "  [ERRO] compat: platform='server' deveria ser oculto no cliente" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinUtilBoostEntryCompatible ([pscustomobject]@{ platform = 'client' }))) { Write-Host "  [ERRO] compat: platform='client' deveria aparecer no cliente" -ForegroundColor Red; $wbErrors++ }
+        $sync.IsServer = $true; $sync.ServerRoles = @('iis')
+        if (-not (Test-WinUtilBoostEntryCompatible ([pscustomobject]@{ platform = 'server' }))) { Write-Host "  [ERRO] compat: platform='server' deveria aparecer no servidor" -ForegroundColor Red; $wbErrors++ }
+        if (Test-WinUtilBoostEntryCompatible ([pscustomobject]@{ platform = 'client' })) { Write-Host "  [ERRO] compat: platform='client' deveria ser oculto no servidor" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinUtilBoostEntryCompatible ([pscustomobject]@{ role = 'iis' }))) { Write-Host "  [ERRO] compat: role='iis' deveria aparecer com o papel IIS presente" -ForegroundColor Red; $wbErrors++ }
+        if (Test-WinUtilBoostEntryCompatible ([pscustomobject]@{ role = 'ad' })) { Write-Host "  [ERRO] compat: role='ad' deveria ser oculto sem o papel AD" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinUtilBoostEntryCompatible ([pscustomobject]@{ role = @('ad','iis') }))) { Write-Host "  [ERRO] compat: role=@('ad','iis') deveria aparecer (basta um papel)" -ForegroundColor Red; $wbErrors++ }
+    } finally {
+        $sync.IsServer = $wbWasServer; $sync.ServerRoles = $wbWasRoles
+    }
+    Write-Host "  Compatibilidade: platform/role OK | servidor=$($sync.IsServer) papéis=$(if (@($sync.ServerRoles).Count) { @($sync.ServerRoles) -join ',' } else { 'nenhum' })"
     # Regras de recomendação: as chaves citadas têm de existir, o que é recomendado tem de ser Seguro
     # (nada de preset disfarçado de recomendação) e cada perfil simulado tem de cair na regra dele.
     $wbRuleKeys = @($sync.WinForgeRules | ForEach-Object { @($_.Recommend) + @($_.Avoid) } | Where-Object { $_ } | Sort-Object -Unique)
@@ -818,6 +930,39 @@ if ($SelfTest) {
         $wbW10 = Invoke-WinForgeRules -Profile $wbSims['win10']
         if ($wbW10.Recommended.Contains('WPFTweaksEndTaskOnTaskbar')) { Write-Host "  [ERRO] regras (win10): 'WPFTweaksEndTaskOnTaskbar' não deveria ser recomendado" -ForegroundColor Red; $wbErrors++ }
     }
+    # Regras de servidor: as simulações são o único jeito de exercitá-las num cliente. 'server-iis'
+    # tem o papel IIS e SMB1 ligado; 'server-ad' é controlador de domínio SEM IIS - é esse par que
+    # prova que as recomendações de IIS não vazam para um DC e que as regras de informação disparam.
+    if ($wbSims['server-iis']) {
+        $wbSrvIis = Invoke-WinForgeRules -Profile $wbSims['server-iis']
+        foreach ($wbSrvK in @('WPFTweaksWFIisAlwaysRunning', 'WPFTweaksWFSrvSmb1Off')) {
+            if (-not $wbSrvIis.Recommended.Contains($wbSrvK)) { Write-Host "  [ERRO] regras (server-iis): '$wbSrvK' deveria ser recomendado" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (-not $wbSrvIis.Discouraged.Contains('WPFTweaksWBGameDVR')) { Write-Host "  [ERRO] regras (server-iis): 'WPFTweaksWBGameDVR' deveria estar em Evitar" -ForegroundColor Red; $wbErrors++ }
+        $wbSrvInfo = @($wbSrvIis.Infos | Where-Object { $_ -match 'Logs do IIS' })
+        if ($wbSrvInfo.Count -ne 1) { Write-Host "  [ERRO] regras (server-iis): esperado 1 info citando 'Logs do IIS', veio $($wbSrvInfo.Count)" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Regras (server-iis): $($wbSrvIis.Recommended.Count) recomendados, info -> $($wbSrvInfo[0])" }
+    }
+    if ($wbSims['server-ad']) {
+        $wbSrvAd = Invoke-WinForgeRules -Profile $wbSims['server-ad']
+        foreach ($wbSrvId in @('ad-dc', 'dc-ntds-os-drive')) {
+            if ($wbSrvId -notin @($wbSrvAd.Fired)) { Write-Host "  [ERRO] regras (server-ad): a regra '$wbSrvId' deveria ter disparado (disparadas: $(@($wbSrvAd.Fired) -join ', '))" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wbSrvAdIis = @(@($wbSrvAd.Recommended.Keys) | Where-Object { $_ -like 'WPFTweaksWFIis*' })
+        if ($wbSrvAdIis.Count) { Write-Host "  [ERRO] regras (server-ad): um DC sem IIS não pode receber $($wbSrvAdIis -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Regras (server-ad): $(@($wbSrvAd.Fired) -join ', ')" }
+    }
+    # Cartão Servidor: existe no perfil de servidor e NÃO existe num cliente - o relatório HTML sai
+    # das mesmas seções, então esta é a trava dos dois de uma vez.
+    if ($wbSims['server-iis']) {
+        $wbSecSrv = @(Get-WinForgeDiagSections -Profile $wbSims['server-iis'] | ForEach-Object { [string]$_.Title })
+        if ('Servidor' -notin $wbSecSrv) { Write-Host "  [ERRO] Diagnóstico (server-iis): esperada a seção 'Servidor' (veio: $($wbSecSrv -join ', '))" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Diagnóstico (server-iis): $($wbSecSrv.Count) seções, com 'Servidor'" }
+        # Perfil simulado: o cartão (e o relatório HTML que sai dele) tem de dizer de onde veio o
+        # "servidor" - sem essa linha o relatório de um teste passa por relatório de máquina real.
+        $wbSecSrvObj = @(Get-WinForgeDiagSections -Profile $wbSims['server-iis'] | Where-Object { [string]$_.Title -eq 'Servidor' })
+        if ($wbSecSrvObj.Count -and 'Simulação' -notin @($wbSecSrvObj[0].Lines | ForEach-Object { [string]$_.Key })) { Write-Host "  [ERRO] Diagnóstico (server-iis): o cartão Servidor de um perfil simulado deveria trazer a linha 'Simulação'" -ForegroundColor Red; $wbErrors++ }
+    }
     # por último o perfil real, para que $sync.Recommended fique com o desta máquina
     # (Invoke-WinForgeRules sobrescreve $sync.Recommended: as simulações acima deixaram lixo lá)
     $sync.Profile = $wbProfile
@@ -827,6 +972,571 @@ if ($SelfTest) {
     Write-Host "    recomendar : $(@($wbRules.Recommended.Keys) -join ', ')"
     Write-Host "    evitar     : $(@($wbRules.Discouraged.Keys) -join ', ')"
     foreach ($wbInfo in @($wbRules.Infos)) { Write-Host "    info       : $wbInfo" }
+    # Num cliente de verdade nada de servidor pode ser recomendado, e o Diagnóstico não pode ganhar o
+    # cartão Servidor: as entradas WF* nem existem na janela aqui, e recomendar chave invisível seria
+    # uma recomendação que ninguém consegue marcar.
+    if (-not $wbProfile.OS.IsServer) {
+        $wbCliSrv = @(@($wbRules.Recommended.Keys) | Where-Object { $_ -like 'WPFTweaksWF*' })
+        if ($wbCliSrv.Count) { Write-Host "  [ERRO] regras (cliente real): nada de servidor deveria ser recomendado, veio $($wbCliSrv -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        $wbCliSec = @(Get-WinForgeDiagSections -Profile $wbProfile | ForEach-Object { [string]$_.Title })
+        if ('Servidor' -in $wbCliSec) { Write-Host "  [ERRO] Diagnóstico (cliente real): a seção 'Servidor' não deveria existir" -ForegroundColor Red; $wbErrors++ }
+    }
+    # ---------------------------------------------------------------- IIS: helpers puros (sem IIS)
+    # Nenhum destes helpers toca no provedor IIS:\, então dão para exercitar em qualquer máquina - e
+    # eles são o miolo do endereçamento, da conversão de valores e da comparação que decide o que
+    # entra no backup. A comparação é o que sustenta a idempotência: chave já no alvo fica fora do
+    # backup, senão aplicar duas vezes gravaria um backup com os valores já ajustados e o Desfazer
+    # (que pega o mais novo) restauraria justamente o que se queria desfazer.
+    $wbIisKey = Split-WinForgeIisKey -Key 'pool:My Pool:processModel.idleTimeout'
+    if ($wbIisKey.Kind -ne 'pool' -or $wbIisKey.Target -ne 'My Pool' -or $wbIisKey.Property -ne 'processModel.idleTimeout') { Write-Host "  [ERRO] IIS: Split-WinForgeIisKey veio kind='$($wbIisKey.Kind)' alvo='$($wbIisKey.Target)' prop='$($wbIisKey.Property)'" -ForegroundColor Red; $wbErrors++ }
+    $wbIisKeySrv = Split-WinForgeIisKey -Key 'server:system.webServer/caching:enableKernelCache'
+    if ($wbIisKeySrv.Kind -ne 'server' -or $wbIisKeySrv.Target -ne 'system.webServer/caching' -or $wbIisKeySrv.Property -ne 'enableKernelCache') { Write-Host "  [ERRO] IIS: Split-WinForgeIisKey (server) veio kind='$($wbIisKeySrv.Kind)' alvo='$($wbIisKeySrv.Target)' prop='$($wbIisKeySrv.Property)'" -ForegroundColor Red; $wbErrors++ }
+    if ((Get-WinForgeIisFilter 'system.webServer/caching') -ne '/system.webServer/caching' -or (Get-WinForgeIisFilter '/system.webServer/caching') -ne '/system.webServer/caching') { Write-Host "  [ERRO] IIS: Get-WinForgeIisFilter não normalizou a seção" -ForegroundColor Red; $wbErrors++ }
+    # TimeSpan acima de 24 h tem de virar hora corrida ('26:00:00'): o ToString() padrão daria
+    # '1.02:00:00', que o IIS recusa de volta. uint32 e valor embrulhado em .Value (PSObject ou
+    # hashtable) também têm de sair como texto simples - '@{Value=5000}' no backup é backup perdido.
+    foreach ($wbIisCase in @(
+        @([TimeSpan]'1.02:00:00', '26:00:00'),
+        @([TimeSpan]::FromMinutes(20), '00:20:00'),
+        @([TimeSpan]::Zero, '00:00:00'),
+        @($true, 'True'),
+        @($false, 'False'),
+        @([uint32]5000, '5000'),
+        @([int64]1048576, '1048576'),
+        @([pscustomobject]@{ Value = 'OnDemand' }, 'OnDemand'),
+        @([pscustomobject]@{ Value = [TimeSpan]'1.02:00:00' }, '26:00:00'),
+        @(@{ Value = '5000' }, '5000'),
+        @($null, '')
+    )) {
+        $wbIisGot = ConvertTo-WinForgeIisString $wbIisCase[0]
+        if ($wbIisGot -ne $wbIisCase[1]) { Write-Host "  [ERRO] IIS: ConvertTo-WinForgeIisString veio '$wbIisGot', esperado '$($wbIisCase[1])'" -ForegroundColor Red; $wbErrors++ }
+    }
+    foreach ($wbIisM in @(
+        @([TimeSpan]::Zero, '00:00:00', $true),
+        @('alwaysrunning', 'AlwaysRunning', $true),
+        @([pscustomobject]@{ Value = $true }, 'True', $true),
+        @([TimeSpan]::FromMinutes(20), '00:00:00', $false),
+        @([uint32]1000, '5000', $false)
+    )) {
+        $wbIisMGot = Test-WinForgeIisValueMatch -Current $wbIisM[0] -Target $wbIisM[1]
+        if ($wbIisMGot -ne $wbIisM[2]) { Write-Host "  [ERRO] IIS: Test-WinForgeIisValueMatch ('$($wbIisM[0])' vs '$($wbIisM[1])') veio $wbIisMGot, esperado $($wbIisM[2])" -ForegroundColor Red; $wbErrors++ }
+    }
+    # As duas pontas da faixa de memória privada, com a RAM vinda por parâmetro para o resultado não
+    # depender da máquina que roda o teste.
+    foreach ($wbIisMem in @(
+        @(2097152, 4, 1048576),
+        @(33554432, 4, 5033164),
+        @(33554432, 1, 8388608)
+    )) {
+        $wbIisMemGot = Get-WinForgeIisPrivateMemoryLimitKb -PoolCount $wbIisMem[1] -TotalKb $wbIisMem[0]
+        if ($wbIisMemGot -ne $wbIisMem[2]) { Write-Host "  [ERRO] IIS: memória privada com $($wbIisMem[0]) KB / $($wbIisMem[1]) pool(s) veio $wbIisMemGot, esperado $($wbIisMem[2])" -ForegroundColor Red; $wbErrors++ }
+    }
+    # As duas chaves de registro do ASP.NET: a de 64 bits e a de 32 bits (Wow6432Node), que é a que
+    # o pool em modo 32 bits lê. Com uma só, metade dos pools ficaria sem o ajuste - e o Desfazer,
+    # que apaga o que a entrada criou, deixaria a outra chave para trás.
+    $wbIisConc = @($sync.configs.tweaks.'WPFTweaksWFIisConcurrency'.registry)
+    if ($wbIisConc.Count -ne 2 -or @($wbIisConc | Where-Object { $_.Path -like '*\Wow6432Node\*' }).Count -ne 1 -or @($wbIisConc | Where-Object { $_.Name -eq 'MaxConcurrentRequestsPerCPU' -and $_.OriginalValue -eq '<RemoveEntry>' }).Count -ne 2) { Write-Host "  [ERRO] IIS: WPFTweaksWFIisConcurrency deveria ter as duas chaves MaxConcurrentRequestsPerCPU (64 e 32 bits) com Original <RemoveEntry>, veio $($wbIisConc.Count): $(@($wbIisConc | ForEach-Object { $_.Path }) -join ' | ')" -ForegroundColor Red; $wbErrors++ }
+    # Alvos de dois itens: OutputCache e Compression são os únicos que não listam pools/sites, então
+    # o plano deles pode ser conferido sem IIS.
+    $wbIisPlanOc = Get-WinForgeIisTweakPlan -Name 'OutputCache'
+    $wbIisOcKeys = @($wbIisPlanOc.Targets.Keys)
+    if ($wbIisOcKeys.Count -ne 2 -or $wbIisPlanOc.Targets['server:system.webServer/caching:enabled'] -ne 'True' -or $wbIisPlanOc.Targets['server:system.webServer/caching:enableKernelCache'] -ne 'True') { Write-Host "  [ERRO] IIS: alvos de OutputCache vieram '$($wbIisOcKeys -join ', ')'" -ForegroundColor Red; $wbErrors++ }
+    $wbIisPlanCp = Get-WinForgeIisTweakPlan -Name 'Compression'
+    if ($wbIisPlanCp.Targets['server:system.webServer/urlCompression:doStaticCompression'] -ne 'True') { Write-Host "  [ERRO] IIS: Compression sem doStaticCompression = True (veio '$($wbIisPlanCp.Targets['server:system.webServer/urlCompression:doStaticCompression'])')" -ForegroundColor Red; $wbErrors++ }
+    # Sem o recurso de compressão dinâmica a chave sai da lista, mas o motivo tem de dizer isso -
+    # ficar de fora calado seria um item que promete duas coisas e entrega uma.
+    if (-not $wbIisPlanCp.Targets.Contains('server:system.webServer/urlCompression:doDynamicCompression') -and [string]$wbIisPlanCp.Skipped -notmatch 'Web-Dyn-Compression') { Write-Host "  [ERRO] IIS: compressão dinâmica fora dos alvos sem citar Web-Dyn-Compression ('$($wbIisPlanCp.Skipped)')" -ForegroundColor Red; $wbErrors++ }
+    $wbIisPlanThrew = $false
+    try { Get-WinForgeIisTweakPlan -Name 'ItemQueNaoExiste' | Out-Null } catch { $wbIisPlanThrew = $true }
+    if (-not $wbIisPlanThrew) { Write-Host "  [ERRO] IIS: Get-WinForgeIisTweakPlan aceitou um item desconhecido" -ForegroundColor Red; $wbErrors++ }
+    # O que entra no backup, com os cinco casos que decidem a reversibilidade do item: leitura que
+    # falhou (chave ausente), valor vazio, valor nulo, valor já no alvo e valor diferente. Só o
+    # último pode entrar no backup e na escrita - vazio no backup viraria um Desfazer que apaga a
+    # propriedade, e "já no alvo" no backup viraria um Desfazer que restaura o valor ajustado.
+    $wbIisAlvos = [ordered]@{
+        'pool:A:startMode'                  = 'AlwaysRunning'
+        'pool:B:startMode'                  = 'AlwaysRunning'
+        'pool:C:startMode'                  = 'AlwaysRunning'
+        'pool:D:startMode'                  = 'AlwaysRunning'
+        'pool:E:processModel.idleTimeout'   = '00:00:00'
+    }
+    $wbIisAtual = @{
+        'pool:B:startMode'                = ''
+        'pool:C:startMode'                = $null
+        'pool:D:startMode'                = 'alwaysrunning'
+        'pool:E:processModel.idleTimeout' = [TimeSpan]::FromMinutes(20)
+    }
+    $wbIisSet = Get-WinForgeIisChangeSet -Targets $wbIisAlvos -Current $wbIisAtual
+    if ((@($wbIisSet.Pending) -join ',') -ne 'pool:E:processModel.idleTimeout') { Write-Host "  [ERRO] IIS: conjunto de mudanças deveria ter só a chave diferente, veio '$(@($wbIisSet.Pending) -join ',')'" -ForegroundColor Red; $wbErrors++ }
+    if ((@($wbIisSet.Unreadable) -join ',') -ne 'pool:A:startMode,pool:B:startMode,pool:C:startMode') { Write-Host "  [ERRO] IIS: não lidas deveriam ser A (ausente), B (vazia) e C (nula), veio '$(@($wbIisSet.Unreadable) -join ',')'" -ForegroundColor Red; $wbErrors++ }
+    if ((@($wbIisSet.Already) -join ',') -ne 'pool:D:startMode') { Write-Host "  [ERRO] IIS: 'já no alvo' deveria ser só D, veio '$(@($wbIisSet.Already) -join ',')'" -ForegroundColor Red; $wbErrors++ }
+    if ($wbIisSet.Previous.Count -ne 1 -or $wbIisSet.Previous['pool:E:processModel.idleTimeout'] -ne '00:20:00') { Write-Host "  [ERRO] IIS: backup deveria ter só E = '00:20:00', veio $($wbIisSet.Previous.Count) item(ns) ('$($wbIisSet.Previous['pool:E:processModel.idleTimeout'])')" -ForegroundColor Red; $wbErrors++ }
+    # Item inteiro já aplicado: nada a escrever, e é por isso que Invoke não grava backup nesse caso.
+    $wbIisSetOk = Get-WinForgeIisChangeSet -Targets $wbIisAlvos -Current @{
+        'pool:A:startMode'                = 'AlwaysRunning'
+        'pool:B:startMode'                = 'AlwaysRunning'
+        'pool:C:startMode'                = 'AlwaysRunning'
+        'pool:D:startMode'                = 'AlwaysRunning'
+        'pool:E:processModel.idleTimeout' = [TimeSpan]::Zero
+    }
+    if (@($wbIisSetOk.Pending).Count -ne 0 -or $wbIisSetOk.Previous.Count -ne 0 -or @($wbIisSetOk.Already).Count -ne 5) { Write-Host "  [ERRO] IIS: item já aplicado deveria dar 0 a escrever, 0 no backup e 5 no alvo (veio $(@($wbIisSetOk.Pending).Count)/$($wbIisSetOk.Previous.Count)/$(@($wbIisSetOk.Already).Count))" -ForegroundColor Red; $wbErrors++ }
+    Write-Host "  IIS (helpers): chave, filtro, $(@($wbIisOcKeys).Count) alvos de OutputCache, conversão de valor, comparação, faixa de memória e conjunto de mudanças OK"
+    # ---------------------------------------------------------------- IIS: backup dos valores anteriores
+    # O backup é o que torna os itens de IIS reversíveis: sem arquivo, "Desfazer" não tem para onde
+    # voltar. Numa máquina sem IIS dá para provar duas coisas, e são as duas cobradas aqui: o
+    # round-trip do arquivo (numa raiz temporária, nunca em %ProgramData%) e a recusa limpa de
+    # Invoke-WinForgeIisTweak quando o módulo WebAdministration não existe.
+    $wbIisRoot = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup'
+    try {
+        if (Test-Path $wbIisRoot) { Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        $wbIisFile = New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'pool:A:startMode' = 'OnDemand'; 'pool:A:autoStart' = 'False' } -Root $wbIisRoot
+        if (-not $wbIisFile -or -not (Test-Path $wbIisFile)) { Write-Host "  [ERRO] IIS: New-WinForgeSnapshot não gravou arquivo ('$wbIisFile')" -ForegroundColor Red; $wbErrors++ }
+        # A pasta nasce protegida: sem herança e sem ninguém de fora de SYSTEM/Administradores (ou da
+        # identidade atual, quando o teste roda sem elevação) com permissão de escrita. É essa
+        # proteção que impede um usuário comum de plantar um JSON que o Desfazer aplicaria elevado.
+        $wbIisAcl = Get-Acl -LiteralPath $wbIisRoot
+        if (-not $wbIisAcl.AreAccessRulesProtected) { Write-Host "  [ERRO] IIS: a pasta de backup nasceu herdando permissões" -ForegroundColor Red; $wbErrors++ }
+        # -ExplicitRoot porque esta pasta é a do teste, em %TEMP%: sem elevação ela nasce com a
+        # identidade atual como dona, e é justamente isso que a pasta PADRÃO recusa (ver o bloco de
+        # segurança mais abaixo, que cobra a recusa na mesma pasta sem esta chave).
+        $wbIisTrust = Test-WinForgeSnapshotRootTrusted -Root $wbIisRoot -ExplicitRoot
+        if (-not $wbIisTrust.Trusted) { Write-Host "  [ERRO] IIS: a pasta recém-criada não passou na checagem de confiança ('$($wbIisTrust.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # Pasta com escrita para 'Todos' (Everyone, S-1-1-0) é o cenário do ataque: tem de ser recusada.
+        $wbIisRootMau = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup-aberto'
+        New-Item -ItemType Directory -Path $wbIisRootMau -Force | Out-Null
+        $wbIisAclMau = Get-Acl -LiteralPath $wbIisRootMau
+        $wbIisAclMau.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $wbIisRootMau -AclObject $wbIisAclMau
+        $wbIisTrustMau = Test-WinForgeSnapshotRootTrusted -Root $wbIisRootMau
+        if ($wbIisTrustMau.Trusted) { Write-Host "  [ERRO] IIS: pasta com escrita para 'Todos' foi considerada confiável" -ForegroundColor Red; $wbErrors++ }
+        New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'pool:A:startMode' = 'OnDemand' } -Root $wbIisRootMau | Out-Null
+        $wbIisBloq = Get-WinForgeSnapshot -Name 'AlwaysRunning' -Root $wbIisRootMau -AllowedKey (Get-WinForgeIisAllowedKey -Name AlwaysRunning)
+        if ($null -eq $wbIisBloq -or -not $wbIisBloq.Blocked) { Write-Host "  [ERRO] IIS: backup em pasta não confiável deveria ser recusado" -ForegroundColor Red; $wbErrors++ }
+        # Segundo backup no MESMO segundo, de propósito: o nome carrega milissegundo, então os dois
+        # arquivos coexistem e o primeiro - o dos valores originais - continua no disco. Com precisão
+        # de segundo, este é o cenário que apagava o backup bom (aplicar duas vezes seguidas).
+        Start-Sleep -Milliseconds 20
+        # O segundo backup traz a MESMA chave com outro valor (o pool já ajustado por uma primeira
+        # aplicação) e uma chave nova (um pool criado depois). Juntando os dois, 'startMode' tem de
+        # voltar como 'OnDemand' - o valor de antes do WinForge - e não como 'AlwaysRunning'.
+        $wbIisFile2 = New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'pool:A:startMode' = 'AlwaysRunning'; 'pool:D:startMode' = 'OnDemand' } -Root $wbIisRoot
+        if ($wbIisFile2 -eq $wbIisFile) { Write-Host "  [ERRO] IIS: o segundo backup do mesmo segundo caiu no mesmo arquivo ($wbIisFile2)" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wbIisFile)) { Write-Host "  [ERRO] IIS: o primeiro backup desapareceu depois do segundo ($wbIisFile)" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wbIisRoot -Filter 'AlwaysRunning-*.json').Count -ne 2) { Write-Host "  [ERRO] IIS: esperado 2 arquivos de backup, veio $(@(Get-ChildItem -LiteralPath $wbIisRoot -Filter 'AlwaysRunning-*.json').Count)" -ForegroundColor Red; $wbErrors++ }
+        $wbIisMerge = Get-WinForgeSnapshot -Name 'AlwaysRunning' -Root $wbIisRoot -AllowedKey (Get-WinForgeIisAllowedKey -Name AlwaysRunning)
+        if ($null -eq $wbIisMerge) { Write-Host "  [ERRO] IIS: Get-WinForgeSnapshot não achou os backups gravados" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if ($wbIisMerge.Values['pool:A:startMode'] -ne 'OnDemand') { Write-Host "  [ERRO] IIS: na junção dos backups o MAIS ANTIGO deveria vencer em 'pool:A:startMode' (veio '$($wbIisMerge.Values['pool:A:startMode'])', esperado 'OnDemand')" -ForegroundColor Red; $wbErrors++ }
+            if ($wbIisMerge.Values['pool:A:autoStart'] -ne 'False') { Write-Host "  [ERRO] IIS: chave só do backup antigo perdida na junção ('pool:A:autoStart' veio '$($wbIisMerge.Values['pool:A:autoStart'])')" -ForegroundColor Red; $wbErrors++ }
+            if ($wbIisMerge.Values['pool:D:startMode'] -ne 'OnDemand') { Write-Host "  [ERRO] IIS: chave só do backup novo perdida na junção ('pool:D:startMode' veio '$($wbIisMerge.Values['pool:D:startMode'])')" -ForegroundColor Red; $wbErrors++ }
+            if (@($wbIisMerge.Paths).Count -ne 2) { Write-Host "  [ERRO] IIS: a junção deveria consumir os 2 arquivos, veio $(@($wbIisMerge.Paths).Count)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Chave que o item NÃO escreve (uma seção qualquer do applicationHost.config) e valor que não
+        # é texto: os dois entram no arquivo e os dois têm de ficar de fora da restauração.
+        $wbIisFile3 = New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'server:system.webServer/security/authentication/anonymousAuthentication:enabled' = 'True'; 'pool:Z:queueLength' = '1000'; 'pool:Y:startMode' = @('nao', 'texto') } -Root $wbIisRoot
+        $wbIisFiltrado = Get-WinForgeSnapshot -Name 'AlwaysRunning' -Root $wbIisRoot -AllowedKey (Get-WinForgeIisAllowedKey -Name AlwaysRunning)
+        foreach ($wbIisMa in @('server:system.webServer/security/authentication/anonymousAuthentication:enabled', 'pool:Z:queueLength', 'pool:Y:startMode')) {
+            if ($wbIisFiltrado.Values.ContainsKey($wbIisMa)) { Write-Host "  [ERRO] IIS: chave '$wbIisMa' deveria ter sido recusada no Desfazer de AlwaysRunning" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Arquivo consumido vira '.restored.json' e some das juntadas seguintes: sem isso, uma nova
+        # aplicação depois do Desfazer voltaria ao estado de duas aplicações atrás.
+        Complete-WinForgeSnapshot -Paths $wbIisFiltrado.Paths | Out-Null
+        if (@(Get-ChildItem -LiteralPath $wbIisRoot -Filter '*.restored.json').Count -ne 3) { Write-Host "  [ERRO] IIS: esperado 3 backups arquivados como .restored.json, veio $(@(Get-ChildItem -LiteralPath $wbIisRoot -Filter '*.restored.json').Count)" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne (Get-WinForgeSnapshot -Name 'AlwaysRunning' -Root $wbIisRoot -AllowedKey (Get-WinForgeIisAllowedKey -Name AlwaysRunning))) { Write-Host "  [ERRO] IIS: backup arquivado ainda foi lido pela junção seguinte" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  IIS: backup em $(Split-Path -Leaf $wbIisFile2) | pasta protegida, o mais ANTIGO vence na junção, chave estranha recusada, consumido vira .restored.json"
+    } catch {
+        Write-Host "  [ERRO] IIS (backup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path (Split-Path -Parent $wbIisRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- backup: forma do valor, dono da pasta, crivo inteiro
+    # Segunda rodada de revisão de segurança. Os três buracos fechados aqui tinham o mesmo fim -
+    # escrita elevada a partir de um arquivo que outra conta plantou:
+    #   1. o valor do backup virava TEXTO DE COMANDO ('powercfg /setactive <valor do JSON>'), então
+    #      'x; algo' era compilado e executado como PowerShell no Desfazer;
+    #   2. o crivo de 'server:' aceitava a forma curta ('server:<atributo>'), e com ela QUALQUER
+    #      seção do applicationHost.config passava pelo Desfazer de um item que só mexe em uma;
+    #   3. a pasta padrão aceitava a conta atual como DONA, e dono guarda WRITE_DAC - um processo de
+    #      integridade média da mesma conta de administrador criava a pasta antes da primeira
+    #      execução, escrevia uma DACL de aparência correta e passava em todas as checagens.
+    foreach ($wbSecCaso in @(
+        @('ActiveSchemeGuid', 'x; echo pwned', $false),
+        @('ActiveSchemeGuid', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c', $true),
+        @('ActiveSchemeGuid', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c; calc', $false),
+        @('AutoTuningLevelLocal', 'Normal', $true),
+        @('AutoTuningLevelLocal', 'Normal; calc', $false),
+        @('EnableSMB1Protocol', 'False', $true),
+        @('EnableSMB1Protocol', 'False; calc', $false),
+        @('MaxIdleTime', '1800000', $true),
+        @('MaxIdleTime', '<RemoveEntry>', $true),
+        @('MaxIdleTime', '0; rm -rf', $false),
+        @('pool:A:startMode', 'OnDemand', $true),
+        @('pool:A:startMode', 'OnDemand & calc', $false),
+        @('pool:A:processModel.idleTimeout', '00:20:00', $true),
+        @('pool:A:processModel.idleTimeout', '30.00:00:00', $true),
+        @('pool:A:processModel.idleTimeout', '00:20:00; calc', $false),
+        @('pool:A:queueLength', '5000', $true),
+        @('pool:A:queueLength', '5000; calc', $false),
+        @('server:system.webServer/caching:enabled', 'True', $true),
+        @('server:system.webServer/caching:enabled', 'True; calc', $false),
+        @('pool:A:propriedadeQueNinguemEscreve', 'x', $false)
+    )) {
+        $wbSecVeio = [bool](Test-WinForgeSnapshotValue -Key $wbSecCaso[0] -Value $wbSecCaso[1])
+        if ($wbSecVeio -ne [bool]$wbSecCaso[2]) { Write-Host "  [ERRO] Backup (forma do valor): '$($wbSecCaso[0])' = '$($wbSecCaso[1])' deveria dar $($wbSecCaso[2]), veio $wbSecVeio" -ForegroundColor Red; $wbErrors++ }
+    }
+    # A recusa mora TAMBÉM no ponto de escrita: nada chega ao powercfg nem ao IIS com valor plantado.
+    foreach ($wbSecEscrita in @(
+        @('Servidor', { Set-WinForgeServerSettingValue -Key 'ActiveSchemeGuid' -Value 'x; echo pwned' }),
+        @('Servidor', { Set-WinForgeServerSettingValue -Key 'AutoTuningLevelLocal' -Value 'Normal; calc' }),
+        @('IIS', { Set-WinForgeIisValue -Key 'pool:A:startMode' -Value 'OnDemand; calc' })
+    )) {
+        $wbSecMsg = ''
+        try { & $wbSecEscrita[1] } catch { $wbSecMsg = [string]$_.Exception.Message }
+        if ($wbSecMsg -notmatch 'forma esperada') { Write-Host "  [ERRO] Backup ($($wbSecEscrita[0])): a escrita com valor plantado deveria ser recusada pela forma ('$wbSecMsg')" -ForegroundColor Red; $wbErrors++ }
+    }
+    # O crivo de 'server:' agora cobra a chave INTEIRA: seção e atributo.
+    $wbSecOc = Get-WinForgeIisAllowedKey -Name OutputCache
+    if (Test-WinForgeSnapshotKey -Key 'server:system.webServer/directoryBrowse:enabled' -AllowedKey $wbSecOc) { Write-Host "  [ERRO] Backup (crivo): OutputCache aceitou 'server:system.webServer/directoryBrowse:enabled' (forma curta)" -ForegroundColor Red; $wbErrors++ }
+    if (-not (Test-WinForgeSnapshotKey -Key 'server:system.webServer/caching:enabled' -AllowedKey $wbSecOc)) { Write-Host "  [ERRO] Backup (crivo): OutputCache recusou a própria chave 'server:system.webServer/caching:enabled'" -ForegroundColor Red; $wbErrors++ }
+    $wbSecRoot = Join-Path $env:TEMP 'WinForge-SelfTest\seguranca'
+    try {
+        if (Test-Path $wbSecRoot) { Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        # Backup plantado com um GUID que não é GUID: a chave sai da leitura (vai para Ignored) e o
+        # backup BOM gravado depois continua respondendo por ela - a tranca não pode comer o bom.
+        New-WinForgeSnapshot -Name 'setting-HighPerf' -Values @{ 'ActiveSchemeGuid' = 'x; echo pwned' } -Root $wbSecRoot | Out-Null
+        Start-Sleep -Milliseconds 20
+        New-WinForgeSnapshot -Name 'setting-HighPerf' -Values @{ 'ActiveSchemeGuid' = '381b4222-f694-41f0-9685-ff5bb260df2e' } -Root $wbSecRoot | Out-Null
+        $wbSecLido = Get-WinForgeSnapshot -Name 'setting-HighPerf' -Root $wbSecRoot -AllowedKey @{ 'ActiveSchemeGuid' = $true }
+        if ($null -eq $wbSecLido) { Write-Host "  [ERRO] Backup (valor plantado): Get-WinForgeSnapshot não leu nada" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if (@($wbSecLido.Ignored) -notcontains 'ActiveSchemeGuid') { Write-Host "  [ERRO] Backup (valor plantado): 'ActiveSchemeGuid' inválido não entrou na lista de recusados" -ForegroundColor Red; $wbErrors++ }
+            if ($wbSecLido.Values['ActiveSchemeGuid'] -ne '381b4222-f694-41f0-9685-ff5bb260df2e') { Write-Host "  [ERRO] Backup (valor plantado): esperado o GUID válido do segundo backup, veio '$($wbSecLido.Values['ActiveSchemeGuid'])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Desfazer que falhou não arquiva: o arquivo é a única cópia do valor anterior da chave.
+        $wbSecArq = New-WinForgeSnapshot -Name 'setting-RdpNla' -Values @{ 'MaxIdleTime' = '1800000' } -Root $wbSecRoot
+        if ((Complete-WinForgeSnapshot -Paths @($wbSecArq) -FailedKey @('MaxIdleTime')) -ne 0) { Write-Host "  [ERRO] Backup (arquivamento): com chave que falhou, nada podia ser arquivado" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wbSecArq)) { Write-Host "  [ERRO] Backup (arquivamento): o arquivo sumiu mesmo com uma chave que falhou" -ForegroundColor Red; $wbErrors++ }
+        if ((Complete-WinForgeSnapshot -Paths @($wbSecArq)) -ne 1) { Write-Host "  [ERRO] Backup (arquivamento): sem falha, o arquivo deveria ser arquivado" -ForegroundColor Red; $wbErrors++ }
+        # Dono da pasta: a MESMA pasta passa com -Root explícito (o caminho do teste) e é recusada
+        # pelas regras da pasta padrão. É a prova de que %ProgramData%\WinForge\iis-backup recusa
+        # pasta de usuário - sem escrever nada em %ProgramData%.
+        $wbSecEu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wbSecSystem = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+        $wbSecAdmin = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+        if ($wbSecEu.Value -eq $wbSecSystem.Value -or $wbSecEu.Value -eq $wbSecAdmin.Value) {
+            Write-Host "  Backup (dono): teste pulado - este build roda como SYSTEM ou como o próprio grupo Administradores"
+        } else {
+            $wbSecDono = Join-Path $wbSecRoot 'dono-usuario'
+            New-Item -ItemType Directory -Path $wbSecDono -Force | Out-Null
+            $wbSecAcl = New-Object System.Security.AccessControl.DirectorySecurity
+            $wbSecAcl.SetAccessRuleProtection($true, $false)
+            foreach ($wbSecSid in @($wbSecSystem, $wbSecAdmin, $wbSecEu)) {
+                $wbSecAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $wbSecSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            }
+            $wbSecAcl.SetOwner($wbSecEu)
+            Set-Acl -LiteralPath $wbSecDono -AclObject $wbSecAcl
+            $wbSecComRoot = Test-WinForgeSnapshotRootTrusted -Root $wbSecDono -ExplicitRoot
+            if (-not $wbSecComRoot.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta de teste com -Root explícito deveria passar ('$($wbSecComRoot.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wbSecPadrao = Test-WinForgeSnapshotRootTrusted -Root $wbSecDono
+            if ($wbSecPadrao.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta com dono fora de SYSTEM/Administradores passou nas regras da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wbSecPadrao.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Backup (dono): o motivo da recusa não fala do dono ('$($wbSecPadrao.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Aplicar numa pasta que qualquer um escreve: recusa antes de tudo, sem arquivo e sem
+        # alteração. -CaptureOnly porque é o único caminho de aplicação que roda num cliente, e ele
+        # só LÊ o registro do RDP.
+        $wbSecAberto = Join-Path $wbSecRoot 'aberta'
+        New-Item -ItemType Directory -Path $wbSecAberto -Force | Out-Null
+        $wbSecAclA = Get-Acl -LiteralPath $wbSecAberto
+        $wbSecAclA.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $wbSecAberto -AclObject $wbSecAclA
+        $wbSecCap = Invoke-WinForgeServerSetting -Name 'RdpNla' -CaptureOnly -Root $wbSecAberto
+        if ($wbSecCap.Changed -ne 0) { Write-Host "  [ERRO] Backup (pasta aberta): a captura alterou $($wbSecCap.Changed) valor(es)" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wbSecCap.Skipped -notmatch 'não confiável') { Write-Host "  [ERRO] Backup (pasta aberta): o motivo não diz que a pasta não é confiável ('$($wbSecCap.Skipped)')" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wbSecCap.Snapshot) { Write-Host "  [ERRO] Backup (pasta aberta): gravou backup numa pasta não confiável ('$($wbSecCap.Snapshot)')" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wbSecAberto -Filter '*.json' -ErrorAction SilentlyContinue).Count -ne 0) { Write-Host "  [ERRO] Backup (pasta aberta): sobrou arquivo JSON na pasta não confiável" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Backup (segurança): forma do valor cobrada na leitura e na escrita, crivo 'server:' inteiro, pasta padrão só de SYSTEM/Administradores, aplicação recusada em pasta aberta"
+    } catch {
+        Write-Host "  [ERRO] Backup (segurança): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- backup: dono do ARQUIVO e cadeia de pastas
+    # Terceira rodada de revisão de segurança, e os dois furos são da mesma família do anterior:
+    #   1. a checagem do ARQUIVO aceitava a identidade atual como dona SEMPRE (o -ExplicitRoot estava
+    #      fixo no código). Na pasta PADRÃO isso devolvia o WRITE_DAC implícito do dono a um processo
+    #      de integridade média da mesma conta de administrador: ele reescrevia a DACL do arquivo pelo
+    #      caminho completo e plantava valores que o Desfazer elevado aplicaria. Agora quem decide é
+    #      quem chamou, e na pasta padrão o dono tem de ser SYSTEM ou Administradores.
+    #   2. o ponto de reanálise era conferido só na ÚLTIMA pasta. Uma junção em %ProgramData%\WinForge
+    #      fazia a pasta de backup nascer fora de %ProgramData%, com a DACL de onde a junção aponta.
+    #      Agora o caminho é normalizado uma vez e TODA a cadeia de ancestrais é conferida.
+    $wb3Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada3'
+    $wb3Root = Join-Path $wb3Base 'backup'
+    try {
+        if (Test-Path $wb3Base) { Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue }
+        # Com -Root próprio (o teste roda sem elevação) o backup continua saindo e continua sendo lido:
+        # endurecer dono/DACL é obrigação da pasta PADRÃO, não uma trava que quebra o -SelfTest.
+        $wb3Arq = New-WinForgeSnapshot -Name 'setting-RdpNla' -Values @{ 'MaxIdleTime' = '1800000' } -Root $wb3Root
+        if (-not $wb3Arq -or -not (Test-Path -LiteralPath $wb3Arq)) { Write-Host "  [ERRO] Backup (rodada 3): New-WinForgeSnapshot não gravou arquivo com -Root próprio ('$wb3Arq')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wb3Lido = Get-WinForgeSnapshot -Name 'setting-RdpNla' -Root $wb3Root -AllowedKey @{ 'MaxIdleTime' = $true }
+            if ($null -eq $wb3Lido -or $wb3Lido.Values['MaxIdleTime'] -ne '1800000') { Write-Host "  [ERRO] Backup (rodada 3): o backup gravado não voltou na leitura ('$($wb3Lido.Values['MaxIdleTime'])')" -ForegroundColor Red; $wbErrors++ }
+            # Dono do arquivo: o MESMO arquivo passa com -ExplicitRoot (é o do teste, em %TEMP%) e é
+            # recusado pelas regras da pasta padrão. Só faz sentido cobrar quando o dono é mesmo a
+            # conta atual - num build elevado o próprio New-WinForgeSnapshot já o entrega a
+            # Administradores, e aí as duas checagens passam.
+            $wb3Dono = (Get-Acl -LiteralPath $wb3Arq).GetOwner([System.Security.Principal.SecurityIdentifier])
+            $wb3System = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+            $wb3Admin = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+            $wb3Exp = Test-WinForgeSnapshotFileTrusted -Path $wb3Arq -ExplicitRoot
+            if (-not $wb3Exp.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): o arquivo do teste deveria passar com -ExplicitRoot ('$($wb3Exp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wb3Pad = Test-WinForgeSnapshotFileTrusted -Path $wb3Arq
+            if ($wb3Dono.Value -eq $wb3System.Value -or $wb3Dono.Value -eq $wb3Admin.Value) {
+                if (-not $wb3Pad.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): arquivo de SYSTEM/Administradores foi recusado nas regras da pasta PADRÃO ('$($wb3Pad.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            } else {
+                if ($wb3Pad.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): arquivo com dono fora de SYSTEM/Administradores passou nas regras da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
+                elseif ($wb3Pad.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Backup (rodada 3): o motivo da recusa do arquivo não fala do dono ('$($wb3Pad.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # Junção NO MEIO do caminho (não na última pasta): a raiz tem de ser recusada mesmo com
+        # -ExplicitRoot, porque o caminho conferido não seria o caminho escrito.
+        $wb3Alvo = Join-Path $wb3Base 'real'
+        New-Item -ItemType Directory -Path $wb3Alvo -Force | Out-Null
+        $wb3Junc = Join-Path $wb3Base 'junc'
+        New-Item -ItemType Junction -Path $wb3Junc -Target $wb3Alvo -ErrorAction Stop | Out-Null
+        $wb3Cadeia = Test-WinForgeSnapshotRootTrusted -Root (Join-Path $wb3Junc 'backup') -ExplicitRoot
+        if ($wb3Cadeia.Trusted) { Write-Host "  [ERRO] Backup (rodada 3): raiz com junção na cadeia de pastas foi considerada confiável" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wb3Cadeia.Reason -notmatch 'reanálise') { Write-Host "  [ERRO] Backup (rodada 3): o motivo da recusa não fala do ponto de reanálise ('$($wb3Cadeia.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Backup (rodada 3): backup com -Root próprio grava e lê, dono do arquivo cobrado pela pasta de quem chamou, junção na cadeia de pastas recusada"
+    } catch {
+        Write-Host "  [ERRO] Backup (rodada 3): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- backup: OWNER RIGHTS na pasta que já existe e DACL do arquivo
+    # Quarta rodada. Os dois furos são o resto da anterior:
+    #   1. a ACE herdável de OWNER RIGHTS (S-1-3-4, só leitura) só era escrita na CRIAÇÃO da pasta.
+    #      Numa pasta que já existia sem ela, o dono do backup recém-gravado guardava o WRITE_DAC
+    #      implícito entre a gravação e o Protect - a janela que a ACE existe para fechar.
+    #   2. a checagem do ARQUIVO olhava só o dono: um backup com ACE de escrita para 'Todos' passava
+    #      mesmo com o dono certo.
+    $wb4Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada4'
+    try {
+        if (Test-Path $wb4Base) { Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue }
+        $wb4Root = Join-Path $wb4Base 'backup'
+        New-Item -ItemType Directory -Path $wb4Root -Force | Out-Null
+        $wb4Eu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wb4System = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+        $wb4Admin = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+        # Pasta LEGADA: protegida e com os donos certos, mas sem a ACE de OWNER RIGHTS.
+        $wb4Acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $wb4Acl.SetAccessRuleProtection($true, $false)
+        foreach ($wb4Sid in @($wb4System, $wb4Admin, $wb4Eu)) {
+            $wb4Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $wb4Sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        }
+        Set-Acl -LiteralPath $wb4Root -AclObject $wb4Acl
+        $wb4TemOwner = {
+            param($caminho)
+            $rx = [int][System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+            foreach ($ace in (Get-Acl -LiteralPath $caminho).Access) {
+                if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+                $sid = $ace.IdentityReference
+                try { if ($sid -isnot [System.Security.Principal.SecurityIdentifier]) { $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier]) } } catch { continue }
+                if ($sid.Value -eq 'S-1-3-4' -and ([int]$ace.FileSystemRights -band $rx) -eq $rx) { return $true }
+            }
+            return $false
+        }
+        if (& $wb4TemOwner $wb4Root) { Write-Host "  [ERRO] Backup (rodada 4): a pasta de teste já nasceu com a ACE de OWNER RIGHTS - o teste não prova nada" -ForegroundColor Red; $wbErrors++ }
+        $wb4Conf = Confirm-WinForgeSnapshotRoot -Root $wb4Root
+        if (-not $wb4Conf.Ok) { Write-Host "  [ERRO] Backup (rodada 4): a pasta legada deveria ser aceita depois do conserto ('$($wb4Conf.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (& $wb4TemOwner $wb4Root)) { Write-Host "  [ERRO] Backup (rodada 4): Confirm-WinForgeSnapshotRoot não acrescentou a ACE de OWNER RIGHTS (S-1-3-4) na pasta que já existia" -ForegroundColor Red; $wbErrors++ }
+        # Arquivo de backup bom passa; o MESMO arquivo com uma ACE de escrita para 'Todos' é recusado
+        # - dono certo não salva DACL aberta.
+        $wb4Arq = New-WinForgeSnapshot -Name 'setting-RdpNla' -Values @{ 'MaxIdleTime' = '1800000' } -Root $wb4Root
+        if (-not $wb4Arq -or -not (Test-Path -LiteralPath $wb4Arq)) { Write-Host "  [ERRO] Backup (rodada 4): New-WinForgeSnapshot não gravou arquivo ('$wb4Arq')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wb4Bom = Test-WinForgeSnapshotFileTrusted -Path $wb4Arq -ExplicitRoot
+            if (-not $wb4Bom.Trusted) { Write-Host "  [ERRO] Backup (rodada 4): o arquivo recém-gravado deveria passar com -ExplicitRoot ('$($wb4Bom.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wb4Info = New-Object System.IO.FileInfo $wb4Arq
+            $wb4AclArq = $wb4Info.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            $wb4AclArq.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Write', 'None', 'None', 'Allow'))
+            $wb4Info.SetAccessControl($wb4AclArq)
+            $wb4Mau = Test-WinForgeSnapshotFileTrusted -Path $wb4Arq -ExplicitRoot
+            if ($wb4Mau.Trusted) { Write-Host "  [ERRO] Backup (rodada 4): arquivo com escrita para 'Todos' foi considerado confiável" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wb4Mau.Reason -notmatch 'escrita') { Write-Host "  [ERRO] Backup (rodada 4): o motivo da recusa do arquivo não fala da permissão de escrita ('$($wb4Mau.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Backup (rodada 4): pasta que já existia recebe a ACE de OWNER RIGHTS, arquivo com DACL aberta recusado"
+    } catch {
+        Write-Host "  [ERRO] Backup (rodada 4): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # O crivo do Desfazer tem de dizer o mesmo que o plano do item. Só dá para cobrar isso nos dois
+    # itens de nível de servidor: o plano dos itens de pool/site precisa do provedor IIS:\ para
+    # listar os alvos, e numa máquina sem IIS ele vem vazio.
+    foreach ($wbIisPar in @(@('OutputCache', 'server:system.webServer/caching'), @('Compression', 'server:system.webServer/urlCompression'))) {
+        try {
+            $wbIisPermitido = Get-WinForgeIisAllowedKey -Name $wbIisPar[0]
+            foreach ($wbIisAlvo in @((Get-WinForgeIisTweakPlan -Name $wbIisPar[0]).Targets.Keys)) {
+                if (-not (Test-WinForgeSnapshotKey -Key $wbIisAlvo -AllowedKey $wbIisPermitido)) { Write-Host "  [ERRO] IIS: '$wbIisAlvo' está no plano de $($wbIisPar[0]) mas o crivo do Desfazer recusa" -ForegroundColor Red; $wbErrors++ }
+            }
+            if (Test-WinForgeSnapshotKey -Key "$($wbIisPar[1]):outraCoisa" -AllowedKey $wbIisPermitido) { Write-Host "  [ERRO] IIS: o crivo de $($wbIisPar[0]) aceitou um atributo que o item não escreve" -ForegroundColor Red; $wbErrors++ }
+        } catch {
+            Write-Host "  [ERRO] IIS (crivo de $($wbIisPar[0])): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    # Sem IIS instalado (todo cliente e boa parte dos servidores), aplicar um item de IIS não pode
+    # estourar: tem de sair 0 alteração e um motivo que diga que foi o IIS que faltou.
+    if (-not (Test-WinForgeIisAvailable)) {
+        try {
+            $wbIisRes = Invoke-WinForgeIisTweak -Name AlwaysRunning
+            if ($null -eq $wbIisRes) { Write-Host "  [ERRO] IIS ausente: Invoke-WinForgeIisTweak não devolveu resultado" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ($wbIisRes.Changed -ne 0) { Write-Host "  [ERRO] IIS ausente: esperado Changed = 0, veio $($wbIisRes.Changed)" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wbIisRes.Skipped -notmatch 'IIS') { Write-Host "  [ERRO] IIS ausente: o motivo não cita o IIS ('$($wbIisRes.Skipped)')" -ForegroundColor Red; $wbErrors++ }
+                Write-Host "  IIS ausente: recusa limpa -> $($wbIisRes.Skipped)"
+            }
+        } catch {
+            Write-Host "  [ERRO] IIS ausente: Invoke-WinForgeIisTweak lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+        }
+    } else {
+        Write-Host "  IIS presente: teste de recusa pulado (o módulo WebAdministration existe nesta máquina)"
+    }
+    # ---------------------------------------------------------------- ajustes de servidor com captura
+    # Estes itens não moram no registro (SMB, energia, TCP, RDP): o Desfazer deles só é honesto porque
+    # o estado anterior vai para um backup antes da mudança. Nada aqui pode ALTERAR a máquina do
+    # build - é um cliente, e mexer no SMB ou no plano de energia de quem compila seria estrago. As
+    # duas coisas cobradas são exatamente essas: numa máquina que não é servidor, aplicar recusa
+    # limpo; e a captura (-CaptureOnly, que nunca escreve) traz valor de verdade onde o cmdlet existe.
+    $wbSrvRoot = Join-Path $env:TEMP 'WinForge-SelfTest\server-backup'
+    try {
+        if (Test-Path $wbSrvRoot) { Remove-Item -Path $wbSrvRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        $wbSrvItens = @(
+            @('Smb1Off', 'Get-SmbServerConfiguration', 'EnableSMB1Protocol'),
+            @('SmbSigning', 'Get-SmbServerConfiguration', 'RequireSecuritySignature'),
+            @('HighPerf', 'powercfg.exe', 'ActiveSchemeGuid'),
+            @('TcpAutotuning', 'Get-NetTCPSetting', 'AutoTuningLevelLocal'),
+            @('RdpNla', $null, 'UserAuthentication')
+        )
+        $wbSrvCapturados = 0
+        foreach ($wbSrvItem in $wbSrvItens) {
+            # Aplicar num cliente: sem exceção, sem alteração e com um motivo que diga por quê.
+            # Num Windows Server de verdade (o runner do CI é um) o apply mudaria SMB/RDP da máquina:
+            # ali este passo não roda - só a recusa em cliente, o Desfazer sem backup e a captura.
+            if (-not (Test-WinForgeRealServer)) {
+                $wbSrvApl = Invoke-WinForgeServerSetting -Name $wbSrvItem[0] -Root $wbSrvRoot
+                if ($null -eq $wbSrvApl) { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' não devolveu resultado" -ForegroundColor Red; $wbErrors++; continue }
+                if ($wbSrvApl.Changed -ne 0) { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' alterou $($wbSrvApl.Changed) valor(es) num cliente" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wbSrvApl.Skipped -notmatch 'Windows Server') { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' num cliente deveria dizer que só vale no Windows Server ('$($wbSrvApl.Skipped)')" -ForegroundColor Red; $wbErrors++ }
+                if ($null -ne $wbSrvApl.Snapshot) { Write-Host "  [ERRO] Servidor (ajuste): '$($wbSrvItem[0])' gravou backup num cliente ('$($wbSrvApl.Snapshot)')" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Desfazer sem backup: mensagem, nenhuma alteração e nenhuma exceção.
+            $wbSrvUnd = Invoke-WinForgeServerSetting -Name $wbSrvItem[0] -Undo -Root $wbSrvRoot
+            if ($wbSrvUnd.Changed -ne 0) { Write-Host "  [ERRO] Servidor (ajuste): Desfazer de '$($wbSrvItem[0])' sem backup alterou $($wbSrvUnd.Changed) valor(es)" -ForegroundColor Red; $wbErrors++ }
+            # Captura: só onde a ferramenta existe nesta máquina. Nada é escrito no sistema.
+            if ($wbSrvItem[1] -and -not (Get-Command $wbSrvItem[1] -ErrorAction SilentlyContinue)) { continue }
+            $wbSrvCap = Invoke-WinForgeServerSetting -Name $wbSrvItem[0] -CaptureOnly -Root $wbSrvRoot
+            if ($wbSrvCap.Changed -ne 0) { Write-Host "  [ERRO] Servidor (captura): '$($wbSrvItem[0])' com -CaptureOnly alterou $($wbSrvCap.Changed) valor(es)" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wbSrvCap.Snapshot -or -not (Test-Path -LiteralPath $wbSrvCap.Snapshot)) { Write-Host "  [ERRO] Servidor (captura): '$($wbSrvItem[0])' não gravou backup ('$($wbSrvCap.Snapshot)')" -ForegroundColor Red; $wbErrors++; continue }
+            $wbSrvPermitidas = @{}
+            foreach ($wbSrvK in (Get-WinForgeServerSettingSpec -Name $wbSrvItem[0]).Keys) { $wbSrvPermitidas[$wbSrvK] = $true }
+            $wbSrvLido = Get-WinForgeSnapshot -Name "setting-$($wbSrvItem[0])" -Root $wbSrvRoot -AllowedKey $wbSrvPermitidas
+            if ($null -eq $wbSrvLido -or [string]::IsNullOrWhiteSpace([string]$wbSrvLido.Values[$wbSrvItem[2]])) { Write-Host "  [ERRO] Servidor (captura): '$($wbSrvItem[0])' não guardou '$($wbSrvItem[2])' (veio '$($wbSrvLido.Values[$wbSrvItem[2]])')" -ForegroundColor Red; $wbErrors++ }
+            else { $wbSrvCapturados++ }
+        }
+        # O crivo é por item: o backup do SMB não pode reescrever o RDP.
+        if (Test-WinForgeSnapshotKey -Key 'MaxIdleTime' -AllowedKey @{ 'EnableSMB1Protocol' = $true }) { Write-Host "  [ERRO] Servidor (captura): o crivo de Smb1Off aceitou uma chave do RDP" -ForegroundColor Red; $wbErrors++ }
+        $wbSrvSpecErro = $false
+        try { Get-WinForgeServerSettingSpec -Name 'NaoExiste' | Out-Null } catch { $wbSrvSpecErro = $true }
+        if (-not $wbSrvSpecErro) { Write-Host "  [ERRO] Servidor (ajuste): Get-WinForgeServerSettingSpec aceitou um item desconhecido" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Servidor (ajustes com captura): $($wbSrvItens.Count) item(ns) recusados sem servidor, $wbSrvCapturados capturado(s) sem alterar nada"
+    } catch {
+        Write-Host "  [ERRO] Servidor (ajustes com captura): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path (Split-Path -Parent $wbSrvRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- comandos de leitura da aba Servidor
+    # Nada aqui exige servidor: a tabela de comandos é dado puro, o núcleo é síncrono e o netsh
+    # existe em qualquer Windows. O caso do dcdiag prova o contrário do TcpShow - ferramenta que
+    # não existe tem de virar texto explicando isso, e não exceção no meio do runspace.
+    $wbSrvNomes = @('TimeCheck', 'DefenderExclusions', 'TcpShow', 'Dcdiag', 'ReplSummary', 'DnsScavenging', 'NtdsLocation')
+    foreach ($wbSrvNome in $wbSrvNomes) {
+        $wbSrvCmd = Get-WinForgeServerCommand -Name $wbSrvNome
+        if ($null -eq $wbSrvCmd -or [string]::IsNullOrWhiteSpace($wbSrvCmd.Title) -or [string]::IsNullOrWhiteSpace($wbSrvCmd.Command)) { Write-Host "  [ERRO] Servidor: comando '$wbSrvNome' sem título ou sem texto de comando" -ForegroundColor Red; $wbErrors++; continue }
+        try { [scriptblock]::Create($wbSrvCmd.Command) | Out-Null } catch { Write-Host "  [ERRO] Servidor: comando '$wbSrvNome' não compila: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
+    }
+    if ((Get-WinForgeServerCommand -Name Dcdiag).Requires -ne 'dcdiag.exe') { Write-Host "  [ERRO] Servidor: Dcdiag deveria exigir 'dcdiag.exe', veio '$((Get-WinForgeServerCommand -Name Dcdiag).Requires)'" -ForegroundColor Red; $wbErrors++ }
+    # 'Native' separa executável de pipeline de cmdlet: só o executável tem código de saída e só ele
+    # passa pela troca de code page. Marcar um pipeline como nativo faria a janela imprimir um
+    # "Código de saída: 0" que nunca existiu.
+    foreach ($wbSrvNat in @(@('TimeCheck', $true), @('Dcdiag', $true), @('ReplSummary', $true), @('TcpShow', $false), @('DefenderExclusions', $false), @('DnsScavenging', $false), @('NtdsLocation', $false))) {
+        $wbSrvNatCmd = Get-WinForgeServerCommand -Name $wbSrvNat[0]
+        if ([bool]$wbSrvNatCmd.Native -ne [bool]$wbSrvNat[1]) { Write-Host "  [ERRO] Servidor: '$($wbSrvNat[0])' deveria ter Native = $($wbSrvNat[1])" -ForegroundColor Red; $wbErrors++ }
+    }
+    # netsh escreve UTF-8 quando a saída é um cano: nenhum comando da aba pode mais depender dele.
+    foreach ($wbSrvNome in $wbSrvNomes) {
+        if ([string](Get-WinForgeServerCommand -Name $wbSrvNome).Command -match '(?i)\bnetsh\b') { Write-Host "  [ERRO] Servidor: '$wbSrvNome' ainda chama o netsh" -ForegroundColor Red; $wbErrors++ }
+    }
+    # ErrorRecord vira texto antes do Out-String: sem isso, a linha que dcdiag manda para o fluxo de
+    # erro chegaria formatada com o bloco '+ CategoryInfo / + FullyQualifiedErrorId' no meio da saída.
+    $wbSrvErr = Invoke-WinForgeCommandText -Command 'Write-Error "falha de teste" 2>&1'
+    if ([string]$wbSrvErr.Text -notmatch 'falha de teste') { Write-Host "  [ERRO] Servidor: a linha de erro não chegou ao texto ('$([string]$wbSrvErr.Text)')" -ForegroundColor Red; $wbErrors++ }
+    if ([string]$wbSrvErr.Text -match 'CategoryInfo|FullyQualifiedErrorId') { Write-Host "  [ERRO] Servidor: o texto trouxe o bloco de ErrorRecord em vez da linha da ferramenta" -ForegroundColor Red; $wbErrors++ }
+    if ($null -ne (Get-WinForgeServerCommand -Name NtdsLocation).Requires) { Write-Host "  [ERRO] Servidor: NtdsLocation não deveria exigir ferramenta nenhuma (veio '$((Get-WinForgeServerCommand -Name NtdsLocation).Requires)')" -ForegroundColor Red; $wbErrors++ }
+    $wbSrvDesconhecido = $false
+    try { Get-WinForgeServerCommand -Name 'NaoExiste' | Out-Null } catch { $wbSrvDesconhecido = $true }
+    if (-not $wbSrvDesconhecido) { Write-Host "  [ERRO] Servidor: Get-WinForgeServerCommand aceitou um comando desconhecido" -ForegroundColor Red; $wbErrors++ }
+    # O código de saída é o que separa "dcdiag não achou nada" de "dcdiag falhou": tem de sobreviver
+    # ao Out-String e chegar ao texto. E a code page volta ao que era - trocá-la é processo inteiro.
+    $wbNatAntes = [Console]::OutputEncoding
+    $wbNat = Invoke-WinForgeNativeCommand -Command 'cmd /c exit 3'
+    if ($wbNat.ExitCode -ne 3) { Write-Host "  [ERRO] Servidor: Invoke-WinForgeNativeCommand deveria devolver código 3, veio '$($wbNat.ExitCode)'" -ForegroundColor Red; $wbErrors++ }
+    if ([Console]::OutputEncoding -ne $wbNatAntes) { Write-Host "  [ERRO] Servidor: Invoke-WinForgeNativeCommand não devolveu a code page do console" -ForegroundColor Red; $wbErrors++ }
+    $wbNatEco = Invoke-WinForgeNativeCommand -Command 'cmd /c echo alo'
+    if ([string]$wbNatEco.Text -notmatch 'alo' -or $wbNatEco.ExitCode -ne 0) { Write-Host "  [ERRO] Servidor: Invoke-WinForgeNativeCommand não capturou a saída ('$([string]$wbNatEco.Text)', código $($wbNatEco.ExitCode))" -ForegroundColor Red; $wbErrors++ }
+    else { Write-Host "  Servidor (comando externo): código de saída e texto OK, code page devolvida" }
+    try {
+        $wbSrvTcp = Invoke-WinForgeServerCommandCore -Name TcpShow
+        if ([string]::IsNullOrWhiteSpace($wbSrvTcp.Text)) { Write-Host "  [ERRO] Servidor: TcpShow voltou sem texto" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wbSrvTcp.Text -match 'Código de saída') { Write-Host "  [ERRO] Servidor: TcpShow é pipeline de cmdlet e não pode trazer linha de código de saída" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wbSrvTcp.Text -notmatch '(?i)AutoTuningLevelLocal') { Write-Host "  [ERRO] Servidor: TcpShow deveria trazer AutoTuningLevelLocal na saída" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wbSrvTcp.Path -or -not (Test-Path -LiteralPath $wbSrvTcp.Path)) { Write-Host "  [ERRO] Servidor: TcpShow não gravou o arquivo ('$($wbSrvTcp.Path)')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Servidor (comandos): TcpShow -> $(([string]$wbSrvTcp.Text).Length) caractere(s) em $(Split-Path -Leaf $wbSrvTcp.Path)" }
+        # w32tm é executável: aí a linha do código de saída existe e é ela que separa "não achou
+        # nada" de "falhou".
+        $wbSrvHora = Invoke-WinForgeServerCommandCore -Name TimeCheck
+        if ([string]$wbSrvHora.Text -notmatch 'Código de saída') { Write-Host "  [ERRO] Servidor: TimeCheck é executável e deveria trazer a linha de código de saída" -ForegroundColor Red; $wbErrors++ }
+    } catch {
+        Write-Host "  [ERRO] Servidor: Invoke-WinForgeServerCommandCore -Name TcpShow lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+    }
+    if (Get-Command 'dcdiag.exe' -ErrorAction SilentlyContinue) {
+        Write-Host "  Servidor (comandos): recusa do dcdiag pulada (a ferramenta existe nesta máquina)"
+    } else {
+        try {
+            $wbSrvDc = Invoke-WinForgeServerCommandCore -Name Dcdiag
+            if ([string]$wbSrvDc.Text -notmatch 'não encontrada') { Write-Host "  [ERRO] Servidor: dcdiag ausente deveria dizer 'não encontrada', veio '$([string]$wbSrvDc.Text)'" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wbSrvDc.Path -or -not (Test-Path -LiteralPath $wbSrvDc.Path)) { Write-Host "  [ERRO] Servidor: dcdiag ausente deveria gravar o arquivo mesmo assim ('$($wbSrvDc.Path)')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Servidor (comandos): ferramenta ausente -> $(([string]$wbSrvDc.Text).Trim())" }
+        } catch {
+            Write-Host "  [ERRO] Servidor: dcdiag ausente lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    # A janela de saída é montada em código, sem XAML: o -NoShow existe para o SelfTest provar que o
+    # TextBox nasce com o texto certo sem abrir nada na tela (ShowDialog aqui travaria o build).
+    try {
+        $wbSrvTexto = "primeira linha`r`nsegunda linha com acento: configuração"
+        $wbSrvJanela = Show-WinForgeOutputWindow -Title 'SelfTest' -Text $wbSrvTexto -NoShow
+        if ($wbSrvJanela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Servidor: Show-WinForgeOutputWindow -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wbSrvCaixa = $wbSrvJanela.FindName('WFOutputText')
+            if ($null -eq $wbSrvCaixa) { Write-Host "  [ERRO] Servidor: a janela de saída não tem o TextBox 'WFOutputText'" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wbSrvCaixa.Text -ne $wbSrvTexto) { Write-Host "  [ERRO] Servidor: o texto da janela veio '$($wbSrvCaixa.Text)'" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wbSrvCaixa.IsReadOnly) { Write-Host "  [ERRO] Servidor: o TextBox da janela de saída deveria ser somente leitura" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Servidor (janela de saída): WFOutputText com $($wbSrvCaixa.Text.Length) caractere(s), somente leitura, sem ShowDialog" }
+        }
+    } catch {
+        Write-Host "  [ERRO] Servidor (janela de saída): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     if ((ConvertTo-WinForgeNvidiaVersion '32.0.16.1656') -ne '616.56' -or (ConvertTo-WinForgeNvidiaVersion '32.0.15.6636') -ne '566.36') { Write-Host "  [ERRO] ConvertTo-WinForgeNvidiaVersion" -ForegroundColor Red; $wbErrors++ }
     # Consulta de drivers: a parte que não depende de rede roda sempre.
     foreach ($wbPair in @(@('NVIDIA GeForce RTX 3070', '30'), @('NVIDIA GeForce GTX 1660 SUPER', '16'), @('NVIDIA GeForce GTX 970M', '900M'), @('NVIDIA GeForce MX450', 'MX400'))) {
@@ -856,7 +1566,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
@@ -905,10 +1615,10 @@ if ($SelfTest) {
         } catch {
             Write-Host "  [ERRO] marcar recomendados antes das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
-        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico') {
+        foreach ($tab in 'Install','Tweaks','Jogos','Config','AppX','Diagnostico','Servidor') {
             try {
                 Initialize-WinUtilTabContent -TabName $tab
-                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } 'Diagnostico' { 'WPFDiagCards' } }
+                $panel = switch ($tab) { 'Install' { 'appspanel' } 'Tweaks' { 'tweakspanel' } 'Jogos' { 'gamespanel' } 'Config' { 'featurespanel' } 'AppX' { 'appxpanel' } 'Diagnostico' { 'WPFDiagCards' } 'Servidor' { 'serverpanel' } }
                 $grid = $wbWindow.FindName($panel)
                 $cbs = @($sync.Keys | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
                 Write-Host "  Aba $tab montada: $($grid.Children.Count) coluna(s), $cbs checkboxes/toggles no total até agora"
@@ -916,12 +1626,95 @@ if ($SelfTest) {
                 Write-Host "  [ERRO] montar aba $tab`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
             }
         }
+        # Aba Servidor: no cliente ela monta VAZIA (todo item tem platform 'server' e o filtro de
+        # compatibilidade esconde tudo) e isso não pode virar exceção - a aba existe na janela em
+        # qualquer Windows, só o botão de navegação some. Sob WINFORGE_SIMULATE_SERVER as caixas
+        # têm de aparecer de verdade; sem esta metade, o SelfTest "de servidor" só provaria que a
+        # aba não explode vazia.
+        try {
+            $wfSrvGrid = $wbWindow.FindName('serverpanel')
+            $wfSrvKeys = @($wbServerTab.PSObject.Properties | Where-Object { [string]$_.Value.Type -ne 'Button' } | ForEach-Object { $_.Name })
+            $wfSrvCaixas = @($wfSrvKeys | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
+            if ($sync.IsServer) {
+                if ($wfSrvCaixas -lt 8) { Write-Host "  [ERRO] aba Servidor: esperado ao menos 8 caixas no servidor, veio $wfSrvCaixas" -ForegroundColor Red; $wbErrors++ }
+                if ($wfSrvGrid.Children.Count -eq 0) { Write-Host "  [ERRO] aba Servidor: painel vazio no servidor" -ForegroundColor Red; $wbErrors++ }
+                # As 7 entradas de IIS têm role "iis": num servidor sem o papel elas somem, e é isso
+                # que se quer. A trava só vale quando o papel está presente - sem ela, o SelfTest
+                # "de servidor com IIS" passaria com a categoria IIS inteira invisível.
+                if ('iis' -in @($sync.ServerRoles)) {
+                    $wfIisCaixas = @($wfSrvKeys | Where-Object { $_ -like 'WPFTweaksWFIis*' -and $sync[$_] -is [System.Windows.Controls.CheckBox] }).Count
+                    if ($wfIisCaixas -ne 7) { Write-Host "  [ERRO] aba Servidor: esperado 7 caixas de IIS com o papel IIS presente, veio $wfIisCaixas" -ForegroundColor Red; $wbErrors++ }
+                    Write-Host "  Aba Servidor (IIS): $wfIisCaixas caixa(s) de IIS com o papel presente"
+                }
+                # Mesma regra para os botões de Active Directory (role "ad"): eles são a única coisa
+                # da aba que roda dcdiag/repadmin, e num servidor com o papel presente têm de estar
+                # na tela. Sem esta trava, um erro de categoria os esconderia sem ninguém notar.
+                if ('ad' -in @($sync.ServerRoles)) {
+                    $wfAdBotoes = @(@('WPFWFAdDcdiag', 'WPFWFAdReplSummary', 'WPFWFAdDnsScavenging', 'WPFWFAdNtdsLocation') | Where-Object { $sync[$_] -is [System.Windows.Controls.Button] }).Count
+                    if ($wfAdBotoes -ne 4) { Write-Host "  [ERRO] aba Servidor: esperado 4 botões de Active Directory com o papel AD presente, veio $wfAdBotoes" -ForegroundColor Red; $wbErrors++ }
+                    Write-Host "  Aba Servidor (AD): $wfAdBotoes botão(ões) de Active Directory com o papel presente"
+                }
+            } else {
+                if ($wfSrvCaixas -ne 0) { Write-Host "  [ERRO] aba Servidor: $wfSrvCaixas caixa(s) criada(s) num cliente, esperado 0" -ForegroundColor Red; $wbErrors++ }
+                if ($wfSrvGrid.Children.Count -ne 0) { Write-Host "  [ERRO] aba Servidor: painel com $($wfSrvGrid.Children.Count) coluna(s) num cliente, esperado 0" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Aba Servidor: $wfSrvCaixas caixa(s), $($wfSrvGrid.Children.Count) coluna(s) | servidor=$($sync.IsServer)"
+        } catch {
+            Write-Host "  [ERRO] aba Servidor: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Contornos verdes na aba Servidor: as regras de servidor só valem alguma coisa se chegarem à
+        # tela. Roda com o perfil simulado 'server-iis' (o perfil real desta máquina pode ser cliente),
+        # conta as linhas verdes de serverpanel e devolve $sync.Recommended ao perfil real - as
+        # conferências seguintes (lista do Diagnóstico, contornos) contam com ele.
+        if ($sync.IsServer -and $wbSims['server-iis']) {
+            try {
+                $null = Invoke-WinForgeRules -Profile $wbSims['server-iis']
+                Update-WinForgeRecommendationVisuals | Out-Null
+                $wfSrvVerdes = @($wfSrvKeys | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush -and [string]$_.Border.BorderBrush.Color -eq '#FF2E7D32' }).Count
+                if ($wfSrvVerdes -lt 5) { Write-Host "  [ERRO] aba Servidor: esperado ao menos 5 contornos verdes em serverpanel, veio $wfSrvVerdes" -ForegroundColor Red; $wbErrors++ }
+                else { Write-Host "  Aba Servidor (contornos): $wfSrvVerdes linha(s) verde(s) com as regras de server-iis" }
+            } catch {
+                Write-Host "  [ERRO] aba Servidor (contornos): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+            } finally {
+                $null = Invoke-WinForgeRules -Profile $wbProfile
+                Update-WinForgeRecommendationVisuals | Out-Null
+            }
+        }
+        # Visibilidade das abas: a MESMA função que roda antes do ShowDialog, chamada nos dois
+        # estados. Forçar $sync.IsServer aqui é o que permite testar o lado "servidor" num cliente
+        # (e o lado "cliente" quando o SelfTest roda sob WINFORGE_SIMULATE_SERVER).
+        try {
+            $wfEraServidor = $sync.IsServer
+            try {
+                $sync.IsServer = $true
+                Update-WinForgeTabVisibility | Out-Null
+                if ($sync.WPFTab7BT.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (servidor): WPFTab7BT (Jogos) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFTab5BT.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (servidor): WPFTab5BT (Win11ISO) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                # A aba AppX não tem botão na barra: o caminho até ela é o 'AppX Removal' da aba Tweaks.
+                if ($sync.WPFAppxRemoval.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (servidor): WPFAppxRemoval (AppX) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFTab9BT.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] abas (servidor): WPFTab9BT (Servidor) deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+                $sync.IsServer = $false
+                Update-WinForgeTabVisibility | Out-Null
+                if ($sync.WPFTab7BT.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] abas (cliente): WPFTab7BT (Jogos) deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFTab9BT.Visibility -ne [Windows.Visibility]::Collapsed) { Write-Host "  [ERRO] abas (cliente): WPFTab9BT (Servidor) deveria estar oculto" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFAppxRemoval.Visibility -ne [Windows.Visibility]::Visible) { Write-Host "  [ERRO] abas (cliente): WPFAppxRemoval (AppX) deveria estar visível" -ForegroundColor Red; $wbErrors++ }
+            } finally {
+                $sync.IsServer = $wfEraServidor
+                Update-WinForgeTabVisibility | Out-Null
+            }
+            Write-Host "  Visibilidade das abas: OK nos dois estados (estado final: servidor=$($sync.IsServer))"
+        } catch {
+            Write-Host "  [ERRO] visibilidade das abas: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
         # Aba Diagnóstico: cartões, tabela de drivers, lista de recomendações e relatório HTML.
         # A contagem esperada de recomendações é recalculada aqui a partir de $sync.Recommended/
         # Discouraged - repetir a conta da UI não provaria nada.
         try {
             $wfCards = $sync.WPFDiagCards.Children.Count
-            if ($wfCards -lt 8) { Write-Host "  [ERRO] Diagnóstico: esperado ao menos 8 cartões, veio $wfCards" -ForegroundColor Red; $wbErrors++ }
+            # 9 cartões fixos (Sistema, Máquina, Processador, Memória, Placa de vídeo, Armazenamento,
+            # Rede, Energia, Segurança e estado) + o cartão Servidor, que só existe no Windows Server.
+            $wfCardsEsperado = 9 + $(if ($sync.IsServer) { 1 } else { 0 })
+            if ($wfCards -ne $wfCardsEsperado) { Write-Host "  [ERRO] Diagnóstico: esperado $wfCardsEsperado cartões (servidor=$($sync.IsServer)), veio $wfCards" -ForegroundColor Red; $wbErrors++ }
             $wfDrvUI = $sync.WPFDiagDrivers.Items.Count
             $wfDrvPerfil = @($sync.Profile.Drivers).Count
             if ($wfDrvUI -ne $wfDrvPerfil) { Write-Host "  [ERRO] Diagnóstico: tabela com $wfDrvUI driver(s), perfil com $wfDrvPerfil" -ForegroundColor Red; $wbErrors++ }
@@ -994,8 +1787,12 @@ if ($SelfTest) {
         try {
             $wbSelTweaks = Select-WinForgeRecommended -Tab "Tweaks"
             $wbSelJogos  = Select-WinForgeRecommended -Tab "Jogos"
+            $wbSelServer = Select-WinForgeRecommended -Tab "Servidor"
             $wbSelAll    = Select-WinForgeRecommended -Tab "All"
-            if ($wbSelAll -ne ($wbSelTweaks + $wbSelJogos)) { Write-Host "  [ERRO] Select-WinForgeRecommended: All ($wbSelAll) != Tweaks ($wbSelTweaks) + Jogos ($wbSelJogos)" -ForegroundColor Red; $wbErrors++ }
+            # No cliente a aba Servidor não entra em 'All' (nem existe na janela): a soma esperada
+            # muda com $sync.IsServer, e é isso que a segunda rodada do SelfTest exercita.
+            $wbSelEsperado = $wbSelTweaks + $wbSelJogos + $(if ($sync.IsServer) { $wbSelServer } else { 0 })
+            if ($wbSelAll -ne $wbSelEsperado) { Write-Host "  [ERRO] Select-WinForgeRecommended: All ($wbSelAll) != Tweaks ($wbSelTweaks) + Jogos ($wbSelJogos) + Servidor ($wbSelServer, servidor=$($sync.IsServer))" -ForegroundColor Red; $wbErrors++ }
             if ($wbSelAll -le 0) { Write-Host "  [ERRO] Select-WinForgeRecommended: nenhuma caixa marcada no perfil real" -ForegroundColor Red; $wbErrors++ }
             foreach ($k in @($sync.Recommended.Keys)) {
                 if ($sync[$k] -isnot [System.Windows.Controls.CheckBox]) { continue }
@@ -1009,7 +1806,7 @@ if ($SelfTest) {
                 # marcar dispara o handler Checked, que é quem alimenta $sync.selectedTweaks
                 if ($k -like 'WPFTweaks*' -and -not $sync.selectedTweaks.Contains($k)) { Write-Host "  [ERRO] Select-WinForgeRecommended: '$k' não entrou em selectedTweaks" -ForegroundColor Red; $wbErrors++ }
             }
-            Write-Host "  Recomendados marcados: $wbSelAll (Tweaks $wbSelTweaks, Jogos $wbSelJogos) | selectedTweaks=$($sync.selectedTweaks.Count)"
+            Write-Host "  Recomendados marcados: $wbSelAll (Tweaks $wbSelTweaks, Jogos $wbSelJogos, Servidor $wbSelServer) | selectedTweaks=$($sync.selectedTweaks.Count)"
         } catch {
             Write-Host "  [ERRO] Select-WinForgeRecommended: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
@@ -1181,6 +1978,17 @@ $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windo
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null
 '@.TrimEnd() "restore prompt hook"
 
+# ---------------------------------------------------------------- abas por tipo de Windows (servidor x cliente)
+# Antes do ShowDialog e na thread da janela: em servidor somem Win11ISO, AppX e Jogos e aparece a
+# aba Servidor; no cliente é o contrário. Feito aqui, e não no Add_ContentRendered acima, para que
+# a barra de navegação já apareça certa - dentro do ContentRendered a janela já está desenhada e o
+# usuário veria as abas piscarem.
+$src = Insert-Before $src '$sync["Form"].ShowDialog() | out-null' @'
+# WinForge: esconde as abas que não fazem sentido neste Windows (servidor x cliente)
+Update-WinForgeTabVisibility | Out-Null
+
+'@ "tab visibility startup"
+
 # ---------------------------------------------------------------- falha ao carregar o XAML: libera o launcher e sai com 2
 $src = Replace-Once $src @'
     Write-Host "Quitting WinUtil..." -ForegroundColor Red
@@ -1218,12 +2026,23 @@ $src = Insert-Before $src @'
                     Background="{DynamicResource ButtonConfigBackgroundColor}"
 '@ $xamlDiagNav "xaml diag nav button"
 
+# Por último na mesma âncora: o botão da aba Servidor fica à direita do de Diagnóstico.
+$src = Insert-Before $src @'
+                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
+                    Background="{DynamicResource ButtonConfigBackgroundColor}"
+'@ $xamlServerNav "xaml server nav button"
+
 $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
 
 # Precisa vir DEPOIS do insert da aba Jogos: Invoke-WPFTab mapeia WPFTab<N>BT para Items[N-1], então
 # o TabItem do Diagnóstico (WPFTab8) tem de ser o oitavo do TabControl - e, na mesma âncora, quem
 # insere por último fica mais perto dela, ou seja, depois de Jogos.
 $src = Insert-Before $src "        </TabControl>`n" $xamlDiagTab "xaml diag tab"
+
+# Mesma regra: WPFTab9BT -> Items[8], então o TabItem da aba Servidor tem de ser o nono do
+# TabControl - e quem insere por último na âncora fica mais perto dela, ou seja, depois do
+# Diagnóstico.
+$src = Insert-Before $src "        </TabControl>`n" $xamlServerTab "xaml server tab"
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
@@ -1344,7 +2163,7 @@ function Sort-RowsByKeyOrdinal([object[]]$rows) {
 $auditSync  = Get-WinForgeAuditData
 $audit      = $auditSync.WinForgeAudit
 $configSync = Get-WinForgeConfigData
-$jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'))
+$jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'), (Get-JsonConfigBlock $src 'wfserver'))
 
 function Get-TweakEntry([string]$key) {
     foreach ($o in $jsonTweaks) {
