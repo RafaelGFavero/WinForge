@@ -1,0 +1,119 @@
+﻿#region ===== WinForge - reparo de componentes (config) =====
+
+# ---------------------------------------------------------------------------
+# Botões do grupo "WinForge - Reparo de componentes" (mesclados em $sync.configs.feature)
+#   panel 1 = coluna da esquerda da aba Config | Type Button | ButtonWidth 350
+#
+# Nenhuma entrada declara "function", de propósito: quem despacha estes botões é o switch de
+# Invoke-WPFButton, com "Invoke-WinForgeRepairCommand -Name <nome curto>" por caso. O caminho da
+# config chamaria a função SEM argumento nenhum, e ela não saberia qual comando rodar - por isso o
+# lookup de Invoke-WPFButton também pula as chaves WPFWFRep*.
+#
+# A descrição de cada botão diz o que ele faz, o que muda na máquina e o que ele exige, e os que
+# alteram o sistema avisam isso na primeira linha. Ela tem um segundo leitor além de quem passa o
+# olho na aba: Get-WinForgeRepairConfirmText usa ESTE texto na caixa de Sim/Não que aparece antes de
+# 'repair' e 'install' rodarem. Por isso ele descreve, mas não pergunta - a pergunta é acrescentada
+# uma vez só, na hora de montar a caixa.
+# ---------------------------------------------------------------------------
+$sync.configs.wfrepair = @'
+{
+  "WPFWFRepSecurityStatus": {
+    "Content": "Estado de TPM, Secure Boot e BitLocker",
+    "Description": "Só lê. Mostra numa janela se o TPM está presente e pronto, se o Secure Boot está ligado, o estado do BitLocker de cada volume e se a segurança baseada em virtualização (VBS/Credential Guard) está configurada e rodando. Não muda nada. TPM e BitLocker só respondem com o WinForge aberto como administrador; sem elevação aparecem como 'n/d'.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepSmartReport": {
+    "Content": "Saúde dos discos (SMART)",
+    "Description": "Só lê. Lista os discos físicos (modelo, tipo, tamanho, estado) e os contadores SMART de cada um: temperatura, horas ligado, desgaste e erros de leitura/escrita não corrigidos. Não muda nada. Os contadores dependem do disco e do controlador: em USB e em alguns RAID eles não existem, e aí a linha diz 'indisponíveis'.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepDotNetStatus": {
+    "Content": "Estado do .NET Framework 3.5 e 4.8",
+    "Description": "Só lê. Diz se o recurso NetFx3 (.NET Framework 3.5) está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro (528040 ou maior = 4.8). Não muda nada. A parte do 3.5 exige o WinForge aberto como administrador; sem elevação aparece como 'n/d'.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepChkdskScan": {
+    "Content": "Verificar disco do sistema agora (chkdsk /scan)",
+    "Description": "Só lê. Roda 'chkdsk /scan' no disco do Windows: é a verificação online, com o sistema em uso, que relata problemas sem reparar nada e sem reiniciar. Pode demorar minutos num disco grande. Para reparar de verdade, use o botão de agendar o chkdsk /f.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepWmiRepair": {
+    "Content": "Repositório WMI: verificar e recuperar",
+    "Description": "ALTERA O SISTEMA. Roda 'winmgmt /verifyrepository' e, só se o repositório estiver inconsistente, 'winmgmt /salvagerepository' (recupera o que dá para aproveitar; não apaga o repositório). Programas que consultam o WMI podem falhar durante a recuperação. Exige o WinForge aberto como administrador: sem elevação a verificação responde 'acesso negado', e o botão para aí em vez de recuperar o repositório por causa de uma leitura que não aconteceu.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepStoreReregister": {
+    "Content": "Microsoft Store e App Installer: registrar de novo",
+    "Description": "ALTERA O SISTEMA. Registra de novo, PARA O USUÁRIO ATUAL, a Microsoft Store, o App Installer (winget) e o Store Purchase App a partir do AppXManifest.xml que já está no disco, sem baixar nada. É o reparo de 'a Store não abre' e de 'o winget sumiu'. Os aplicativos fecham durante o registro. Vale só para quem está com o WinForge aberto: outros usuários da máquina precisam rodar o botão no próprio logon. Com o WinForge como administrador a busca alcança os pacotes que sumiram do perfil atual.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepChkdskSchedule": {
+    "Content": "Agendar chkdsk /f na próxima reinicialização",
+    "Description": "ALTERA O SISTEMA E NÃO TEM DESFAZER. Marca o disco do Windows como 'sujo' (fsutil dirty set): na próxima reinicialização o chkdsk roda com reparo antes de o Windows carregar, e isso pode demorar bastante - a máquina não pode ser desligada no meio. Não existe 'fsutil dirty clear': quem limpa a marca é o próprio chkdsk, e só quando concluir que o volume está íntegro, então num disco com problema a verificação se repete a cada reinicialização. Nada é verificado agora. Exige o WinForge aberto como administrador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepMemoryDiag": {
+    "Content": "Diagnóstico de memória na próxima reinicialização",
+    "Description": "ALTERA O SISTEMA. Coloca o Diagnóstico de Memória do Windows na sequência de inicialização (bcdedit /bootsequence {memdiag}): vale para a PRÓXIMA reinicialização e só para ela. O teste roda antes do Windows e o resultado aparece no Visualizador de Eventos. Exige o WinForge aberto como administrador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepDotNet35Enable": {
+    "Content": ".NET Framework 3.5: habilitar (DISM)",
+    "Description": "INSTALA COMPONENTE. Habilita o recurso NetFx3 (.NET Framework 3.5, com WCF) pelo DISM, sem reiniciar na hora. Os arquivos não estão na imagem instalada: vêm do Windows Update, então precisa de internet e pode demorar minutos. Em rede com WSUS restritivo o DISM pede a mídia do Windows. Exige o WinForge aberto como administrador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepVcRedist": {
+    "Content": "Visual C++ 2005–2022 (x86/x64) via winget",
+    "Description": "INSTALA COMPONENTE. Instala ou atualiza os 12 pacotes redistribuíveis do Visual C++ (2005, 2008, 2010, 2012, 2013 e 2015-2022), nas duas arquiteturas, pelo winget. O que já está instalado é pulado. É o que resolve erro de VCRUNTIME140.dll e MSVCP140.dll. São vários downloads: precisa de internet e demora. Exige o winget instalado (App Installer) e o WinForge aberto como administrador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepPowerShell7": {
+    "Content": "PowerShell 7 via winget",
+    "Description": "INSTALA COMPONENTE. Instala o PowerShell 7 (Microsoft.PowerShell) pelo winget, lado a lado: o Windows PowerShell 5.1 continua instalado e é ele que roda o WinForge. Precisa de internet e do winget instalado (App Installer).",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepDirectX": {
+    "Content": "DirectX: abrir a página oficial da Microsoft",
+    "Description": "Só abre uma página. Abre no navegador a página oficial de download do DirectX End-User Runtime Web Installer, no site da Microsoft. O download e a execução do dxwebsetup.exe são seus, no navegador: o WinForge não baixa nem executa arquivo nenhum da internet. O instalador é interativo e traz as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua vindo pelo Windows Update. Precisa de internet.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  }
+}
+'@ | ConvertFrom-Json
+
+#endregion

@@ -47,7 +47,8 @@ Parâmetros de linha de comando:
   limpeza de disco, backup do registro, cache de RAM e otimização de unidades.
 - **Jogos** — prioridade de CPU por jogo (IFEO), GameDVR, MMCSS, HAGS e ajustes de shader cache
   para NVIDIA, AMD e Intel.
-- **Config** — recursos do Windows, correções de sistema e atalhos de manutenção.
+- **Config** — recursos do Windows, correções de sistema, reparo de componentes e atalhos de
+  manutenção.
 - **Updates** — política de atualizações do Windows (padrão, adiada ou desligada).
 - **Win11 Creator** — criação de mídia de instalação do Windows 11.
 - **AppX** — remoção de aplicativos pré-instalados.
@@ -204,6 +205,65 @@ igualmente a um servidor membro; e telemetria no mínimo, Delivery Optimization 
 continuam sendo itens da aba **Tweaks** recomendados pelo Diagnóstico, não itens da aba Servidor —
 quem trabalhar só nesta aba não os verá.
 
+## Reparo de componentes
+
+Na aba **Config**, o grupo **WinForge - Reparo de componentes** reúne doze botões para os problemas
+que não se resolvem com tweak: componente que sumiu, repositório corrompido, disco com suspeita de
+defeito. Eles ficam ao lado dos botões que já existiam ali — verificação de corrupção do sistema
+(SFC + DISM), reset do Windows Update, reset de rede e reinstalação do WinGet —, que continuam
+funcionando como sempre.
+
+**Só leem, não mudam nada (e o do DirectX só abre uma página):**
+
+| Botão | O que faz |
+|---|---|
+| Estado de TPM, Secure Boot e BitLocker | TPM presente e pronto, Secure Boot ligado, BitLocker de cada volume e a segurança baseada em virtualização (VBS/Credential Guard). |
+| Saúde dos discos (SMART) | Discos físicos e os contadores SMART de cada um: temperatura, horas ligado, desgaste e erros não corrigidos. Em USB e em alguns RAID os contadores não existem. |
+| Estado do .NET Framework 3.5 e 4.8 | Se o recurso NetFx3 está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro. |
+| Verificar disco do sistema agora (chkdsk /scan) | Verificação online, com o sistema em uso: relata problemas, não repara nada e não reinicia. Pode demorar minutos num disco grande. |
+| DirectX: abrir a página oficial da Microsoft | Abre no navegador a página oficial de download do DirectX End-User Runtime Web Installer. Quem baixa e roda o `dxwebsetup.exe` é você, no navegador: o WinForge não baixa nem executa arquivo da internet. O instalador é interativo e traz as bibliotecas antigas (d3dx9, XInput) que jogos mais velhos pedem. |
+
+**Alteram o sistema:**
+
+| Botão | O que faz |
+|---|---|
+| Repositório WMI: verificar e recuperar | `winmgmt /verifyrepository` e, só se o repositório estiver inconsistente, `winmgmt /salvagerepository`. Programas que consultam o WMI podem falhar durante a recuperação. |
+| Microsoft Store e App Installer: registrar de novo | Registra de novo, para o usuário atual, a Store, o App Installer (winget) e o Store Purchase App a partir do manifesto que já está no disco, sem baixar nada. É o reparo de "a Store não abre" e de "o winget sumiu". |
+| Agendar chkdsk /f na próxima reinicialização | Marca o disco do Windows como sujo (`fsutil dirty set`): o chkdsk roda com reparo antes de o Windows carregar. **Não tem desfazer** — quem limpa a marca é o próprio chkdsk, e só quando o volume estiver íntegro, então num disco com problema a verificação se repete a cada reinicialização. |
+| Diagnóstico de memória na próxima reinicialização | Coloca o Diagnóstico de Memória na sequência de inicialização (`bcdedit /bootsequence {memdiag}`), válido só para a próxima. O resultado aparece no Visualizador de Eventos. |
+
+**Instalam componente:**
+
+| Botão | O que faz |
+|---|---|
+| .NET Framework 3.5: habilitar (DISM) | Habilita o recurso NetFx3 pelo DISM. Os arquivos não estão na imagem instalada: vêm do Windows Update, então precisa de internet. Em rede com WSUS restritivo o DISM pede a mídia do Windows. |
+| Visual C++ 2005–2022 (x86/x64) via winget | Os 12 redistribuíveis (2005, 2008, 2010, 2012, 2013 e 2015-2022), nas duas arquiteturas. O que já está instalado é pulado. É o que resolve erro de VCRUNTIME140.dll e MSVCP140.dll. |
+| PowerShell 7 via winget | Instala o `Microsoft.PowerShell` lado a lado: o Windows PowerShell 5.1 continua instalado e é ele que roda o WinForge. |
+
+**Nada roda sem clique e confirmação.** Os botões que só leem rodam direto. Os que alteram o
+sistema ou instalam componente abrem antes uma caixa de Sim/Não com a descrição inteira do botão —
+o mesmo texto que está na aba, com o aviso na primeira linha. Responder "Não" não deixa rastro.
+
+Tudo roda fora da thread da interface: a janela continua respondendo enquanto o comando trabalha. A
+saída aparece numa janela própria, que não bloqueia o resto do programa, com **Copiar** e **Abrir
+arquivo**. O arquivo é `repair-<nome>-<data-hora>.txt`, na mesma pasta de logs do WinForge
+(`%LocalAppData%\WinForge\logs`).
+
+O que cada botão exige está escrito na descrição dele. Em resumo: WMI, chkdsk agendado, diagnóstico
+de memória, .NET 3.5 e Visual C++ precisam do WinForge aberto como administrador; sem elevação, as
+leituras de TPM, Secure Boot, BitLocker e NetFx3 respondem `n/d`. Os dois botões de winget precisam
+do App Installer instalado e de internet. O .NET 3.5 também precisa de internet.
+
+**O WinForge não baixa nem executa arquivo da internet.** O `winget.exe` que os botões de instalação
+usam sai só do pacote do App Installer instalado pela Microsoft Store: editor `8wekyb3d8bbwe`,
+assinatura de Store ou do sistema e pasta dentro de `%ProgramFiles%\WindowsApps`, sem link no
+caminho. O `PATH` fica de fora de propósito — num processo elevado ele resolve para o atalho em
+`%LOCALAPPDATA%\Microsoft\WindowsApps`, uma pasta que qualquer programa do usuário pode reescrever.
+O registro de novo da Store e do App Installer aplica o mesmo crivo antes de escolher o manifesto.
+Pelo mesmo motivo, todo executável do Windows que o WinForge chama (`chkdsk`, `winmgmt`, `fsutil`,
+`bcdedit`, `powercfg`, `w32tm`, `dcdiag`, `repadmin`) é chamado pelo caminho completo em
+`%SystemRoot%\System32`, e não pelo nome.
+
 ## Classificação de risco
 
 Todo tweak e toggle passou por uma auditoria e carrega uma de três classes:
@@ -268,11 +328,11 @@ docs/               changelog e documentação
 ## Roadmap
 
 Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)), a
-detecção de hardware, drivers e papéis de servidor com as recomendações da aba Diagnóstico, e a aba
-Servidor com os ajustes de Windows Server, IIS e Active Directory.
+detecção de hardware, drivers e papéis de servidor com as recomendações da aba Diagnóstico, a aba
+Servidor com os ajustes de Windows Server, IIS e Active Directory, e o reparo de componentes do
+Windows na aba Config.
 
 - Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
-- Reparo de componentes do Windows (DISM/SFC e correção de repositório).
 
 ## Licença
 

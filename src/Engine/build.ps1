@@ -55,12 +55,15 @@ $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
 $launcherBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-launcher.ps1")
 $configBlock    = Read-Lf (Join-Path $PSScriptRoot "config\wb-config.ps1")
 $serverConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-server-config.ps1")
+$repairConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-repair-config.ps1")
 $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
 $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
+$commandsBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-commands.ps1")
+$repairBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-repair.ps1")
 $serverBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-server.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
@@ -254,6 +257,7 @@ $src = Replace-Once $src '$Host.UI.RawUI.WindowTitle = "WinUtil"' '$Host.UI.RawU
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($functionsBlock.TrimEnd() + "`n`n") "insert functions"
 $src = Insert-Before $src "`$inputXML = @'" ($configBlock.TrimEnd() + "`n`n") "insert config"
 $src = Insert-Before $src "`$inputXML = @'" ($serverConfig.TrimEnd() + "`n`n") "insert server config"
+$src = Insert-Before $src "`$inputXML = @'" ($repairConfig.TrimEnd() + "`n`n") "insert repair config"
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 $src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
 
@@ -280,6 +284,15 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.Tr
 
 # ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
+
+# ---------------------------------------------------------------- comandos com janela de saída (núcleo genérico)
+# ANTES do bloco da aba Servidor de propósito: todas as inserções usam a mesma âncora, e cada uma
+# entra logo acima dela - então quem insere primeiro fica mais ACIMA no arquivo gerado. É o núcleo
+# genérico que os invólucros da aba Servidor chamam, e ele nasce antes deles.
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($commandsBlock.TrimEnd() + "`n`n") "insert commands"
+
+# ---------------------------------------------------------------- reparo de componentes (aba Config)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($repairBlock.TrimEnd() + "`n`n") "insert repair"
 
 # ---------------------------------------------------------------- aba Servidor (comandos e visibilidade das abas)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($serverBlock.TrimEnd() + "`n`n") "insert server"
@@ -622,16 +635,17 @@ $src = Replace-Once $src @'
 
 '@ @'
     $buttonConfig = $null
-    if ($sync.configs.feature.$Button) {
+    if ($sync.configs.feature.$Button -and $Button -notlike "WPFWFRep*") {
         $buttonConfig = $sync.configs.feature.$Button
     } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button" -and $Button -notlike "WPFWFSrv*" -and $Button -notlike "WPFWFAd*") {
         # WinForge: botões definidos na config de tweaks (aba Jogos)
         $buttonConfig = $sync.configs.tweaks.$Button
     }
-    # Os botões da aba Servidor (WPFWFSrv*, WPFWFAd*) ficam de fora de propósito: este caminho chama
-    # $buttonConfig.function SEM argumento nenhum, e as funções deles precisam do -Name para saber
-    # qual comando rodar. Quem despacha esses botões é o switch abaixo, com o -Name explícito por
-    # caso - por isso a config deles também não declara "function": seria uma chave morta.
+    # Os botões da aba Servidor (WPFWFSrv*, WPFWFAd*) e os do reparo de componentes (WPFWFRep*, na
+    # config de Config) ficam de fora de propósito: este caminho chama $buttonConfig.function SEM
+    # argumento nenhum, e as funções deles precisam do -Name para saber qual comando rodar. Quem
+    # despacha esses botões é o switch abaixo, com o -Name explícito por caso - por isso a config
+    # deles também não declara "function": seria uma chave morta.
     if ($buttonConfig) {
 
 '@ "button lookup"
@@ -661,6 +675,20 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFAdReplSummary" {Invoke-WinForgeServerCommand -Name ReplSummary}
         "WPFWFAdDnsScavenging" {Invoke-WinForgeServerCommand -Name DnsScavenging}
         "WPFWFAdNtdsLocation" {Invoke-WinForgeServerCommand -Name NtdsLocation}
+        # Reparo de componentes (aba Config): mesma regra dos botões da aba Servidor - o nome curto do
+        # comando é dito AQUI, porque o caminho da config não passaria argumento nenhum.
+        "WPFWFRepSecurityStatus" {Invoke-WinForgeRepairCommand -Name SecurityStatus}
+        "WPFWFRepSmartReport" {Invoke-WinForgeRepairCommand -Name SmartReport}
+        "WPFWFRepDotNetStatus" {Invoke-WinForgeRepairCommand -Name DotNetStatus}
+        "WPFWFRepChkdskScan" {Invoke-WinForgeRepairCommand -Name ChkdskScan}
+        "WPFWFRepWmiRepair" {Invoke-WinForgeRepairCommand -Name WmiRepair}
+        "WPFWFRepStoreReregister" {Invoke-WinForgeRepairCommand -Name StoreReregister}
+        "WPFWFRepChkdskSchedule" {Invoke-WinForgeRepairCommand -Name ChkdskSchedule}
+        "WPFWFRepMemoryDiag" {Invoke-WinForgeRepairCommand -Name MemoryDiag}
+        "WPFWFRepDotNet35Enable" {Invoke-WinForgeRepairCommand -Name DotNet35Enable}
+        "WPFWFRepVcRedist" {Invoke-WinForgeRepairCommand -Name VcRedist}
+        "WPFWFRepPowerShell7" {Invoke-WinForgeRepairCommand -Name PowerShell7}
+        "WPFWFRepDirectX" {Invoke-WinForgeRepairCommand -Name DirectX}
         "WPFDiagRefresh" {Start-WinForgeProfileJob}
         "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
         "WPFDiagExport" {
@@ -745,6 +773,10 @@ Initialize-WinUtilBoostConfigs
 Initialize-WinForgeAudit
 
 if ($SelfTest) {
+    # PRIMEIRA linha do bloco, antes de qualquer teste: daqui para baixo toda função que ESCREVE no
+    # sistema se recusa a rodar (Assert-WinForgeNotSelfTest e a trava de Invoke-WinForgeCommandCore).
+    # A execução normal do WinForge nunca define esta chave, e chave ausente em hashtable é $null.
+    $sync.SelfTest = $true
     Write-Host "== WinForge SelfTest =="
     $wbErrors = 0
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
@@ -786,7 +818,7 @@ if ($SelfTest) {
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
-    if (@($sync.configs.feature.PSObject.Properties).Count -ne 42) { Write-Host "  [ERRO] Config: esperado 42 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 54) { Write-Host "  [ERRO] Config: esperado 54 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
@@ -1414,7 +1446,7 @@ if ($SelfTest) {
         $wbSrvItens = @(
             @('Smb1Off', 'Get-SmbServerConfiguration', 'EnableSMB1Protocol'),
             @('SmbSigning', 'Get-SmbServerConfiguration', 'RequireSecuritySignature'),
-            @('HighPerf', 'powercfg.exe', 'ActiveSchemeGuid'),
+            @('HighPerf', (Get-WinForgeSystemExe -Name 'powercfg.exe'), 'ActiveSchemeGuid'),
             @('TcpAutotuning', 'Get-NetTCPSetting', 'AutoTuningLevelLocal'),
             @('RdpNla', $null, 'UserAuthentication')
         )
@@ -1434,7 +1466,9 @@ if ($SelfTest) {
             $wbSrvUnd = Invoke-WinForgeServerSetting -Name $wbSrvItem[0] -Undo -Root $wbSrvRoot
             if ($wbSrvUnd.Changed -ne 0) { Write-Host "  [ERRO] Servidor (ajuste): Desfazer de '$($wbSrvItem[0])' sem backup alterou $($wbSrvUnd.Changed) valor(es)" -ForegroundColor Red; $wbErrors++ }
             # Captura: só onde a ferramenta existe nesta máquina. Nada é escrito no sistema.
-            if ($wbSrvItem[1] -and -not (Get-Command $wbSrvItem[1] -ErrorAction SilentlyContinue)) { continue }
+            # A exigência pode ser um cmdlet (nome) ou um executável do sistema (caminho absoluto):
+            # quem sabe responder pelos dois é Test-WinForgeCommandRequirement.
+            if ($wbSrvItem[1] -and -not (Test-WinForgeCommandRequirement -Requires $wbSrvItem[1])) { continue }
             $wbSrvCap = Invoke-WinForgeServerSetting -Name $wbSrvItem[0] -CaptureOnly -Root $wbSrvRoot
             if ($wbSrvCap.Changed -ne 0) { Write-Host "  [ERRO] Servidor (captura): '$($wbSrvItem[0])' com -CaptureOnly alterou $($wbSrvCap.Changed) valor(es)" -ForegroundColor Red; $wbErrors++ }
             if (-not $wbSrvCap.Snapshot -or -not (Test-Path -LiteralPath $wbSrvCap.Snapshot)) { Write-Host "  [ERRO] Servidor (captura): '$($wbSrvItem[0])' não gravou backup ('$($wbSrvCap.Snapshot)')" -ForegroundColor Red; $wbErrors++; continue }
@@ -1465,7 +1499,7 @@ if ($SelfTest) {
         if ($null -eq $wbSrvCmd -or [string]::IsNullOrWhiteSpace($wbSrvCmd.Title) -or [string]::IsNullOrWhiteSpace($wbSrvCmd.Command)) { Write-Host "  [ERRO] Servidor: comando '$wbSrvNome' sem título ou sem texto de comando" -ForegroundColor Red; $wbErrors++; continue }
         try { [scriptblock]::Create($wbSrvCmd.Command) | Out-Null } catch { Write-Host "  [ERRO] Servidor: comando '$wbSrvNome' não compila: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
     }
-    if ((Get-WinForgeServerCommand -Name Dcdiag).Requires -ne 'dcdiag.exe') { Write-Host "  [ERRO] Servidor: Dcdiag deveria exigir 'dcdiag.exe', veio '$((Get-WinForgeServerCommand -Name Dcdiag).Requires)'" -ForegroundColor Red; $wbErrors++ }
+    if ((Get-WinForgeServerCommand -Name Dcdiag).Requires -ne (Get-WinForgeSystemExe -Name 'dcdiag.exe')) { Write-Host "  [ERRO] Servidor: Dcdiag deveria exigir '$(Get-WinForgeSystemExe -Name 'dcdiag.exe')', veio '$((Get-WinForgeServerCommand -Name Dcdiag).Requires)'" -ForegroundColor Red; $wbErrors++ }
     # 'Native' separa executável de pipeline de cmdlet: só o executável tem código de saída e só ele
     # passa pela troca de code page. Marcar um pipeline como nativo faria a janela imprimir um
     # "Código de saída: 0" que nunca existiu.
@@ -1509,7 +1543,7 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Servidor: Invoke-WinForgeServerCommandCore -Name TcpShow lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
     }
-    if (Get-Command 'dcdiag.exe' -ErrorAction SilentlyContinue) {
+    if (Test-Path -LiteralPath (Get-WinForgeSystemExe -Name 'dcdiag.exe') -PathType Leaf) {
         Write-Host "  Servidor (comandos): recusa do dcdiag pulada (a ferramenta existe nesta máquina)"
     } else {
         try {
@@ -1520,6 +1554,557 @@ if ($SelfTest) {
         } catch {
             Write-Host "  [ERRO] Servidor: dcdiag ausente lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
         }
+    }
+    # -DryRun no núcleo genérico: devolve o texto do comando prefixado com '[simulação] ', não roda
+    # nada e não grava arquivo nenhum - nem a checagem de ferramenta acontece. É o que deixa o
+    # SelfTest exercitar QUALQUER linha de uma tabela de comandos, inclusive uma que repara o
+    # sistema, sem tocar na máquina de quem compila. A contagem de arquivos antes/depois é a prova
+    # de que a simulação não escreveu: um 'if' esquecido gravaria o arquivo do mesmo jeito.
+    try {
+        $wbCmdDir = Split-Path -Parent $sync.logPath
+        $wbCmdAntes = @(Get-ChildItem -LiteralPath $wbCmdDir -Filter 'server-*.txt' -ErrorAction SilentlyContinue).Count
+        $wbCmdSeco = Invoke-WinForgeCommandCore -Spec (Get-WinForgeServerCommand -Name TcpShow) -Name TcpShow -Component Server -Prefix server -DryRun
+        # O segundo tiro usa um nome que não é de comando nenhum, e é ele que sustenta a contagem: o
+        # nome do arquivo tem os segundos, então uma simulação que gravasse com o nome 'TcpShow'
+        # sobrescreveria em silêncio o arquivo do TcpShow de verdade rodado logo acima, no mesmo
+        # segundo, e a contagem não mudaria. Com um nome inédito, gravar é sempre um arquivo a mais.
+        $wbCmdSecoUnico = Invoke-WinForgeCommandCore -Spec (Get-WinForgeServerCommand -Name TcpShow) -Name 'SimulacaoSelfTest' -Component Server -Prefix server -DryRun
+        if ($null -ne $wbCmdSecoUnico.Path) { Write-Host "  [ERRO] Comandos: -DryRun não pode devolver caminho de arquivo (veio '$($wbCmdSecoUnico.Path)')" -ForegroundColor Red; $wbErrors++ }
+        # StartsWith e não -like: em curinga do PowerShell '[...]' é classe de caracteres, e
+        # "-like '[simulação]*'" casaria com qualquer texto começando por uma daquelas letras.
+        if (-not ([string]$wbCmdSeco.Text).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Comandos: -DryRun deveria devolver '[simulação] <comando>', veio '$([string]$wbCmdSeco.Text)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wbCmdSeco.Text -notmatch 'Get-NetTCPSetting') { Write-Host "  [ERRO] Comandos: -DryRun não trouxe o texto do comando" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wbCmdSeco.Path) { Write-Host "  [ERRO] Comandos: -DryRun não pode devolver caminho de arquivo (veio '$($wbCmdSeco.Path)')" -ForegroundColor Red; $wbErrors++ }
+        $wbCmdDepois = @(Get-ChildItem -LiteralPath $wbCmdDir -Filter 'server-*.txt' -ErrorAction SilentlyContinue).Count
+        if ($wbCmdDepois -ne $wbCmdAntes) { Write-Host "  [ERRO] Comandos: -DryRun gravou arquivo na pasta de logs ($wbCmdAntes -> $wbCmdDepois)" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Comandos (simulação): TcpShow devolveu o texto do comando sem rodar nada e sem gravar arquivo" }
+    } catch {
+        Write-Host "  [ERRO] Comandos (simulação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Reparo de componentes: a tabela INTEIRA passa pela simulação, inclusive as linhas que reparam e
+    # instalam. É o único jeito de o SelfTest provar que cada linha tem título, comando que compila e
+    # tipo válido sem tocar na máquina de quem compila - e a contagem de arquivos antes/depois é o
+    # que sustenta o "não tocou": um -DryRun quebrado gravaria o arquivo do mesmo jeito.
+    $wfRepNomes = @('SecurityStatus','SmartReport','DotNetStatus','ChkdskScan','WmiRepair','StoreReregister','ChkdskSchedule','MemoryDiag','DotNet35Enable','VcRedist','PowerShell7','DirectX')
+    try {
+        $wfRepDir = Split-Path -Parent $sync.logPath
+        $wfRepAntes = @(Get-ChildItem -LiteralPath $wfRepDir -Filter 'repair-*.txt' -ErrorAction SilentlyContinue).Count
+        $wfRepPorTipo = @{}
+        foreach ($wfRepNome in $wfRepNomes) {
+            $wfRepSpec = Get-WinForgeRepairCommand -Name $wfRepNome
+            if ([string]::IsNullOrWhiteSpace($wfRepSpec.Title)) { Write-Host "  [ERRO] Reparo $wfRepNome`: sem título" -ForegroundColor Red; $wbErrors++ }
+            if ([string]::IsNullOrWhiteSpace($wfRepSpec.Command)) { Write-Host "  [ERRO] Reparo $wfRepNome`: sem comando" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfRepSpec.Kind -notin @('read','repair','install')) { Write-Host "  [ERRO] Reparo $wfRepNome`: tipo inválido '$($wfRepSpec.Kind)'" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepSpec.Native) { Write-Host "  [ERRO] Reparo $wfRepNome`: toda linha chama função do WinForge, Native tem de ser falso" -ForegroundColor Red; $wbErrors++ }
+            # Ação que muda a máquina sem texto de confirmação seria uma pergunta em branco na etapa
+            # seguinte do plano - a hora de pegar isso é agora, na tabela.
+            if ([string]$wfRepSpec.Kind -ne 'read' -and [string]::IsNullOrWhiteSpace($wfRepSpec.Confirm)) { Write-Host "  [ERRO] Reparo $wfRepNome`: ação '$($wfRepSpec.Kind)' sem texto de confirmação" -ForegroundColor Red; $wbErrors++ }
+            try { [scriptblock]::Create($wfRepSpec.Command) | Out-Null } catch { Write-Host "  [ERRO] Reparo $wfRepNome`: comando não compila: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++ }
+            # O comando é o nome de uma função do próprio programa: se ela não existir, o botão só
+            # falharia no clique de quem estivesse com o problema que ele conserta.
+            $wfRepFuncao = ([string]$wfRepSpec.Command -split '\s+')[0]
+            if (-not (Get-Command $wfRepFuncao -ErrorAction SilentlyContinue)) { Write-Host "  [ERRO] Reparo $wfRepNome`: função '$wfRepFuncao' não existe" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepSpec.Requires -and -not ($wfRepSpec.Requires -is [string])) { Write-Host "  [ERRO] Reparo $wfRepNome`: Requires deveria ser texto" -ForegroundColor Red; $wbErrors++ }
+            # Nome inédito por linha: o nome do arquivo de saída tem os segundos, então uma simulação
+            # que gravasse com o nome do comando poderia sobrescrever um arquivo do mesmo segundo e a
+            # contagem não mudaria.
+            $wfRepSeco = Invoke-WinForgeCommandCore -Spec $wfRepSpec -Name "SimulacaoRep$wfRepNome" -Component Repair -Prefix repair -DryRun
+            if (-not ([string]$wfRepSeco.Text).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Reparo $wfRepNome`: -DryRun deveria devolver '[simulação] <comando>', veio '$([string]$wfRepSeco.Text)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfRepSeco.Text -notmatch [regex]::Escape([string]$wfRepSpec.Command)) { Write-Host "  [ERRO] Reparo $wfRepNome`: -DryRun não trouxe o texto do comando" -ForegroundColor Red; $wbErrors++ }
+            if ($null -ne $wfRepSeco.Path) { Write-Host "  [ERRO] Reparo $wfRepNome`: -DryRun não pode devolver caminho de arquivo (veio '$($wfRepSeco.Path)')" -ForegroundColor Red; $wbErrors++ }
+            $wfRepPorTipo[[string]$wfRepSpec.Kind] = 1 + [int]$wfRepPorTipo[[string]$wfRepSpec.Kind]
+        }
+        $wfRepDepois = @(Get-ChildItem -LiteralPath $wfRepDir -Filter 'repair-*.txt' -ErrorAction SilentlyContinue).Count
+        if ($wfRepDepois -ne $wfRepAntes) { Write-Host "  [ERRO] Reparo: -DryRun gravou arquivo na pasta de logs ($wfRepAntes -> $wfRepDepois)" -ForegroundColor Red; $wbErrors++ }
+        $wfRepDesconhecido = $false
+        try { Get-WinForgeRepairCommand -Name 'NaoExisteEsteComando' | Out-Null } catch { $wfRepDesconhecido = $true }
+        if (-not $wfRepDesconhecido) { Write-Host "  [ERRO] Reparo: nome desconhecido deveria lançar" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (simulação): $($wfRepNomes.Count) comando(s) - $(@($wfRepPorTipo.Keys | Sort-Object | ForEach-Object { "$_=$($wfRepPorTipo[$_])" }) -join ', ') - sem rodar nada e sem gravar arquivo"
+    } catch {
+        Write-Host "  [ERRO] Reparo (simulação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Despacho: nesta etapa só leitura vai para o runspace, e com -NoUI nem isso. O SelfTest roda sem
+    # ninguém na frente - se um destes botões despachasse aqui, o build repararia a máquina de quem
+    # compila (ou abriria uma janela num processo sem laço de mensagens).
+    try {
+        $wfRepTravaAntes = $sync.CommandRunning
+        foreach ($wfRepNome in $wfRepNomes) {
+            $wfRepDec = Invoke-WinForgeRepairCommand -Name $wfRepNome -NoUI
+            if ($null -eq $wfRepDec) { Write-Host "  [ERRO] Reparo $wfRepNome`: -NoUI deveria devolver a decisão" -ForegroundColor Red; $wbErrors++; continue }
+            if ($wfRepDec.Dispatched) { Write-Host "  [ERRO] Reparo $wfRepNome`: -NoUI não pode despachar nada" -ForegroundColor Red; $wbErrors++ }
+            if ([string]::IsNullOrWhiteSpace($wfRepDec.Reason)) { Write-Host "  [ERRO] Reparo $wfRepNome`: -NoUI sem motivo da recusa" -ForegroundColor Red; $wbErrors++ }
+            $wfRepEsperado = if ([string]$wfRepDec.Kind -eq 'read') { 'NoUI' } else { 'confirmação' }
+            if ([string]$wfRepDec.Reason -ne $wfRepEsperado) { Write-Host "  [ERRO] Reparo $wfRepNome`: motivo '$($wfRepDec.Reason)', esperado '$wfRepEsperado'" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfRepDecRuim = Invoke-WinForgeRepairCommand -Name 'NaoExisteEsteComando' -NoUI
+        if ($wfRepDecRuim.Dispatched -or [string]$wfRepDecRuim.Reason -ne 'desconhecido') { Write-Host "  [ERRO] Reparo: nome desconhecido deveria recusar com motivo 'desconhecido'" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.CommandRunning -ne $wfRepTravaAntes) { Write-Host "  [ERRO] Reparo: a trava de comando em andamento mudou sem nenhum despacho" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (despacho): $($wfRepNomes.Count) botão(ões) recusados com -NoUI, nada rodou"
+    } catch {
+        Write-Host "  [ERRO] Reparo (despacho): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # As três leituras rodam DE VERDADE nesta máquina: são o conteúdo dos únicos botões que esta
+    # etapa despacha, e uma função que devolve texto vazio (ou lança sem elevação) seria uma janela
+    # em branco na cara de quem clicou. Sem admin as partes que exigem elevação viram 'n/d' - o texto
+    # continua saindo.
+    foreach ($wfRepPar in @(@('Get-WinForgeSecurityStatus','segurança'), @('Get-WinForgeSmartReport','discos'), @('Get-WinForgeDotNetStatus','.NET'))) {
+        try {
+            $wfRepTexto = [string](& $wfRepPar[0])
+            if ([string]::IsNullOrWhiteSpace($wfRepTexto)) { Write-Host "  [ERRO] Reparo (leitura $($wfRepPar[1])): $($wfRepPar[0]) devolveu texto vazio" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Reparo (leitura $($wfRepPar[1])): $($wfRepTexto.Length) caractere(s), $(@($wfRepTexto -split "`r?`n").Count) linha(s)" }
+        } catch {
+            Write-Host "  [ERRO] Reparo (leitura $($wfRepPar[1])): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    # Uma linha da tabela rodando de verdade pelo núcleo, de ponta a ponta: é o que prova que o
+    # invólucro do reparo amarra 'Repair'/'repair' ao núcleo e que o arquivo de saída sai com o
+    # prefixo certo. Só SecurityStatus: é leitura pura e responde em milissegundos (o chkdsk /scan,
+    # que também é leitura, levaria minutos e não cabe num build).
+    try {
+        $wfRepReal = Invoke-WinForgeRepairCommandCore -Name SecurityStatus
+        if ([string]::IsNullOrWhiteSpace($wfRepReal.Text)) { Write-Host "  [ERRO] Reparo (execução): SecurityStatus voltou sem texto" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfRepReal.Text -match 'Código de saída') { Write-Host "  [ERRO] Reparo (execução): SecurityStatus não é executável e não pode trazer linha de código de saída" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfRepReal.Path -or -not (Test-Path -LiteralPath $wfRepReal.Path)) { Write-Host "  [ERRO] Reparo (execução): SecurityStatus não gravou o arquivo ('$($wfRepReal.Path)')" -ForegroundColor Red; $wbErrors++ }
+        elseif ((Split-Path -Leaf $wfRepReal.Path) -notlike 'repair-*') { Write-Host "  [ERRO] Reparo (execução): arquivo fora do prefixo 'repair' ($(Split-Path -Leaf $wfRepReal.Path))" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (execução): SecurityStatus -> $(([string]$wfRepReal.Text).Length) caractere(s) em $(Split-Path -Leaf $wfRepReal.Path)" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (execução): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # winget fora do PATH é o caso normal logo depois de um logon novo, e é por isso que a busca não
+    # é um Get-Command: o que ela não pode é lançar - nem devolver um caminho que não existe, que
+    # viraria "o sistema não pode encontrar o arquivo" dentro do runspace, longe do botão.
+    try {
+        $wfRepWinget = Get-WinForgeWingetPath
+        if ($wfRepWinget -and -not (Test-Path -LiteralPath $wfRepWinget -PathType Leaf)) { Write-Host "  [ERRO] Reparo (winget): caminho devolvido não existe ('$wfRepWinget')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (winget): $(if ($wfRepWinget) { $wfRepWinget } else { 'não encontrado nesta máquina' })"
+    } catch {
+        Write-Host "  [ERRO] Reparo (winget): Get-WinForgeWingetPath lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
+    }
+    # Versão de pacote Appx é TEXTO: '1.9.0.0' é maior que '1.25.0.0' em ordem alfabética e menor em
+    # ordem de versão. Quem escolhe errado aponta o winget para uma pasta de instalação antiga que
+    # pode nem existir mais - por isso a escolha é uma função pura, testada com a lista sintética.
+    try {
+        $wfRepPacotes = @(
+            [pscustomobject]@{ Version = '1.9.0.0';  InstallLocation = 'C:\antigo' },
+            [pscustomobject]@{ Version = '1.25.0.0'; InstallLocation = 'C:\novo' },
+            [pscustomobject]@{ Version = '1.10.0.0'; InstallLocation = 'C:\meio' }
+        )
+        $wfRepNovo = Select-WinForgeNewestPackage -Package $wfRepPacotes
+        if ([string]$wfRepNovo.Version -ne '1.25.0.0') { Write-Host "  [ERRO] Reparo (versão): a mais nova de 1.9.0.0/1.25.0.0/1.10.0.0 deveria ser 1.25.0.0, veio '$($wfRepNovo.Version)'" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne (Select-WinForgeNewestPackage -Package @())) { Write-Host "  [ERRO] Reparo (versão): lista vazia deveria devolver nulo" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (versão): 1.25.0.0 escolhido sobre 1.10.0.0 e 1.9.0.0 (ordem de versão, não de texto)" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (versão): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Confirmação: o texto que aparece na caixa antes de mexer na máquina. Ele nasce do título e da
+    # descrição da config - a mesma frase que o usuário já leu no botão -, e termina perguntando.
+    # Uma ação que muda o sistema sem o título na pergunta seria uma caixa dizendo "Continuar?" sem
+    # dizer continuar o quê.
+    try {
+        $wfRepConfOk = 0
+        foreach ($wfRepNome in $wfRepNomes) {
+            $wfRepSpec = Get-WinForgeRepairCommand -Name $wfRepNome
+            if ([string]$wfRepSpec.Kind -eq 'read') { continue }
+            $wfRepConf = [string](Get-WinForgeRepairConfirmText -Name $wfRepNome)
+            if ($wfRepConf -notmatch [regex]::Escape([string]$wfRepSpec.Title)) { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: o texto não traz o título" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepConf -notmatch 'Continuar') { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: o texto não pergunta 'Continuar'" -ForegroundColor Red; $wbErrors++ }
+            if (([regex]::Matches($wfRepConf, 'Continuar')).Count -ne 1) { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: 'Continuar' aparece mais de uma vez" -ForegroundColor Red; $wbErrors++ }
+            if ($wfRepConf.Length -lt 120) { Write-Host "  [ERRO] Reparo (confirmação) $wfRepNome`: texto curto demais ($($wfRepConf.Length) caractere(s)) para explicar o que muda" -ForegroundColor Red; $wbErrors++ }
+            $wfRepConfOk++
+        }
+        # A descrição da caixa TEM de ser a mesma frase que o usuário lê ao lado do botão na aba
+        # Config. Sem esta conferência, alguém trocaria a fonte por um texto escrito só para a caixa e
+        # os dois envelheceriam separados - a aba prometendo uma coisa e a confirmação outra.
+        $wfRepDescWmi = [string]$sync.configs.feature.WPFWFRepWmiRepair.Description
+        if ([string]::IsNullOrWhiteSpace($wfRepDescWmi)) { Write-Host "  [ERRO] Reparo (confirmação): WPFWFRepWmiRepair sem Description na config" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string](Get-WinForgeRepairConfirmText -Name WmiRepair) -notmatch [regex]::Escape($wfRepDescWmi.Trim())) { Write-Host "  [ERRO] Reparo (confirmação): o texto de WmiRepair não veio da Description da config" -ForegroundColor Red; $wbErrors++ }
+        # A caixa é de Sim/Não com ícone de aviso: um "OK" não é confirmação, é aviso, e o botão
+        # rodaria de qualquer jeito.
+        $wfRepFonte = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        if ($wfRepFonte -notmatch 'YesNo') { Write-Host "  [ERRO] Reparo (confirmação): a caixa deveria ser YesNo" -ForegroundColor Red; $wbErrors++ }
+        # Dona da janela: sem owner a caixa pode nascer ATRÁS do programa, e uma confirmação escondida
+        # é uma confirmação que alguém fecha no susto para achar o que sumiu.
+        # Não basta o texto '$sync.Form' aparecer na função: ele tem de ser a CONDIÇÃO do ramo que
+        # chama a caixa E o primeiro argumento dela. Um 'if ($false)' na frente deixaria a linha lá,
+        # bonita e morta.
+        if ($wfRepFonte -notmatch '(?s)if \(\$sync\.Form\).{0,200}?MessageBox\]::Show\(\s*\$sync\.Form') { Write-Host "  [ERRO] Reparo (confirmação): a caixa deveria ter `$sync.Form como dona quando a janela existe" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (confirmação): $wfRepConfOk texto(s) com título, descrição da config e uma pergunta"
+    } catch {
+        Write-Host "  [ERRO] Reparo (confirmação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # O instalador do Visual C++ em simulação: a lista de ids sai sem o winget rodar. É o único jeito
+    # de o build conferir a lista (as duas arquiteturas de cada ano, na ordem) sem instalar doze
+    # pacotes na máquina de quem compila.
+    try {
+        $wfRepIdsEsperados = @(
+            'Microsoft.VCRedist.2005.x86', 'Microsoft.VCRedist.2005.x64',
+            'Microsoft.VCRedist.2008.x86', 'Microsoft.VCRedist.2008.x64',
+            'Microsoft.VCRedist.2010.x86', 'Microsoft.VCRedist.2010.x64',
+            'Microsoft.VCRedist.2012.x86', 'Microsoft.VCRedist.2012.x64',
+            'Microsoft.VCRedist.2013.x86', 'Microsoft.VCRedist.2013.x64',
+            'Microsoft.VCRedist.2015+.x86', 'Microsoft.VCRedist.2015+.x64'
+        )
+        $wfRepIds = @(Install-WinForgeVcRedist -DryRun)
+        if ($wfRepIds.Count -ne $wfRepIdsEsperados.Count) { Write-Host "  [ERRO] Reparo (VcRedist simulado): $($wfRepIds.Count) id(s), esperado $($wfRepIdsEsperados.Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif (($wfRepIds -join '|') -ne ($wfRepIdsEsperados -join '|')) { Write-Host "  [ERRO] Reparo (VcRedist simulado): lista fora de ordem ou diferente: $($wfRepIds -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (VcRedist simulado): $($wfRepIds.Count) id(s) na ordem, sem chamar o winget" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (VcRedist simulado): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # DirectX: o WinForge NÃO baixa executável. O botão abre a página oficial da Microsoft e quem
+    # baixa e roda o instalador web é o usuário, no navegador, com o token dele. A versão anterior
+    # baixava o dxwebsetup.exe para %TEMP% (gravável por integridade média) e o abria elevado, com
+    # uma janela entre a conferência da assinatura e o Start-Process.
+    #
+    # A linha é 'read' e mesmo assim NUNCA roda no SelfTest: 'OpensExternal' marca isso, e o build
+    # confere o marcador em vez de abrir um navegador na máquina de quem compila.
+    try {
+        $wfRepDx = Get-WinForgeRepairCommand -Name DirectX
+        if ([string]$wfRepDx.Kind -ne 'read') { Write-Host "  [ERRO] Reparo (DirectX): abrir uma página é leitura, veio Kind '$($wfRepDx.Kind)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfRepDx.OpensExternal) { Write-Host "  [ERRO] Reparo (DirectX): a linha deveria estar marcada com OpensExternal" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfRepDx.Command -notmatch "^Start-Process 'https://www\.microsoft\.com/download/details\.aspx\?id=35'$") { Write-Host "  [ERRO] Reparo (DirectX): o comando deveria ser um Start-Process da página oficial, veio '$($wfRepDx.Command)'" -ForegroundColor Red; $wbErrors++ }
+        # Nenhuma função de download sobrou no programa: se alguma voltar, este teste cai.
+        foreach ($wfRepDxMorta in @('Install-WinForgeDirectX', 'Test-WinForgeMicrosoftSignature', 'Test-WinForgeMicrosoftSigner', 'Split-WinForgeCertificateSubject')) {
+            if (Get-Command $wfRepDxMorta -ErrorAction SilentlyContinue) { Write-Host "  [ERRO] Reparo (DirectX): '$wfRepDxMorta' voltou ao programa - o WinForge não baixa executável" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o marcador tem de valer de verdade: nenhuma linha com OpensExternal pode estar na lista
+        # que o SelfTest roda de ponta a ponta.
+        $wfRepExecutadas = @('SecurityStatus')
+        foreach ($wfRepNome in $wfRepExecutadas) {
+            if ((Get-WinForgeRepairCommand -Name $wfRepNome).OpensExternal) { Write-Host "  [ERRO] Reparo (DirectX): '$wfRepNome' abre coisa fora do WinForge e não pode rodar no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Reparo (DirectX): botão de leitura que abre a página oficial, sem download e sem execução no SelfTest"
+    } catch {
+        Write-Host "  [ERRO] Reparo (DirectX): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Confiança do pacote Appx: é ela que decide de qual pasta sai o winget.exe que o WinForge roda
+    # ELEVADO. '-Name Microsoft.DesktopAppInstaller' filtra pela identidade do manifesto, que quem
+    # instala escolhe - um pacote sideloaded com esse nome e versão 99.0.0.0 vencia a ordenação e
+    # apontava para uma pasta gravável por integridade média. Os casos são sintéticos de propósito:
+    # a prova não pode depender do que está instalado em quem compila.
+    try {
+        # A raiz sai de [Environment]::GetFolderPath(ProgramFiles), como na própria porteira:
+        # %ProgramFiles% vem do bloco de ambiente do usuário e é gravável em integridade média.
+        $wfRepPfRaiz = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+        # Desde que a varredura de reanálise passou a RECUSAR o que não consegue ler, um caminho
+        # inventado dentro de WindowsApps deixou de servir como caso positivo - ele é agora um caso
+        # negativo, e está na tabela como tal. Os positivos precisam de uma pasta que exista de
+        # verdade sob WindowsApps, e a única que dá para descobrir sem listar a pasta (a listagem é
+        # negada até para administrador) é a do pacote realmente instalado. Sem App Installer na
+        # máquina, os quatro casos que dependem dela ficam de fora, com aviso - as três recusas que
+        # não dependem de pasta continuam valendo.
+        $wfRepBoaPasta = $null
+        try {
+            $wfRepBoaPasta = [string](@(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) -and (Test-Path -LiteralPath ([string]$_.InstallLocation) -PathType Container) } |
+                Select-Object -First 1).InstallLocation
+        } catch { $wfRepBoaPasta = $null }
+        $wfRepPastaInventada = Join-Path $wfRepPfRaiz 'WindowsApps\Microsoft.DesktopAppInstaller_1.25.0.0_x64__8wekyb3d8bbwe'
+        $wfRepConfCasos = @(
+            @('pasta inventada',      @{ PublisherId = '8wekyb3d8bbwe'; SignatureKind = 'Store';     InstallLocation = $wfRepPastaInventada }, $false),
+            @('pasta do usuário',     @{ PublisherId = '8wekyb3d8bbwe'; SignatureKind = 'Store';     InstallLocation = (Join-Path $env:LocalAppData 'Microsoft\WindowsApps') }, $false),
+            @('sem pasta',            @{ PublisherId = '8wekyb3d8bbwe'; SignatureKind = 'Store';     InstallLocation = '' }, $false),
+            @('nulo',                 $null, $false)
+        )
+        if ([string]::IsNullOrWhiteSpace($wfRepBoaPasta)) {
+            Write-Host "  Reparo (pacote confiável): sem Microsoft.DesktopAppInstaller instalado - os casos com pasta real ficaram de fora"
+        } else {
+            $wfRepConfCasos = @(
+                @('Store em WindowsApps', @{ PublisherId = '8wekyb3d8bbwe'; SignatureKind = 'Store';     InstallLocation = $wfRepBoaPasta }, $true),
+                @('do sistema',           @{ PublisherId = '8wekyb3d8bbwe'; SignatureKind = 'System';    InstallLocation = $wfRepBoaPasta }, $true),
+                @('outro editor',         @{ PublisherId = 'abcdefghijklm'; SignatureKind = 'Store';     InstallLocation = $wfRepBoaPasta }, $false),
+                @('modo desenvolvedor',   @{ PublisherId = '8wekyb3d8bbwe'; SignatureKind = 'Developer'; InstallLocation = $wfRepBoaPasta }, $false)
+            ) + $wfRepConfCasos
+        }
+        $wfRepConfOkAppx = 0
+        foreach ($wfRepConfCaso in $wfRepConfCasos) {
+            $wfRepConfObj = if ($null -eq $wfRepConfCaso[1]) { $null } else { [pscustomobject]$wfRepConfCaso[1] }
+            $wfRepConfVeio = [bool](Test-WinForgeTrustedAppxPackage -Package $wfRepConfObj)
+            if ($wfRepConfVeio -ne [bool]$wfRepConfCaso[2]) { Write-Host "  [ERRO] Reparo (pacote confiável): '$($wfRepConfCaso[0])' deveria dar $($wfRepConfCaso[2]), deu $wfRepConfVeio" -ForegroundColor Red; $wbErrors++ }
+            else { $wfRepConfOkAppx++ }
+        }
+        # A porteira tem de estar no caminho, e não só existir: quem escolhe o winget e quem escolhe
+        # o manifesto a registrar chamam a mesma função.
+        foreach ($wfRepConfFn in @('Get-WinForgeWingetPath', 'Invoke-WinForgeStoreReregister')) {
+            if ([string](Get-Command $wfRepConfFn).ScriptBlock -notmatch 'Test-WinForgeTrustedAppxPackage') { Write-Host "  [ERRO] Reparo (pacote confiável): '$wfRepConfFn' não passa pelo filtro de confiança" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o PATH está fora: um alias de execução em %LOCALAPPDATA%\Microsoft\WindowsApps é
+        # gravável por integridade média, e o botão do Visual C++ o rodaria com token de admin.
+        if ([string](Get-Command Get-WinForgeWingetPath).ScriptBlock -match "Get-Command\s+'?winget[^']*'?\s+-ErrorAction") { Write-Host "  [ERRO] Reparo (pacote confiável): Get-WinForgeWingetPath voltou a resolver o winget pelo PATH" -ForegroundColor Red; $wbErrors++ }
+        # A raiz de WindowsApps também não pode sair de %ProgramFiles%: é variável do bloco do
+        # usuário, gravável em integridade média, e com ela apontando para uma pasta do perfil o
+        # "prefixo de WindowsApps" viraria um caminho que qualquer um escreve. Com a variável
+        # plantada, o pacote bom tem de continuar passando - se a função voltar a lê-la, ele é
+        # recusado e a prova cai.
+        if (-not [string]::IsNullOrWhiteSpace($wfRepBoaPasta)) {
+            $wfRepPfAntes = $env:ProgramFiles
+            $wfRepPfVeio = $null
+            try {
+                $env:ProgramFiles = 'C:\WinForge-ProgramFiles-Plantado'
+                $wfRepPfVeio = [bool](Test-WinForgeTrustedAppxPackage -Package ([pscustomobject]@{ PublisherId = '8wekyb3d8bbwe'; SignatureKind = 'Store'; InstallLocation = $wfRepBoaPasta }))
+            } finally {
+                if ($null -eq $wfRepPfAntes) { Remove-Item -LiteralPath 'Env:\ProgramFiles' -ErrorAction SilentlyContinue } else { $env:ProgramFiles = $wfRepPfAntes }
+            }
+            if (-not $wfRepPfVeio) { Write-Host "  [ERRO] Reparo (pacote confiável): com %ProgramFiles% plantado o pacote bom foi recusado - a raiz tem de sair de [Environment]::GetFolderPath" -ForegroundColor Red; $wbErrors++ }
+            if ($env:ProgramFiles -ne $wfRepPfAntes) { Write-Host "  [ERRO] Reparo (pacote confiável): %ProgramFiles% não foi devolvida depois da prova" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Reparo (pacote confiável): $wfRepConfOkAppx de $($wfRepConfCasos.Count) caso(s) - só editor 8wekyb3d8bbwe, assinatura Store/System e pasta EXISTENTE em WindowsApps passam"
+    } catch {
+        Write-Host "  [ERRO] Reparo (pacote confiável): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Executável do sistema por caminho completo. O WinForge roda SEMPRE elevado: chamar 'chkdsk.exe'
+    # pelo nome deixa a escolha do binário com o PATH, e um PATH de sistema editado por instalador
+    # (que prepende a própria pasta) faz um executável de terceiro rodar com token de administrador.
+    # O winmgmt tem uma armadilha a mais: ele mora em System32\wbem, e sem essa pasta no PATH a
+    # chamada por nome nem encontra nada.
+    try {
+        $wfExeEsperado = Join-Path ([Environment]::SystemDirectory) 'fsutil.exe'
+        if ((Get-WinForgeSystemExe -Name 'fsutil.exe') -ne $wfExeEsperado) { Write-Host "  [ERRO] Executáveis: Get-WinForgeSystemExe -Name fsutil.exe deveria dar '$wfExeEsperado', deu '$(Get-WinForgeSystemExe -Name 'fsutil.exe')'" -ForegroundColor Red; $wbErrors++ }
+        # E a âncora não pode ser %SystemRoot%: essa variável nasce do bloco de ambiente do USUÁRIO
+        # (HKCU\Environment), que qualquer processo de integridade média da conta escreve. Com ela
+        # apontando para uma pasta do perfil, todo executável de sistema do WinForge - que roda
+        # ELEVADO - sairia de lá. A prova planta o valor por um instante e o devolve no finally.
+        $wfExeRootAntes = $env:SystemRoot
+        $wfExeSob = $null
+        try {
+            $env:SystemRoot = 'C:\WinForge-SystemRoot-Plantado'
+            $wfExeSob = Get-WinForgeSystemExe -Name 'fsutil.exe'
+        } finally {
+            if ($null -eq $wfExeRootAntes) { Remove-Item -LiteralPath 'Env:\SystemRoot' -ErrorAction SilentlyContinue } else { $env:SystemRoot = $wfExeRootAntes }
+        }
+        if ($wfExeSob -ne $wfExeEsperado) { Write-Host "  [ERRO] Executáveis: com %SystemRoot% plantado o caminho virou '$wfExeSob' - a âncora tem de ser [Environment]::SystemDirectory" -ForegroundColor Red; $wbErrors++ }
+        if ($env:SystemRoot -ne $wfExeRootAntes) { Write-Host "  [ERRO] Executáveis: %SystemRoot% não foi devolvida depois da prova" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeSystemExe -Name 'wbem\winmgmt.exe') -ne (Join-Path ([Environment]::SystemDirectory) 'wbem\winmgmt.exe')) { Write-Host "  [ERRO] Executáveis: o winmgmt deveria sair em System32\wbem" -ForegroundColor Red; $wbErrors++ }
+        if (-not [System.IO.Path]::IsPathRooted((Get-WinForgeSystemExe -Name 'chkdsk.exe'))) { Write-Host "  [ERRO] Executáveis: Get-WinForgeSystemExe devolveu caminho relativo" -ForegroundColor Red; $wbErrors++ }
+        # A exigência por caminho absoluto é conferida com Test-Path, não com Get-Command.
+        if (-not (Test-WinForgeCommandRequirement -Requires (Get-WinForgeSystemExe -Name 'fsutil.exe'))) { Write-Host "  [ERRO] Executáveis: o fsutil por caminho completo deveria existir nesta máquina" -ForegroundColor Red; $wbErrors++ }
+        if (Test-WinForgeCommandRequirement -Requires (Join-Path ([Environment]::SystemDirectory) 'nao-existe-este-executavel.exe')) { Write-Host "  [ERRO] Executáveis: caminho absoluto inexistente deveria ser recusado" -ForegroundColor Red; $wbErrors++ }
+        # Nenhum nome solto sobrou no programa inteiro: todo -FilePath literal é caminho absoluto, e
+        # toda linha 'Native' da tabela do servidor chama o executável por caminho absoluto.
+        $wfExeFonte = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfExeFonte = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfExeFonte = '' }
+        if ([string]::IsNullOrWhiteSpace($wfExeFonte)) {
+            Write-Host "  [ERRO] Executáveis: o próprio arquivo do WinForge não pôde ser lido para a conferência de -FilePath" -ForegroundColor Red; $wbErrors++
+        } else {
+            $wfExeSoltos = @()
+            foreach ($wfExeM in [regex]::Matches($wfExeFonte, "-FilePath\s+'([^']+)'")) {
+                $wfExeVal = [string]$wfExeM.Groups[1].Value
+                if (-not [System.IO.Path]::IsPathRooted($wfExeVal)) { $wfExeSoltos += $wfExeVal }
+            }
+            if ($wfExeSoltos.Count) { Write-Host "  [ERRO] Executáveis: -FilePath com nome solto (resolvido pelo PATH): $(@($wfExeSoltos | Sort-Object -Unique) -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Executáveis: $(([regex]::Matches($wfExeFonte, "-FilePath\s+'([^']+)'")).Count) -FilePath literal(is), todos com caminho absoluto" }
+            # A varredura acima só olha uma forma ('-FilePath' com aspas simples), e foi por uma
+            # fresta dessas que o powercfg do perfil sobreviveu: ele era chamado pelo NOME, solto no
+            # meio de um pipeline, e o w32tm ia como texto em "-Command 'w32tm /query /source'" - as
+            # duas formas passavam batido. Aqui a conferência é sobre o CÓDIGO das quatro áreas do
+            # WinForge que chamam ferramenta de sistema, e cobre as três formas.
+            #
+            # O recorte por região é o que torna isso possível: o utilitário de base sobre o qual o
+            # WinForge é construído chama 'netsh' e afins por Start-Process -FilePath "netsh", e esse
+            # arquivo não é nosso para editar. As marcas '#region ===== WinForge - ... =====' e
+            # '#endregion' delimitam exatamente os blocos que saem de src\Engine\winforge. O '?' no
+            # nome de uma região é curinga de -like, para a conferência não depender de o acento
+            # chegar inteiro até aqui.
+            $wfExeRegioes = @('perfil do sistema', 'comandos com janela de sa?da', 'reparo de componentes', 'servidor (IIS/AD)')
+            $wfExeNomes = 'w32tm|powercfg|netsh|fsutil|bcdedit|chkdsk|winmgmt|dcdiag|repadmin'
+            $wfExeLinhas = @($wfExeFonte -split "`r?`n")
+            $wfExeCodigo = @()
+            foreach ($wfExeReg in $wfExeRegioes) {
+                $wfExeIni = -1
+                for ($wfExeI = 0; $wfExeI -lt $wfExeLinhas.Count; $wfExeI++) {
+                    if ($wfExeLinhas[$wfExeI] -like "#region ===== WinForge - $wfExeReg =====") { $wfExeIni = $wfExeI; break }
+                }
+                if ($wfExeIni -lt 0) { Write-Host "  [ERRO] Executáveis: região '$wfExeReg' não encontrada no motor - a varredura de nome solto ficaria cega" -ForegroundColor Red; $wbErrors++; continue }
+                # Comentário de BLOCO fora: os cabeçalhos de ajuda falam de w32tm, netsh e dcdiag o
+                # tempo todo, em prosa. Comentário de linha idem - cortar no '#' só tira texto, então
+                # no máximo esconde uma chamada, nunca inventa uma.
+                $wfExeEmBloco = $false
+                for ($wfExeI = $wfExeIni + 1; $wfExeI -lt $wfExeLinhas.Count; $wfExeI++) {
+                    $wfExeL = [string]$wfExeLinhas[$wfExeI]
+                    if ($wfExeL -eq '#endregion') { break }
+                    if ($wfExeEmBloco) {
+                        $wfExeFim = $wfExeL.IndexOf('#>')
+                        if ($wfExeFim -lt 0) { continue }
+                        $wfExeL = $wfExeL.Substring($wfExeFim + 2)
+                        $wfExeEmBloco = $false
+                    }
+                    while ($true) {
+                        $wfExeAb = $wfExeL.IndexOf('<#')
+                        if ($wfExeAb -lt 0) { break }
+                        $wfExeFim = $wfExeL.IndexOf('#>', $wfExeAb + 2)
+                        if ($wfExeFim -lt 0) { $wfExeL = $wfExeL.Substring(0, $wfExeAb); $wfExeEmBloco = $true; break }
+                        $wfExeL = $wfExeL.Substring(0, $wfExeAb) + $wfExeL.Substring($wfExeFim + 2)
+                    }
+                    $wfExeL = [regex]::Replace($wfExeL, '#.*$', '')
+                    if (-not [string]::IsNullOrWhiteSpace($wfExeL)) { $wfExeCodigo += ,@($wfExeReg, ($wfExeI + 1), $wfExeL) }
+                }
+            }
+            $wfExeAchados = @()
+            foreach ($wfExeItem in $wfExeCodigo) {
+                $wfExeTexto = [string]$wfExeItem[2]
+                # 1. "-Command '<exe> ...'": o texto é COMPILADO, e o nome solto lá dentro volta a
+                #    ser resolvido pelo PATH.
+                foreach ($wfExePadrao in @("-Command\s+'([^']+)'", '-Command\s+"([^"]+)"')) {
+                    foreach ($wfExeM in [regex]::Matches($wfExeTexto, $wfExePadrao)) {
+                        $wfExeVal = ([string]$wfExeM.Groups[1].Value).TrimStart()
+                        if ($wfExeVal -match "^&?\s*'?($wfExeNomes)(\.exe)?'?(\s|$)") { $wfExeAchados += "$($wfExeItem[0]):$($wfExeItem[1]) -Command '$wfExeVal'" }
+                    }
+                }
+                # 2. '-FilePath "..."': a outra aspa, que a varredura do arquivo inteiro não olha.
+                #    "$variavel" fica de fora do padrão - ali o valor não está no texto.
+                foreach ($wfExeM in [regex]::Matches($wfExeTexto, '-FilePath\s+"([^"$]+)"')) {
+                    if (-not [System.IO.Path]::IsPathRooted([string]$wfExeM.Groups[1].Value)) { $wfExeAchados += "$($wfExeItem[0]):$($wfExeItem[1]) -FilePath ""$($wfExeM.Groups[1].Value)""" }
+                }
+                # 3. O executável chamado direto, fora de qualquer literal. Os literais saem antes -
+                #    é neles que moram os '-Name ''powercfg.exe''' de Get-WinForgeSystemExe.
+                $wfExeSem = [regex]::Replace($wfExeTexto, "'[^']*'", ' ')
+                $wfExeSem = [regex]::Replace($wfExeSem, '"[^"]*"', ' ')
+                foreach ($wfExeM in [regex]::Matches($wfExeSem, "(?:^|[\s({|;&=])($wfExeNomes)(\.exe)?(?=\s|\)|$)")) {
+                    $wfExeAchados += "$($wfExeItem[0]):$($wfExeItem[1]) '$($wfExeM.Groups[1].Value)' solto"
+                }
+            }
+            if ($wfExeAchados.Count) {
+                Write-Host "  [ERRO] Executáveis: $($wfExeAchados.Count) chamada(s) de ferramenta de sistema fora de Get-WinForgeSystemExe" -ForegroundColor Red; $wbErrors++
+                foreach ($wfExeA in @($wfExeAchados | Sort-Object -Unique)) { Write-Host "           $wfExeA" -ForegroundColor Red }
+            } else {
+                Write-Host "  Executáveis: $($wfExeCodigo.Count) linha(s) de código em $($wfExeRegioes.Count) região(ões) - nenhum w32tm/powercfg/netsh/fsutil/bcdedit/chkdsk/winmgmt/dcdiag/repadmin fora de Get-WinForgeSystemExe"
+            }
+        }
+        foreach ($wbSrvNome in $wbSrvNomes) {
+            $wbSrvCmd = Get-WinForgeServerCommand -Name $wbSrvNome
+            if (-not $wbSrvCmd.Native) { continue }
+            if ([string]$wbSrvCmd.Requires -and -not [System.IO.Path]::IsPathRooted([string]$wbSrvCmd.Requires)) { Write-Host "  [ERRO] Executáveis: '$wbSrvNome' exige '$($wbSrvCmd.Requires)' pelo PATH" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wbSrvChamada in [regex]::Matches([string]$wbSrvCmd.Command, "&\s+'([^']+)'")) {
+                if (-not [System.IO.Path]::IsPathRooted([string]$wbSrvChamada.Groups[1].Value)) { Write-Host "  [ERRO] Executáveis: '$wbSrvNome' chama '$($wbSrvChamada.Groups[1].Value)' pelo PATH" -ForegroundColor Red; $wbErrors++ }
+            }
+            if ([string]$wbSrvCmd.Command -notmatch "&\s+'") { Write-Host "  [ERRO] Executáveis: '$wbSrvNome' é Native e não chama executável por caminho entre aspas" -ForegroundColor Red; $wbErrors++ }
+        }
+    } catch {
+        Write-Host "  [ERRO] Executáveis: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Recusa em modo SelfTest. Esta parte nasceu de um estrago real: uma chamada de teste a um
+    # ajudante que ainda não tinha bloco param() engoliu o '-DryRun' em $args, e o instalador web do
+    # DirectX foi baixado e ABERTO na máquina de quem estava compilando - com o winget instalando os
+    # doze redistribuíveis na mesma rodada. Uma função PowerShell sem param() aceita qualquer switch
+    # em silêncio. A resposta tem duas camadas, e as duas são provadas aqui: TODA função que escreve
+    # declara -DryRun de verdade, e TODA função que escreve recusa quando $sync.SelfTest está ligado.
+    $wfRepEscrevem = @(
+        'Invoke-WinForgeWmiRepair', 'Invoke-WinForgeStoreReregister', 'Enable-WinForgeDotNet35',
+        'Install-WinForgeVcRedist', 'Install-WinForgePowerShell7',
+        'Invoke-WinForgeChkdskSchedule', 'Invoke-WinForgeMemoryDiagSchedule'
+    )
+    try {
+        if (-not $sync.SelfTest) { Write-Host "  [ERRO] Reparo (trava): `$sync.SelfTest deveria estar ligado dentro do SelfTest" -ForegroundColor Red; $wbErrors++ }
+        $wfRepSemParam = @($wfRepEscrevem | Where-Object {
+            $wfRepInfo = Get-Command $_ -ErrorAction SilentlyContinue
+            ($null -eq $wfRepInfo) -or (-not $wfRepInfo.Parameters.ContainsKey('DryRun'))
+        })
+        if ($wfRepSemParam.Count) { Write-Host "  [ERRO] Reparo (trava): função que escreve sem bloco param() com -DryRun: $($wfRepSemParam -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        # Com -DryRun elas continuam respondendo DENTRO do SelfTest: a trava vem depois do retorno da
+        # simulação de propósito, senão o próprio SelfTest não conseguiria exercitar as tabelas.
+        $wfRepSecoOk = 0
+        foreach ($wfRepFn in $wfRepEscrevem) {
+            try {
+                $wfRepSecoR = & $wfRepFn -DryRun
+                if ($null -eq $wfRepSecoR) { Write-Host "  [ERRO] Reparo (trava): $wfRepFn -DryRun não devolveu nada" -ForegroundColor Red; $wbErrors++ }
+                else { $wfRepSecoOk++ }
+            } catch {
+                Write-Host "  [ERRO] Reparo (trava): $wfRepFn -DryRun lançou '$($_.Exception.Message)' - a simulação tem de funcionar em SelfTest" -ForegroundColor Red; $wbErrors++
+            }
+        }
+        if ($wfRepSecoOk -ne $wfRepEscrevem.Count) { Write-Host "  [ERRO] Reparo (trava): $wfRepSecoOk de $($wfRepEscrevem.Count) simulação(ões) responderam" -ForegroundColor Red; $wbErrors++ }
+        # A trava direta, na função compartilhada: a mensagem tem de dizer QUEM foi recusado.
+        $wfRepAssert = $null
+        try { Assert-WinForgeNotSelfTest -Name 'FuncaoDeTeste'; } catch { $wfRepAssert = [string]$_.Exception.Message }
+        if ($null -eq $wfRepAssert) { Write-Host "  [ERRO] Reparo (trava): Assert-WinForgeNotSelfTest não recusou com `$sync.SelfTest ligado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepAssert -notmatch 'SelfTest' -or $wfRepAssert -notmatch 'FuncaoDeTeste') { Write-Host "  [ERRO] Reparo (trava): mensagem sem o nome da função ou sem 'SelfTest': '$wfRepAssert'" -ForegroundColor Red; $wbErrors++ }
+        # O chkdsk é o caso que mais dói: não existe 'fsutil dirty clear', e um bit ligado por engano
+        # faz o Windows verificar o disco em TODA reinicialização até o autochk se dar por satisfeito.
+        # Por isso a prova é nele - e o estado do volume antes e depois tem de ser o mesmo. A leitura
+        # ('fsutil dirty query') costuma exigir elevação; sem ela, a prova fica só na recusa.
+        $wfRepVolume = if ([string]::IsNullOrWhiteSpace($env:SystemDrive)) { 'C:' } else { $env:SystemDrive }
+        $wfRepSujoAntes = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'fsutil.exe') -Arguments @('dirty', 'query', $wfRepVolume)
+        $wfRepRecusa = $null
+        try { Invoke-WinForgeChkdskSchedule | Out-Null } catch { $wfRepRecusa = [string]$_.Exception.Message }
+        if ($null -eq $wfRepRecusa) { Write-Host "  [ERRO] Reparo (trava): Invoke-WinForgeChkdskSchedule sem -DryRun deveria recusar em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Reparo (trava): a recusa do chkdsk não fala em SelfTest: '$wfRepRecusa'" -ForegroundColor Red; $wbErrors++ }
+        $wfRepSujoDepois = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'fsutil.exe') -Arguments @('dirty', 'query', $wfRepVolume)
+        if ([int]$wfRepSujoAntes.ExitCode -eq 0 -and [int]$wfRepSujoDepois.ExitCode -eq 0) {
+            if ([string]$wfRepSujoAntes.Text -ne [string]$wfRepSujoDepois.Text) { Write-Host "  [ERRO] Reparo (trava): o estado de '$wfRepVolume' mudou depois da recusa do chkdsk" -ForegroundColor Red; $wbErrors++ }
+            $wfRepSujoNota = 'estado do volume inalterado'
+        } else {
+            $wfRepSujoNota = "estado do volume não conferível sem elevação (fsutil dirty query saiu com $($wfRepSujoAntes.ExitCode))"
+        }
+        # O funil genérico: linha de tabela com Kind que não é 'read' e sem -DryRun morre aqui, antes
+        # de qualquer coisa. A linha é sintética e o comando é inofensivo de propósito - se a trava
+        # cair, o que roda é um Get-Date, e não um instalador.
+        $wfRepNucleoSpec = @{ Title = 'Trava de SelfTest'; Command = 'Get-Date'; Kind = 'install'; Native = $false; Requires = $null }
+        $wfRepNucleoRecusa = $null
+        try { Invoke-WinForgeCommandCore -Spec $wfRepNucleoSpec -Name 'TravaSelfTest' -Component Repair -Prefix repair | Out-Null } catch { $wfRepNucleoRecusa = [string]$_.Exception.Message }
+        if ($null -eq $wfRepNucleoRecusa) { Write-Host "  [ERRO] Reparo (trava): o núcleo rodou uma linha 'install' em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepNucleoRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Reparo (trava): a recusa do núcleo não fala em SelfTest: '$wfRepNucleoRecusa'" -ForegroundColor Red; $wbErrors++ }
+        # E a mesma linha COM -DryRun continua passando: a trava não pode cegar a simulação.
+        $wfRepNucleoSeco = Invoke-WinForgeCommandCore -Spec $wfRepNucleoSpec -Name 'TravaSelfTestSeco' -Component Repair -Prefix repair -DryRun
+        if (-not ([string]$wfRepNucleoSeco.Text).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Reparo (trava): -DryRun de uma linha 'install' deveria continuar simulando em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        # 'OpensExternal' é o outro lado: a linha é 'read' (abrir uma página não altera nada) e mesmo
+        # assim não pode rodar num build, porque abriria o navegador na máquina de quem compila. Isso
+        # era só uma convenção conferida por fora ("nenhuma linha marcada está na lista que o SelfTest
+        # roda"); agora é recusa no próprio núcleo. A linha é sintética e o comando é um Get-Date - se
+        # a trava cair, o que roda é isso, e não um navegador.
+        $wfRepAbreSpec = @{ Title = 'Trava de OpensExternal'; Command = 'Get-Date'; Kind = 'read'; Native = $false; Requires = $null; OpensExternal = $true }
+        $wfRepAbreRecusa = $null
+        try { Invoke-WinForgeCommandCore -Spec $wfRepAbreSpec -Name 'TravaAbreExterno' -Component Repair -Prefix repair | Out-Null } catch { $wfRepAbreRecusa = [string]$_.Exception.Message }
+        if ($null -eq $wfRepAbreRecusa) { Write-Host "  [ERRO] Reparo (trava): o núcleo rodou uma linha 'OpensExternal' em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepAbreRecusa -notmatch 'SelfTest' -or $wfRepAbreRecusa -notmatch 'OpensExternal') { Write-Host "  [ERRO] Reparo (trava): a recusa de OpensExternal não fala em SelfTest e no marcador: '$wfRepAbreRecusa'" -ForegroundColor Red; $wbErrors++ }
+        $wfRepAbreSeco = Invoke-WinForgeCommandCore -Spec $wfRepAbreSpec -Name 'TravaAbreExternoSeco' -Component Repair -Prefix repair -DryRun
+        if (-not ([string]$wfRepAbreSeco.Text).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Reparo (trava): -DryRun de uma linha 'OpensExternal' deveria continuar simulando em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        # O clique sem -NoUI também não pode abrir caixa nenhuma durante o SelfTest: não há ninguém
+        # para responder e o build ficaria pendurado. A ordem é conferida na fonte (chamar a função
+        # sem -NoUI aqui abriria a caixa se a trava estivesse quebrada, o que é justamente o risco).
+        $wfRepOrdem = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        $wfRepIdxTrava = $wfRepOrdem.IndexOf('Assert-WinForgeNotSelfTest')
+        $wfRepIdxCaixa = $wfRepOrdem.IndexOf('YesNo')
+        if ($wfRepIdxTrava -lt 0) { Write-Host "  [ERRO] Reparo (trava): Invoke-WinForgeRepairCommand sem a trava de SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfRepIdxCaixa -lt 0 -or $wfRepIdxTrava -gt $wfRepIdxCaixa) { Write-Host "  [ERRO] Reparo (trava): a trava de SelfTest tem de vir ANTES da caixa de confirmação" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (trava): $($wfRepEscrevem.Count) função(ões) com -DryRun e recusando em SelfTest; núcleo recusa 'install' e 'OpensExternal'; $wfRepSujoNota"
+    } catch {
+        Write-Host "  [ERRO] Reparo (trava): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # Leitura de 'winget list': a saída é uma TABELA de largura fixa e o id longo sai cortado na
+    # coluna. Procurar o id inteiro dá "não instalado" para um pacote que está lá, e o botão reinstala
+    # os doze redistribuíveis à toa - minutos de winget para não mudar nada.
+    try {
+        $wfRepWgCasos = @(
+            @('Microsoft.VCRedist.2015+.x64', 0, "Nome    Id                       Versão`r`nMicrosoft Visual C++    Microsoft.VCRedist.2015…  14.40.33810.0", $true),
+            @('Microsoft.VCRedist.2015+.x64', 0, "Nome    Id    Versão`r`nMicrosoft.VCRedist.2015+.x64  14.40.33810.0", $true),
+            @('Microsoft.VCRedist.2005.x86',  0, 'Nenhum pacote instalado encontrado com os critérios de entrada.', $false),
+            @('Microsoft.VCRedist.2005.x86',  1, 'Microsoft.VCRedist.2005.x86', $false),
+            @('Microsoft.PowerShell',         0, '', $false)
+        )
+        $wfRepWgOk = 0
+        foreach ($wfRepWgCaso in $wfRepWgCasos) {
+            $wfRepWgVeio = [bool](Test-WinForgeWingetInstalled -Id $wfRepWgCaso[0] -ExitCode $wfRepWgCaso[1] -Text $wfRepWgCaso[2])
+            if ($wfRepWgVeio -ne [bool]$wfRepWgCaso[3]) { Write-Host "  [ERRO] Reparo (winget list): '$($wfRepWgCaso[0])' código $($wfRepWgCaso[1]) deveria dar $($wfRepWgCaso[3]), deu $wfRepWgVeio" -ForegroundColor Red; $wbErrors++ }
+            else { $wfRepWgOk++ }
+        }
+        # O prefixo usado na busca não pode ser o id inteiro: seria voltar ao caso que quebra.
+        if ((Test-WinForgeWingetInstalled -Id 'Microsoft.VCRedist.2015+.x64' -ExitCode 0 -Text 'Microsoft.VCRedist.2') -ne $true) { Write-Host "  [ERRO] Reparo (winget list): a busca deveria caber nos 20 primeiros caracteres do id" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Reparo (winget list): $wfRepWgOk de $($wfRepWgCasos.Count) leitura(s) - id cortado na coluna conta como instalado, código diferente de 0 não"
+    } catch {
+        Write-Host "  [ERRO] Reparo (winget list): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # A guarda do lookup de Invoke-WPFButton: sem ela o caminho da config chamaria $buttonConfig.function
+    # (inexistente nestas entradas) e o clique morreria antes de chegar ao switch que passa o -Name.
+    try {
+        $wfRepLookup = [string](Get-Command Invoke-WPFButton).ScriptBlock
+        if ($wfRepLookup -notmatch '\$Button -notlike "WPFWFRep\*"') { Write-Host "  [ERRO] Reparo: o lookup de Invoke-WPFButton não exclui as chaves WPFWFRep*" -ForegroundColor Red; $wbErrors++ }
+        $wfRepSemEntrada = @($wfRepNomes | Where-Object { $null -eq $sync.configs.feature."WPFWFRep$_" })
+        if ($wfRepSemEntrada.Count) { Write-Host "  [ERRO] Reparo: sem entrada na config da aba Config: $($wfRepSemEntrada -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        $wfRepComFuncao = @($wfRepNomes | Where-Object { $wfRepEntrada = $sync.configs.feature."WPFWFRep$_"; $wfRepEntrada -and $wfRepEntrada.PSObject.Properties['function'] })
+        if ($wfRepComFuncao.Count) { Write-Host "  [ERRO] Reparo: entradas com chave 'function' morta: $($wfRepComFuncao -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Reparo (lookup): WPFWFRep* fora do caminho da config, despacho pelo switch com -Name" }
+    } catch {
+        Write-Host "  [ERRO] Reparo (lookup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # A janela de saída é montada em código, sem XAML: o -NoShow existe para o SelfTest provar que o
     # TextBox nasce com o texto certo sem abrir nada na tela (ShowDialog aqui travaria o build).
@@ -1625,6 +2210,17 @@ if ($SelfTest) {
             } catch {
                 Write-Host "  [ERRO] montar aba $tab`: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
             }
+        }
+        # Aba Config: os botões de reparo têm de existir DEPOIS de a aba ser montada de verdade. A
+        # trava é sobre o controle na janela, não sobre a config: uma entrada com categoria ou painel
+        # errado continuaria na config e nunca apareceria na tela.
+        try {
+            $wfRepChaves = @($wfRepNomes | ForEach-Object { "WPFWFRep$_" })
+            $wfRepFaltando = @($wfRepChaves | Where-Object { $sync[$_] -isnot [System.Windows.Controls.Button] })
+            if ($wfRepFaltando.Count) { Write-Host "  [ERRO] aba Config (reparo): botão(ões) ausentes: $($wfRepFaltando -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Aba Config (reparo): $($wfRepChaves.Count) botão(ões) na tela" }
+        } catch {
+            Write-Host "  [ERRO] aba Config (reparo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         # Aba Servidor: no cliente ela monta VAZIA (todo item tem platform 'server' e o filtro de
         # compatibilidade esconde tudo) e isso não pode virar exceção - a aba existe na janela em

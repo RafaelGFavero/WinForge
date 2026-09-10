@@ -1,4 +1,4 @@
-#region ===== WinForge - funções adicionais =====
+﻿#region ===== WinForge - funções adicionais =====
 # Todas as funções levam "WinUtilBoost" no nome para serem importadas automaticamente
 # nos runspaces (Initialize-WinUtilRunspacePool importa tudo que casa com 'winutil|WPF').
 
@@ -239,6 +239,12 @@ function Initialize-WinUtilBoostConfigs {
     }
 
     foreach ($p in $sync.configs.wbfeatures.PSObject.Properties) {
+        $sync.configs.feature | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+
+    # Reparo de componentes: mesma aba Config, grupo próprio. Entra depois de wbfeatures porque é a
+    # ordem em que os grupos aparecem na tela.
+    foreach ($p in $sync.configs.wfrepair.PSObject.Properties) {
         $sync.configs.feature | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
     }
 
