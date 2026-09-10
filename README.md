@@ -309,19 +309,29 @@ de máquina, defina antes de rodar:
 - `WINFORGE_SIMULATE_SERVER` com os papéis desejados — por exemplo `iis,ad` para um Windows Server
   com IIS e Active Directory. É o que a segunda rodada do `build.cmd` usa.
 
+Para conferir a interface de verdade, o passeio de QA abre o programa, clica em cada aba com o
+mouse e salva um PNG de cada tela em `dist\screenshots` (fora do git):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\UI-Walkthrough.ps1 -Launch
+```
+
+Precisa de administrador — o script se reabre elevado sozinho — e se recusa a rodar com CS2 ou
+CS:GO aberto, porque o jogo captura o mouse.
+
 ## Estrutura
 
 ```
 src/Engine/         gerador do motor PowerShell/WPF
   base/             cópia intocada do utilitário de origem
   winforge/         blocos de código do WinForge (funções, assets, launcher)
-  config/           tweaks, jogos e presets do WinForge
-  xaml/             trechos de interface (abas Jogos, Diagnóstico e Servidor, com sua navegação)
+  config/           tweaks, jogos, presets e curadoria da lista de aplicativos
+  xaml/             trechos de interface (barra de navegação e abas Jogos, Diagnóstico e Servidor)
   build.ps1         aplica os blocos sobre a base e escreve dist/engine/WinForge.ps1
 src/Launcher/       WinForge.exe (C# net48): splash, elevação e hospedagem do motor
 src/Launcher.Tests/ testes do launcher
 tests/engine/       verificações do motor gerado (marca, mojibake)
-tools/              utilitários de build (geração do ícone)
+tools/              utilitários de build (ícone) e de QA visual (passeio pela interface)
 docs/               changelog e documentação
 ```
 

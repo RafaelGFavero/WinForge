@@ -67,12 +67,11 @@ $repairBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-repair.ps1")
 $serverBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-server.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
-$xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
+$xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
-$xamlDiagNav    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-nav.xml")
 $xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
-$xamlServerNav  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-nav.xml")
 $xamlServerTab  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-tab.xml")
+$appsData       = Read-Lf (Join-Path $PSScriptRoot "config\wf-apps.ps1")
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -260,6 +259,7 @@ $src = Insert-Before $src "`$inputXML = @'" ($serverConfig.TrimEnd() + "`n`n") "
 $src = Insert-Before $src "`$inputXML = @'" ($repairConfig.TrimEnd() + "`n`n") "insert repair config"
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 $src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
+$src = Insert-Before $src "`$inputXML = @'" ($appsData.TrimEnd() + "`n`n") "insert apps data"
 
 # ---------------------------------------------------------------- logo
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
@@ -545,10 +545,25 @@ $src = Replace-Once $src @'
 
 # ---------------------------------------------------------------- aba Jogos: inicialização, navegação, busca
 $src = Replace-Once $src @'
+        "Install" {
+            Initialize-WPFUI -targetGridName "appscategory"
+
+            Initialize-WPFUI -targetGridName "appspanel"
+        }
         "Tweaks" {
             Invoke-WPFUIElements -configVariable $sync.configs.tweaks -targetGridName "tweakspanel" -columncount 2
         }
 '@ @'
+        "Install" {
+            Initialize-WPFUI -targetGridName "appscategory"
+
+            Initialize-WPFUI -targetGridName "appspanel"
+
+            # WinForge: a lista tem centenas de aplicativos em dez grupos. Aberta, ela obriga a
+            # rolar muito antes de achar qualquer coisa - então nasce fechada, com os títulos dos
+            # grupos à mostra.
+            Set-WinForgeInstallCollapsed
+        }
         "Tweaks" {
             Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab @("Jogos","Servidor") -Exclude) -targetGridName "tweakspanel" -columncount 2
         }
@@ -755,19 +770,31 @@ __        __ _         _____
 
 # ---------------------------------------------------------------- mescla das configs + SelfTest
 $src = Replace-Once $src @'
+$sync.configs.applicationsHashtable = @{}
+$sync.configs.applications.PSObject.Properties | ForEach-Object {
+    $sync.configs.applicationsHashtable[$_.Name] = $_.Value
+}
+
 $sync.configs.appxHashtable = @{}
 $sync.configs.appx.PSObject.Properties | ForEach-Object {
     $sync.configs.appxHashtable[$_.Name] = $_.Value
 }
 $sync.preferences.theme = "Auto"
 '@ @'
+# WinForge: mescla tweaks/botões/presets/jogos, marca recursos só do Windows 11 e faz a curadoria
+# da lista de aplicativos. Vem ANTES dos hashtables derivados: applicationsHashtable é a fonte da
+# aba Instalar, então um aplicativo removido depois dele continuaria virando controle na tela.
+Initialize-WinUtilBoostConfigs
+
+$sync.configs.applicationsHashtable = @{}
+$sync.configs.applications.PSObject.Properties | ForEach-Object {
+    $sync.configs.applicationsHashtable[$_.Name] = $_.Value
+}
+
 $sync.configs.appxHashtable = @{}
 $sync.configs.appx.PSObject.Properties | ForEach-Object {
     $sync.configs.appxHashtable[$_.Name] = $_.Value
 }
-
-# WinForge: mescla tweaks/botões/presets/jogos e marca recursos só do Windows 11
-Initialize-WinUtilBoostConfigs
 
 # WinForge: aplica a classificação de risco (Seguro/Cuidado/Removido) em tweaks e presets
 Initialize-WinForgeAudit
@@ -822,6 +849,23 @@ if ($SelfTest) {
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
+    # Aba Instalar: a curadoria de wf-apps.ps1 tem de ter rodado ANTES de applicationsHashtable -
+    # é dele que a aba nasce, então uma chave removida tarde demais volta como controle na tela.
+    $wfApps = @($sync.configs.applications.PSObject.Properties)
+    $wfAppsCategorias = @($wfApps | ForEach-Object { [string]$_.Value.Category } | Sort-Object -Unique)
+    Write-Host "  Aba Instalar: $($wfApps.Count) aplicativo(s) em $($wfAppsCategorias.Count) grupo(s) -> $($wfAppsCategorias -join ', ')"
+    if ($wfApps.Count -ne 137) { Write-Host "  [ERRO] aba Instalar: esperado 137 aplicativos, veio $($wfApps.Count)" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.WinForgeRemovedApps).Count -ne 95) { Write-Host "  [ERRO] aba Instalar: esperado 95 chaves em WinForgeRemovedApps, veio $(@($sync.WinForgeRemovedApps).Count)" -ForegroundColor Red; $wbErrors++ }
+    $wfSobrando = @($sync.WinForgeRemovedApps | Where-Object { $sync.configs.applications.PSObject.Properties[$_] -or $sync.configs.applicationsHashtable.ContainsKey($_) })
+    if ($wfSobrando.Count) { Write-Host "  [ERRO] aba Instalar: aplicativo(s) que deveriam ter saído continuam na lista: $($wfSobrando -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    # Todo grupo na tela tem de sair do mapa (ou de um override) de wf-apps.ps1: uma categoria nova
+    # na base, ou uma linha que sumiu do mapa, apareceria em inglês no meio dos outros.
+    $wfGruposPermitidos = @(@($sync.WinForgeAppCategoryMap.Values) + @($sync.WinForgeAppCategoryOverride.Values) | Sort-Object -Unique)
+    $wfIngles = @($wfAppsCategorias | Where-Object { $_ -notin $wfGruposPermitidos })
+    if ($wfIngles.Count) { Write-Host "  [ERRO] aba Instalar: grupo(s) fora do mapa pt-BR: $($wfIngles -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    if ([string]$sync.configs.applications.WPFInstallplexdesktop.Category -ne 'Multimídia') { Write-Host "  [ERRO] aba Instalar: WPFInstallplexdesktop deveria estar em Multimídia, está em '$($sync.configs.applications.WPFInstallplexdesktop.Category)'" -ForegroundColor Red; $wbErrors++ }
+    if ([string]$sync.configs.applications.WPFInstalllocalsend.Category -ne 'Utilitários') { Write-Host "  [ERRO] aba Instalar: WPFInstalllocalsend deveria estar em Utilitários, está em '$($sync.configs.applications.WPFInstalllocalsend.Category)'" -ForegroundColor Red; $wbErrors++ }
+    if ($sync.currentTab -ne "Diagnostico") { Write-Host "  [ERRO] aba de abertura: `$sync.currentTab = '$($sync.currentTab)', esperado 'Diagnostico'" -ForegroundColor Red; $wbErrors++ }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -2154,6 +2198,20 @@ if ($SelfTest) {
         foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
+        # Ordem da barra de navegação: é a ordem de leitura da ferramenta (diagnosticar, ajustar,
+        # depois instalar), não a da base. Vale nos dois modos - quem esconde botão em servidor é
+        # Update-WinForgeTabVisibility, que mexe em Visibility e não na ordem.
+        $wfNavEsperada = @('WPFTab8BT','WPFTab2BT','WPFTab7BT','WPFTab3BT','WPFTab9BT','WPFTab4BT','WPFTab1BT','WPFTab5BT')
+        $wfNavOrdem = Get-WinForgeNavOrder -Window $wbWindow
+        if (($wfNavOrdem -join ',') -ne ($wfNavEsperada -join ',')) { Write-Host "  [ERRO] barra de navegação: ordem '$($wfNavOrdem -join ',')', esperada '$($wfNavEsperada -join ',')'" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Barra de navegação: $($wfNavOrdem.Count) botão(ões) na ordem $($wfNavOrdem -join ' > ')" }
+        # Chips de filtro da aba Instalar: o filtro compara o texto do chip com a categoria do
+        # aplicativo, então o conjunto de chips (fora "Todos") tem de ser exatamente o conjunto de
+        # grupos da lista. Um grupo novo sem chip fica sem filtro; um chip sem grupo não filtra nada.
+        $wfChips = @($wbWindow.FindName('WPFSearchChips').Children | Where-Object { $_ -is [System.Windows.Controls.Primitives.ToggleButton] } | ForEach-Object { [string]$_.Content })
+        $wfChipsGrupos = @($wfChips | Where-Object { $_ -ne 'Todos' } | Sort-Object)
+        if (($wfChipsGrupos -join '|') -ne (($wfAppsCategorias | Sort-Object) -join '|')) { Write-Host "  [ERRO] chips da aba Instalar: '$($wfChipsGrupos -join ', ')' não bate com os grupos '$($wfAppsCategorias -join ', ')'" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Chips da aba Instalar: $($wfChips.Count) (Todos + $($wfChipsGrupos.Count) grupos)" }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
         $sync["Form"] = $wbWindow
         $wbXaml.SelectNodes("//*[@Name]") | ForEach-Object { $sync["$($_.Name)"] = $sync["Form"].FindName($_.Name) }
@@ -2192,6 +2250,18 @@ if ($SelfTest) {
         # A aba Instalar é montada primeiro porque a janela real faz isso antes de aparecer, e
         # Reset-WPFCheckBoxes (chamada no fim de toda montagem) escreve em controles que nascem lá.
         Initialize-WinForgeTabContent -TabName 'Install'
+        # Grupos fechados na montagem: a trava é sobre os controles, não sobre a chamada. Cada
+        # grupo é um StackPanel com o rótulo em Children[0] e o WrapPanel dos aplicativos em
+        # Children[1] - fechado quer dizer WrapPanel Collapsed e rótulo começando com "+ ".
+        try {
+            $wfGrupos = @($sync.ItemsControl.Items | Where-Object { $_ -is [System.Windows.Controls.StackPanel] -and $_.Children.Count -ge 2 })
+            $wfAbertos = @($wfGrupos | Where-Object { $_.Children[1].Visibility -ne [Windows.Visibility]::Collapsed -or [string]$_.Children[0].Content -notlike '+ *' })
+            if ($wfGrupos.Count -lt 5) { Write-Host "  [ERRO] aba Instalar: esperado ao menos 5 grupos montados, veio $($wfGrupos.Count)" -ForegroundColor Red; $wbErrors++ }
+            if ($wfAbertos.Count) { Write-Host "  [ERRO] aba Instalar: $($wfAbertos.Count) grupo(s) abertos na montagem: $(@($wfAbertos | ForEach-Object { $_.Children[0].Content }) -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Aba Instalar: $($wfGrupos.Count) grupo(s) fechados na montagem" }
+        } catch {
+            Write-Host "  [ERRO] aba Instalar (grupos fechados): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
         try {
             $wfMarcadosCedo = Select-WinForgeRecommended -Tab All
             if ($wfMarcadosCedo -le 0) { Write-Host "  [ERRO] marcar recomendados antes das abas: nenhuma caixa marcada" -ForegroundColor Red; $wbErrors++ }
@@ -2610,23 +2680,78 @@ $src = Replace-Once $src 'Header="Sponsors" Name="SponsorMenuItem"' 'Header="Cr�
 $src = Replace-Once $src 'Header="Documentation" Name="DocumentationMenuItem"' 'Header="Documentação" Name="DocumentationMenuItem"' "xaml docs"
 $src = Replace-Once $src 'Header="About" Name="AboutMenuItem"' 'Header="Sobre" Name="AboutMenuItem"' "xaml about"
 
-$src = Insert-Before $src @'
-                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
-                    Background="{DynamicResource ButtonConfigBackgroundColor}"
-'@ $xamlNav "xaml nav button"
+# A barra de navegação inteira vem do WinForge: são oito botões em ordem própria (Diagnóstico
+# primeiro, Instalar perto do fim) com rótulos em pt-BR, e emendar isso com inserções pontuais na
+# barra da base só produziria a ordem original com remendos. O NavLogoPanel continua dentro do
+# StackPanel, no mesmo lugar - é ali que o logo é desenhado em tempo de execução.
+$src = Replace-Between $src '            <!-- Navigation Buttons Panel -->' '            <!-- Search Bar and Action Buttons -->' ($xamlNav.TrimEnd() + "`n`n") "nav panel"
 
-# Depois do de Jogos e na mesma âncora: o bloco inserido por último fica mais perto dela, então o
-# botão do Diagnóstico aparece à direita do de Jogos na barra de navegação.
-$src = Insert-Before $src @'
-                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
-                    Background="{DynamicResource ButtonConfigBackgroundColor}"
-'@ $xamlDiagNav "xaml diag nav button"
+# ---------------------------------------------------------------- aba de abertura: Diagnóstico
+# A primeira tela do WinForge é o diagnóstico da máquina, não a lista de aplicativos: é ele que diz
+# o que este PC precisa, e as recomendações das outras abas saem daí.
+$src = Replace-Once $src '$sync.currentTab = "Install"' '$sync.currentTab = "Diagnostico"' "default tab variable"
+$src = Replace-Once $src '        Invoke-WPFTab "WPFTab1BT"  # Default to install tab' '        Invoke-WPFTab "WPFTab8BT"  # WinForge: abre no Diagnóstico' "default tab online"
+# Sem internet a base desviava para Ajustes "em vez da aba Instalar". Agora a aba de abertura é o
+# Diagnóstico, que funciona offline: o desvio perdeu o motivo e viraria uma aba diferente só porque
+# a máquina está sem rede.
+$src = Replace-Once $src '        Invoke-WPFTab "WPFTab2BT"  # Switch to Tweaks tab instead' '        Invoke-WPFTab "WPFTab8BT"  # WinForge: abre no Diagnóstico (funciona offline)' "default tab offline"
 
-# Por último na mesma âncora: o botão da aba Servidor fica à direita do de Diagnóstico.
-$src = Insert-Before $src @'
-                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
-                    Background="{DynamicResource ButtonConfigBackgroundColor}"
-'@ $xamlServerNav "xaml server nav button"
+# ---------------------------------------------------------------- filtros da aba Instalar
+# Os chips filtram comparando o texto da Tag com a categoria do aplicativo. Como a curadoria
+# (wf-apps.ps1) reescreve as categorias em pt-BR, um chip com Tag em inglês passa a não casar com
+# nada - por isso rótulo e Tag mudam juntos. O chip "Selfhosted Tools" some: aquele grupo foi
+# absorvido por Utilitários e o filtro ficaria vazio para sempre.
+$src = Replace-Once $src @'
+                        <ToggleButton Name="WPFSearchChipAll"             Content="All"               Style="{StaticResource FilterChipToggleStyle}" IsChecked="True"/>
+                        <ToggleButton Name="WPFSearchChipBrowsers"        Content="Browsers"          Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipCommunications"  Content="Communications"    Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDevelopment"     Content="Development"       Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDocument"        Content="Document"          Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipGames"           Content="Games"             Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMicrosoftTools"  Content="Microsoft Tools"   Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMultimediaTools" Content="Multimedia Tools"  Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipProTools"        Content="Pro Tools"         Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipSelfhostedTools" Content="Selfhosted Tools"  Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipUtilities"       Content="Utilities"         Style="{StaticResource FilterChipToggleStyle}"/>
+'@ @'
+                        <ToggleButton Name="WPFSearchChipAll"             Content="Todos"                     Style="{StaticResource FilterChipToggleStyle}" IsChecked="True"/>
+                        <ToggleButton Name="WPFSearchChipBrowsers"        Content="Navegadores"               Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipCommunications"  Content="Comunicação"               Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDevelopment"     Content="Desenvolvimento"           Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDocument"        Content="Documentos"                Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipGames"           Content="Jogos"                     Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMicrosoftTools"  Content="Ferramentas Microsoft"     Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMultimediaTools" Content="Multimídia"                Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipProTools"        Content="Ferramentas profissionais" Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipUtilities"       Content="Utilitários"               Style="{StaticResource FilterChipToggleStyle}"/>
+'@ "xaml chips pt-BR"
+
+$src = Replace-Once $src 'ToolTip="Filter by category. Ctrl click to select more than one."' 'ToolTip="Filtra por grupo. Ctrl+clique para escolher mais de um."' "xaml chips tooltip"
+
+$src = Replace-Once $src @'
+    @{ Name = "WPFSearchChipBrowsers";        Category = "Browsers" }
+    @{ Name = "WPFSearchChipCommunications";  Category = "Communications" }
+    @{ Name = "WPFSearchChipDevelopment";     Category = "Development" }
+    @{ Name = "WPFSearchChipDocument";        Category = "Document" }
+    @{ Name = "WPFSearchChipGames";           Category = "Games" }
+    @{ Name = "WPFSearchChipMicrosoftTools";  Category = "Microsoft Tools" }
+    @{ Name = "WPFSearchChipMultimediaTools"; Category = "Multimedia Tools" }
+    @{ Name = "WPFSearchChipProTools";        Category = "Pro Tools" }
+    @{ Name = "WPFSearchChipSelfhostedTools"; Category = "Selfhosted Tools" }
+    @{ Name = "WPFSearchChipUtilities";       Category = "Utilities" }
+'@ @'
+    @{ Name = "WPFSearchChipBrowsers";        Category = "Navegadores" }
+    @{ Name = "WPFSearchChipCommunications";  Category = "Comunicação" }
+    @{ Name = "WPFSearchChipDevelopment";     Category = "Desenvolvimento" }
+    @{ Name = "WPFSearchChipDocument";        Category = "Documentos" }
+    @{ Name = "WPFSearchChipGames";           Category = "Jogos" }
+    @{ Name = "WPFSearchChipMicrosoftTools";  Category = "Ferramentas Microsoft" }
+    @{ Name = "WPFSearchChipMultimediaTools"; Category = "Multimídia" }
+    @{ Name = "WPFSearchChipProTools";        Category = "Ferramentas profissionais" }
+    @{ Name = "WPFSearchChipUtilities";       Category = "Utilitários" }
+'@ "chips pt-BR"
+
+$src = Replace-Once $src "`$sync[`"WPFSearchChipSelfhostedTools`"].Add_Click({ Invoke-WinUtilAppCategoryChip -Chip `$this })`n" '' "chip selfhosted click"
 
 $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
 
@@ -2695,6 +2820,16 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
     throw "Erros de sintaxe no arquivo gerado."
 }
 Write-Host "Sintaxe PowerShell: OK"
+
+# ---------------------------------------------------------------- travas de texto no motor gerado
+# A aba de abertura é decidida em duas linhas soltas do arquivo, longe uma da outra. Replace-Once
+# já falha se a âncora sumir, mas nada impediria uma substituição posterior de desfazer o resultado
+# - por isso a conferência é sobre o texto final.
+foreach ($wfEsperado in @('$sync.currentTab = "Diagnostico"', 'Invoke-WPFTab "WPFTab8BT"  # WinForge: abre no Diagnóstico')) {
+    if ($final.IndexOf($wfEsperado, [StringComparison]::Ordinal) -lt 0) { throw "Motor gerado sem a aba de abertura no Diagnóstico: falta $wfEsperado" }
+}
+if ($final.IndexOf('Invoke-WPFTab "WPFTab1BT"', [StringComparison]::Ordinal) -ge 0) { throw "Motor gerado ainda abre na aba Instalar (Invoke-WPFTab `"WPFTab1BT`")" }
+Write-Host "Aba de abertura: Diagnóstico"
 
 # ---------------------------------------------------------------- teste de marca no motor gerado
 # Antes de gerar o doc: uma falha de marca no motor e sobre o produto e tem de aparecer primeiro.

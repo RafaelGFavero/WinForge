@@ -251,6 +251,64 @@ function Initialize-WinUtilBoostConfigs {
     foreach ($p in $sync.configs.wbpresets.PSObject.Properties) {
         $sync.configs.preset | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
     }
+
+    # Aba Instalar: tira da lista os aplicativos que não entram no WinForge (wf-apps.ps1) e traduz
+    # os títulos dos grupos. Tem de acontecer aqui, antes de o motor derivar applicationsHashtable
+    # e montar a aba - depois disso a chave removida já seria um controle na tela.
+    $wfRemovidos = 0
+    foreach ($k in $sync.WinForgeRemovedApps) {
+        if ($sync.configs.applications.PSObject.Properties[$k]) {
+            $sync.configs.applications.PSObject.Properties.Remove($k)
+            $wfRemovidos++
+        }
+    }
+    foreach ($p in $sync.configs.applications.PSObject.Properties) {
+        $cat = [string]$p.Value.Category
+        if ($sync.WinForgeAppCategoryMap.ContainsKey($cat)) { $p.Value.Category = $sync.WinForgeAppCategoryMap[$cat] }
+    }
+    foreach ($o in $sync.WinForgeAppCategoryOverride.GetEnumerator()) {
+        $app = $sync.configs.applications.PSObject.Properties[$o.Key]
+        if ($app) { $app.Value.Category = $o.Value }
+    }
+    Write-WinUtilLog -Component "Boost" -Message "Aba Instalar: $wfRemovidos aplicativo(s) removido(s), $(@($sync.configs.applications.PSObject.Properties).Count) na lista."
+}
+
+function Set-WinForgeInstallCollapsed {
+    <#
+    .SYNOPSIS
+        Fecha todos os grupos da aba Instalar assim que ela é montada.
+    .DESCRIPTION
+        Chamada por Initialize-WinUtilTabContent no caso "Install". A base já sabe fechar tudo
+        (é o botão "Collapse All Categories"), então aqui só se aciona a mesma função - com
+        try/catch porque isto roda dentro da montagem da aba e uma exceção deixaria a aba pela
+        metade.
+
+        O filtro de busca vazio (Find-AppsByNameOrDescription) respeita o "+" no título do grupo,
+        então trocar de aba e voltar não reabre nada.
+    #>
+    try {
+        Invoke-WPFToggleAllCategories -Action "Collapse"
+        Write-WinUtilLog -Component "Boost" -Message "Aba Instalar: grupos fechados na montagem."
+    } catch {
+        Write-WinUtilLog -Component "Boost" -Message "Aba Instalar: falha ao fechar os grupos: $($_.Exception.Message)"
+    }
+}
+
+function Get-WinForgeNavOrder {
+    <#
+    .SYNOPSIS
+        Nomes dos botões da barra de navegação, na ordem em que aparecem na tela.
+    .PARAMETER Window
+        A janela já carregada do XAML.
+    .OUTPUTS
+        String[] com os nomes (WPFTab8BT, WPFTab2BT, ...). Vazio se o painel não existir.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Window
+    )
+    $panel = $Window.FindName('NavDockPanel')
+    if ($null -eq $panel) { return @() }
+    return @($panel.Children | Where-Object { $_ -is [System.Windows.Controls.Primitives.ToggleButton] } | ForEach-Object { $_.Name })
 }
 
 function Invoke-WinUtilBoostRestorePointPrompt {
