@@ -2,10 +2,10 @@
 
 ## 1.4.0 (2026-09-10)
 
-- Novo grupo "WinForge - Reparo de componentes" na aba Config, com doze botões. Quatro só leem:
+- Novo grupo "WinForge - Reparo de componentes" na aba Config, com doze botões. Cinco só leem:
   estado de TPM, Secure Boot, BitLocker e VBS; saúde dos discos pelos contadores SMART; estado do
-  .NET Framework 3.5 e 4.8; e `chkdsk /scan` no disco do Windows, que relata sem reparar. Os botões
-  de leitura rodam direto.
+  .NET Framework 3.5 e 4.8; `chkdsk /scan` no disco do Windows, que relata sem reparar; e o do
+  DirectX, que abre a página oficial da Microsoft no navegador. Os botões de leitura rodam direto.
 - Quatro alteram o sistema: verificação do repositório WMI, com `salvagerepository` só quando a
   verificação acusa inconsistência; registro de novo da Microsoft Store, do App Installer (winget) e
   do Store Purchase App para o usuário atual, a partir do manifesto que já está no disco;
@@ -13,12 +13,14 @@
   de Memória na sequência de inicialização (`bcdedit /bootsequence {memdiag}`), válido só para a
   próxima. O chkdsk agendado não tem desfazer: não existe `fsutil dirty clear`, quem limpa a marca é
   o próprio chkdsk e só quando concluir que o volume está íntegro.
-- Quatro instalam componente: .NET Framework 3.5 pelo DISM (os arquivos vêm do Windows Update, então
-  precisa de internet), os 12 redistribuíveis do Visual C++ 2005–2022 x86/x64 pelo winget, o
-  PowerShell 7 pelo winget e o instalador web do DirectX. O que já está instalado é pulado. O
-  `dxwebsetup.exe` é baixado de `download.microsoft.com` para `%TEMP%\WinForge` e tem a assinatura
-  Authenticode conferida — só roda se ela for da Microsoft Corporation; se não fechar, o arquivo é
-  apagado sem ser executado.
+- Três instalam componente: .NET Framework 3.5 pelo DISM (os arquivos vêm do Windows Update, então
+  precisa de internet), os 12 redistribuíveis do Visual C++ 2005–2022 x86/x64 pelo winget e o
+  PowerShell 7 pelo winget. O que já está instalado é pulado.
+- O WinForge não baixa nem executa arquivo da internet. O botão do DirectX abre a página oficial de
+  download da Microsoft no navegador; o `dxwebsetup.exe` é baixado e executado por você, a partir
+  dessa página, com o seu próprio usuário. O WinForge roda sempre elevado, e `%TEMP%` é gravável por
+  qualquer programa do usuário: baixar para lá e abrir de lá dava a um programa comum a chance de
+  trocar o arquivo entre a conferência da assinatura e a execução.
 - Nada roda sem clique e confirmação: antes de qualquer botão que altera ou instala, aparece uma
   caixa de Sim/Não com a descrição inteira do botão, o mesmo texto que está na aba. As funções que
   escrevem também recusam rodar em modo SelfTest, então o build nunca mexe na máquina de quem
@@ -26,8 +28,25 @@
 - Todo comando roda fora da thread da interface, e a saída vai para uma janela própria — que não
   bloqueia o resto do programa — com Copiar e Abrir arquivo. Cada execução grava
   `repair-<nome>-<data-hora>.txt` em `%LocalAppData%\WinForge\logs`.
-- Sob elevação, o winget é resolvido pela pasta do pacote do App Installer: o `PATH` do
-  administrador não enxerga o `WindowsApps` do usuário, e era ali que a busca falhava.
+- O `winget.exe` sai só do pacote do App Installer instalado pela Microsoft Store — editor
+  `8wekyb3d8bbwe`, assinatura de Store ou do sistema e pasta dentro de `%ProgramFiles%\WindowsApps`,
+  sem link de reanálise no caminho. O `PATH` não é mais consultado: num processo elevado ele resolve
+  para o atalho em `%LOCALAPPDATA%\Microsoft\WindowsApps`, que qualquer programa do usuário pode
+  reescrever. O registro de novo da Store e do App Installer aplica o mesmo crivo antes de escolher
+  o manifesto, e descarta com uma linha no relatório o que não passar.
+- Todo executável do Windows que o WinForge chama (`chkdsk`, `winmgmt`, `fsutil`, `bcdedit`,
+  `powercfg`, `w32tm`, `dcdiag`, `repadmin`) passou a ser chamado pelo caminho completo em
+  `%SystemRoot%\System32` em vez de pelo nome: num processo elevado, um `PATH` de sistema com uma
+  pasta na frente do System32 escolheria o binário. O `winmgmt` mora em `System32\wbem`, que nem
+  sempre está no `PATH`.
+- Botão de reparo confere "já existe comando em andamento" (e a instalação do próprio WinForge)
+  ANTES de mostrar a caixa de confirmação, e não depois do "Sim". A saída de cada comando chega à
+  janela num pacote próprio, e não mais por um espaço global: dois comandos seguidos não trocam mais
+  de texto na janela.
+- O winget é chamado com `--disable-interactivity` e a saída dele é lida como UTF-8, que é o que ele
+  escreve — os acentos do relatório e dos nomes de pacote deixaram de vir embaralhados.
+- `Secure Boot` sem elevação responde `n/d (sem elevação)`, como TPM e BitLocker, em vez de repetir
+  a mensagem de acesso negado do cmdlet.
 
 ## 1.3.0 (2026-09-10)
 

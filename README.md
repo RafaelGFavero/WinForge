@@ -213,7 +213,7 @@ defeito. Eles ficam ao lado dos botões que já existiam ali — verificação d
 (SFC + DISM), reset do Windows Update, reset de rede e reinstalação do WinGet —, que continuam
 funcionando como sempre.
 
-**Só leem, não mudam nada:**
+**Só leem, não mudam nada (e o do DirectX só abre uma página):**
 
 | Botão | O que faz |
 |---|---|
@@ -221,6 +221,7 @@ funcionando como sempre.
 | Saúde dos discos (SMART) | Discos físicos e os contadores SMART de cada um: temperatura, horas ligado, desgaste e erros não corrigidos. Em USB e em alguns RAID os contadores não existem. |
 | Estado do .NET Framework 3.5 e 4.8 | Se o recurso NetFx3 está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro. |
 | Verificar disco do sistema agora (chkdsk /scan) | Verificação online, com o sistema em uso: relata problemas, não repara nada e não reinicia. Pode demorar minutos num disco grande. |
+| DirectX: abrir a página oficial da Microsoft | Abre no navegador a página oficial de download do DirectX End-User Runtime Web Installer. Quem baixa e roda o `dxwebsetup.exe` é você, no navegador: o WinForge não baixa nem executa arquivo da internet. O instalador é interativo e traz as bibliotecas antigas (d3dx9, XInput) que jogos mais velhos pedem. |
 
 **Alteram o sistema:**
 
@@ -238,7 +239,6 @@ funcionando como sempre.
 | .NET Framework 3.5: habilitar (DISM) | Habilita o recurso NetFx3 pelo DISM. Os arquivos não estão na imagem instalada: vêm do Windows Update, então precisa de internet. Em rede com WSUS restritivo o DISM pede a mídia do Windows. |
 | Visual C++ 2005–2022 (x86/x64) via winget | Os 12 redistribuíveis (2005, 2008, 2010, 2012, 2013 e 2015-2022), nas duas arquiteturas. O que já está instalado é pulado. É o que resolve erro de VCRUNTIME140.dll e MSVCP140.dll. |
 | PowerShell 7 via winget | Instala o `Microsoft.PowerShell` lado a lado: o Windows PowerShell 5.1 continua instalado e é ele que roda o WinForge. |
-| DirectX (instalador web da Microsoft) | Baixa o `dxwebsetup.exe` da Microsoft em `%TEMP%\WinForge`, confere a assinatura digital da Microsoft Corporation e só então o abre — se a assinatura não fechar, o arquivo é apagado sem ser executado. Instala as bibliotecas antigas (d3dx9, XInput) que jogos mais velhos pedem. O instalador é interativo. |
 
 **Nada roda sem clique e confirmação.** Os botões que só leem rodam direto. Os que alteram o
 sistema ou instalam componente abrem antes uma caixa de Sim/Não com a descrição inteira do botão —
@@ -251,10 +251,18 @@ arquivo**. O arquivo é `repair-<nome>-<data-hora>.txt`, na mesma pasta de logs 
 
 O que cada botão exige está escrito na descrição dele. Em resumo: WMI, chkdsk agendado, diagnóstico
 de memória, .NET 3.5 e Visual C++ precisam do WinForge aberto como administrador; sem elevação, as
-leituras de TPM, BitLocker e NetFx3 respondem `n/d`. Os três botões de winget precisam do App
-Installer instalado e de internet — sob elevação o WinForge encontra o winget pela pasta do pacote
-do App Installer, que é onde o `PATH` do administrador não olha. DirectX e .NET 3.5 também precisam
-de internet.
+leituras de TPM, Secure Boot, BitLocker e NetFx3 respondem `n/d`. Os dois botões de winget precisam
+do App Installer instalado e de internet. O .NET 3.5 também precisa de internet.
+
+**O WinForge não baixa nem executa arquivo da internet.** O `winget.exe` que os botões de instalação
+usam sai só do pacote do App Installer instalado pela Microsoft Store: editor `8wekyb3d8bbwe`,
+assinatura de Store ou do sistema e pasta dentro de `%ProgramFiles%\WindowsApps`, sem link no
+caminho. O `PATH` fica de fora de propósito — num processo elevado ele resolve para o atalho em
+`%LOCALAPPDATA%\Microsoft\WindowsApps`, uma pasta que qualquer programa do usuário pode reescrever.
+O registro de novo da Store e do App Installer aplica o mesmo crivo antes de escolher o manifesto.
+Pelo mesmo motivo, todo executável do Windows que o WinForge chama (`chkdsk`, `winmgmt`, `fsutil`,
+`bcdedit`, `powercfg`, `w32tm`, `dcdiag`, `repadmin`) é chamado pelo caminho completo em
+`%SystemRoot%\System32`, e não pelo nome.
 
 ## Classificação de risco
 
