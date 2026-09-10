@@ -203,6 +203,51 @@ function Get-WinForgeServerOutputPath {
     return (Join-Path $dir ("server-{0}-{1}.txt" -f $Name, (Get-Date -Format 'yyyyMMdd-HHmmss')))
 }
 
+function Invoke-WinForgeNativeCommand {
+    <#
+    .SYNOPSIS
+        Roda um comando externo e devolve o texto (decodificado em OEM) junto com o código de saída.
+    .DESCRIPTION
+        Duas armadilhas de executável no PowerShell moram aqui, e é por isso que existe um lugar só
+        para elas - a aba Servidor e o perfil do sistema caíam nas duas em separado:
+
+        1. A code page. w32tm, netsh, dcdiag e repadmin escrevem em OEM (850/437 no Brasil); o
+           PowerShell decodifica pelo [Console]::OutputEncoding, que costuma estar em outra coisa - e
+           toda palavra acentuada chega embaralhada. A troca é PROCESSO INTEIRO, então a janela é a
+           menor possível: muda, roda o comando, devolve no finally.
+        2. O código de saída. $LASTEXITCODE é global e sobrevive à chamada anterior: sem zerar antes,
+           um comando que não é executável devolveria o código de outro. Ele é lido na linha seguinte
+           ao comando, antes que qualquer outra coisa o sobrescreva.
+
+        '2>&1' antes do Out-String porque dcdiag e repadmin escrevem parte do que interessa no fluxo
+        de erro, e sem isso a saída sairia vazia justamente quando há problema. -Width 4096 porque o
+        padrão do Out-String é a largura do console (80 em runspace sem janela): tabela larga voltava
+        cortada, e o corte ia direto para o arquivo.
+    .OUTPUTS
+        @{ Text = <string>; ExitCode = <int> }.
+    #>
+    param([Parameter(Mandatory)][string]$Command)
+
+    $encodingAnterior = $null
+    $texto = ''
+    $codigo = $null
+    try {
+        try {
+            $encodingAnterior = [Console]::OutputEncoding
+            [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+        } catch {
+            $encodingAnterior = $null
+        }
+        $global:LASTEXITCODE = 0
+        $texto = & ([scriptblock]::Create($Command)) 2>&1 | Out-String -Width 4096
+        $codigo = $LASTEXITCODE
+    } finally {
+        if ($null -ne $encodingAnterior) { try { [Console]::OutputEncoding = $encodingAnterior } catch { } }
+    }
+
+    return @{ Text = [string]$texto; ExitCode = $codigo }
+}
+
 function Invoke-WinForgeServerCommandCore {
     <#
     .SYNOPSIS
@@ -211,20 +256,15 @@ function Invoke-WinForgeServerCommandCore {
         É o miolo do botão, sem interface nenhuma: é o que roda dentro do runspace e é o que o
         -SelfTest consegue exercitar sem abrir janela.
 
-        Três decisões moram aqui:
+        Duas decisões moram aqui (a code page e o código de saída são de Invoke-WinForgeNativeCommand):
 
         1. Ferramenta ausente NÃO é exceção. w32tm existe em qualquer Windows, dcdiag e repadmin não:
            o texto vira "Ferramenta 'x' não encontrada neste sistema.", o arquivo é gravado do mesmo
            jeito e o retorno tem a mesma forma do caso bem-sucedido. Quem chama nunca precisa de dois
            caminhos.
-        2. '2>&1' antes do Out-String: dcdiag e repadmin escrevem parte do que interessa no fluxo de
-           erro, e sem isso a janela sairia vazia justamente quando há problema. -Width 200 evita que
-           uma tabela larga volte quebrada no meio.
-        3. A code page da saída. w32tm, netsh, dcdiag e repadmin escrevem em OEM (850/437 no Brasil);
-           o PowerShell decodifica pelo [Console]::OutputEncoding, que costuma estar em outra coisa -
-           e toda palavra acentuada chega embaralhada. A troca é PROCESSO INTEIRO, então a janela é
-           a menor possível: muda, roda o comando, devolve no finally. Nenhuma outra thread do
-           programa lê saída de executável, e o próprio comando roda um de cada vez.
+        2. O código de saída entra no PRÓPRIO texto, e não só no cabeçalho do arquivo: "dcdiag falhou"
+           e "dcdiag não achou nada" saem parecidos na tela, e sem o código o usuário não distingue
+           os dois. Uma linha só, no topo, para o arquivo e a janela contarem a mesma coisa.
     .OUTPUTS
         Hashtable com Name, Title, Text (o que vai para a janela) e Path (arquivo gravado, ou $null).
     #>
@@ -232,25 +272,20 @@ function Invoke-WinForgeServerCommandCore {
 
     $cmd = Get-WinForgeServerCommand -Name $Name
     $inicio = Get-Date
+    # $null enquanto nada de externo rodou (ferramenta ausente, exceção): 0 seria mentira de sucesso.
+    $codigo = $null
 
     if (-not (Test-WinForgeServerRequirement -Requires $cmd.Requires)) {
         $texto = "Ferramenta '$($cmd.Requires)' não encontrada neste sistema."
         Write-WinForgeLog -Component "Server" -Level "WARN" -Message "$Name não executado: $texto"
     } else {
-        $encodingAnterior = $null
         try {
-            try {
-                $encodingAnterior = [Console]::OutputEncoding
-                [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-            } catch {
-                $encodingAnterior = $null
-            }
-            $texto = & ([scriptblock]::Create($cmd.Command)) 2>&1 | Out-String -Width 200
+            $exec = Invoke-WinForgeNativeCommand -Command $cmd.Command
+            $texto = $exec.Text
+            $codigo = $exec.ExitCode
         } catch {
             $texto = "Falha ao executar o comando: $($_.Exception.Message)"
             Write-WinForgeLog -Component "Server" -Level "ERROR" -Message "$Name falhou: $($_.Exception.Message)"
-        } finally {
-            if ($null -ne $encodingAnterior) { try { [Console]::OutputEncoding = $encodingAnterior } catch { } }
         }
         # 'dcdiag /q' só fala quando encontra problema: saída vazia é a boa notícia, e uma janela em
         # branco pareceria o comando ter falhado.
@@ -258,6 +293,7 @@ function Invoke-WinForgeServerCommandCore {
     }
 
     $texto = [string]$texto
+    if ($null -ne $codigo) { $texto = "Código de saída: $codigo`r`n`r`n$texto" }
     $arquivo = $null
     try {
         $arquivo = Get-WinForgeServerOutputPath -Name $Name
@@ -269,7 +305,7 @@ function Invoke-WinForgeServerCommandCore {
     }
 
     $segundos = [math]::Round(((Get-Date) - $inicio).TotalSeconds, 1)
-    Write-WinForgeLog -Component "Server" -Message "$Name concluído em $segundos s: $($texto.Length) caractere(s)$(if ($arquivo) { " em $arquivo" } else { ' (sem arquivo)' })."
+    Write-WinForgeLog -Component "Server" -Message "$Name concluído em $segundos s (código $(if ($null -ne $codigo) { $codigo } else { 'n/d' })): $($texto.Length) caractere(s)$(if ($arquivo) { " em $arquivo" } else { ' (sem arquivo)' })."
     return @{ Name = $Name; Title = $cmd.Title; Text = $texto; Path = $arquivo }
 }
 
@@ -286,8 +322,8 @@ function Show-WinForgeOutputWindow {
         FindName() não acha nada numa árvore criada em código - e é por FindName que o -SelfTest
         confere o texto.
     .PARAMETER NoShow
-        Monta e devolve a janela sem ShowDialog. É o que o -SelfTest usa: abrir uma janela modal
-        durante o build deixaria o build parado para sempre esperando alguém clicar.
+        Monta e devolve a janela sem mostrá-la. É o que o -SelfTest usa: abrir janela durante o build
+        deixaria um build sem ninguém na frente exibindo coisa na tela.
     .OUTPUTS
         A janela ([System.Windows.Window]).
     #>
@@ -372,6 +408,12 @@ function Show-WinForgeOutputWindow {
     $textoParaCopiar = $Text
     $btnCopiar.Add_Click({
         try {
+            # Clipboard.SetText lança com texto vazio ("O valor não pode ser nulo"). Saída vazia é
+            # cenário normal aqui (dcdiag /q calado), e um erro no clique não ajudaria ninguém.
+            if ([string]::IsNullOrEmpty($textoParaCopiar)) {
+                Write-WinForgeLog -Component "Server" -Message "Nada a copiar: a saída de '$Title' está vazia."
+                return
+            }
             [System.Windows.Clipboard]::SetText($textoParaCopiar)
             Write-WinForgeLog -Component "Server" -Message "Saída de '$Title' copiada para a área de transferência."
         } catch {
@@ -398,7 +440,11 @@ function Show-WinForgeOutputWindow {
     [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
     $janela.RegisterName('WFOutputText', $caixa)
 
-    if (-not $NoShow) { $janela.ShowDialog() | Out-Null }
+    # .Show() e não .ShowDialog(): modal, a janela prenderia a thread da interface até alguém fechá-la,
+    # e como o Dispatcher.Invoke que a abriu é síncrono, a runspace do pool ficaria presa junto - o
+    # próximo comando da aba Servidor só começaria depois de fechar esta. Modeless devolve na hora;
+    # o Owner (definido acima) garante que ela continua por cima da janela principal e fecha com ela.
+    if (-not $NoShow) { $janela.Show() }
     return $janela
 }
 
@@ -433,10 +479,11 @@ function Invoke-WinForgeServerCommand {
         interface congelada. O comando roda num runspace do pool e a janela de saída é aberta pela
         thread da interface, com o callback que nasceu na runspace principal.
 
-        Um de cada vez ($sync.ServerCommandRunning). A trava é zerada no 'finally' do corpo E no
-        'catch' do despacho: se o Invoke-WPFRunspace falhar (pool fechado, sem thread livre), o corpo
-        nunca roda, o 'finally' dele também não, e sem esse catch o botão ficaria morto até fechar o
-        programa.
+        Um de cada vez ($sync.ServerCommandRunning). A trava cai assim que o comando termina - antes
+        de abrir a janela de saída, que é modeless e pode ficar aberta o tempo que o usuário quiser -
+        e o 'finally' do corpo cobre o caminho de exceção. Ela é zerada também no 'catch' do despacho:
+        se o Invoke-WPFRunspace falhar (pool fechado, sem thread livre), o corpo nunca roda, o
+        'finally' dele também não, e sem esse catch o botão ficaria morto até fechar o programa.
 
         Ferramenta que não existe nem chega a virar runspace: a resposta é imediata e cabe num aviso.
     #>
@@ -468,6 +515,11 @@ function Invoke-WinForgeServerCommand {
         try {
             $wfRes = Invoke-WinForgeServerCommandCore -Name $wfName
             $sync.ServerCommandOutput = @{ Title = $wfRes.Title; Text = $wfRes.Text; Path = $wfRes.Path }
+            # A trava cai ANTES de abrir a janela: o comando já terminou e o arquivo já está gravado,
+            # então segurá-la enquanto a janela de saída existe só faria o próximo botão recusar por
+            # um trabalho que não está mais rodando. O 'finally' abaixo continua sendo a rede de
+            # segurança para o caminho de exceção.
+            $sync.ServerCommandRunning = $false
             # Janela fechando: Invoke-WPFUIThread é síncrono e esperaria por um Dispatcher que está
             # sendo desligado. Não há mais janela para mostrar nada - o arquivo já está gravado.
             if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeServerOutputCallback }

@@ -384,15 +384,19 @@ function Get-WinForgeSystemProfile {
         try { $smb = Get-SmbServerConfiguration -ErrorAction Stop; $srv.Smb1Enabled = [bool]$smb.EnableSMB1Protocol; $srv.SmbSigningRequired = [bool]$smb.RequireSecuritySignature } catch { $p.Errors += "SMB: $($_.Exception.Message)" }
         try { $tcp = (netsh int tcp show global 2>$null) -join "`n"; if ($tcp -match '(?im)^\s*Receive Window Auto-Tuning Level\s*:\s*(\S+)|^\s*Nível de Ajuste Automático da Janela de Recebimento\s*:\s*(\S+)') { $srv.TcpAutotuning = ($Matches[1] + $Matches[2]).ToLower() } } catch { }
         # O w32tm escreve a FALHA no stdout, não no stderr ("Ocorreu o seguinte erro: O serviço não
-        # foi iniciado. (0x80070426)"), então o 2>$null não filtra nada e a mensagem de erro virava
-        # a fonte de horário do relatório. Só o código de saída separa resposta de erro.
+        # foi iniciado. (0x80070426)"), então filtrar o stderr não adianta e a mensagem de erro virava
+        # a fonte de horário do relatório. Só o código de saída separa resposta de erro - e a leitura
+        # passa por Invoke-WinForgeNativeCommand para a mensagem em português não chegar embaralhada
+        # (ele troca a code page para OEM). A função vive em wf-server.ps1, inserido depois deste
+        # bloco no build: a ordem de definição não importa, porque tudo já está definido quando o job
+        # de perfil roda.
         try {
-            $global:LASTEXITCODE = 0
-            $tsOut = @(w32tm /query /source 2>$null) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            $ts = Invoke-WinForgeNativeCommand -Command 'w32tm /query /source'
+            $tsOut = @([string]$ts.Text -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
             $tsFirst = $(if (@($tsOut).Count) { ([string]@($tsOut)[0]).Trim() } else { '' })
-            if ($LASTEXITCODE -eq 0 -and $tsFirst) { $srv.TimeSource = $tsFirst }
+            if ($ts.ExitCode -eq 0 -and $tsFirst) { $srv.TimeSource = $tsFirst }
             elseif ($tsFirst) { $p.Errors += "Horário: $tsFirst" }
-            else { $p.Errors += "Horário: w32tm /query /source não respondeu (código $LASTEXITCODE)" }
+            else { $p.Errors += "Horário: w32tm /query /source não respondeu (código $($ts.ExitCode))" }
         } catch { $p.Errors += "Horário: $($_.Exception.Message)" }
         if ($p.Roles.IIS) {
             try {

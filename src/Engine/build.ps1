@@ -1081,7 +1081,7 @@ if ($SelfTest) {
         # Segundo backup no MESMO segundo, de propósito: o nome carrega milissegundo, então os dois
         # arquivos coexistem e o primeiro - o dos valores originais - continua no disco. Com precisão
         # de segundo, este é o cenário que apagava o backup bom (aplicar duas vezes seguidas).
-        Start-Sleep -Milliseconds 5
+        Start-Sleep -Milliseconds 20
         $wbIisFile2 = New-WinForgeIisSnapshot -Name 'SelfTest' -Values @{ 'pool:DefaultAppPool:startMode' = 'AlwaysRunning' } -Root $wbIisRoot
         if ($wbIisFile2 -eq $wbIisFile) { Write-Host "  [ERRO] IIS: o segundo backup do mesmo segundo caiu no mesmo arquivo ($wbIisFile2)" -ForegroundColor Red; $wbErrors++ }
         if (-not (Test-Path -LiteralPath $wbIisFile)) { Write-Host "  [ERRO] IIS: o primeiro backup desapareceu depois do segundo ($wbIisFile)" -ForegroundColor Red; $wbErrors++ }
@@ -1126,9 +1126,19 @@ if ($SelfTest) {
     $wbSrvDesconhecido = $false
     try { Get-WinForgeServerCommand -Name 'NaoExiste' | Out-Null } catch { $wbSrvDesconhecido = $true }
     if (-not $wbSrvDesconhecido) { Write-Host "  [ERRO] Servidor: Get-WinForgeServerCommand aceitou um comando desconhecido" -ForegroundColor Red; $wbErrors++ }
+    # O código de saída é o que separa "dcdiag não achou nada" de "dcdiag falhou": tem de sobreviver
+    # ao Out-String e chegar ao texto. E a code page volta ao que era - trocá-la é processo inteiro.
+    $wbNatAntes = [Console]::OutputEncoding
+    $wbNat = Invoke-WinForgeNativeCommand -Command 'cmd /c exit 3'
+    if ($wbNat.ExitCode -ne 3) { Write-Host "  [ERRO] Servidor: Invoke-WinForgeNativeCommand deveria devolver código 3, veio '$($wbNat.ExitCode)'" -ForegroundColor Red; $wbErrors++ }
+    if ([Console]::OutputEncoding -ne $wbNatAntes) { Write-Host "  [ERRO] Servidor: Invoke-WinForgeNativeCommand não devolveu a code page do console" -ForegroundColor Red; $wbErrors++ }
+    $wbNatEco = Invoke-WinForgeNativeCommand -Command 'cmd /c echo alo'
+    if ([string]$wbNatEco.Text -notmatch 'alo' -or $wbNatEco.ExitCode -ne 0) { Write-Host "  [ERRO] Servidor: Invoke-WinForgeNativeCommand não capturou a saída ('$([string]$wbNatEco.Text)', código $($wbNatEco.ExitCode))" -ForegroundColor Red; $wbErrors++ }
+    else { Write-Host "  Servidor (comando externo): código de saída e texto OK, code page devolvida" }
     try {
         $wbSrvTcp = Invoke-WinForgeServerCommandCore -Name TcpShow
         if ([string]::IsNullOrWhiteSpace($wbSrvTcp.Text)) { Write-Host "  [ERRO] Servidor: TcpShow voltou sem texto" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wbSrvTcp.Text -notmatch 'Código de saída: 0') { Write-Host "  [ERRO] Servidor: TcpShow deveria trazer 'Código de saída: 0' no texto" -ForegroundColor Red; $wbErrors++ }
         if (-not $wbSrvTcp.Path -or -not (Test-Path -LiteralPath $wbSrvTcp.Path)) { Write-Host "  [ERRO] Servidor: TcpShow não gravou o arquivo ('$($wbSrvTcp.Path)')" -ForegroundColor Red; $wbErrors++ }
         else { Write-Host "  Servidor (comandos): TcpShow -> $(([string]$wbSrvTcp.Text).Length) caractere(s) em $(Split-Path -Leaf $wbSrvTcp.Path)" }
     } catch {
