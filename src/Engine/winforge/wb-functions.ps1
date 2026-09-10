@@ -331,8 +331,8 @@ function Invoke-WinUtilBoostRestorePointPrompt {
                "Recomendado: permite voltar o Windows ao estado atual caso alguma otimização cause problema.`n`n" +
                "Sim  = criar agora (leva de 30 segundos a alguns minutos; a janela pode ficar sem resposta nesse tempo)`n" +
                "Não  = continuar sem criar. Você ainda pode criar depois em:`n" +
-               "         Config > WinForge - Manutenção > 'Ponto de restauração - Criar agora'`n" +
-               "         ou marcando 'Restore Point - Create' na aba Tweaks."
+               "         Configurações > WinForge - Manutenção > 'Ponto de restauração - Criar agora'`n" +
+               "         ou marcando 'Restore Point - Create' na aba Ajustes."
         $result = [System.Windows.MessageBox]::Show($sync.Form, $msg, "WinForge - Ponto de Restauração",
             [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
         $create = ($result -eq [System.Windows.MessageBoxResult]::Yes)
@@ -680,7 +680,7 @@ Logs    : $($sync.logPath)
 
 Base    : projeto original $($sync.baseVersion) (licença MIT) - ver arquivo NOTICE
 Extras  : scripts do repositório 'Windows Boost - Essential' reescritos como tweaks reversíveis
-          (aba Tweaks, aba Jogos e Config > WinForge - Manutenção)
+          (aba Ajustes, aba Jogos e Configurações > WinForge - Manutenção)
 "@
     Show-CustomDialog -Title "Sobre o WinForge" -Message $msg
 }

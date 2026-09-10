@@ -29,6 +29,26 @@ function Replace-Once([string]$text, [string]$old, [string]$new, [string]$what) 
     return $text.Substring(0, $idx) + $new + $text.Substring($idx + $old.Length)
 }
 
+function Replace-All([string]$text, [string]$old, [string]$new, [string]$what) {
+    # Irmã do Replace-Once para texto que se repete de propósito (a mesma categoria em cada entrada
+    # do JSON, a mesma mensagem em dois caminhos de código). Falha alto quando NÃO acha nada - é
+    # esse o caso que denuncia uma âncora que sumiu do arquivo base.
+    $old = $old -replace "`r`n", "`n"
+    $new = $new -replace "`r`n", "`n"
+    $count = 0
+    $idx = 0
+    while (($idx = $text.IndexOf($old, $idx, [StringComparison]::Ordinal)) -ge 0) {
+        $text = $text.Substring(0, $idx) + $new + $text.Substring($idx + $old.Length)
+        # avança pelo tamanho do NOVO texto: sem isso, uma tradução que contenha o original
+        # (ou parte dele) faria o laço achar a si mesmo para sempre.
+        $idx += $new.Length
+        $count++
+    }
+    if ($count -eq 0) { throw "Âncora não encontrada: $what" }
+    $script:wfI18nHits += $count
+    return $text
+}
+
 function Insert-Before([string]$text, [string]$anchor, [string]$block, [string]$what) {
     return Replace-Once $text $anchor ($block + $anchor) $what
 }
@@ -72,6 +92,12 @@ $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
 $xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
 $xamlServerTab  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-tab.xml")
 $appsData       = Read-Lf (Join-Path $PSScriptRoot "config\wf-apps.ps1")
+
+# Dicionário de tradução: é código, não bloco injetado, então tem de ser EXECUTADO. Dot-source do
+# arquivo não serve (o PowerShell 5.1 lê .ps1 pela code page ANSI quando não há BOM); ler o texto em
+# UTF-8 e rodar um scriptblock mantém os acentos independentemente do BOM.
+. ([scriptblock]::Create([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "config\wf-i18n-strings.ps1"), [System.Text.Encoding]::UTF8)))
+$wfI18nHits = 0
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -866,6 +892,13 @@ if ($SelfTest) {
     if ([string]$sync.configs.applications.WPFInstallplexdesktop.Category -ne 'Multimídia') { Write-Host "  [ERRO] aba Instalar: WPFInstallplexdesktop deveria estar em Multimídia, está em '$($sync.configs.applications.WPFInstallplexdesktop.Category)'" -ForegroundColor Red; $wbErrors++ }
     if ([string]$sync.configs.applications.WPFInstalllocalsend.Category -ne 'Utilitários') { Write-Host "  [ERRO] aba Instalar: WPFInstalllocalsend deveria estar em Utilitários, está em '$($sync.configs.applications.WPFInstalllocalsend.Category)'" -ForegroundColor Red; $wbErrors++ }
     if ($sync.currentTab -ne "Diagnostico") { Write-Host "  [ERRO] aba de abertura: `$sync.currentTab = '$($sync.currentTab)', esperado 'Diagnostico'" -ForegroundColor Red; $wbErrors++ }
+    # Trava de idioma. A lista de termos é injetada pelo build logo acima ($sync.WinForgeEnglishSweep),
+    # DEPOIS do dicionário de tradução - se ela viesse antes, o próprio dicionário a traduziria e a
+    # trava passaria por não ter mais o que procurar. Aqui a varredura é sobre o XAML gerado; a
+    # Tarefa 3 usa a mesma função no Content/Description das configurações.
+    $wfIdiomaXaml = Test-WinForgeEnglishLeftovers -Text $inputXML -Where 'XAML' -Xaml
+    if ($wfIdiomaXaml) { $wbErrors += $wfIdiomaXaml }
+    else { Write-Host "  Idioma: $(@($sync.WinForgeEnglishSweep).Count) termo(s) em inglês procurados no XAML, nenhum encontrado" }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -2767,7 +2800,7 @@ $src = Insert-Before $src "        </TabControl>`n" $xamlServerTab "xaml server 
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
-                                    <Button Name="WPFPresetWinForge" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Standard + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (WinForge)."/>
+                                    <Button Name="WPFPresetWinForge" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Padrão + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (WinForge)."/>
                                     <Button Name="WPFSelectRecommended" Content=" Marcar recomendados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca os itens que o diagnóstico recomenda para este PC (contorno verde)."/>
 '@.TrimEnd() "xaml preset button"
 
@@ -2804,6 +2837,42 @@ $src = $src -creplace 'WinUtil',    'WinForge'
 $src = $src -creplace 'Winutil',    'WinForge'
 $src = $src -creplace 'winutil',    'winforge'
 $src = $src -replace  'winutil',    'winforge'   # rede de segurança para qualquer outra grafia
+
+# ---------------------------------------------------------------- tradução da interface (pt-BR)
+# ÚLTIMA transformação, depois das injeções, da limpeza de marca e do rename global. O plano pedia
+# esta etapa antes da limpeza/rename; ficou depois por dois motivos concretos:
+#   1. o rename troca WinUtil por WinForge dentro de textos que estão nesta lista ("Change the
+#      WinUtil UI Theme", "settings managed by WinUtil"). Antes dele, cada par teria de usar a
+#      grafia antiga - divergindo do que o arquivo gerado mostra e do que o inventário imprime.
+#   2. a limpeza de marca reescreve um Write-Host inteiro ("Successfully uninstalled CTT PowerShell
+#      Profile."). Traduzir primeiro apagaria aquela âncora e o build quebraria ali.
+# Rodando por último, o lado esquerdo de cada par é exatamente o texto do arquivo gerado - o mesmo
+# que tools\List-EnglishStrings.ps1 lista - e nenhuma âncora anterior corre risco. A proteção contra
+# mudança do arquivo base continua igual: Replace-Once falha se o texto sumir ou ficar ambíguo, e
+# Replace-All falha se não achar nada.
+$wfI18nOnce = 0
+foreach ($pair in $WinForgeI18nStrings) {
+    $src = Replace-Once $src $pair[0] $pair[1] "i18n: $($pair[0])"
+    $wfI18nOnce++
+}
+$wfI18nHits = 0
+foreach ($pair in $WinForgeI18nRepeated) {
+    $src = Replace-All $src $pair[0] $pair[1] "i18n (repetido): $($pair[0])"
+}
+Write-Host "Tradução: $wfI18nOnce texto(s) único(s) + $($WinForgeI18nRepeated.Count) repetido(s) em $wfI18nHits ocorrência(s)"
+
+# Trava de idioma do -SelfTest: a lista de termos é injetada AQUI, depois do laço, senão o próprio
+# laço traduziria a lista (e a trava passaria por não ter mais o que procurar).
+$wfEnglishSweep = @(
+    'Recommended Selections', 'Run Tweaks', 'Undo Selected', 'Install/Upgrade', 'Uninstall Applications',
+    'Upgrade all', 'Clear Selection', 'Collapse All', 'Expand All', 'Selected Apps', 'Show Installed',
+    'Get Installed', 'Windows Update Profiles', 'Apply Recommended', 'Restore Defaults', 'Disable Updates',
+    'Status Log', 'Browse', 'Open Microsoft Download', 'Legacy Windows Panels', 'Essential Tweaks',
+    'Customize Preferences', 'Advanced Tweaks', 'Performance Plans', 'Remote Access', 'Install Features',
+    'Package Manager', 'Free and Open Source', 'No ISO selected', 'Select Windows 11 ISO'
+) + @(' - Disable', ' - Enable', ' - Remove', ' - Run', ' - Reset', ' - Create', ' - Reinstall')
+$wfSweepLiteral = "    `$sync.WinForgeEnglishSweep = @(" + (($wfEnglishSweep | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', ') + ")`n"
+$src = Insert-After $src "    `$sync.SelfTest = `$true`n" $wfSweepLiteral "lista da trava de idioma"
 
 # ---------------------------------------------------------------- saída
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null

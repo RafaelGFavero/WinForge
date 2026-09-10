@@ -17,7 +17,7 @@
                                 <Label Content="Seleções recomendadas (WinForge):" FontSize="{DynamicResource FontSize}" VerticalAlignment="Center" Margin="2"/>
                                 <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,2,0,0">
                                     <Button Name="WPFServerSelectRecommended" Content=" Marcar recomendados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca os itens que o diagnóstico recomenda para este servidor (contorno verde)."/>
-                                    <Button Name="WPFClearServerSelection" Content=" Limpar seleção " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Desmarca todos os tweaks (desta aba e da aba Tweaks)."/>
+                                    <Button Name="WPFClearServerSelection" Content=" Limpar seleção " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Desmarca todos os tweaks (desta aba e da aba Ajustes)."/>
                                     <Button Name="WPFGetInstalledServer" Content=" Detectar aplicados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca o que já está aplicado no sistema (lê o registro e os serviços)."/>
                                 </WrapPanel>
                             </StackPanel>

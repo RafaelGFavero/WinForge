@@ -18,7 +18,7 @@
                                 <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,2,0,0">
                                     <Button Name="WPFPresetGamer" Content=" Gamer " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca o conjunto WinForge + otimizações de jogos (GameDVR, MMCSS, prioridade de primeiro plano, telemetria da GPU). Não marca serviços Xbox nem itens 'CUIDADO'."/>
                                     <Button Name="WPFGamesSelectRecommended" Content=" Marcar recomendados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca os itens que o diagnóstico recomenda para este PC (contorno verde)."/>
-                                    <Button Name="WPFClearGamesSelection" Content=" Limpar seleção " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Desmarca todos os tweaks (desta aba e da aba Tweaks)."/>
+                                    <Button Name="WPFClearGamesSelection" Content=" Limpar seleção " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Desmarca todos os tweaks (desta aba e da aba Ajustes)."/>
                                     <Button Name="WPFGetInstalledGames" Content=" Detectar aplicados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca o que já está aplicado no sistema (lê o registro e os serviços)."/>
                                 </WrapPanel>
                             </StackPanel>
@@ -31,7 +31,7 @@
                                     <TextBlock Padding="10" TextWrapping="Wrap" Foreground="{DynamicResource MainForegroundColor}">
                                         Esquerda: prioridade de CPU Alta por jogo (IFEO). Direita: otimizações gerais para jogos e por fabricante de GPU (só aparece a GPU detectada).
                                         <LineBreak/>Passe o mouse sobre cada item para ver a descrição, o que ele altera e de qual script do Windows Boost veio.
-                                        <LineBreak/>'Aplicar selecionados' aplica tudo que estiver marcado nesta aba E na aba Tweaks. 'Desfazer selecionados' reverte os itens marcados.
+                                        <LineBreak/>'Aplicar selecionados' aplica tudo que estiver marcado nesta aba E na aba Ajustes. 'Desfazer selecionados' reverte os itens marcados.
                                     </TextBlock>
                                 </StackPanel>
                             </Border>
