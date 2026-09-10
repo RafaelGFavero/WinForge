@@ -130,6 +130,12 @@ Active Directory só aparecem quando o papel está instalado.
 | Desativar o SMB1 no servidor | Desliga o protocolo obsoleto. Dispositivos que só falam SMB1 (multifuncionais, NAS velhos) perdem o acesso. |
 | TCP: nível de ajuste automático 'normal' | Devolve o autotuning da janela TCP ao padrão do Windows, desfazendo o `disabled` que scripts antigos deixam para trás. |
 
+Esses quatro — mais a exigência de assinatura SMB, em "Avançado (CUIDADO)" — não moram no registro, então o
+WinForge **lê o estado atual antes de mexer** e grava em `%ProgramData%\WinForge\iis-backup`, como já fazia
+com o IIS. O **Desfazer** devolve exatamente o que estava lá: num servidor onde o SMB1 já vinha desligado,
+desfazer não o liga; num controlador de domínio onde a assinatura já é obrigatória por política, desfazer
+não a remove. Sem backup (item nunca aplicado), o Desfazer não faz nada.
+
 **IIS** — todos os pools e sites de uma vez: iniciar sempre (`AlwaysRunning`), sem tempo limite de
 ociosidade, reciclar por memória em vez de por tempo, pré-carregar os sites (`preloadEnabled`),
 compressão estática e dinâmica, cache de saída e de kernel, e fila de 5000 com as requisições
@@ -137,24 +143,38 @@ concorrentes do ASP.NET liberadas.
 
 **Avançado (CUIDADO)** — os três itens que cobram um preço ficam aqui, como no resto do programa, e
 não entram em nada automaticamente: desativar a Configuração de Segurança Reforçada do IE, exigir
-assinatura SMB e a reciclagem de pool por memória.
+assinatura SMB e a reciclagem de pool por memória (que na tela aparece só nessa categoria, e não
+junto dos outros itens de IIS).
 
 Antes de mexer em qualquer configuração do IIS, o WinForge grava os valores anteriores em
-`%ProgramData%\WinForge\iis-backup\<item>-<data-hora>.json`. O **Desfazer** lê o backup mais
-recente daquele item e devolve pool por pool o que estava lá. Aplicar duas vezes não muda nada na
-segunda: o que já está no valor desejado é pulado, e o backup só é gravado quando há mesmo algo a
-mudar. Os dois itens que dependem de recurso do Windows — pré-carregar (Inicialização de
+`%ProgramData%\WinForge\iis-backup\<item>-<data-hora>.json`. O **Desfazer** junta todos os backups
+vivos daquele item e devolve, propriedade por propriedade, o valor **mais antigo** — o de antes da
+primeira aplicação, e não o da última. É isso que mantém a promessa depois de um pool novo: aplicar
+de novo grava um backup só com o que mudou, e sem essa junção o Desfazer deixaria os pools antigos
+mexidos para sempre. Os arquivos consumidos viram `<nome>.restored.json` e saem da conta, para que
+uma aplicação seguinte comece de um backup limpo. Aplicar duas vezes não muda nada na segunda: o
+que já está no valor desejado é pulado, e o backup só é gravado quando há mesmo algo a mudar.
+
+A pasta de backup é criada pelo próprio WinForge com permissões próprias — sem herança, só SYSTEM e
+Administradores — e é conferida antes de todo Desfazer: pasta que pertence a outra pessoa, que dê
+escrita a quem não é administrador ou que seja um link é recusada, com a mensagem na tela e nada
+alterado. Do arquivo, só volta o que aquele item de fato escreve; qualquer outra chave é ignorada e
+registrada no log. Sem isso, um JSON plantado na pasta viraria escrita arbitrária no
+`applicationHost.config` na primeira vez que alguém clicasse em Desfazer.
+
+Os dois itens que dependem de recurso do Windows — pré-carregar (Inicialização de
 Aplicativos, `Web-AppInit`) e a parte dinâmica da compressão (`Web-Dyn-Compression`) — avisam e
 seguem sem alterar aquilo quando o recurso não está instalado. **O WinForge não instala recurso
 nenhum do Windows.**
 
-Os botões só leem, nunca alteram:
+Os botões só leem, nunca alteram. Os três primeiros ficam no grupo **Servidor**; os quatro últimos,
+no grupo **Active Directory**, que só aparece quando o papel de AD está instalado:
 
 | Botão | O que mostra |
 |---|---|
 | Verificar fonte de horário (w32tm) | A fonte de horário configurada e o estado do serviço W32Time. |
 | Listar exclusões do Defender | As exclusões de caminho, extensão e processo do Microsoft Defender. |
-| Mostrar parâmetros TCP (netsh) | A saída de `netsh int tcp show global` (autotuning, RSS, ECN). |
+| Mostrar parâmetros TCP | `Get-NetTCPSetting` e `Get-NetOffloadGlobalSetting`: autotuning, congestionamento, ECN, RSS. |
 | Executar dcdiag /q | Só o que está errado no controlador de domínio. Sem saída significa sem erro. |
 | Resumo de replicação (repadmin) | Atrasos e falhas de replicação por parceiro (`repadmin /replsummary`). |
 | Limpeza de registros DNS (scavenging) | A configuração de limpeza automática de registros DNS antigos. |
@@ -174,6 +194,15 @@ laranja, o SMB1 ligado é apontado, e logs do IIS ou banco do AD no disco do sis
 **Nada da aba Servidor entra em preset.** Preset é para máquina de usuário; em servidor de produção
 cada item se marca à mão, e o botão "Marcar recomendados" da aba deixa tudo visível antes de você
 aplicar.
+
+Vale registrar onde a aba se afasta de propósito do que foi desenhado no começo, para ninguém
+procurar o que não existe: o SMB1 é **desativado**, não desinstalado (o recurso do Windows continua
+lá — o WinForge não remove recurso); o perfil de atualização "só de segurança" do Windows Update é
+**texto de orientação** no rodapé da aba, e não um item que se aplica; a verificação de horário
+(`w32tm`) fica no grupo **Servidor**, e não no grupo **Active Directory**, porque ela interessa
+igualmente a um servidor membro; e telemetria no mínimo, Delivery Optimization e hibernação
+continuam sendo itens da aba **Tweaks** recomendados pelo Diagnóstico, não itens da aba Servidor —
+quem trabalhar só nesta aba não os verá.
 
 ## Classificação de risco
 
