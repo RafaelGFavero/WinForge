@@ -61,6 +61,7 @@ $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
+$commandsBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-commands.ps1")
 $serverBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-server.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
@@ -280,6 +281,12 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.Tr
 
 # ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
+
+# ---------------------------------------------------------------- comandos com janela de saída (núcleo genérico)
+# ANTES do bloco da aba Servidor de propósito: todas as inserções usam a mesma âncora, e cada uma
+# entra logo acima dela - então quem insere primeiro fica mais ACIMA no arquivo gerado. É o núcleo
+# genérico que os invólucros da aba Servidor chamam, e ele nasce antes deles.
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($commandsBlock.TrimEnd() + "`n`n") "insert commands"
 
 # ---------------------------------------------------------------- aba Servidor (comandos e visibilidade das abas)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($serverBlock.TrimEnd() + "`n`n") "insert server"
@@ -1520,6 +1527,32 @@ if ($SelfTest) {
         } catch {
             Write-Host "  [ERRO] Servidor: dcdiag ausente lançou '$($_.Exception.Message)'" -ForegroundColor Red; $wbErrors++
         }
+    }
+    # -DryRun no núcleo genérico: devolve o texto do comando prefixado com '[simulação] ', não roda
+    # nada e não grava arquivo nenhum - nem a checagem de ferramenta acontece. É o que deixa o
+    # SelfTest exercitar QUALQUER linha de uma tabela de comandos, inclusive uma que repara o
+    # sistema, sem tocar na máquina de quem compila. A contagem de arquivos antes/depois é a prova
+    # de que a simulação não escreveu: um 'if' esquecido gravaria o arquivo do mesmo jeito.
+    try {
+        $wbCmdDir = Split-Path -Parent $sync.logPath
+        $wbCmdAntes = @(Get-ChildItem -LiteralPath $wbCmdDir -Filter 'server-*.txt' -ErrorAction SilentlyContinue).Count
+        $wbCmdSeco = Invoke-WinForgeCommandCore -Spec (Get-WinForgeServerCommand -Name TcpShow) -Name TcpShow -Component Server -Prefix server -DryRun
+        # O segundo tiro usa um nome que não é de comando nenhum, e é ele que sustenta a contagem: o
+        # nome do arquivo tem os segundos, então uma simulação que gravasse com o nome 'TcpShow'
+        # sobrescreveria em silêncio o arquivo do TcpShow de verdade rodado logo acima, no mesmo
+        # segundo, e a contagem não mudaria. Com um nome inédito, gravar é sempre um arquivo a mais.
+        $wbCmdSecoUnico = Invoke-WinForgeCommandCore -Spec (Get-WinForgeServerCommand -Name TcpShow) -Name 'SimulacaoSelfTest' -Component Server -Prefix server -DryRun
+        if ($null -ne $wbCmdSecoUnico.Path) { Write-Host "  [ERRO] Comandos: -DryRun não pode devolver caminho de arquivo (veio '$($wbCmdSecoUnico.Path)')" -ForegroundColor Red; $wbErrors++ }
+        # StartsWith e não -like: em curinga do PowerShell '[...]' é classe de caracteres, e
+        # "-like '[simulação]*'" casaria com qualquer texto começando por uma daquelas letras.
+        if (-not ([string]$wbCmdSeco.Text).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Comandos: -DryRun deveria devolver '[simulação] <comando>', veio '$([string]$wbCmdSeco.Text)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wbCmdSeco.Text -notmatch 'Get-NetTCPSetting') { Write-Host "  [ERRO] Comandos: -DryRun não trouxe o texto do comando" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wbCmdSeco.Path) { Write-Host "  [ERRO] Comandos: -DryRun não pode devolver caminho de arquivo (veio '$($wbCmdSeco.Path)')" -ForegroundColor Red; $wbErrors++ }
+        $wbCmdDepois = @(Get-ChildItem -LiteralPath $wbCmdDir -Filter 'server-*.txt' -ErrorAction SilentlyContinue).Count
+        if ($wbCmdDepois -ne $wbCmdAntes) { Write-Host "  [ERRO] Comandos: -DryRun gravou arquivo na pasta de logs ($wbCmdAntes -> $wbCmdDepois)" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Comandos (simulação): TcpShow devolveu o texto do comando sem rodar nada e sem gravar arquivo" }
+    } catch {
+        Write-Host "  [ERRO] Comandos (simulação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # A janela de saída é montada em código, sem XAML: o -NoShow existe para o SelfTest provar que o
     # TextBox nasce com o texto certo sem abrir nada na tela (ShowDialog aqui travaria o build).
