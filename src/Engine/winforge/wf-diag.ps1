@@ -287,6 +287,27 @@ function Test-WinForgeRecommendationToggle {
     return ($entry -and [string]$entry.Type -eq 'Toggle')
 }
 
+function Test-WinForgeRecommendationAvailable {
+    <#
+    .SYNOPSIS
+        Diz se a chave recomendada TEM uma caixa de verdade nesta máquina - sem montar aba nenhuma.
+    .DESCRIPTION
+        A linha do checklist precisa saber disso na hora em que é DESENHADA, e não no clique. Antes,
+        a linha nascia habilitada, o usuário clicava, a aba de destino era montada, a caixa não
+        existia e só aí a linha se desabilitava - com a marca já dada e o total do contador já
+        contando com ela.
+        A resposta sai do mesmo par de regras que esconde a entrada na aba: platform/role/os/gpu
+        (Test-WinUtilBoostEntryCompatible) e a aba Servidor, que num cliente não é montada. Nenhuma
+        das duas precisa da aba na tela, então a pergunta é barata e não tem efeito colateral.
+    #>
+    param([Parameter(Mandatory)][string]$Key)
+
+    $entry = $sync.configs.tweaks.$Key
+    if ($null -eq $entry) { return $false }
+    if ((Get-WinForgeRecommendationTab -Key $Key) -eq 'Servidor' -and -not $sync.IsServer) { return $false }
+    return [bool](Test-WinUtilBoostEntryCompatible $entry)
+}
+
 function Get-WinForgeRecommendationControl {
     <#
     .SYNOPSIS
@@ -320,8 +341,10 @@ function Update-WinForgeDiagRecommendationCount {
     .SYNOPSIS
         Reescreve o contador "N de M recomendados marcados" da aba Diagnóstico.
     .DESCRIPTION
-        Conta os espelhos, não os controles reais: a lista é o que o usuário está olhando, e uma
-        linha que não se aplica a esta máquina fica desabilitada e nunca entra no N.
+        Conta os espelhos, não os controles reais: a lista é o que o usuário está olhando.
+        Linha DESABILITADA fica de fora dos dois números. Ela é uma recomendação que não se aplica a
+        esta máquina - ninguém consegue marcá-la, e contá-la no M deixaria o contador parado em
+        "15 de 16" com tudo marcado, o que parece defeito.
     #>
     if ($null -eq $sync -or $null -eq $sync.WPFDiagRecCount) { return }
 
@@ -330,7 +353,7 @@ function Update-WinForgeDiagRecommendationCount {
     if ($sync.WinForgeDiagMirrors) {
         foreach ($key in @($sync.WinForgeDiagMirrors.Keys)) {
             $mirror = $sync.WinForgeDiagMirrors[$key]
-            if ($null -eq $mirror) { continue }
+            if ($null -eq $mirror -or -not $mirror.IsEnabled) { continue }
             $total++
             if ($mirror.IsChecked) { $marcados++ }
         }
@@ -460,7 +483,15 @@ function New-WinForgeDiagRecRow {
         $head.Foreground = $brush
         $head.VerticalAlignment = 'Center'
         $head.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
-        $head.ToolTip = "Marca também a caixa correspondente na aba $(Get-WinForgeRecommendationTab -Key $key)."
+        # A disponibilidade é perguntada AGORA, na hora de desenhar, e não no clique: a linha de uma
+        # recomendação que não existe nesta máquina nasce desabilitada, com a dica dizendo por quê,
+        # em vez de aceitar a marca e se desabilitar depois (ver Test-WinForgeRecommendationAvailable).
+        if (Test-WinForgeRecommendationAvailable -Key $key) {
+            $head.ToolTip = "Marca também a caixa correspondente na aba $(Get-WinForgeRecommendationTab -Key $key)."
+        } else {
+            $head.IsEnabled = $false
+            $head.ToolTip = "não se aplica a este computador"
+        }
         $head.SetResourceReference([System.Windows.Controls.Control]::FontSizeProperty, "FontSize")
         [System.Windows.Automation.AutomationProperties]::SetName($head, [string]$Item.Content)
         # O handler lê a chave da Tag do controle que disparou: a lista é redesenhada a cada
@@ -502,8 +533,14 @@ function Get-WinForgeDiagDriverRows {
     .SYNOPSIS
         Linhas da tabela de drivers a partir do inventário do perfil.
     .DESCRIPTION
-        'Url' vira $null quando não há página de fabricante conhecida: a coluna de hyperlink liga o
-        texto ao endereço, e uma string vazia ali só produziria um link morto.
+        'Url' vira $null quando não há página de fabricante conhecida: o relatório HTML liga o texto
+        ao endereço, e uma string vazia ali só produziria um link morto.
+
+        A LINHA carrega a ação (ActionKind/ActionLabel/ActionUrl) porque é ela que viaja na Tag do
+        botão da coluna "Ação" até o handler - a tabela é redesenhada a cada diagnóstico, e um índice
+        guardado no clique apontaria para a linha da rodada anterior. 'ActionVisible' é texto de
+        Visibility ('Visible'/'Collapsed') e não booleano: é o que o XAML liga direto na propriedade,
+        sem precisar de conversor.
     .OUTPUTS
         ObservableCollection de PSCustomObject (o DataGrid liga direto nela).
     #>
@@ -518,20 +555,189 @@ function Get-WinForgeDiagDriverRows {
         $icon = switch ($status) { 'atualizar' { '⬆' } 'verificar' { '⚠' } default { '✓' } }
         $url = [string]$d.Url
         if ([string]::IsNullOrWhiteSpace($url)) { $url = $null }
+        $acao = Get-WinForgeDriverAction -Driver $d
         $rows.Add([pscustomobject]@{
-            Device     = [string]$d.Device
-            Class      = [string]$d.Class
-            Version    = (Format-WinForgeDiagValue $d.Version)
-            Date       = (Format-WinForgeDiagValue $d.Date)
-            Provider   = [string]$d.Provider
-            Status     = $status
-            StatusText = "$icon $status"
-            Latest     = [string]$d.Latest
-            Url        = $url
-            UrlLabel   = $(if ($url) { 'página do fabricante' } else { '' })
+            Device        = [string]$d.Device
+            Class         = [string]$d.Class
+            Version       = (Format-WinForgeDiagValue $d.Version)
+            Date          = (Format-WinForgeDiagValue $d.Date)
+            Provider      = [string]$d.Provider
+            Status        = $status
+            StatusText    = "$icon $status"
+            Latest        = [string]$d.Latest
+            Url           = $url
+            UrlLabel      = $(if ($url) { 'página do fabricante' } else { '' })
+            ActionKind    = [string]$acao.Kind
+            ActionLabel   = [string]$acao.Label
+            ActionUrl     = $acao.Url
+            ActionVisible = $(if ([string]$acao.Kind -eq 'none') { 'Collapsed' } else { 'Visible' })
+            ActionTip     = $(switch ([string]$acao.Kind) {
+                'nvidia-download' { "Baixa o instalador oficial do driver $($acao.Label -replace '^Baixar ', '') do site da NVIDIA, confere a assinatura e abre o instalador." }
+                'vendor-page'     { "Abre a página de download do fabricante no navegador." }
+                default           { $null }
+            })
         })
     }
     return ,$rows
+}
+
+function Invoke-WinForgeDriverAction {
+    <#
+    .SYNOPSIS
+        O que o botão da coluna "Ação" faz: abrir a página do fabricante ou baixar o driver NVIDIA.
+    .DESCRIPTION
+        Recebe a LINHA da tabela (a que veio na Tag do botão), não um índice. A página do fabricante
+        abre direto - é o navegador do usuário abrindo um endereço, sem download e sem execução. O
+        download da NVIDIA pergunta antes, porque são centenas de megabytes e porque o instalador vai
+        abrir uma janela na cara de quem clicou.
+
+        A trava de SelfTest vem ANTES da caixa de confirmação, pela mesma razão de
+        Invoke-WinForgeRepairCommand: num build sem ninguém na frente, uma caixa modal pendura tudo.
+
+        O trabalho vai para um runspace com o corpo criado AQUI, na runspace principal (esta função
+        roda no clique). Um scriptblock criado dentro do corpo do job pertenceria à runspace do pool
+        e travaria no primeiro pipeline quando o Dispatcher o executasse - o mesmo laço descrito em
+        Start-WinForgeProfileJob. E os dados viajam como ARGUMENTO, nunca concatenados num texto de
+        comando: o endereço vem da rede, e texto de fora não vira código.
+    .OUTPUTS
+        Texto curto com o que foi feito ('none', 'vendor-page', 'nvidia-download', 'ocupado').
+    #>
+    param($Row)
+
+    if ($null -eq $Row) { return 'none' }
+    $tipo = [string]$Row.ActionKind
+    if ([string]::IsNullOrWhiteSpace($tipo) -or $tipo -eq 'none') { return 'none' }
+
+    if ($tipo -eq 'vendor-page') {
+        Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeDriverAction (vendor-page)'
+        $endereco = [string]$Row.ActionUrl
+        # O endereço sai de uma tabela literal do programa (Get-WinForgeVendorDriverUrl), mas quem
+        # chega até aqui é a LINHA, e Start-Process abre tanto endereço quanto arquivo: sem conferir
+        # o esquema, uma linha com um caminho no lugar da URL viraria execução com a elevação do
+        # WinForge. Duas linhas de conferência custam menos que confiar na origem do dado.
+        $uri = $null
+        try { $uri = [uri]$endereco } catch { $uri = $null }
+        if ($null -eq $uri -or -not $uri.IsAbsoluteUri -or $uri.Scheme -notin @('http', 'https')) {
+            Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Endereço recusado para '$($Row.Device)': '$endereco' não é http/https."
+            return 'vendor-page'
+        }
+        try {
+            Start-Process $endereco
+            Write-WinForgeLog -Component "Diag" -Message "Página do fabricante aberta para '$($Row.Device)': $endereco"
+        } catch {
+            Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Não foi possível abrir '$endereco': $($_.Exception.Message)"
+        }
+        return 'vendor-page'
+    }
+
+    if ($tipo -ne 'nvidia-download') { return 'none' }
+    Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeDriverAction (nvidia-download)'
+
+    if ($sync.CommandRunning) {
+        [System.Windows.MessageBox]::Show("Já existe um trabalho em andamento. Espere ele terminar.", "WinForge", "OK", "Warning") | Out-Null
+        return 'ocupado'
+    }
+
+    $versao = [string]$Row.Latest
+    $resposta = [System.Windows.MessageBox]::Show($sync.Form,
+        "Baixar o driver NVIDIA $versao do site oficial (várias centenas de MB)? O instalador abrirá para você concluir.",
+        "WinForge", "YesNo", "Warning")
+    if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
+        Write-WinForgeLog -Component "Diag" -Message "Download do driver NVIDIA $versao cancelado pelo usuário."
+        return 'cancelado'
+    }
+
+    $sync.CommandRunning = $true
+    $corpo = {
+        param($wfArgs)
+        try {
+            $null = Set-WinForgeProfileProgress -Label "Baixando o driver NVIDIA $($wfArgs.Version) do site oficial..." -Percent 10
+            $wfRes = Install-WinForgeNvidiaDriver -Url $wfArgs.Url -Version $wfArgs.Version
+            $null = Set-WinForgeProfileProgress -Label ([string]$wfRes.Text) -Percent $(if ($wfRes.Started) { 100 } else { 0 })
+        } catch {
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA falhou: $($_.Exception.Message)"
+            $null = Set-WinForgeProfileProgress -Label "Download do driver NVIDIA falhou: $($_.Exception.Message)" -Percent 0
+        } finally {
+            $sync.CommandRunning = $false
+        }
+    }
+    try {
+        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Url = [string]$Row.ActionUrl; Version = $versao } | Out-Null
+    } catch {
+        # Despacho que falha (pool fechado, sem thread livre) nunca roda o 'finally' do corpo: sem
+        # este catch a trava ficaria ligada e nenhum outro comando começaria.
+        $sync.CommandRunning = $false
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)"
+        $null = Set-WinForgeProfileProgress -Label "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)" -Percent 0
+    }
+    return 'nvidia-download'
+}
+
+function Invoke-WinForgeWindowsUpdateAction {
+    <#
+    .SYNOPSIS
+        O que o botão "Instalar" da tabela do Windows Update faz.
+    .DESCRIPTION
+        Mesmo desenho da ação de driver: trava de SelfTest antes da caixa, confirmação, um trabalho
+        por vez ($sync.CommandRunning) e o serviço COM rodando fora da thread da janela - ele baixa e
+        instala, e isso são minutos de interface congelada se rodar no clique.
+
+        A caixa de mensagem no fim só aparece quando é preciso REINICIAR: o resto do resultado vai
+        para a barra de status e para o log, que é onde o usuário já está olhando. Reinício pendente
+        é a única coisa que ele precisa saber antes de continuar mexendo na máquina.
+    .OUTPUTS
+        Texto curto com o que foi feito.
+    #>
+    param($Row)
+
+    if ($null -eq $Row) { return 'none' }
+    $id = [string]$Row.UpdateId
+    if ([string]::IsNullOrWhiteSpace($id)) { return 'none' }
+    Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeWindowsUpdateAction'
+
+    if ($sync.CommandRunning) {
+        [System.Windows.MessageBox]::Show("Já existe um trabalho em andamento. Espere ele terminar.", "WinForge", "OK", "Warning") | Out-Null
+        return 'ocupado'
+    }
+
+    $titulo = [string]$Row.Title
+    $resposta = [System.Windows.MessageBox]::Show($sync.Form, "Instalar '$titulo' pelo Windows Update?", "WinForge", "YesNo", "Warning")
+    if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
+        Write-WinForgeLog -Component "Diag" -Message "Instalação de '$titulo' pelo Windows Update cancelada pelo usuário."
+        return 'cancelado'
+    }
+
+    # Nasce na runspace principal, como todo bloco que o Dispatcher vai executar.
+    $sync.WinForgeWUInstallCallback = {
+        try {
+            [System.Windows.MessageBox]::Show($sync.Form, [string]$sync.LastWUInstallText + "`r`n`r`nÉ preciso reiniciar o computador para concluir.", "WinForge", "OK", "Information") | Out-Null
+        } catch { }
+    }
+
+    $sync.CommandRunning = $true
+    $corpo = {
+        param($wfArgs)
+        try {
+            $null = Set-WinForgeProfileProgress -Label "Instalando '$($wfArgs.Title)' pelo Windows Update..." -Percent 10
+            $wfRes = Install-WinForgeWindowsUpdateDriver -UpdateId $wfArgs.UpdateId
+            $sync.LastWUInstallText = [string]$wfRes.Text
+            $null = Set-WinForgeProfileProgress -Label ([string]$wfRes.Text) -Percent $(if ([int]$wfRes.ResultCode -in @(2, 3)) { 100 } else { 0 })
+            if ($wfRes.RebootRequired -and -not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUInstallCallback }
+        } catch {
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update falhou: $($_.Exception.Message)"
+            $null = Set-WinForgeProfileProgress -Label "Instalação pelo Windows Update falhou: $($_.Exception.Message)" -Percent 0
+        } finally {
+            $sync.CommandRunning = $false
+        }
+    }
+    try {
+        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ UpdateId = $id; Title = $titulo } | Out-Null
+    } catch {
+        $sync.CommandRunning = $false
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update não pôde começar: $($_.Exception.Message)"
+        $null = Set-WinForgeProfileProgress -Label "Instalação pelo Windows Update não pôde começar: $($_.Exception.Message)" -Percent 0
+    }
+    return 'windows-update'
 }
 
 function New-WinForgeDiagLineBlock {
@@ -683,6 +889,9 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
             Provider = (Format-WinForgeDiagValue $u.Provider)
             Version  = (Format-WinForgeDiagValue $u.Version)
             Date     = (Format-WinForgeDiagValue $u.Date)
+            # O id, e não o título, é o que identifica a atualização na hora de instalar: dois
+            # drivers do mesmo dispositivo saem com títulos parecidos e ids diferentes.
+            UpdateId = [string]$u.UpdateId
         })
     }
 
@@ -775,12 +984,17 @@ function Initialize-WinForgeDiagnosticsTab {
         Monta a aba Diagnóstico (chamada por Initialize-WinForgeTabContent na primeira vez que a aba
         é aberta).
     .DESCRIPTION
-        Os botões já são ligados a Invoke-WPFButton pelo laço geral da janela; o que falta aqui são
-        dois eventos roteados: o clique nos links da coluna "Fabricante" (Hyperlink, não Button) e a
-        roda do mouse sobre as tabelas.
-        Os dois handlers são registrados uma única vez - a aba pode ser redesenhada muitas vezes, e um
-        handler por redesenho abriria o navegador várias vezes no mesmo clique e rolaria a página
-        várias vezes por giro da roda.
+        Os botões DO XAML já são ligados a Invoke-WPFButton pelo laço geral da janela; o que falta
+        aqui são dois eventos roteados: o clique nos botões das colunas "Ação" e "Instalar" e a roda
+        do mouse sobre as tabelas.
+
+        Os botões das duas colunas nascem e morrem com as linhas, então não dá para ligar um handler
+        em cada um: quem escuta é a TABELA, uma vez só, no evento Click que sobe de qualquer botão
+        de dentro dela. Quem clicou é lido de $e.OriginalSource, e a linha vem na Tag do botão.
+
+        Todos os handlers são registrados uma única vez - a aba pode ser redesenhada muitas vezes, e
+        um handler por redesenho baixaria o mesmo driver várias vezes no mesmo clique e rolaria a
+        página várias vezes por giro da roda.
     #>
     if ($null -eq $sync -or $null -eq $sync.WPFDiagDrivers) { return }
 
@@ -803,16 +1017,34 @@ function Initialize-WinForgeDiagnosticsTab {
         $sync.WinForgeDiagWheelHooked = $true
     }
 
-    if (-not $sync.DiagNavigateHandlerWired) {
-        $handler = [System.Windows.Navigation.RequestNavigateEventHandler] {
+    # Clique nos botões de linha. O resultado fica em $sync.LastDriverAction: é o que o -SelfTest lê
+    # para provar que o clique chegou ao lugar certo, e é onde a recusa aparece quando a ação é
+    # barrada (modo SelfTest, trabalho em andamento) - sem isso a exceção morreria calada dentro do
+    # handler, que é o único lugar de onde ela não tem para onde subir.
+    if (-not $sync.WinForgeDiagActionHandlerWired) {
+        $sync.WPFDiagDrivers.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
             param($eventSender, $eventArgs)
-            try { Start-Process $eventArgs.Uri.AbsoluteUri } catch {
-                Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Não foi possível abrir o link: $($_.Exception.Message)"
-            }
+            $wfBotao = $eventArgs.OriginalSource
+            if ($wfBotao -isnot [System.Windows.Controls.Button] -or $null -eq $wfBotao.Tag) { return }
             $eventArgs.Handled = $true
+            try { $sync.LastDriverAction = Invoke-WinForgeDriverAction -Row $wfBotao.Tag } catch {
+                $sync.LastDriverAction = "erro: $($_.Exception.Message)"
+                Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Ação de driver falhou: $($_.Exception.Message)"
+            }
+        })
+        if ($null -ne $sync.WPFDiagWU) {
+            $sync.WPFDiagWU.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
+                param($eventSender, $eventArgs)
+                $wfBotao = $eventArgs.OriginalSource
+                if ($wfBotao -isnot [System.Windows.Controls.Button] -or $null -eq $wfBotao.Tag) { return }
+                $eventArgs.Handled = $true
+                try { $sync.LastDriverAction = Invoke-WinForgeWindowsUpdateAction -Row $wfBotao.Tag } catch {
+                    $sync.LastDriverAction = "erro: $($_.Exception.Message)"
+                    Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update falhou: $($_.Exception.Message)"
+                }
+            })
         }
-        $sync.WPFDiagDrivers.AddHandler([System.Windows.Documents.Hyperlink]::RequestNavigateEvent, $handler)
-        $sync.DiagNavigateHandlerWired = $true
+        $sync.WinForgeDiagActionHandlerWired = $true
     }
 
     Update-WinForgeDiagnosticsTab

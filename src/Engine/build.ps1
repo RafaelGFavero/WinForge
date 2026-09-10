@@ -1887,9 +1887,15 @@ if ($SelfTest) {
         if ([string]$wfRepDx.Kind -ne 'read') { Write-Host "  [ERRO] Reparo (DirectX): abrir uma página é leitura, veio Kind '$($wfRepDx.Kind)'" -ForegroundColor Red; $wbErrors++ }
         if (-not $wfRepDx.OpensExternal) { Write-Host "  [ERRO] Reparo (DirectX): a linha deveria estar marcada com OpensExternal" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfRepDx.Command -notmatch "^Start-Process 'https://www\.microsoft\.com/download/details\.aspx\?id=35'$") { Write-Host "  [ERRO] Reparo (DirectX): o comando deveria ser um Start-Process da página oficial, veio '$($wfRepDx.Command)'" -ForegroundColor Red; $wbErrors++ }
-        # Nenhuma função de download sobrou no programa: se alguma voltar, este teste cai.
-        foreach ($wfRepDxMorta in @('Install-WinForgeDirectX', 'Test-WinForgeMicrosoftSignature', 'Test-WinForgeMicrosoftSigner', 'Split-WinForgeCertificateSubject')) {
-            if (Get-Command $wfRepDxMorta -ErrorAction SilentlyContinue) { Write-Host "  [ERRO] Reparo (DirectX): '$wfRepDxMorta' voltou ao programa - o WinForge não baixa executável" -ForegroundColor Red; $wbErrors++ }
+        # O caminho de download do DirectX continua morto: se alguma dessas funções voltar, este
+        # teste cai. 'Split-WinForgeCertificateSubject' saiu desta lista na Tarefa 5 do Plano 6 - o
+        # download do driver NVIDIA precisa ler o assunto do certificado -, mas ela sozinha não
+        # baixa nada: é um analisador de texto. O que continua proibido é o DirectX baixar e abrir
+        # um instalador de %TEMP%, que é gravável por integridade média. O download da NVIDIA vai
+        # para %ProgramData%\WinForge\downloads, com a DACL de SYSTEM/Administradores e a mesma
+        # conferência de dono e de reanálise da pasta de backup (Confirm-WinForgeDownloadRoot).
+        foreach ($wfRepDxMorta in @('Install-WinForgeDirectX', 'Test-WinForgeMicrosoftSignature', 'Test-WinForgeMicrosoftSigner')) {
+            if (Get-Command $wfRepDxMorta -ErrorAction SilentlyContinue) { Write-Host "  [ERRO] Reparo (DirectX): '$wfRepDxMorta' voltou ao programa - o WinForge não baixa executável para o DirectX" -ForegroundColor Red; $wbErrors++ }
         }
         # E o marcador tem de valer de verdade: nenhuma linha com OpensExternal pode estar na lista
         # que o SelfTest roda de ponta a ponta.
@@ -2268,6 +2274,165 @@ if ($SelfTest) {
         Write-Host "  NVIDIA (rede): status=$($wbNv.Status) versão=$($wbNv.Version) lançamento=$($wbNv.ReleaseDate)"
         if ($wbNv.Status -ne 'ok' -or $wbNv.Version -notmatch '^\d{3}\.\d{2}$') { Write-Host "  [ERRO] Get-WinForgeNvidiaLatestDriver: esperado status 'ok' e versão no formato 000.00" -ForegroundColor Red; $wbErrors++ }
     }
+    # ---------------------------------------------------------------- ações por linha de driver
+    # A coluna "Ação" da tabela de drivers e o botão "Instalar" da tabela do Windows Update. Nada
+    # aqui baixa nem instala nada: o SelfTest exercita a DECISÃO (que ação cada linha oferece) e as
+    # três travas do caminho que escreve - domínio da URL, assinatura do arquivo e modo SelfTest.
+    try {
+        # Que ação cada linha oferece. A linha da NVIDIA atrasada COM link oficial é a única que
+        # ganha o botão de download; com o link fora do domínio da NVIDIA ela cai na página do
+        # fabricante, que é o comportamento seguro.
+        $wfAcCasos = @(
+            @('NVIDIA atrasada com link oficial',      @{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'atualizar'; Latest = '616.92'; LatestUrl = 'https://us.download.nvidia.com/Windows/616.92/616.92-desktop-win10-win11-64bit-international-dch-whql.exe'; Url = 'https://www.nvidia.com/pt-br/drivers/' }, 'nvidia-download', 'Baixar 616.92'),
+            @('NVIDIA em dia',                         @{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'ok'; Url = 'https://www.nvidia.com/pt-br/drivers/' }, 'vendor-page', 'Página do fabricante'),
+            @('NVIDIA atrasada com link fora do domínio', @{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'atualizar'; Latest = '616.92'; LatestUrl = 'https://nvidia.com.evil.com/616.92.exe'; Url = 'https://www.nvidia.com/pt-br/drivers/' }, 'vendor-page', 'Página do fabricante'),
+            @('AMD com página do fabricante',          @{ Device = 'AMD Radeon'; Vendor = 'amd'; Class = 'DISPLAY'; Status = 'verificar'; Url = 'https://www.amd.com/pt/support/download/drivers.html' }, 'vendor-page', 'Página do fabricante'),
+            @('sem link nenhum',                       @{ Device = 'Dispositivo genérico'; Vendor = 'outro'; Class = 'SYSTEM'; Status = 'ok' }, 'none', '')
+        )
+        $wfAcOk = 0
+        foreach ($wfAcCaso in $wfAcCasos) {
+            $wfAcVeio = Get-WinForgeDriverAction -Driver ([pscustomobject]$wfAcCaso[1])
+            if ([string]$wfAcVeio.Kind -ne [string]$wfAcCaso[2]) { Write-Host "  [ERRO] Ação de driver ($($wfAcCaso[0])): veio '$($wfAcVeio.Kind)', esperado '$($wfAcCaso[2])'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfAcVeio.Label -ne [string]$wfAcCaso[3]) { Write-Host "  [ERRO] Ação de driver ($($wfAcCaso[0])): rótulo '$($wfAcVeio.Label)', esperado '$($wfAcCaso[3])'" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcOk++ }
+        }
+        # As linhas da tabela têm de CARREGAR a decisão: é delas que o botão do XAML tira o texto e
+        # a visibilidade, e é a própria linha que viaja na Tag do botão até o handler.
+        # O ',' de Get-WinForgeDiagDriverRows protege a coleção do desmembramento: '@(...)' em volta
+        # da chamada daria UM item (a própria coleção). O pipe é o que a enumera.
+        $wfAcLinhas = @((Get-WinForgeDiagDriverRows -Profile @{ Drivers = @($wfAcCasos | ForEach-Object { [pscustomobject]$_[1] }) }) | ForEach-Object { $_ })
+        if ($wfAcLinhas.Count -ne $wfAcCasos.Count) { Write-Host "  [ERRO] Ação de driver: $($wfAcLinhas.Count) linha(s), esperado $($wfAcCasos.Count)" -ForegroundColor Red; $wbErrors++ }
+        else {
+            for ($wfAcI = 0; $wfAcI -lt $wfAcCasos.Count; $wfAcI++) {
+                $wfAcLinha = $wfAcLinhas[$wfAcI]
+                if ([string]$wfAcLinha.ActionKind -ne [string]$wfAcCasos[$wfAcI][2]) { Write-Host "  [ERRO] Ação de driver (linha '$($wfAcCasos[$wfAcI][0])'): ActionKind '$($wfAcLinha.ActionKind)', esperado '$($wfAcCasos[$wfAcI][2])'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfAcLinha.ActionLabel -ne [string]$wfAcCasos[$wfAcI][3]) { Write-Host "  [ERRO] Ação de driver (linha '$($wfAcCasos[$wfAcI][0])'): ActionLabel '$($wfAcLinha.ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
+                $wfAcVisEsperada = $(if ([string]$wfAcCasos[$wfAcI][2] -eq 'none') { 'Collapsed' } else { 'Visible' })
+                if ([string]$wfAcLinha.ActionVisible -ne $wfAcVisEsperada) { Write-Host "  [ERRO] Ação de driver (linha '$($wfAcCasos[$wfAcI][0])'): ActionVisible '$($wfAcLinha.ActionVisible)', esperado '$wfAcVisEsperada'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # Domínio da URL de download. 'https://nvidia.com.evil.com' é o caso que um -like '*nvidia.com*'
+        # deixaria passar: o host TERMINA em nvidia.com só na leitura da esquerda para a direita.
+        $wfAcUrls = @(
+            @('https://us.download.nvidia.com/Windows/616.92/x.exe', $true),
+            @('https://international.download.nvidia.com/x.exe', $true),
+            @('https://nvidia.com/x.exe', $true),
+            @('http://us.download.nvidia.com/x.exe', $false),
+            @('http://evil/x.exe', $false),
+            @('https://nvidia.com.evil.com/x.exe', $false),
+            @('https://www.nvidia.com.br/x.exe', $false),
+            @('file:///C:/Windows/System32/calc.exe', $false),
+            @('', $false)
+        )
+        $wfAcUrlOk = 0
+        foreach ($wfAcUrl in $wfAcUrls) {
+            $wfAcUrlVeio = [bool](Test-WinForgeNvidiaDownloadUrl -Url ([string]$wfAcUrl[0]))
+            if ($wfAcUrlVeio -ne [bool]$wfAcUrl[1]) { Write-Host "  [ERRO] URL de download NVIDIA: '$($wfAcUrl[0])' deveria dar $($wfAcUrl[1]), deu $wfAcUrlVeio" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcUrlOk++ }
+        }
+        # Simulação do download: devolve o caminho de destino dentro da pasta de downloads e NÃO
+        # começa nada. Nenhum byte sai da rede e nenhum arquivo nasce no disco.
+        $wfAcRaiz = Get-WinForgeDownloadRoot
+        if ($wfAcRaiz -ne (Join-Path $env:ProgramData 'WinForge\downloads')) { Write-Host "  [ERRO] Get-WinForgeDownloadRoot: veio '$wfAcRaiz'" -ForegroundColor Red; $wbErrors++ }
+        $wfAcSeco = Install-WinForgeNvidiaDriver -Url 'https://us.download.nvidia.com/Windows/616.92/616.92-desktop-win10-win11-64bit-international-dch-whql.exe' -Version '616.92' -DryRun
+        if (-not ([string]$wfAcSeco.Path).StartsWith($wfAcRaiz, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: '$($wfAcSeco.Path)' fora da pasta de downloads '$wfAcRaiz'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAcSeco.Started -ne $false) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: Started deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAcSeco.Verified -ne $false) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: Verified deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfAcSeco.Text -notmatch '616\.92') { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: o texto não fala da versão ('$($wfAcSeco.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath ([string]$wfAcSeco.Path)) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: a simulação criou '$($wfAcSeco.Path)'" -ForegroundColor Red; $wbErrors++ }
+        # URL fora do domínio é recusada ANTES do -DryRun: uma simulação com URL de terceiro não é
+        # simulação de nada, e o dia em que o -DryRun se perder de novo a recusa já terá acontecido.
+        foreach ($wfAcRuim in @('http://evil/x.exe', 'https://nvidia.com.evil.com/x.exe')) {
+            $wfAcErroUrl = $null
+            try { Install-WinForgeNvidiaDriver -Url $wfAcRuim -Version '616.92' -DryRun | Out-Null } catch { $wfAcErroUrl = [string]$_.Exception.Message }
+            if ($null -eq $wfAcErroUrl) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver: '$wfAcRuim' deveria ser recusada" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAcErroUrl -notmatch 'nvidia\.com') { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver: a recusa de '$wfAcRuim' não fala do domínio ('$wfAcErroUrl')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Assinatura: arquivo sem assinatura nenhuma é recusado, e o nome da organização é comparado
+        # por igualdade EXATA - 'NVIDIA Corporation Ltd' não é 'NVIDIA Corporation'.
+        $wfAcTmpDir = Join-Path $env:TEMP 'WinForge-SelfTest\assinatura'
+        New-Item -ItemType Directory -Path $wfAcTmpDir -Force | Out-Null
+        $wfAcTmpExe = Join-Path $wfAcTmpDir 'sem-assinatura.exe'
+        Set-Content -LiteralPath $wfAcTmpExe -Value 'MZ este arquivo nao e um executavel assinado' -Encoding Ascii
+        if (Test-WinForgeNvidiaSigner -Path $wfAcTmpExe) { Write-Host "  [ERRO] Test-WinForgeNvidiaSigner: arquivo sem assinatura foi aceito" -ForegroundColor Red; $wbErrors++ }
+        if (Test-WinForgeNvidiaSigner -Path (Join-Path $wfAcTmpDir 'nao-existe.exe')) { Write-Host "  [ERRO] Test-WinForgeNvidiaSigner: arquivo inexistente foi aceito" -ForegroundColor Red; $wbErrors++ }
+        $wfAcRdnCasos = @(
+            @('CN=NVIDIA Corporation, OU=Digital ID, O=NVIDIA Corporation Ltd, L=Santa Clara, S=California, C=US', 'NVIDIA Corporation Ltd', $false),
+            @('CN=NVIDIA Corporation, O=NVIDIA Corporation, L=Santa Clara, S=California, C=US', 'NVIDIA Corporation', $true),
+            @('CN=Fulano, O="NVIDIA Corporation, Inc.", C=US', 'NVIDIA Corporation, Inc.', $false)
+        )
+        $wfAcRdnOk = 0
+        foreach ($wfAcRdnCaso in $wfAcRdnCasos) {
+            $wfAcRdn = Split-WinForgeCertificateSubject -Subject ([string]$wfAcRdnCaso[0])
+            $wfAcOrgs = @($wfAcRdn['O'])
+            if ($wfAcOrgs.Count -ne 1) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: '$($wfAcRdnCaso[0])' deu $($wfAcOrgs.Count) valor(es) de O" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfAcOrgs[0] -ne [string]$wfAcRdnCaso[1]) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: O veio '$($wfAcOrgs[0])', esperado '$($wfAcRdnCaso[1])'" -ForegroundColor Red; $wbErrors++ }
+            elseif (([string]$wfAcOrgs[0] -eq 'NVIDIA Corporation') -ne [bool]$wfAcRdnCaso[2]) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: '$($wfAcRdnCaso[0])' bateu com 'NVIDIA Corporation' quando não devia (ou o contrário)" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcRdnOk++ }
+        }
+        # Dois O no mesmo assunto: 'O=Evil, O=NVIDIA Corporation' não pode virar um O só.
+        if (@((Split-WinForgeCertificateSubject -Subject 'CN=x, O=Evil, O=NVIDIA Corporation, C=US')['O']).Count -ne 2) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: dois O no assunto deveriam virar dois valores" -ForegroundColor Red; $wbErrors++ }
+        # Windows Update: a simulação diz o que faria e não toca no COM. Fora dela, a lista de
+        # objetos IUpdate é a de $sync.DiagWUUpdates, que no SelfTest está vazia.
+        $wfAcWuSeco = Install-WinForgeWindowsUpdateDriver -UpdateId 'x' -DryRun
+        if ([string]$wfAcWuSeco.Text -notlike '*(id x)*') { Write-Host "  [ERRO] Install-WinForgeWindowsUpdateDriver -DryRun: o texto não traz o id ('$($wfAcWuSeco.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wfAcWuSeco.ResultCode) { Write-Host "  [ERRO] Install-WinForgeWindowsUpdateDriver -DryRun: ResultCode deveria ser nulo, veio '$($wfAcWuSeco.ResultCode)'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAcWuSeco.RebootRequired -ne $false) { Write-Host "  [ERRO] Install-WinForgeWindowsUpdateDriver -DryRun: RebootRequired deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
+        # As duas funções que escrevem recusam sem -DryRun enquanto o WinForge está em SelfTest.
+        $wfAcTravas = @(
+            @('Install-WinForgeNvidiaDriver', { Install-WinForgeNvidiaDriver -Url 'https://us.download.nvidia.com/Windows/616.92/x.exe' -Version '616.92' }),
+            @('Install-WinForgeWindowsUpdateDriver', { Install-WinForgeWindowsUpdateDriver -UpdateId 'x' })
+        )
+        foreach ($wfAcTrava in $wfAcTravas) {
+            $wfAcTravaMsg = $null
+            try { & $wfAcTrava[1] | Out-Null } catch { $wfAcTravaMsg = [string]$_.Exception.Message }
+            if ($null -eq $wfAcTravaMsg) { Write-Host "  [ERRO] Ação de driver (trava): $($wfAcTrava[0]) sem -DryRun deveria recusar em SelfTest" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAcTravaMsg -notmatch 'SelfTest') { Write-Host "  [ERRO] Ação de driver (trava): a recusa de $($wfAcTrava[0]) não fala em SelfTest ('$wfAcTravaMsg')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Pasta de downloads: as MESMAS regras da pasta de backup padrão, e sem o afrouxamento de
+        # -ExplicitRoot. O instalador baixado é aberto com a elevação do WinForge - uma pasta que um
+        # processo de integridade média escreve trocaria o arquivo entre a conferência e a abertura.
+        $wfAcRaizAberta = Join-Path $env:TEMP 'WinForge-SelfTest\downloads-aberto'
+        New-Item -ItemType Directory -Path $wfAcRaizAberta -Force | Out-Null
+        $wfAcAclAberta = Get-Acl -LiteralPath $wfAcRaizAberta
+        $wfAcAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $wfAcRaizAberta -AclObject $wfAcAclAberta
+        $wfAcConfAberta = Confirm-WinForgeDownloadRoot -Root $wfAcRaizAberta
+        # O motivo exato varia com a elevação de quem compila (sem elevação a pasta é recusada já
+        # pelo dono, antes de a DACL ser olhada); o que se cobra aqui é a recusa COM motivo.
+        if ($wfAcConfAberta.Ok) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: pasta com escrita para 'Todos' foi aceita" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfAcConfAberta.Reason)) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: recusou a pasta aberta sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        # A pasta do próprio usuário passa com as regras de -Root explícito e é RECUSADA aqui: é a
+        # prova de que a pasta de downloads não pegou o atalho que a pasta de teste usa.
+        $wfAcEu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wfAcSystemSid = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+        $wfAcAdminSid = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+        if ($wfAcEu.Value -eq $wfAcSystemSid.Value -or $wfAcEu.Value -eq $wfAcAdminSid.Value) {
+            Write-Host "  Pasta de downloads (dono): teste pulado - este build roda como SYSTEM ou como o próprio grupo Administradores"
+        } else {
+            $wfAcRaizDono = Join-Path $env:TEMP 'WinForge-SelfTest\downloads-dono'
+            New-Item -ItemType Directory -Path $wfAcRaizDono -Force | Out-Null
+            $wfAcAclDono = New-Object System.Security.AccessControl.DirectorySecurity
+            $wfAcAclDono.SetAccessRuleProtection($true, $false)
+            foreach ($wfAcSid in @($wfAcSystemSid, $wfAcAdminSid, $wfAcEu)) {
+                $wfAcAclDono.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $wfAcSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            }
+            $wfAcAclDono.SetOwner($wfAcEu)
+            Set-Acl -LiteralPath $wfAcRaizDono -AclObject $wfAcAclDono
+            $wfAcComRoot = Test-WinForgeSnapshotRootTrusted -Root $wfAcRaizDono -ExplicitRoot
+            if (-not $wfAcComRoot.Trusted) { Write-Host "  [ERRO] Pasta de downloads (dono): a pasta de teste deveria passar com -ExplicitRoot ('$($wfAcComRoot.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wfAcConfDono = Confirm-WinForgeDownloadRoot -Root $wfAcRaizDono
+            if ($wfAcConfDono.Ok) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: pasta com dono fora de SYSTEM/Administradores foi aceita" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfAcConfDono.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: o motivo da recusa não fala do dono ('$($wfAcConfDono.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Ações de driver: $wfAcOk de $($wfAcCasos.Count) linha(s) com a ação certa, $wfAcUrlOk de $($wfAcUrls.Count) URL(s) julgada(s), $wfAcRdnOk de $($wfAcRdnCasos.Count) assunto(s) de certificado, download e instalação recusados em SelfTest"
+    } catch {
+        Write-Host "  [ERRO] ações de driver: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\assinatura') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+    }
     try {
         [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
         [xml]$wbXaml = $inputXML
@@ -2508,6 +2673,80 @@ if ($SelfTest) {
         } catch {
             Write-Host "  [ERRO] aba Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
+        # Coluna "Ação" da tabela de drivers e coluna "Instalar" da tabela do Windows Update: as duas
+        # são DataGridTemplateColumn com um Button que tira o texto da LINHA e leva a linha inteira na
+        # Tag. É pela Tag que o handler sabe em que linha o usuário clicou - a tabela é redesenhada a
+        # cada diagnóstico, e um índice guardado no clique apontaria para a linha da rodada anterior.
+        try {
+            $wfBtnColunas = @(
+                @('WPFDiagDrivers', 'Ação',     'ActionLabel', 'ActionVisible'),
+                @('WPFDiagWU',      'Instalar', $null,         $null)
+            )
+            foreach ($wfBtnCol in $wfBtnColunas) {
+                $wfBtnGrade = $sync[$wfBtnCol[0]]
+                $wfBtnColuna = @($wfBtnGrade.Columns | Where-Object { $_ -is [System.Windows.Controls.DataGridTemplateColumn] -and [string]$_.Header -eq [string]$wfBtnCol[1] })[0]
+                if ($null -eq $wfBtnColuna) { Write-Host "  [ERRO] coluna de ação: $($wfBtnCol[0]) sem DataGridTemplateColumn '$($wfBtnCol[1])'" -ForegroundColor Red; $wbErrors++; continue }
+                $wfBtnConteudo = $wfBtnColuna.CellTemplate.LoadContent()
+                if ($wfBtnConteudo -isnot [System.Windows.Controls.Button]) { Write-Host "  [ERRO] coluna de ação: o modelo de '$($wfBtnCol[1])' não é um Button, é '$($wfBtnConteudo.GetType().Name)'" -ForegroundColor Red; $wbErrors++; continue }
+                $wfBtnTag = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.FrameworkElement]::TagProperty)
+                if ($null -eq $wfBtnTag -or [string]$wfBtnTag.Path.Path -ne '') { Write-Host "  [ERRO] coluna de ação: a Tag do botão de '$($wfBtnCol[1])' não está ligada à linha inteira" -ForegroundColor Red; $wbErrors++ }
+                if ($wfBtnCol[2]) {
+                    $wfBtnTexto = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.Controls.ContentControl]::ContentProperty)
+                    if ($null -eq $wfBtnTexto -or [string]$wfBtnTexto.Path.Path -ne [string]$wfBtnCol[2]) { Write-Host "  [ERRO] coluna de ação: o texto do botão de '$($wfBtnCol[1])' não vem de $($wfBtnCol[2])" -ForegroundColor Red; $wbErrors++ }
+                }
+                if ($wfBtnCol[3]) {
+                    $wfBtnVis = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.UIElement]::VisibilityProperty)
+                    if ($null -eq $wfBtnVis -or [string]$wfBtnVis.Path.Path -ne [string]$wfBtnCol[3]) { Write-Host "  [ERRO] coluna de ação: a visibilidade do botão de '$($wfBtnCol[1])' não vem de $($wfBtnCol[3])" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+            # A tabela do Windows Update tem de carregar o id: é ele, e não o título, que identifica
+            # a atualização na hora de instalar.
+            $wfBtnWuAntes = $sync.DiagWUResults
+            try {
+                $sync.DiagWUResults = @([pscustomobject]@{ Title = 'Driver de teste - 1.2.3.4'; Driver = 'Teste'; Provider = 'WinForge'; Version = '1.2.3.4'; Date = '2026-09-10'; UpdateId = 'id-de-teste' })
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+                $wfBtnWuLinha = @($sync.WPFDiagWU.ItemsSource)[0]
+                if ([string]$wfBtnWuLinha.UpdateId -ne 'id-de-teste') { Write-Host "  [ERRO] tabela do Windows Update: a linha não carrega o UpdateId (veio '$($wfBtnWuLinha.UpdateId)')" -ForegroundColor Red; $wbErrors++ }
+            } finally {
+                $sync.DiagWUResults = $wfBtnWuAntes
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+            }
+            # O clique: um handler por tabela, registrado UMA vez em Initialize-WinForgeDiagnosticsTab.
+            # A linha 'none' não faz nada e prova o caminho; a linha 'vendor-page' prova a trava - em
+            # SelfTest nada abre, nem navegador nem caixa de mensagem.
+            if (-not $sync.WinForgeDiagActionHandlerWired) { Write-Host "  [ERRO] clique de ação: `$sync.WinForgeDiagActionHandlerWired não foi ligado por Initialize-WinForgeDiagnosticsTab" -ForegroundColor Red; $wbErrors++ }
+            $wfBtnCliques = @(
+                @('none',        ([pscustomobject]@{ Device = 'x'; ActionKind = 'none'; ActionLabel = ''; ActionUrl = $null }),                                              'none'),
+                @('vendor-page', ([pscustomobject]@{ Device = 'x'; ActionKind = 'vendor-page'; ActionLabel = 'Página do fabricante'; ActionUrl = 'https://www.amd.com/' }), 'erro')
+            )
+            foreach ($wfBtnClique in $wfBtnCliques) {
+                $sync.LastDriverAction = $null
+                $wfBtnFalso = New-Object System.Windows.Controls.Button
+                $wfBtnFalso.Tag = $wfBtnClique[1]
+                $wfBtnArgs = New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent), $wfBtnFalso
+                $sync.WPFDiagDrivers.RaiseEvent($wfBtnArgs)
+                if ([string]$wfBtnClique[2] -eq 'none') {
+                    if ([string]$sync.LastDriverAction -ne 'none') { Write-Host "  [ERRO] clique de ação: linha sem ação deveria dar 'none', deu '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+                } else {
+                    if ([string]$sync.LastDriverAction -notmatch 'SelfTest') { Write-Host "  [ERRO] clique de ação: a linha 'vendor-page' deveria ser recusada em SelfTest, deu '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+            # Botão sem Tag (o clique em qualquer outro botão que porventura caia na tabela) não pode
+            # virar ação nenhuma.
+            $sync.LastDriverAction = 'nao-mexer'
+            $wfBtnSemTag = New-Object System.Windows.Controls.Button
+            $sync.WPFDiagDrivers.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent), $wfBtnSemTag))
+            if ([string]$sync.LastDriverAction -ne 'nao-mexer') { Write-Host "  [ERRO] clique de ação: botão sem Tag disparou a ação '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+            # A tabela do Windows Update tem handler próprio, e ele também recusa em SelfTest.
+            $sync.LastDriverAction = $null
+            $wfBtnWu = New-Object System.Windows.Controls.Button
+            $wfBtnWu.Tag = [pscustomobject]@{ Title = 'Driver de teste'; UpdateId = 'id-de-teste' }
+            $sync.WPFDiagWU.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent), $wfBtnWu))
+            if ([string]$sync.LastDriverAction -notmatch 'SelfTest') { Write-Host "  [ERRO] clique de ação: o botão Instalar do Windows Update deveria ser recusado em SelfTest, deu '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Colunas de ação: 'Ação' e 'Instalar' com Button ligado à linha; clique roteado pelas duas tabelas e recusado em SelfTest"
+        } catch {
+            Write-Host "  [ERRO] colunas de ação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
         # Checklist das recomendações + contador na tela. Uma linha por recomendação, e caixa de
         # marcar só nas que a aba de destino aceita marcar: Toggle aplica o tweak no clique, e
         # recomendação não muda o sistema (mesma regra de Select-WinForgeRecommended).
@@ -2536,6 +2775,42 @@ if ($SelfTest) {
             Write-Host "  Checklist do Diagnóstico: $wfChkCaixas caixa(s), Marcar todos = $wfChkTodos, contador '$($sync.WPFDiagRecCount.Text)'"
         } catch {
             Write-Host "  [ERRO] checklist do Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Recomendação que NÃO se aplica a esta máquina. A linha existia habilitada e só descobria o
+        # problema no clique: montava a aba de destino, não achava a caixa e aí se desabilitava - com
+        # o total do contador já contando com ela. Agora a linha nasce desabilitada, com a dica na
+        # frente, e fica de fora do M do contador. A entrada de teste é sintética e tem um papel de
+        # servidor que não existe, então ela é escondida no cliente E no servidor simulado.
+        try {
+            $wfIndispChave = 'WPFTweaksWFSelfTestIndisponivel'
+            $wfIndispRecAntes = $sync.Recommended
+            try {
+                $sync.configs.tweaks | Add-Member -NotePropertyName $wfIndispChave -NotePropertyValue ([pscustomobject]@{ Content = 'Item de teste indisponível'; Description = 'Só existe durante o SelfTest.'; Type = 'CheckBox'; role = 'papel-que-nao-existe'; risk = 'seguro'; category = 'z__Teste' }) -Force
+                $wfIndispRec = @{}
+                foreach ($wfIndispK in @($sync.Recommended.Keys)) { $wfIndispRec[$wfIndispK] = $sync.Recommended[$wfIndispK] }
+                $wfIndispRec[$wfIndispChave] = 'linha sintética do SelfTest'
+                $sync.Recommended = $wfIndispRec
+                Update-WinForgeDiagnosticsTab
+                $wfIndispLinha = $sync.WinForgeDiagMirrors[$wfIndispChave]
+                if ($null -eq $wfIndispLinha) { throw "a linha da recomendação indisponível não foi criada" }
+                if ($wfIndispLinha.IsEnabled) { Write-Host "  [ERRO] recomendação indisponível: a linha nasceu habilitada" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfIndispLinha.ToolTip -notmatch 'não se aplica') { Write-Host "  [ERRO] recomendação indisponível: a dica não diz que o item não se aplica ('$($wfIndispLinha.ToolTip)')" -ForegroundColor Red; $wbErrors++ }
+                $wfIndispHab = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync.WinForgeDiagMirrors[$_].IsEnabled }).Count
+                if (@($sync.WinForgeDiagMirrors.Keys).Count -ne ($wfIndispHab + 1)) { Write-Host "  [ERRO] recomendação indisponível: esperado exatamente 1 linha desabilitada, veio $(@($sync.WinForgeDiagMirrors.Keys).Count - $wfIndispHab)" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFDiagRecCount.Text -ne "0 de $wfIndispHab recomendados marcados") { Write-Host "  [ERRO] recomendação indisponível: contador '$($sync.WPFDiagRecCount.Text)', esperado '0 de $wfIndispHab recomendados marcados' (a linha desabilitada não entra no total)" -ForegroundColor Red; $wbErrors++ }
+                $wfIndispTodos = Set-WinForgeDiagRecommendationSelection -Checked $true
+                if ($wfIndispLinha.IsChecked) { Write-Host "  [ERRO] recomendação indisponível: 'Marcar todos' marcou a linha desabilitada" -ForegroundColor Red; $wbErrors++ }
+                if ($wfIndispTodos -ne $wfIndispHab) { Write-Host "  [ERRO] recomendação indisponível: 'Marcar todos' marcou $wfIndispTodos linha(s), esperado $wfIndispHab" -ForegroundColor Red; $wbErrors++ }
+                $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+                Write-Host "  Recomendação indisponível: linha desabilitada com dica, fora do total do contador ($wfIndispHab disponível(is))"
+            } finally {
+                $sync.Recommended = $wfIndispRecAntes
+                $sync.configs.tweaks.PSObject.Properties.Remove($wfIndispChave)
+                Update-WinForgeDiagnosticsTab
+                $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+            }
+        } catch {
+            Write-Host "  [ERRO] recomendação indisponível: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         # Roda do mouse sobre as tabelas: o DataGrid tem rolagem própria e engolia a roda, deixando a
         # aba inteira parada. O conserto repassa o evento ao ScrollViewer da aba - e é isso que se

@@ -258,6 +258,7 @@ function Update-WinForgeProfileDriverStatus {
 
     $nvidiaBehind = $false
     $nvidiaLatest = $null
+    $nvidiaUrl = $null
     foreach ($gpu in @($Profile.GPU)) {
         if (-not $gpu -or $gpu.Vendor -ne 'nvidia') { continue }
         $latest = Get-WinForgeNvidiaLatestDriver -GpuName ([string]$gpu.Name) -IsWin11 $isWin11 -IsLaptop $isLaptop
@@ -267,6 +268,7 @@ function Update-WinForgeProfileDriverStatus {
         }
         $gpu.Latest     = $latest.Version
         $gpu.LatestDate = $latest.ReleaseDate
+        $gpu.LatestUrl  = $latest.Url
         $gpu.LatestStatus = 'ok'
         # MarketingVersion é a versão comercial derivada do driver instalado (616.56); comparar como
         # texto diria que '616.8' é maior que '616.64', então a comparação é numérica.
@@ -275,6 +277,7 @@ function Update-WinForgeProfileDriverStatus {
                 $gpu.LatestStatus = 'atualizar'
                 $nvidiaBehind = $true
                 $nvidiaLatest = $latest.Version
+                $nvidiaUrl = $latest.Url
             }
         } catch {
             # versão em formato inesperado dos dois lados: não dá para dizer que está em dia
@@ -288,6 +291,9 @@ function Update-WinForgeProfileDriverStatus {
         if ($nvidiaBehind -and $drv.Vendor -eq 'nvidia' -and $drv.Class -eq 'DISPLAY') {
             $drv.Status = 'atualizar'
             $drv.Latest = $nvidiaLatest
+            # O link do instalador vem do catálogo, não é montado aqui: é ele que o botão "Baixar"
+            # usa, e quem o valida antes de qualquer requisição é Test-WinForgeNvidiaDownloadUrl.
+            $drv.LatestUrl = $nvidiaUrl
         } elseif ($drv.Old) {
             $drv.Status = 'verificar'
         } else {
@@ -304,11 +310,18 @@ function Search-WinForgeWindowsUpdateDrivers {
         Consulta que pode levar de 10 a 60 segundos (o serviço fala com os servidores da Microsoft),
         então quem chama deve rodá-la num runspace. Falha - serviço desligado, sem rede, política de
         WSUS - devolve array vazio e deixa a mensagem em $sync.LastWUError.
+
+        As linhas devolvidas são TEXTO, para a tabela e para o relatório. O objeto IUpdate de cada
+        uma fica em $sync.DiagWUUpdates, indexado pelo UpdateID: instalar exige o objeto COM
+        original (a coleção que o downloader recebe é de IUpdate, não de título), e recriá-lo a
+        partir da linha significaria uma segunda busca de um minuto. O mapa é refeito a cada busca -
+        um objeto de uma busca anterior aponta para uma sessão que já foi embora.
     #>
     try {
         $session  = New-Object -ComObject Microsoft.Update.Session
         $searcher = $session.CreateUpdateSearcher()
         $found    = $searcher.Search("IsInstalled=0 and Type='Driver'")
+        try { if ($sync) { $sync.DiagWUUpdates = @{} } } catch { }
         return @(foreach ($u in $found.Updates) {
             $date = ''
             try { if ($u.DriverVerDate) { $date = ([datetime]$u.DriverVerDate).ToString('yyyy-MM-dd') } } catch { }
@@ -317,6 +330,9 @@ function Search-WinForgeWindowsUpdateDrivers {
             # Sem esse número no título, Version fica $null - melhor vazio do que uma data disfarçada.
             $version = $null
             if ([string]$u.Title -match '(\d+(?:\.\d+){2,3})\s*$') { $version = $Matches[1] }
+            $updateId = ''
+            try { $updateId = [string]$u.Identity.UpdateID } catch { $updateId = '' }
+            if ($updateId) { try { if ($sync -and $sync.DiagWUUpdates) { $sync.DiagWUUpdates[$updateId] = $u } } catch { } }
             [pscustomobject]@{
                 Title    = [string]$u.Title
                 Driver   = [string]$u.DriverModel
@@ -324,11 +340,379 @@ function Search-WinForgeWindowsUpdateDrivers {
                 Version  = $version
                 Date     = $date
                 KB       = (@($u.KBArticleIDs) -join ',')
+                UpdateId = $updateId
             }
         })
     } catch {
         try { if ($sync) { $sync.LastWUError = $_.Exception.Message } } catch { }
         return @()
+    }
+}
+
+function Test-WinForgeNvidiaDownloadUrl {
+    <#
+    .SYNOPSIS
+        Diz se um endereço pode ser baixado como instalador oficial da NVIDIA.
+    .DESCRIPTION
+        Duas exigências, e as duas são sobre o que o WinForge vai ABRIR depois com a elevação dele:
+
+        1. https. Em http qualquer um no caminho troca o corpo da resposta, e a conferência de
+           assinatura viria depois de o arquivo já estar no disco.
+        2. O HOST tem de ser nvidia.com ou terminar em '.nvidia.com'. A comparação é pelo host que
+           o parser de URI extrai, e não por procurar 'nvidia.com' no texto: 'https://nvidia.com.evil.com/x.exe'
+           contém 'nvidia.com' e é de outra pessoa. O ponto antes do domínio também é obrigatório -
+           sem ele, 'www.nvidia.com.br' passaria.
+
+        O endereço vem do catálogo da própria NVIDIA (campo DownloadURL), mas ele chega pela rede:
+        é dado de fora, e dado de fora que vira caminho de execução é conferido.
+    #>
+    param([string]$Url)
+
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+    $uri = $null
+    try { $uri = [uri]$Url } catch { return $false }
+    if (-not $uri.IsAbsoluteUri) { return $false }
+    if ($uri.Scheme -ne 'https') { return $false }
+    $host_ = [string]$uri.Host
+    if ([string]::IsNullOrWhiteSpace($host_)) { return $false }
+    if ($host_ -eq 'nvidia.com') { return $true }
+    return $host_.EndsWith('.nvidia.com', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-WinForgeDriverAction {
+    <#
+    .SYNOPSIS
+        Que ação a linha de um driver oferece: baixar o driver oficial, abrir a página do fabricante
+        ou nada.
+    .DESCRIPTION
+        Uma linha só ganha o botão de DOWNLOAD quando as três condições valem juntas: é uma placa
+        NVIDIA, o catálogo diz que ela está atrás e o link do instalador passa pela conferência de
+        domínio. Faltando qualquer uma delas, sobra a página do fabricante - que é abrir um endereço
+        no navegador, sem download e sem execução. Sem nem isso, a linha não tem botão.
+
+        Função pura: decide a partir da linha do inventário e não toca em rede nem em disco. Quem
+        preenche 'LatestUrl' é Update-WinForgeProfileDriverStatus, com o link que veio do catálogo.
+    .OUTPUTS
+        @{ Kind = 'nvidia-download' | 'vendor-page' | 'none'; Label = <texto do botão>; Url = <endereço> }.
+    #>
+    param($Driver)
+
+    $acao = @{ Kind = 'none'; Label = ''; Url = $null }
+    if ($null -eq $Driver) { return $acao }
+
+    $versao = [string]$Driver.Latest
+    if ([string]$Driver.Vendor -eq 'nvidia' -and [string]$Driver.Status -eq 'atualizar' -and
+        -not [string]::IsNullOrWhiteSpace($versao) -and (Test-WinForgeNvidiaDownloadUrl -Url ([string]$Driver.LatestUrl))) {
+        $acao.Kind = 'nvidia-download'
+        $acao.Label = "Baixar $versao"
+        $acao.Url = [string]$Driver.LatestUrl
+        return $acao
+    }
+
+    $pagina = [string]$Driver.Url
+    if (-not [string]::IsNullOrWhiteSpace($pagina)) {
+        $acao.Kind = 'vendor-page'
+        $acao.Label = 'Página do fabricante'
+        $acao.Url = $pagina
+    }
+    return $acao
+}
+
+function Get-WinForgeDownloadRoot {
+    <#
+    .SYNOPSIS
+        Pasta dos arquivos baixados (%ProgramData%\WinForge\downloads). -Root existe para o teste
+        não escrever em %ProgramData%.
+    .DESCRIPTION
+        Só monta o caminho, normalizado uma vez ([System.IO.Path]::GetFullPath) como a pasta de
+        backup: daqui para baixo todo mundo conta com a mesma forma. Quem cria e quem confere é
+        Confirm-WinForgeDownloadRoot.
+    #>
+    param([string]$Root)
+
+    $alvo = if ($Root) { $Root } else { (Join-Path $env:ProgramData 'WinForge\downloads') }
+    try { return [System.IO.Path]::GetFullPath($alvo) } catch { return $alvo }
+}
+
+function Confirm-WinForgeDownloadRoot {
+    <#
+    .SYNOPSIS
+        Garante que a pasta de downloads existe e é confiável, ANTES de qualquer byte chegar nela.
+    .DESCRIPTION
+        Mesmas regras da pasta de backup, e pelas mesmas funções: DACL própria sem herança
+        (New-WinForgeSnapshotRoot), nenhuma pasta da cadeia pode ser ponto de reanálise, dono dentro
+        de SYSTEM/Administradores e ninguém de fora deles com escrita
+        (Test-WinForgeSnapshotRootTrusted), mais a ACE herdável de OWNER RIGHTS
+        (Repair-WinForgeSnapshotRootOwnerRight).
+
+        O que muda em relação a Confirm-WinForgeSnapshotRoot é uma coisa só, e é de propósito: aqui
+        NUNCA se passa -ExplicitRoot, nem quando -Root vem preenchido. Aquele afrouxamento existe
+        para a pasta de teste em %TEMP% poder ter a identidade atual como dona; a pasta de downloads
+        não pode. O que sai daqui é um instalador que o WinForge ABRE com a elevação dele - se um
+        processo de integridade média da mesma conta puder escrever na pasta, ele troca o arquivo
+        entre a conferência da assinatura e o Start-Process, e o WinForge abre o dele. É exatamente
+        o furo que tirou o download do DirectX do programa; a diferença aqui é a pasta protegida.
+
+        Consequência prática: sem elevação a pasta nasce com a identidade atual como dona e esta
+        função RECUSA. O download não acontece, e a mensagem diz por quê - melhor que baixar para
+        uma pasta que a própria conta reescreve.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <pasta> }.
+    #>
+    param([string]$Root)
+
+    $dir = Get-WinForgeDownloadRoot $Root
+    # Criar pode simplesmente não ser permitido: %ProgramData%\WinForge é de SYSTEM/Administradores,
+    # e uma execução sem elevação não escreve lá dentro. Isso é recusa, não exceção - quem chamou
+    # precisa de um motivo para mostrar, e não de uma pilha de erro.
+    if (-not (Test-Path -LiteralPath $dir)) {
+        try { New-WinForgeSnapshotRoot -Root $dir | Out-Null }
+        catch { return @{ Ok = $false; Reason = "não foi possível criar '$dir': $($_.Exception.Message)"; Path = $dir } }
+        if (-not (Test-Path -LiteralPath $dir)) { return @{ Ok = $false; Reason = "a pasta '$dir' não pôde ser criada"; Path = $dir } }
+    }
+    $t = Test-WinForgeSnapshotRootTrusted -Root $dir
+    if (-not $t.Trusted) { return @{ Ok = $false; Reason = $t.Reason; Path = $dir } }
+    $dono = Repair-WinForgeSnapshotRootOwnerRight -Root $dir
+    if (-not $dono.Ok) { return @{ Ok = $false; Reason = "pasta de downloads sem proteção de dono ('$dir'): $($dono.Reason)"; Path = $dir } }
+    return @{ Ok = $true; Reason = ''; Path = $dir }
+}
+
+function Test-WinForgeNvidiaSigner {
+    <#
+    .SYNOPSIS
+        Diz se o arquivo está assinado pela NVIDIA Corporation, com assinatura válida.
+    .DESCRIPTION
+        Duas perguntas, e as duas precisam de resposta:
+
+        1. Get-AuthenticodeSignature devolve 'Valid'? Isso cobre arquivo sem assinatura, assinatura
+           quebrada (o arquivo mudou depois de assinado) e cadeia que não chega a uma raiz confiável.
+        2. O RDN 'O' do assunto do certificado é EXATAMENTE 'NVIDIA Corporation'? Procurar o texto
+           dentro do assunto inteiro aceitaria 'O=NVIDIA Corporation Ltd' e qualquer certificado com
+           'CN=NVIDIA Corporation' - a linha que diz de quem é a organização é o O, e a comparação é
+           por igualdade.
+
+        Um assunto com DOIS RDN 'O' é recusado: assunto legítimo tem um só, e dois é a forma óbvia
+        de esconder o nome do fabricante ao lado do de quem assinou de verdade.
+    .OUTPUTS
+        $true ou $false. O motivo da recusa vai para o log.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Assinatura: '$Path' não existe."
+        return $false
+    }
+    $sig = $null
+    try { $sig = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop } catch {
+        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Assinatura de '$Path' não pôde ser lida: $($_.Exception.Message)"
+        return $false
+    }
+    if ($null -eq $sig -or [string]$sig.Status -ne 'Valid') {
+        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Assinatura de '$Path': situação '$(if ($sig) { $sig.Status } else { 'nenhuma' })', esperado 'Valid'."
+        return $false
+    }
+    $cert = $sig.SignerCertificate
+    if ($null -eq $cert) {
+        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Assinatura de '$Path': sem certificado de quem assinou."
+        return $false
+    }
+    $orgs = @((Split-WinForgeCertificateSubject -Subject ([string]$cert.Subject))['O'])
+    if ($orgs.Count -ne 1 -or [string]$orgs[0] -ne 'NVIDIA Corporation') {
+        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message "Assinatura de '$Path': organização '$($orgs -join ' | ')', esperado exatamente 'NVIDIA Corporation'."
+        return $false
+    }
+    return $true
+}
+
+function Install-WinForgeNvidiaDriver {
+    <#
+    .SYNOPSIS
+        Baixa o instalador oficial do driver NVIDIA para a pasta protegida, confere a assinatura e o
+        abre para o usuário concluir.
+    .DESCRIPTION
+        A ordem das travas é o que faz esta função ser diferente do download que saiu do programa no
+        Plano 5:
+
+        1. O endereço é conferido ANTES de tudo, inclusive antes do -DryRun: uma simulação com URL
+           de terceiro não simula nada, e a recusa acontece mesmo no dia em que o -DryRun se perder
+           outra vez em $args.
+        2. -DryRun devolve só o endereço e o caminho de destino, sem tocar em rede nem em disco.
+        3. Assert-WinForgeNotSelfTest logo depois: em modo SelfTest nada é baixado.
+        4. A pasta de destino é criada e conferida (Confirm-WinForgeDownloadRoot) - sem elevação,
+           ela recusa e o download não começa.
+        5. O arquivo baixa com nome '.parcial' e só depois vira o nome final: um download
+           interrompido não deixa para trás algo com cara de instalador pronto.
+        6. Gravado, ele é ENDURECIDO (dono Administradores, DACL SYSTEM+Administradores) e reconferido
+           (Test-WinForgeSnapshotFileTrusted) antes da assinatura. É isso que fecha a janela entre a
+           conferência e o Start-Process: depois desse ponto, um processo de integridade média da
+           mesma conta não consegue mais trocar o arquivo.
+        7. Só então a assinatura é conferida. Reprovou - ou qualquer passo acima falhou - o arquivo
+           é APAGADO, e a recusa vai para o log e para a barra de status.
+
+        Quem instala é o usuário: o instalador da NVIDIA é interativo (licença, tipo de instalação,
+        reinício), e fingir que o WinForge conduz isso seria mentira. O WinForge abre a janela dele.
+    .PARAMETER Root
+        Pasta de downloads própria (usada pelos testes). Não afrouxa nenhuma regra - ver
+        Confirm-WinForgeDownloadRoot.
+    .OUTPUTS
+        @{ Path; Verified; Started; Text }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Version,
+        [string]$Root,
+        [switch]$DryRun
+    )
+
+    if (-not (Test-WinForgeNvidiaDownloadUrl -Url $Url)) {
+        throw "Recusado: '$Url' não é um endereço https de um host da nvidia.com."
+    }
+
+    # O nome do arquivo é montado AQUI, e não tirado do fim da URL: o último segmento de um endereço
+    # é texto de fora, e texto de fora não escolhe caminho no disco.
+    $limpa = ([string]$Version) -replace '[^0-9A-Za-z\.\-]', '_'
+    if ([string]::IsNullOrWhiteSpace($limpa)) { $limpa = 'driver' }
+    $nome = "nvidia-$limpa.exe"
+    $destino = Join-Path (Get-WinForgeDownloadRoot $Root) $nome
+
+    if ($DryRun) {
+        return @{ Path = $destino; Verified = $false; Started = $false; Text = "[simulação] baixaria o driver NVIDIA $Version de '$Url' para '$destino'" }
+    }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    $raiz = Confirm-WinForgeDownloadRoot -Root $Root
+    if (-not $raiz.Ok) {
+        $msg = "Download recusado: a pasta '$($raiz.Path)' não é confiável -> $($raiz.Reason)"
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
+        return @{ Path = $null; Verified = $false; Started = $false; Text = $msg }
+    }
+    $destino = Join-Path $raiz.Path $nome
+    $parcial = "$destino.parcial"
+
+    try {
+        # TLS 1.2 somado ao que já estiver habilitado, como na consulta ao catálogo: o padrão do
+        # PowerShell 5.1 ainda é SSL3/TLS1.0 e os servidores da NVIDIA recusam.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Remove-Item -LiteralPath $parcial -Force -ErrorAction SilentlyContinue
+        Write-WinForgeLog -Component "Diag" -Message "Baixando o driver NVIDIA $Version de $Url"
+        # -UseBasicParsing: sem ele o Invoke-WebRequest tenta o motor do Internet Explorer, que não
+        # existe em instalação limpa. 600 s porque o instalador passa de 700 MB.
+        Invoke-WebRequest -Uri $Url -OutFile $parcial -UseBasicParsing -TimeoutSec 600 -ErrorAction Stop
+        Move-Item -LiteralPath $parcial -Destination $destino -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $parcial -Force -ErrorAction SilentlyContinue
+        $msg = "Download do driver NVIDIA $Version falhou: $($_.Exception.Message)"
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
+        return @{ Path = $null; Verified = $false; Started = $false; Text = $msg }
+    }
+
+    $recusa = $null
+    $prot = Protect-WinForgeSnapshotFile -Path $destino
+    if (-not $prot.Hardened) { $recusa = "o arquivo baixado não pôde ser protegido ($($prot.Reason))" }
+    if (-not $recusa) {
+        $conf = Test-WinForgeSnapshotFileTrusted -Path $destino
+        if (-not $conf.Trusted) { $recusa = "o arquivo baixado não passou na conferência de dono e permissões ($($conf.Reason))" }
+    }
+    if (-not $recusa -and -not (Test-WinForgeNvidiaSigner -Path $destino)) {
+        $recusa = "o arquivo baixado não está assinado pela NVIDIA Corporation"
+    }
+    if ($recusa) {
+        Remove-Item -LiteralPath $destino -Force -ErrorAction SilentlyContinue
+        $msg = "Driver NVIDIA $Version recusado: $recusa. O arquivo foi apagado."
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
+        return @{ Path = $null; Verified = $false; Started = $false; Text = $msg }
+    }
+
+    try {
+        Start-Process -FilePath $destino -ErrorAction Stop
+    } catch {
+        $msg = "Driver NVIDIA $Version baixado e conferido em '$destino', mas o instalador não abriu: $($_.Exception.Message)"
+        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message $msg
+        return @{ Path = $destino; Verified = $true; Started = $false; Text = $msg }
+    }
+    $msg = "Driver NVIDIA $Version baixado, assinatura conferida, instalador aberto: $destino"
+    Write-WinForgeLog -Component "Diag" -Message $msg
+    return @{ Path = $destino; Verified = $true; Started = $true; Text = $msg }
+}
+
+function Install-WinForgeWindowsUpdateDriver {
+    <#
+    .SYNOPSIS
+        Instala um driver oferecido pelo Windows Update, pelo id da atualização.
+    .DESCRIPTION
+        O objeto IUpdate da busca é obrigatório: a coleção que o downloader e o instalador recebem é
+        de IUpdate, não de título nem de id. Ele fica em $sync.DiagWUUpdates desde
+        Search-WinForgeWindowsUpdateDrivers; se não estiver mais lá (o programa foi reaberto, ou uma
+        busca nova refez o mapa), a função avisa e pede uma busca nova em vez de adivinhar.
+
+        A licença é aceita antes do download quando a atualização exige - sem isso o download volta
+        com erro de EULA. Aceitar aqui é o que o usuário já disse ao confirmar a instalação.
+
+        Códigos de resultado do Windows Update: 2 concluída, 3 concluída com avisos, 4 falhou,
+        5 cancelada. Eles vão para o texto, porque "instalado" e "instalado com aviso" são coisas
+        diferentes para quem vai reiniciar a máquina depois.
+    .OUTPUTS
+        @{ ResultCode; RebootRequired; Text }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$UpdateId,
+        [switch]$DryRun
+    )
+
+    $titulo = '(não está mais na lista)'
+    try {
+        foreach ($linha in @($sync.DiagWUResults)) {
+            if ($linha -and [string]$linha.UpdateId -eq $UpdateId) { $titulo = [string]$linha.Title; break }
+        }
+    } catch { }
+
+    if ($DryRun) {
+        return @{ ResultCode = $null; RebootRequired = $false; Text = "[simulação] instalaria '$titulo' (id $UpdateId)" }
+    }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    $update = $null
+    try { if ($sync.DiagWUUpdates) { $update = $sync.DiagWUUpdates[$UpdateId] } } catch { $update = $null }
+    if ($null -eq $update) {
+        $msg = "A atualização '$UpdateId' não está mais na lista desta sessão. Busque os drivers no Windows Update de novo."
+        Write-WinForgeLog -Component "Diag" -Level "WARN" -Message $msg
+        return @{ ResultCode = $null; RebootRequired = $false; Text = $msg }
+    }
+
+    try {
+        if (-not $update.EulaAccepted) { $update.AcceptEula() }
+        $colecao = New-Object -ComObject Microsoft.Update.UpdateColl
+        [void]$colecao.Add($update)
+        $sessao = New-Object -ComObject Microsoft.Update.Session
+
+        $baixador = $sessao.CreateUpdateDownloader()
+        $baixador.Updates = $colecao
+        $resDown = $baixador.Download()
+        if ([int]$resDown.ResultCode -notin @(2, 3)) {
+            $msg = "Download de '$titulo' pelo Windows Update terminou com código $($resDown.ResultCode)."
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
+            return @{ ResultCode = [int]$resDown.ResultCode; RebootRequired = $false; Text = $msg }
+        }
+
+        $instalador = $sessao.CreateUpdateInstaller()
+        $instalador.Updates = $colecao
+        $res = $instalador.Install()
+        $codigo = [int]$res.ResultCode
+        $reinicio = [bool]$res.RebootRequired
+        $situacao = switch ($codigo) {
+            2 { 'instalado' }
+            3 { 'instalado com avisos' }
+            4 { 'falhou' }
+            5 { 'cancelado' }
+            default { "código $codigo" }
+        }
+        $msg = "Windows Update: '$titulo' -> $situacao$(if ($reinicio) { ' (é preciso reiniciar)' } else { '' })."
+        Write-WinForgeLog -Component "Diag" -Level $(if ($codigo -in @(2, 3)) { 'INFO' } else { 'ERROR' }) -Message $msg
+        return @{ ResultCode = $codigo; RebootRequired = $reinicio; Text = $msg }
+    } catch {
+        $msg = "Instalação de '$titulo' pelo Windows Update falhou: $($_.Exception.Message)"
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $msg
+        return @{ ResultCode = $null; RebootRequired = $false; Text = $msg }
     }
 }
 #endregion

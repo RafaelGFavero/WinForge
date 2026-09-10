@@ -20,6 +20,71 @@
 # de rodar é o dono da tabela. O núcleo genérico só executa o que mandarem executar.
 # ---------------------------------------------------------------------------
 
+function Split-WinForgeCertificateSubject {
+    <#
+    .SYNOPSIS
+        Quebra o assunto de um certificado ('CN=..., O=..., C=US') nos seus RDNs.
+    .DESCRIPTION
+        Existe porque comparar o assunto INTEIRO com texto - ou procurar 'NVIDIA Corporation' dentro
+        dele - aceita coisas que não deveria: 'O=NVIDIA Corporation Ltd' contém 'NVIDIA Corporation',
+        e 'CN=NVIDIA Corporation' de um certificado de qualquer outra organização também. A pergunta
+        certa é "o RDN O vale EXATAMENTE tal coisa", e para fazê-la é preciso separar os RDNs
+        primeiro.
+
+        Três detalhes do formato, e os três já apareceram em certificado de verdade:
+
+        1. Vírgula dentro do valor. O .NET escreve o valor entre aspas quando ele tem vírgula
+           ('O="Alguma Coisa, Inc."'); um split por vírgula partiria o valor no meio e o pedaço da
+           direita viraria um RDN inventado.
+        2. Barra invertida como escape ('O=Alguma Coisa\, Inc'), que algumas APIs usam no lugar das
+           aspas.
+        3. O MESMO RDN duas vezes ('O=Fulano, O=NVIDIA Corporation'). Por isso cada chave guarda uma
+           LISTA: quem confere pode exigir que exista um só - um assunto com dois O não é o assunto
+           do fabricante, é um assunto montado para passar por ele.
+    .OUTPUTS
+        Hashtable de RDN em MAIÚSCULAS ('CN', 'O', 'L') para o array de valores, na ordem em que
+        aparecem. Assunto vazio devolve hashtable vazia.
+    #>
+    param([string]$Subject)
+
+    $rdns = @{}
+    if ([string]::IsNullOrWhiteSpace($Subject)) { return $rdns }
+
+    # Quebra em partes de primeiro nível: vírgula fora de aspas e não escapada.
+    $partes = [System.Collections.Generic.List[string]]::new()
+    $atual = New-Object System.Text.StringBuilder
+    $emAspas = $false
+    for ($i = 0; $i -lt $Subject.Length; $i++) {
+        $c = $Subject[$i]
+        if ($c -eq '\' -and $i + 1 -lt $Subject.Length) {
+            # O escape leva o caractere seguinte inteiro, e a barra some do valor.
+            [void]$atual.Append($Subject[$i + 1])
+            $i++
+            continue
+        }
+        if ($c -eq '"') { $emAspas = -not $emAspas; continue }
+        if ($c -eq ',' -and -not $emAspas) {
+            [void]$partes.Add($atual.ToString())
+            [void]$atual.Clear()
+            continue
+        }
+        [void]$atual.Append($c)
+    }
+    [void]$partes.Add($atual.ToString())
+
+    foreach ($parte in $partes) {
+        $texto = $parte.Trim()
+        if ([string]::IsNullOrWhiteSpace($texto)) { continue }
+        $igual = $texto.IndexOf('=')
+        if ($igual -le 0) { continue }
+        $chave = $texto.Substring(0, $igual).Trim().ToUpperInvariant()
+        $valor = $texto.Substring($igual + 1).Trim()
+        if (-not $rdns.ContainsKey($chave)) { $rdns[$chave] = @() }
+        $rdns[$chave] = @($rdns[$chave]) + @($valor)
+    }
+    return $rdns
+}
+
 function Get-WinForgeSystemExe {
     <#
     .SYNOPSIS
