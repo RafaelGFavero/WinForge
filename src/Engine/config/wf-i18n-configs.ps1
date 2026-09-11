@@ -297,9 +297,13 @@ $sync.WinForgeI18n = @{
         Content     = '.NET Framework (versões 2, 3 e 4) - Ativar'
         Description = 'O .NET e o .NET Framework formam uma plataforma de desenvolvimento feita de ferramentas, linguagens de programação e bibliotecas para criar muitos tipos de aplicação.'
     }
+    # Os cinco botões do grupo "Correções" rodam fora da thread da janela, com a saída ao vivo numa
+    # janela própria, e todos passam por uma caixa de Sim/Não antes de agir. A descrição abaixo é a
+    # MESMA frase que a caixa mostra (Get-WinForgeRepairConfirmText a lê daqui), então ela precisa
+    # dizer o que vai rodar e, onde for o caso, que é preciso reiniciar - não é só uma dica de botão.
     'WPFFixesNTPPool' = @{
         Content     = 'Servidor NTP - Ativar'
-        Description = 'Troca o servidor NTP padrão do Windows (time.windows.com) pelo pool.ntp.org, para uma sincronização de horário mais precisa e confiável.'
+        Description = 'Troca o servidor NTP padrão do Windows (time.windows.com) pelo pool.ntp.org, para uma sincronização de horário mais precisa e confiável. Inicia o serviço de Horário do Windows, grava a nova lista de servidores com o w32tm, reinicia o serviço e força uma sincronização.'
     }
     'WPFFeatureshyperv' = @{
         Content     = 'Hyper-V - Ativar'
@@ -340,16 +344,20 @@ $sync.WinForgeI18n = @{
         Content = 'Logon automático - Executar'
     }
     'WPFFixesUpdate' = @{
-        Content = 'Windows Update - Redefinir'
+        Content     = 'Windows Update - Redefinir'
+        Description = 'Redefine o Windows Update: para os serviços BITS, wuauserv, appidsvc e cryptsvc, apaga a fila de trabalhos do BITS e o log, renomeia a pasta de downloads, registra de novo as DLLs, remove as configurações de WSUS, redefine o Winsock e religa os serviços. É preciso reiniciar o computador depois.'
     }
     'WPFFixesNetwork' = @{
-        Content = 'Rede - Redefinir'
+        Content     = 'Rede - Redefinir'
+        Description = 'Redefine a pilha de rede com "netsh winsock reset" e "netsh int ip reset": as configurações de TCP/IP e do Winsock voltam ao padrão do Windows, e conexões de VPN ou proxy podem precisar ser refeitas. É preciso reiniciar o computador para concluir.'
     }
     'WPFPanelDISM' = @{
-        Content = 'Verificação de corrupção do sistema - Executar'
+        Content     = 'Verificação de corrupção do sistema - Executar'
+        Description = 'Roda em sequência o chkdsk (verificação do disco do sistema, só leitura), o sfc /scannow (reparo dos arquivos protegidos do Windows) e o DISM /RestoreHealth (reparo da imagem do Windows, que baixa arquivos pela internet). Pode levar de vários minutos a mais de uma hora, e a saída aparece ao vivo numa janela.'
     }
     'WPFFixesWinget' = @{
-        Content = 'WinGet - Reinstalar'
+        Content     = 'WinGet - Reinstalar'
+        Description = 'Reinstala o WinGet (Gerenciador de Pacotes do Windows) baixando o App Installer da Microsoft. Precisa de internet e pode demorar. Os programas já instalados por ele continuam onde estão.'
     }
     'WPFWinForgeSSHServer' = @{
         Content = 'Servidor OpenSSH - Ativar'

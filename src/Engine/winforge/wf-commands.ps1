@@ -198,6 +198,149 @@ function Invoke-WinForgeCommandText {
     return @{ Text = [string]$texto; ExitCode = $global:LASTEXITCODE }
 }
 
+function Get-WinForgeOutputEncoding {
+    <#
+    .SYNOPSIS
+        A decodificação da saída de um executável: OEM (padrão), UTF-8 ou UTF-16LE.
+    .DESCRIPTION
+        Os três destinos num lugar só, porque o mesmo par de switches serve aos dois caminhos de
+        Invoke-WinForgeNativeCommand (a troca de code page do processo e o StandardOutputEncoding do
+        fluxo ao vivo) e escrever a escolha duas vezes é escrevê-la para envelhecer pela metade.
+
+        OEM é o padrão porque é o que netsh, w32tm, chkdsk e DISM escrevem no Brasil (850/437).
+        UTF-8 é o winget. UTF-16LE é o sfc, que muda de codificação quando a saída é redirecionada.
+
+        UTF8Encoding($false): sem BOM. Com BOM, os três bytes iniciais entrariam no texto da primeira
+        linha da saída.
+    .OUTPUTS
+        [System.Text.Encoding].
+    #>
+    param([switch]$Utf8, [switch]$Unicode)
+
+    if ($Unicode) { return [System.Text.Encoding]::Unicode }
+    if ($Utf8) { return (New-Object System.Text.UTF8Encoding $false) }
+    try { return [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) } catch { return [System.Text.Encoding]::Default }
+}
+
+function Format-WinForgeProcessArguments {
+    <#
+    .SYNOPSIS
+        Junta um vetor de argumentos na linha de comando única que o ProcessStartInfo exige.
+    .DESCRIPTION
+        O .NET Framework 4.x não tem ArgumentList: o ProcessStartInfo recebe UM texto, e quem separa
+        os argumentos de volta é o analisador do próprio executável. A citação segue a regra do CRT
+        do Windows, que é a que quase todo executável usa: aspas em volta do argumento que tem espaço
+        ou aspas, barras invertidas dobradas antes de uma aspa.
+
+        Argumento sem espaço e sem aspas sai como está - '/scannow' entre aspas confundiria mais de
+        um utilitário antigo do Windows.
+
+        Vale a mesma regra de Invoke-WinForgeNativeCommand: aqui só entram literais do próprio
+        programa. Isto é montagem de linha de comando, não sanitização de entrada.
+    .OUTPUTS
+        Texto da linha de comando (sem o nome do executável).
+    #>
+    param([string[]]$Arguments = @())
+
+    $partes = @()
+    foreach ($arg in @($Arguments)) {
+        $texto = [string]$arg
+        if ($texto -notmatch '[\s"]') { $partes += $texto; continue }
+        # Cada barra invertida imediatamente antes da aspa de fechamento (ou de uma aspa interna)
+        # precisa ser dobrada, senão ela escapa a aspa e o argumento sangra para o seguinte.
+        $escapado = [regex]::Replace($texto, '(\\*)"', '$1$1\"')
+        $escapado = [regex]::Replace($escapado, '(\\+)$', '$1$1')
+        $partes += '"' + $escapado + '"'
+    }
+    return ($partes -join ' ')
+}
+
+function Write-WinForgeStreamLine {
+    <#
+    .SYNOPSIS
+        Acrescenta uma linha ao arquivo que a janela de saída está acompanhando.
+    .DESCRIPTION
+        Existe para o cabeçalho de cada passo ('> netsh.exe winsock reset') e para as frases finais
+        chegarem ao arquivo pelo MESMO caminho que a saída dos executáveis - mesma codificação, mesma
+        forma de abrir o arquivo. O compartilhamento é ReadWrite porque a janela lê o arquivo de meio
+        em meio segundo enquanto ele é escrito.
+
+        Falha de escrita não derruba o comando: o passo seguinte importa mais do que uma linha de
+        cabeçalho, e a saída de verdade continua indo para o mesmo arquivo.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Text = ''
+    )
+
+    try {
+        $escritor = New-Object System.IO.StreamWriter($Path, $true, (New-Object System.Text.UTF8Encoding $true))
+        try { $escritor.WriteLine([string]$Text) } finally { $escritor.Dispose() }
+    } catch { }
+}
+
+function Invoke-WinForgeStreamedProcess {
+    <#
+    .SYNOPSIS
+        Roda um executável escrevendo cada linha num arquivo enquanto ela sai. Devolve texto e código.
+    .DESCRIPTION
+        O miolo do -StreamTo de Invoke-WinForgeNativeCommand, separado porque não tem nada em comum
+        com o outro caminho: não troca a code page do processo, não pega o mutex e não usa
+        $LASTEXITCODE. Ver a documentação de -StreamTo para o porquê de cada uma dessas três.
+
+        O arquivo é aberto em ACRÉSCIMO e fechado no fim do processo, com AutoFlush ligado: sem o
+        flush, a janela leria um arquivo vazio até o buffer de 4 KB encher - que num sfc é o comando
+        inteiro. O StreamWriter só escreve o BOM quando o arquivo está vazio, então um arquivo que já
+        tem o cabeçalho não ganha três bytes no meio.
+    .OUTPUTS
+        @{ Text = <string>; ExitCode = <int> }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory)][string]$StreamTo,
+        [Parameter(Mandatory)][System.Text.Encoding]$Encoding
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = Format-WinForgeProcessArguments -Arguments $Arguments
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $Encoding
+    $psi.StandardErrorEncoding = $Encoding
+
+    $processo = New-Object System.Diagnostics.Process
+    $processo.StartInfo = $psi
+    $acumulado = New-Object System.Text.StringBuilder
+    $codigo = $null
+    $escritor = $null
+    try {
+        [void]$processo.Start()
+        $tarefaErro = $processo.StandardError.ReadToEndAsync()
+        $escritor = New-Object System.IO.StreamWriter($StreamTo, $true, (New-Object System.Text.UTF8Encoding $true))
+        $escritor.AutoFlush = $true
+        while ($null -ne ($linha = $processo.StandardOutput.ReadLine())) {
+            $escritor.WriteLine($linha)
+            [void]$acumulado.AppendLine($linha)
+        }
+        $processo.WaitForExit()
+        $codigo = $processo.ExitCode
+        foreach ($linha in @([string]$tarefaErro.Result -split "`r`n|`n|`r")) {
+            if ([string]::IsNullOrWhiteSpace($linha)) { continue }
+            $escritor.WriteLine("[erro] $linha")
+            [void]$acumulado.AppendLine("[erro] $linha")
+        }
+    } finally {
+        if ($null -ne $escritor) { try { $escritor.Dispose() } catch { } }
+        try { $processo.Dispose() } catch { }
+    }
+
+    return @{ Text = $acumulado.ToString(); ExitCode = $codigo }
+}
+
 function Invoke-WinForgeNativeCommand {
     <#
     .SYNOPSIS
@@ -238,6 +381,26 @@ function Invoke-WinForgeNativeCommand {
         troca para OEM, todo acento do texto localizado dele ("Nenhum pacote instalado encontrado")
         e dos nomes de pacote chega embaralhado ao relatório. A troca continua sendo do PROCESSO
         INTEIRO e continua serializada pelo mesmo mutex - só o destino muda.
+    .PARAMETER Unicode
+        Decodifica a saída como UTF-16LE. É o caso do sfc: quando a saída dele é redirecionada, ele
+        escreve UTF-16, e lida como OEM cada caractere vira uma letra seguida de um byte zero
+        ("V e r i f i c a ç ã o"). O terceiro destino existe por causa dele.
+    .PARAMETER StreamTo
+        Caminho de um arquivo que recebe cada linha ASSIM QUE ELA SAI, em vez de tudo no fim. É o que
+        deixa a janela de saída mostrar um sfc ou um DISM enquanto eles rodam, em vez de ficar vazia
+        por meia hora e despejar tudo de uma vez.
+
+        Este caminho não passa pela troca de code page do processo (e portanto não passa pelo mutex):
+        quem decodifica é o próprio Process, pelo StandardOutputEncoding, que vale só para ele. Como
+        efeito colateral bom, dois comandos com fluxo ao vivo não disputam nada entre si.
+
+        O fluxo de erro é lido por uma tarefa do .NET (ReadToEndAsync) e não por um manipulador de
+        evento em PowerShell: manipulador criado dentro de uma runspace do pool volta a chamar o
+        PowerShell de uma thread do pool de threads, que é a receita de travamento desta base de
+        código. Sem leitura paralela nenhuma, um comando falante no fluxo de erro encheria o buffer
+        do cano (4 KB) e ficaria parado esperando alguém esvaziá-lo enquanto nós esperamos o fluxo de
+        saída - travamento dos dois lados. As linhas de erro entram no arquivo com o prefixo '[erro]',
+        depois da saída normal.
     .OUTPUTS
         @{ Text = <string>; ExitCode = <int> }.
     #>
@@ -245,7 +408,9 @@ function Invoke-WinForgeNativeCommand {
         [string]$Command,
         [string]$FilePath,
         [string[]]$Arguments = @(),
-        [switch]$Utf8
+        [string]$StreamTo,
+        [switch]$Utf8,
+        [switch]$Unicode
     )
 
     if ([string]::IsNullOrWhiteSpace($Command) -and [string]::IsNullOrWhiteSpace($FilePath)) {
@@ -253,6 +418,13 @@ function Invoke-WinForgeNativeCommand {
     }
     if (-not [string]::IsNullOrWhiteSpace($Command) -and -not [string]::IsNullOrWhiteSpace($FilePath)) {
         throw "Invoke-WinForgeNativeCommand aceita -Command OU -FilePath, não os dois."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($StreamTo) -and [string]::IsNullOrWhiteSpace($FilePath)) {
+        throw "Invoke-WinForgeNativeCommand -StreamTo só vale com -FilePath: pipeline de cmdlet não tem fluxo para acompanhar."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($StreamTo)) {
+        return Invoke-WinForgeStreamedProcess -FilePath $FilePath -Arguments $Arguments -StreamTo $StreamTo -Encoding (Get-WinForgeOutputEncoding -Utf8:$Utf8 -Unicode:$Unicode)
     }
 
     $encodingAnterior = $null
@@ -267,13 +439,7 @@ function Invoke-WinForgeNativeCommand {
         }
         try {
             $encodingAnterior = [Console]::OutputEncoding
-            if ($Utf8) {
-                # UTF8Encoding($false): sem BOM. Com BOM, os três bytes iniciais entrariam no texto
-                # da primeira linha da saída.
-                [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-            } else {
-                [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-            }
+            [Console]::OutputEncoding = Get-WinForgeOutputEncoding -Utf8:$Utf8 -Unicode:$Unicode
         } catch {
             $encodingAnterior = $null
         }
@@ -434,9 +600,20 @@ function Show-WinForgeOutputWindow {
     .PARAMETER Component
         Rótulo do log das ações da janela (Copiar, Abrir arquivo). Quem abre a janela sabe de que
         aba veio o comando; a janela em si, não.
+    .PARAMETER FollowPath
+        Arquivo a ACOMPANHAR enquanto ele cresce, em vez de mostrar um texto pronto. A janela abre
+        na hora com o que o arquivo já tem e um relógio de meio em meio segundo traz o resto
+        (Invoke-WinForgeFollowTick). O cabeçalho diz "Em andamento: <título> (mm:ss)" e vira
+        "Concluído em mm:ss (código N)" quando $sync.WinForgeStreamDone[<arquivo>] é marcado.
+
+        Meio segundo é o intervalo porque é o que separa "ao vivo" de "piscando": um DISM escreve
+        dezenas de linhas de progresso por segundo, e um relógio de 100 ms faria a caixa de texto
+        rolar mais do que ler.
     .PARAMETER NoShow
-        Monta e devolve a janela sem mostrá-la. É o que o -SelfTest usa: abrir janela durante o build
-        deixaria um build sem ninguém na frente exibindo coisa na tela.
+        Monta e devolve a janela sem mostrá-la, e NÃO liga o relógio do -FollowPath. É o que o
+        -SelfTest usa: abrir janela durante o build deixaria um build sem ninguém na frente exibindo
+        coisa na tela, e um relógio sem laço de mensagens nunca bateria - quem dá o tique lá é o
+        próprio teste, chamando Invoke-WinForgeFollowTick.
     .OUTPUTS
         A janela ([System.Windows.Window]).
     #>
@@ -444,9 +621,13 @@ function Show-WinForgeOutputWindow {
         [Parameter(Mandatory)][string]$Title,
         [string]$Text = '',
         [string]$Path,
+        [string]$FollowPath,
         [string]$Component = 'Command',
         [switch]$NoShow
     )
+
+    # Acompanhando um arquivo, é ele que o botão "Abrir arquivo" abre: não há outro.
+    if ([string]::IsNullOrWhiteSpace($Path) -and -not [string]::IsNullOrWhiteSpace($FollowPath)) { $Path = $FollowPath }
 
     # Em uso normal o WPF já está carregado desde a montagem da janela principal. No -SelfTest não:
     # esta função roda antes do XAML, e sem os dois assemblies o primeiro [System.Windows.*] do
@@ -480,12 +661,26 @@ function Show-WinForgeOutputWindow {
 
     $grade = New-Object System.Windows.Controls.Grid
     $grade.Margin = New-Object System.Windows.Thickness 10
+    $linhaCabecalho = New-Object System.Windows.Controls.RowDefinition
+    $linhaCabecalho.Height = [System.Windows.GridLength]::Auto
     $linhaTexto = New-Object System.Windows.Controls.RowDefinition
     $linhaTexto.Height = New-Object System.Windows.GridLength (1, [System.Windows.GridUnitType]::Star)
     $linhaBotoes = New-Object System.Windows.Controls.RowDefinition
     $linhaBotoes.Height = [System.Windows.GridLength]::Auto
+    $grade.RowDefinitions.Add($linhaCabecalho)
     $grade.RowDefinitions.Add($linhaTexto)
     $grade.RowDefinitions.Add($linhaBotoes)
+
+    # O cabeçalho existe SEMPRE (é o que amarra a numeração das linhas da grade), mas só aparece
+    # quando há algo acontecendo: numa saída pronta não há o que informar, e uma faixa vazia no topo
+    # só roubaria altura do texto.
+    $cabecalho = New-Object System.Windows.Controls.TextBlock
+    $cabecalho.Foreground = $frente
+    $cabecalho.Margin = New-Object System.Windows.Thickness (0, 0, 0, 8)
+    $cabecalho.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $cabecalho.Visibility = [System.Windows.Visibility]::Collapsed
+    [System.Windows.Controls.Grid]::SetRow($cabecalho, 0)
+    $grade.Children.Add($cabecalho) | Out-Null
 
     $caixa = New-Object System.Windows.Controls.TextBox
     $caixa.Text = $Text
@@ -498,14 +693,14 @@ function Show-WinForgeOutputWindow {
     $caixa.HorizontalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
     $caixa.Background = $fundo
     $caixa.Foreground = $frente
-    [System.Windows.Controls.Grid]::SetRow($caixa, 0)
+    [System.Windows.Controls.Grid]::SetRow($caixa, 1)
     $grade.Children.Add($caixa) | Out-Null
 
     $barra = New-Object System.Windows.Controls.StackPanel
     $barra.Orientation = [System.Windows.Controls.Orientation]::Horizontal
     $barra.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
     $barra.Margin = New-Object System.Windows.Thickness (0, 10, 0, 0)
-    [System.Windows.Controls.Grid]::SetRow($barra, 1)
+    [System.Windows.Controls.Grid]::SetRow($barra, 2)
     $grade.Children.Add($barra) | Out-Null
 
     $novoBotao = {
@@ -519,10 +714,12 @@ function Show-WinForgeOutputWindow {
     }
 
     $btnCopiar = & $novoBotao 'Copiar'
-    $textoParaCopiar = $Text
+    # O texto sai da CAIXA, e não do parâmetro: numa janela que acompanha um arquivo o parâmetro
+    # está vazio, e copiar o que a pessoa está vendo é o que ela espera dos dois jeitos.
     $componenteLog = $Component
     $btnCopiar.Add_Click({
         try {
+            $textoParaCopiar = [string]$caixa.Text
             # Clipboard.SetText lança com texto vazio ("O valor não pode ser nulo"). Saída vazia é
             # cenário normal aqui (dcdiag /q calado), e um erro no clique não ajudaria ninguém.
             if ([string]::IsNullOrEmpty($textoParaCopiar)) {
@@ -554,6 +751,36 @@ function Show-WinForgeOutputWindow {
     $janela.Content = $grade
     [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
     $janela.RegisterName('WFOutputText', $caixa)
+    $janela.RegisterName('WFOutputHeader', $cabecalho)
+
+    if (-not [string]::IsNullOrWhiteSpace($FollowPath)) {
+        $cabecalho.Visibility = [System.Windows.Visibility]::Visible
+        # Todo o estado do acompanhamento mora na Tag, e não em variáveis fechadas dentro de um
+        # scriptblock: é o que deixa Invoke-WinForgeFollowTick ser uma função de arquivo, chamável
+        # tanto pelo relógio quanto pelo -SelfTest, sem um scriptblock por janela.
+        $janela.Tag = @{
+            Path   = $FollowPath
+            Offset = [long]0
+            Start  = (Get-Date)
+            Title  = $Title
+            Box    = $caixa
+            Header = $cabecalho
+            Timer  = $null
+        }
+        # Primeira leitura antes de mostrar: a janela abre já com o que o arquivo tem, e não em
+        # branco por meio segundo.
+        Invoke-WinForgeFollowTick -Window $janela
+        if (-not $NoShow) {
+            $relogio = New-Object System.Windows.Threading.DispatcherTimer
+            $relogio.Interval = [TimeSpan]::FromMilliseconds(500)
+            $relogio.Add_Tick({ Invoke-WinForgeFollowTick -Window $janela }.GetNewClosure())
+            $janela.Tag.Timer = $relogio
+            # Janela fechada no meio de um DISM: o comando continua (o arquivo é o resultado), mas
+            # um relógio batendo sobre uma caixa de texto que já morreu não serve a ninguém.
+            $janela.Add_Closed({ try { $relogio.Stop() } catch { } }.GetNewClosure())
+            $relogio.Start()
+        }
+    }
 
     # .Show() e não .ShowDialog(): modal, a janela prenderia a thread da interface até alguém fechá-la,
     # e como o Dispatcher.Invoke que a abriu é síncrono, a runspace do pool ficaria presa junto - o
@@ -563,12 +790,107 @@ function Show-WinForgeOutputWindow {
     return $janela
 }
 
+function Invoke-WinForgeFollowTick {
+    <#
+    .SYNOPSIS
+        Um tique da janela que acompanha um arquivo: traz o que o arquivo ganhou e atualiza o cabeçalho.
+    .DESCRIPTION
+        Função de ARQUIVO, e não um scriptblock preso ao relógio de cada janela, por dois motivos:
+        o -SelfTest consegue dar o tique à mão (num build não há laço de mensagens, e um
+        DispatcherTimer nunca bateria), e a regra desta base de código - nada de scriptblock de
+        interface nascido dentro de uma runspace do pool - continua valendo de graça.
+
+        Três detalhes que já morderam:
+
+        1. A leitura é INCREMENTAL, por deslocamento em BYTES. Reler o arquivo inteiro a cada meio
+           segundo repintaria a caixa e jogaria a rolagem para o começo a cada tique - num DISM de
+           vinte minutos, ninguém conseguiria ler nada.
+        2. O corte é na ÚLTIMA QUEBRA DE LINHA. Sem isso, um tique que pega o arquivo no meio de um
+           caractere acentuado (UTF-8 usa dois bytes) mostraria um losango na tela e o deslocamento
+           sairia do lugar para sempre. O resto fica para o tique seguinte - menos no último, quando
+           já não há tique seguinte e o que sobrou tem de aparecer.
+        3. O BOM do arquivo só é pulado na primeira leitura, e conta no deslocamento: sem contá-lo,
+           os três bytes voltariam como texto no tique seguinte.
+    #>
+    param([Parameter(Mandatory)]$Window)
+
+    $estado = $Window.Tag
+    if ($null -eq $estado -or [string]::IsNullOrWhiteSpace([string]$estado.Path)) { return }
+
+    $concluido = $false
+    try { $concluido = [bool]$sync.WinForgeStreamDone[[string]$estado.Path] } catch { $concluido = $false }
+
+    try {
+        $arquivo = [System.IO.File]::Open([string]$estado.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        try {
+            if ($arquivo.Length -gt [long]$estado.Offset) {
+                [void]$arquivo.Seek([long]$estado.Offset, [System.IO.SeekOrigin]::Begin)
+                $bytes = New-Object byte[] ([int]($arquivo.Length - [long]$estado.Offset))
+                $lidos = $arquivo.Read($bytes, 0, $bytes.Length)
+                $inicio = 0
+                if ([long]$estado.Offset -eq 0 -and $lidos -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $inicio = 3 }
+                $texto = [System.Text.Encoding]::UTF8.GetString($bytes, $inicio, $lidos - $inicio)
+                if (-not $concluido) {
+                    $corte = $texto.LastIndexOf("`n")
+                    $texto = if ($corte -lt 0) { '' } else { $texto.Substring(0, $corte + 1) }
+                }
+                if ($texto.Length -gt 0) {
+                    $estado.Box.AppendText($texto)
+                    $estado.Box.ScrollToEnd()
+                }
+                $estado.Offset = [long]$estado.Offset + $inicio + [System.Text.Encoding]::UTF8.GetByteCount($texto)
+            }
+        } finally { $arquivo.Dispose() }
+    } catch {
+        # Arquivo ainda não criado, ou momentaneamente travado por quem escreve: o tique seguinte
+        # pega a mesma coisa meio segundo depois. Uma exceção aqui mataria o relógio.
+    }
+
+    $decorrido = (Get-Date) - [datetime]$estado.Start
+    $mmss = '{0:00}:{1:00}' -f [int][math]::Floor($decorrido.TotalMinutes), $decorrido.Seconds
+    if ($concluido) {
+        $codigo = $null
+        try { $codigo = $sync.WinForgeStreamExit[[string]$estado.Path] } catch { $codigo = $null }
+        $estado.Header.Text = "Concluído em $mmss (código $(if ($null -ne $codigo) { $codigo } else { 'n/d' }))"
+        if ($null -ne $estado.Timer) { try { $estado.Timer.Stop() } catch { } }
+    } else {
+        $estado.Header.Text = "Em andamento: $($estado.Title) ($mmss)"
+    }
+}
+
 # Saída pendente de janela: um slot POR CHAMADA, com chave própria, e não um único global. O slot
 # nasce no runspace do comando e morre no callback, que o remove assim que o lê - nada sobrevive à
 # janela. A fila guarda a ORDEM das chaves, porque o callback é chamado sem argumento e precisa
 # saber qual slot é o dele.
 $sync.CommandOutputs = [System.Collections.Hashtable]::Synchronized(@{})
 $sync.CommandOutputQueue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
+
+# Fim de um comando com fluxo ao vivo, por arquivo: quem escreve é a runspace, quem lê é o relógio
+# da janela na thread da interface. Sincronizadas porque são exatamente isso - uma variável
+# atravessando duas threads. A chave é o caminho do arquivo, então duas janelas acompanhando dois
+# arquivos diferentes não se confundem.
+$sync.WinForgeStreamDone = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.WinForgeStreamExit = [System.Collections.Hashtable]::Synchronized(@{})
+
+# O ícone da barra de tarefas é objeto da JANELA: escrever nele de uma runspace do pool morre com
+# "outra thread é dona deste objeto". As funções da base que rodam dentro dos passos
+# (Invoke-WPFFixesUpdate, Invoke-WPFFixesWinget) chamam Set-WinUtilTaskbaritem sem passar pelo
+# Dispatcher - na base elas rodavam na thread da janela e isso bastava. O build desvia a chamada
+# para cá quando ela vem de outra thread; o pacote de argumentos viaja por $sync porque
+# Invoke-WPFUIThread chama o bloco SEM argumento.
+$sync.WinForgeTaskbarArgs = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.WinForgeTaskbarCallback = {
+    try {
+        $wfTb = @{}
+        foreach ($wfTbChave in @('state', 'overlay', 'description')) {
+            $wfTbValor = [string]$sync.WinForgeTaskbarArgs[$wfTbChave]
+            if (-not [string]::IsNullOrWhiteSpace($wfTbValor)) { $wfTb[$wfTbChave] = $wfTbValor }
+        }
+        $wfTbValue = [double]$sync.WinForgeTaskbarArgs['value']
+        if ($wfTbValue) { $wfTb['value'] = $wfTbValue }
+        if ($wfTb.Count) { Set-WinUtilTaskbaritem @wfTb }
+    } catch { }
+}
 
 # O callback da interface nasce AQUI, na runspace principal, e não dentro do runspace do comando.
 # Scriptblock criado numa runspace do pool e executado pelo Dispatcher trava na primeira pipeline
@@ -679,6 +1001,137 @@ function Invoke-WinForgeCommandButton {
     } catch {
         $sync.CommandRunning = $false
         Write-WinForgeLog -Component $Component -Level "ERROR" -Message "$Name não pôde começar: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show("O comando não pôde começar: $($_.Exception.Message)", "WinForge", "OK", "Error") | Out-Null
+    }
+}
+
+function Start-WinForgeStreamedCommand {
+    <#
+    .SYNOPSIS
+        Ação de um botão cujo comando DEMORA: roda os passos fora da thread da janela e mostra a
+        saída numa janela que se enche enquanto o trabalho acontece.
+    .DESCRIPTION
+        A diferença para Invoke-WinForgeCommandButton é só o momento de mostrar. Lá o comando roda
+        inteiro, devolve um texto e a janela abre com ele pronto - serve para um dcdiag de três
+        segundos. Um sfc, um DISM ou uma redefinição do Windows Update levam de minutos a mais de uma
+        hora, e uma janela que só aparece no fim é indistinguível de um botão quebrado: era
+        exatamente o que acontecia com estes cinco botões, que ainda por cima rodavam NA thread da
+        janela e a congelavam enquanto isso.
+
+        A ordem importa e é esta:
+
+        1. O arquivo nasce primeiro, com o cabeçalho. A janela precisa de algo para ler.
+        2. A janela abre AQUI, na thread da interface (este é o handler do botão, que já roda nela) e
+           ANTES de a runspace começar. Abrir depois seria abrir de dentro da runspace, e a regra
+           desta base de código é que interface nasce na thread da interface.
+        3. Só então a runspace começa. O corpo dela é criado AQUI também, e recebe tudo num
+           hashtable: Invoke-WPFRunspace passa um argumento posicional só.
+        4. O fim é marcado em $sync.WinForgeStreamDone/$sync.WinForgeStreamExit, no 'finally'. É o
+           que troca o cabeçalho da janela de "Em andamento" para "Concluído" e para o relógio. Sem
+           o 'finally', um passo que lançasse deixaria a janela dizendo "em andamento" para sempre e
+           a trava de comando presa até fechar o programa.
+
+        Cada passo é @{ FilePath; Arguments; Unicode } (executável, com a saída indo linha a linha
+        para o arquivo) ou @{ Function } (função do próprio motor ou da base, com todos os fluxos
+        redirecionados para o mesmo arquivo). Os passos rodam em SEQUÊNCIA, na ordem da tabela: o
+        chkdsk antes do sfc antes do DISM não é gosto, é dependência.
+    .PARAMETER DryRun
+        Devolve a lista dos passos prefixada com '[simulação] ' e para por aí: nada roda, nenhum
+        arquivo é criado, nenhuma janela abre. É como o -SelfTest passa por estas cinco linhas sem
+        redefinir a rede de quem compila.
+    .OUTPUTS
+        Com -DryRun, a lista de passos. Sem ele, nada.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][hashtable]$Spec,
+        [switch]$DryRun
+    )
+
+    $passos = @($Spec.Steps)
+    if ($DryRun) {
+        return @($passos | ForEach-Object {
+            if ($_.Function) { "[simulação] $($_.Function)" }
+            else { ("[simulação] $($_.FilePath) $(@($_.Arguments) -join ' ')").TrimEnd() }
+        })
+    }
+    # Segunda camada da trava de SelfTest, no mesmo lugar em que Invoke-WinForgeCommandCore põe a
+    # dela: o -DryRun já retornou acima, então daqui para baixo é execução de verdade.
+    Assert-WinForgeNotSelfTest -Name "Start-WinForgeStreamedCommand ($Name)"
+
+    if ($sync.CommandRunning) {
+        [System.Windows.MessageBox]::Show("Já existe um comando em andamento. Espere ele terminar.", "WinForge", "OK", "Warning") | Out-Null
+        return
+    }
+    if (-not $passos.Count) {
+        Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$Name não tem passos para rodar."
+        return
+    }
+
+    $sync.CommandRunning = $true
+    $caminho = $null
+    try {
+        $caminho = Get-WinForgeCommandOutputPath -Name $Name -Prefix 'repair'
+        $cabecalho = "WinForge - $($Spec.Title)`r`n$((Get-Date).ToString('dd/MM/yyyy HH:mm:ss')) - $env:COMPUTERNAME`r`n" + ('-' * 78)
+        Set-Content -LiteralPath $caminho -Value $cabecalho -Encoding UTF8 -ErrorAction Stop
+        $sync.WinForgeStreamDone[$caminho] = $false
+        $sync.WinForgeStreamExit[$caminho] = $null
+
+        Show-WinForgeOutputWindow -Title $Spec.Title -FollowPath $caminho -Component 'Repair' | Out-Null
+
+        $corpo = {
+            param($wfArgs)
+            $wfCaminho = [string]$wfArgs.Path
+            $wfCodigo = 0
+            try {
+                foreach ($wfPasso in @($wfArgs.Steps)) {
+                    if ($wfPasso.Function) {
+                        Write-WinForgeStreamLine -Path $wfCaminho -Text ""
+                        Write-WinForgeStreamLine -Path $wfCaminho -Text "> $($wfPasso.Function)"
+                        # '*>&1' porque as funções da base falam por Write-Host, Write-Warning e
+                        # Write-Error em partes iguais, e sem isso a janela ficaria vazia num passo
+                        # que está falando o tempo todo.
+                        #
+                        # Linha a linha, e NÃO 'Out-File -Append': o Out-File segura a saída no
+                        # buffer do próprio escritor e só a solta quando o pipeline acaba - ou seja,
+                        # quando o passo TERMINA. Numa redefinição do Windows Update isso é a janela
+                        # em branco por vários minutos, que é exatamente o problema que este botão
+                        # tinha antes. Abrir e fechar o arquivo por linha é o preço de a linha
+                        # aparecer na hora, e são dezenas de linhas, não milhares.
+                        & ([string]$wfPasso.Function) *>&1 | ForEach-Object { Write-WinForgeStreamLine -Path $wfCaminho -Text ([string]$_) }
+                        continue
+                    }
+                    Write-WinForgeStreamLine -Path $wfCaminho -Text ""
+                    Write-WinForgeStreamLine -Path $wfCaminho -Text "> $($wfPasso.FilePath) $(@($wfPasso.Arguments) -join ' ')"
+                    $wfRes = Invoke-WinForgeNativeCommand -FilePath ([string]$wfPasso.FilePath) -Arguments @($wfPasso.Arguments) -StreamTo $wfCaminho -Unicode:([bool]$wfPasso.Unicode)
+                    # O código que fica é o do PRIMEIRO passo que falhou: um DISM bem-sucedido depois
+                    # de um chkdsk com erro não pode apagar o erro do chkdsk do cabeçalho.
+                    if ($wfCodigo -eq 0 -and $null -ne $wfRes.ExitCode) { $wfCodigo = [int]$wfRes.ExitCode }
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$wfArgs.Final)) {
+                    Write-WinForgeStreamLine -Path $wfCaminho -Text ""
+                    Write-WinForgeStreamLine -Path $wfCaminho -Text ([string]$wfArgs.Final)
+                }
+            } catch {
+                $wfCodigo = -1
+                Write-WinForgeStreamLine -Path $wfCaminho -Text "[erro] $($_.Exception.Message)"
+                Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$($wfArgs.Name) falhou: $($_.Exception.Message)"
+            } finally {
+                $sync.WinForgeStreamExit[$wfCaminho] = $wfCodigo
+                $sync.WinForgeStreamDone[$wfCaminho] = $true
+                $sync.CommandRunning = $false
+                Write-WinForgeLog -Component "Repair" -Message "$($wfArgs.Name) concluído (código $wfCodigo): $wfCaminho"
+            }
+        }
+
+        Write-WinForgeLog -Component "Repair" -Message "$Name iniciado: $($passos.Count) passo(s), saída ao vivo em $caminho"
+        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Name = $Name; Path = $caminho; Steps = $passos; Final = $Spec.Final } | Out-Null
+    } catch {
+        # O corpo pode nem ter começado (pool fechado, arquivo não gravável): sem isto a trava
+        # ficaria presa e todos os botões de comando morreriam até fechar o programa.
+        $sync.CommandRunning = $false
+        if ($caminho) { $sync.WinForgeStreamDone[$caminho] = $true }
+        Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$Name não pôde começar: $($_.Exception.Message)"
         [System.Windows.MessageBox]::Show("O comando não pôde começar: $($_.Exception.Message)", "WinForge", "OK", "Error") | Out-Null
     }
 }

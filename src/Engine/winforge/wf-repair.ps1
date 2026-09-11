@@ -160,6 +160,106 @@ function Get-WinForgeRepairCommand {
                 Confirm  = 'Instalar o PowerShell 7 (Microsoft.PowerShell) pelo winget. O Windows PowerShell 5.1 continua instalado e é ele que o WinForge usa.'
             }
         }
+        # ------------------------------------------------------------------ Correções (vindas da base)
+        # Estas cinco linhas não têm 'Command': elas têm 'Steps', e quem as roda é
+        # Start-WinForgeStreamedCommand, não Invoke-WinForgeCommandCore. O motivo é o tempo. Um
+        # dcdiag responde em segundos e cabe no modelo "roda, devolve texto, abre janela"; um sfc, um
+        # DISM ou uma redefinição do Windows Update levam de minutos a mais de uma hora, e uma janela
+        # que só aparece no fim é indistinguível de um botão quebrado.
+        #
+        # Na base, os cinco botões chamavam a função direto da THREAD DA JANELA e escreviam num
+        # console que o lançador esconde: a aba inteira congelava e nada aparecia na tela. Aqui eles
+        # ganham runspace, janela que acompanha o arquivo ao vivo e a mesma pergunta de Sim/Não das
+        # outras ações que alteram o sistema.
+        #
+        # 'ConfigKey' existe porque a entrada da config destas cinco veio da BASE e não segue o
+        # padrão WPFWFRep<Nome>: é dela que sai a descrição da caixa de confirmação, a mesma frase
+        # que a dica do botão mostra na aba Config.
+        'NetworkReset' {
+            return @{
+                Title     = 'Rede - Redefinir'
+                ConfigKey = 'WPFFixesNetwork'
+                Requires  = (Get-WinForgeSystemExe -Name 'netsh.exe')
+                Kind      = 'repair'
+                Stream    = $true
+                Steps     = @(
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'netsh.exe'); Arguments = @('winsock', 'reset') }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'netsh.exe'); Arguments = @('int', 'ip', 'reset') }
+                )
+                Final     = 'Configuração de rede redefinida. Reinicie o computador.'
+                Confirm   = 'Redefine a pilha de rede com "netsh winsock reset" e "netsh int ip reset": as configurações de TCP/IP e do Winsock voltam ao padrão do Windows. É preciso reiniciar o computador para concluir.'
+            }
+        }
+        'NtpPool' {
+            # Quatro passos, e os dois de serviço são função porque Start-Service/Restart-Service são
+            # cmdlets: 'net start w32time' faria a mesma coisa chamando um executável a mais e
+            # perdendo a mensagem de erro em português do próprio PowerShell.
+            return @{
+                Title     = 'Servidor NTP - Ativar'
+                ConfigKey = 'WPFFixesNTPPool'
+                Requires  = (Get-WinForgeSystemExe -Name 'w32tm.exe')
+                Kind      = 'repair'
+                Stream    = $true
+                Steps     = @(
+                    @{ Function = 'Start-WinForgeTimeService' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'w32tm.exe'); Arguments = @('/config', '/update', '/manualpeerlist:pool.ntp.org,0x8', '/syncfromflags:MANUAL') }
+                    @{ Function = 'Restart-WinForgeTimeService' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'w32tm.exe'); Arguments = @('/resync') }
+                )
+                Final     = 'Servidor de horário configurado para pool.ntp.org.'
+                Confirm   = 'Troca o servidor NTP padrão do Windows (time.windows.com) pelo pool.ntp.org: inicia o serviço de Horário do Windows, grava a nova lista de servidores, reinicia o serviço e força uma sincronização.'
+            }
+        }
+        'SystemRepair' {
+            # A ordem é dependência, não gosto: o disco primeiro (um setor ruim corrompe de novo o
+            # que o sfc acabou de consertar), o sfc depois e o DISM por último, porque é ele que
+            # repõe a imagem de onde o sfc copia os arquivos bons.
+            #
+            # 'Unicode' no sfc: quando a saída dele é redirecionada, ele passa a escrever UTF-16LE.
+            # Lida como OEM, cada caractere vira uma letra seguida de um byte zero.
+            return @{
+                Title     = 'Verificação de corrupção do sistema - Executar'
+                ConfigKey = 'WPFPanelDISM'
+                Requires  = (Get-WinForgeSystemExe -Name 'sfc.exe')
+                Kind      = 'repair'
+                Stream    = $true
+                Steps     = @(
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'chkdsk.exe'); Arguments = @($(if ([string]::IsNullOrWhiteSpace($env:SystemDrive)) { 'C:' } else { $env:SystemDrive }), '/scan', '/perf') }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'sfc.exe'); Arguments = @('/scannow'); Unicode = $true }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'Dism.exe'); Arguments = @('/Online', '/Cleanup-Image', '/RestoreHealth') }
+                )
+                Final     = 'Verificação de corrupção concluída.'
+                Confirm   = 'Roda em sequência o chkdsk (verificação do disco do sistema, só leitura), o sfc /scannow (reparo dos arquivos protegidos do Windows) e o DISM /RestoreHealth (reparo da imagem do Windows, que baixa arquivos pela internet). Pode levar de vários minutos a mais de uma hora.'
+            }
+        }
+        'WindowsUpdateReset' {
+            return @{
+                Title     = 'Windows Update - Redefinir'
+                ConfigKey = 'WPFFixesUpdate'
+                Requires  = $null
+                Kind      = 'repair'
+                Stream    = $true
+                Steps     = @(
+                    @{ Function = 'Invoke-WPFFixesUpdate' }
+                )
+                Final     = 'Windows Update redefinido. Reinicie o computador.'
+                Confirm   = 'Redefine o Windows Update: para os serviços, apaga a fila do BITS e o log, renomeia a pasta de downloads, registra de novo as DLLs, remove as configurações de WSUS, redefine o Winsock e religa os serviços. É preciso reiniciar o computador depois.'
+            }
+        }
+        'WingetReinstall' {
+            return @{
+                Title     = 'WinGet - Reinstalar'
+                ConfigKey = 'WPFFixesWinget'
+                Requires  = $null
+                Kind      = 'repair'
+                Stream    = $true
+                Steps     = @(
+                    @{ Function = 'Invoke-WPFFixesWinget' }
+                )
+                Final     = 'Reinstalação do WinGet concluída.'
+                Confirm   = 'Reinstala o WinGet (Gerenciador de Pacotes do Windows) baixando o App Installer da Microsoft. Precisa de internet. Os programas já instalados por ele continuam onde estão.'
+            }
+        }
         'DirectX' {
             # O WinForge NÃO baixa executável nenhum. A versão anterior deste botão baixava o
             # dxwebsetup.exe para %TEMP% e o abria com o token de administrador do programa - e
@@ -449,6 +549,39 @@ function Invoke-WinForgeChkdskScan {
     if ([string]::IsNullOrWhiteSpace($unidade)) { $unidade = 'C:' }
     $r = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'chkdsk.exe') -Arguments @($unidade, '/scan')
     return "chkdsk $unidade /scan - código de saída: $($r.ExitCode)`r`n`r`n$($r.Text)"
+}
+
+function Start-WinForgeTimeService {
+    <#
+    .SYNOPSIS
+        Liga o serviço de Horário do Windows (w32time). Passo do botão "Servidor NTP - Ativar".
+    .DESCRIPTION
+        O w32tm só configura um serviço que está de pé: numa máquina onde o Horário do Windows está
+        parado (o padrão em várias instalações de cliente), o '/config' responde "o serviço não foi
+        iniciado" e a troca do servidor não acontece. O passo existe por causa disso.
+    #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return 'Start-Service w32time' }
+    Assert-WinForgeNotSelfTest -Name 'Start-WinForgeTimeService'
+    Start-Service -Name w32time -ErrorAction Stop
+    Write-Host "Serviço de Horário do Windows (w32time) iniciado."
+}
+
+function Restart-WinForgeTimeService {
+    <#
+    .SYNOPSIS
+        Reinicia o serviço de Horário do Windows. Passo do botão "Servidor NTP - Ativar".
+    .DESCRIPTION
+        O w32tm grava a nova lista de servidores no registro, mas o serviço só a lê ao subir: sem o
+        reinício, o '/resync' do passo seguinte ainda falaria com o time.windows.com.
+    #>
+    param([switch]$DryRun)
+
+    if ($DryRun) { return 'Restart-Service w32time' }
+    Assert-WinForgeNotSelfTest -Name 'Restart-WinForgeTimeService'
+    Restart-Service -Name w32time -Force -ErrorAction Stop
+    Write-Host "Serviço de Horário do Windows (w32time) reiniciado."
 }
 
 function Select-WinForgeNewestPackage {
@@ -1163,7 +1296,11 @@ function Get-WinForgeRepairConfirmText {
     $cmd = Get-WinForgeRepairCommand -Name $Name
     $descricao = $null
     try {
-        $entrada = $sync.configs.feature."WPFWFRep$Name"
+        # 'ConfigKey' é das cinco linhas que vieram da base: a entrada delas na config tem o nome do
+        # arquivo original (WPFFixesNetwork), não o padrão WPFWFRep<Nome> das linhas do WinForge.
+        $chave = [string]$cmd.ConfigKey
+        if ([string]::IsNullOrWhiteSpace($chave)) { $chave = "WPFWFRep$Name" }
+        $entrada = $sync.configs.feature.$chave
         if ($entrada) { $descricao = [string]$entrada.Description }
     } catch { $descricao = $null }
     if ([string]::IsNullOrWhiteSpace($descricao)) { $descricao = [string]$cmd.Confirm }
@@ -1281,6 +1418,14 @@ function Invoke-WinForgeRepairCommand {
     }
 
     if ($NoUI) { return @{ Dispatched = $false; Reason = 'NoUI'; Kind = $kind } }
+
+    # Dois despachos, e a diferença é o TEMPO do comando. 'Stream' é das linhas que demoram minutos
+    # ou horas (sfc, DISM, Windows Update): a janela abre vazia e se enche enquanto o trabalho
+    # acontece. O resto continua no despacho de sempre - roda, devolve o texto, abre a janela pronta.
+    if ($cmd.Stream) {
+        Start-WinForgeStreamedCommand -Name $Name -Spec $cmd
+        return
+    }
 
     Invoke-WinForgeCommandButton -Spec $cmd -Name $Name -Component 'Repair' -Prefix 'repair'
 }

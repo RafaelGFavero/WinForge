@@ -753,7 +753,8 @@ $src = Replace-Once $src @'
 
 '@ @'
     $buttonConfig = $null
-    if ($sync.configs.feature.$Button -and $Button -notlike "WPFWFRep*") {
+    $wfCorrecoes = @("WPFFixesNetwork", "WPFFixesNTPPool", "WPFPanelDISM", "WPFFixesUpdate", "WPFFixesWinget")
+    if ($sync.configs.feature.$Button -and $Button -notlike "WPFWFRep*" -and $Button -notin $wfCorrecoes) {
         $buttonConfig = $sync.configs.feature.$Button
     } elseif ($sync.configs.tweaks.$Button -and $sync.configs.tweaks.$Button.Type -eq "Button" -and $Button -notlike "WPFWFSrv*" -and $Button -notlike "WPFWFAd*") {
         # WinForge: botões definidos na config de tweaks (aba Jogos)
@@ -764,6 +765,12 @@ $src = Replace-Once $src @'
     # argumento nenhum, e as funções deles precisam do -Name para saber qual comando rodar. Quem
     # despacha esses botões é o switch abaixo, com o -Name explícito por caso - por isso a config
     # deles também não declara "function": seria uma chave morta.
+    #
+    # As cinco chaves de $wfCorrecoes vieram da BASE e saem daqui pelo mesmo motivo, com um a mais:
+    # a função da base que elas apontavam rodava nesta thread - a da janela - e escrevia num console
+    # que o lançador esconde. Um sfc ou um DISM congelava a aba inteira e não mostrava nada. Agora
+    # elas caem em Invoke-WinForgeRepairCommand, que pergunta antes e roda em runspace com a saída
+    # ao vivo numa janela. A chave 'function' delas também some, em Initialize-WinUtilBoostConfigs.
     if ($buttonConfig) {
 
 '@ "button lookup"
@@ -807,6 +814,14 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFRepVcRedist" {Invoke-WinForgeRepairCommand -Name VcRedist}
         "WPFWFRepPowerShell7" {Invoke-WinForgeRepairCommand -Name PowerShell7}
         "WPFWFRepDirectX" {Invoke-WinForgeRepairCommand -Name DirectX}
+        # Correções (aba Config, vindas da base): mesma tabela e mesma máquina do reparo, com a
+        # janela que se enche ao vivo. Antes cada uma destas chaves chamava a função da base pelo
+        # campo "function" da config, na thread da janela.
+        "WPFFixesNetwork" {Invoke-WinForgeRepairCommand -Name NetworkReset}
+        "WPFFixesNTPPool" {Invoke-WinForgeRepairCommand -Name NtpPool}
+        "WPFPanelDISM" {Invoke-WinForgeRepairCommand -Name SystemRepair}
+        "WPFFixesUpdate" {Invoke-WinForgeRepairCommand -Name WindowsUpdateReset}
+        "WPFFixesWinget" {Invoke-WinForgeRepairCommand -Name WingetReinstall}
         "WPFDiagRefresh" {Start-WinForgeProfileJob}
         "WPFDiagWUDrivers" {Invoke-WinForgeDriverUpdateSearch}
         "WPFDiagExport" {
@@ -824,6 +839,59 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFDiagApplySelected" {Invoke-WPFtweaksbutton}
         "WPFDiagUndoSelected" {Invoke-WPFundoall}
 '@.TrimEnd() "button switch"
+
+# ---------------------------------------------------------------- ícone da barra de tarefas: volta para a thread da janela
+# taskbarItemInfo é objeto da JANELA, e escrever nele de outra thread morre com "o thread chamador
+# não pode acessar este objeto porque um thread diferente é o proprietário". Na base isso nunca
+# aparecia: as funções que chamam Set-WinUtilTaskbaritem sem passar pelo Dispatcher (Invoke-WPFFixesUpdate,
+# Invoke-WPFFixesWinget, Invoke-WPFSystemRepair) rodavam NA thread da janela - que é justamente o
+# congelamento que o WinForge está desfazendo. Agora duas delas são passos de um comando em runspace,
+# e a segunda linha de Invoke-WPFFixesUpdate morreria antes de qualquer saída.
+#
+# O desvio fica na PRÓPRIA função, e não em quem chama: assim vale para qualquer caminho novo, da
+# base ou do WinForge, sem depender de quem o escreveu ter lembrado do Dispatcher. Chamada que já
+# vem da thread da janela (o caso de sempre, inclusive o do próprio callback) passa direto.
+$src = Replace-Once $src @'
+        [string]$description
+    )
+
+    if ($value) {
+        $sync["Form"].taskbarItemInfo.ProgressValue = $value
+    }
+'@ @'
+        [string]$description
+    )
+
+    # WinForge: de outra thread, o trabalho é remarcado para a thread da janela (ver wf-commands.ps1).
+    if ($null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher -and -not $sync.Form.Dispatcher.CheckAccess()) {
+        $sync.WinForgeTaskbarArgs['state'] = $state
+        $sync.WinForgeTaskbarArgs['value'] = $value
+        $sync.WinForgeTaskbarArgs['overlay'] = $overlay
+        $sync.WinForgeTaskbarArgs['description'] = $description
+        Invoke-WPFUIThread $sync.WinForgeTaskbarCallback
+        return
+    }
+
+    if ($value) {
+        $sync["Form"].taskbarItemInfo.ProgressValue = $value
+    }
+'@ "taskbar cross-thread"
+
+# ---------------------------------------------------------------- Windows Update - Redefinir: sem caixa em inglês
+# A base termina a redefinição com uma MessageBox em inglês. Rodando em runspace, ela apareceria
+# numa thread que não é a da janela - modal, sem dono, e segurando a trava de comando em andamento
+# até alguém achá-la e fechá-la. O aviso de reinicialização já está na frase final do comando e na
+# própria pergunta de confirmação; aqui ele vira uma linha da saída, que é onde a pessoa está olhando.
+$src = Replace-Once $src @'
+    $ButtonType = [System.Windows.MessageBoxButton]::OK
+    $MessageboxTitle = "Reset Windows Update "
+    $Messageboxbody = ("Stock settings loaded.`n Please reboot your computer")
+    $MessageIcon = [System.Windows.MessageBoxImage]::Information
+
+    [System.Windows.MessageBox]::Show($Messageboxbody, $MessageboxTitle, $ButtonType, $MessageIcon)
+'@ @'
+    Write-Host "Configurações do Windows Update restauradas para o padrão. Reinicie o computador."
+'@ "reset WU sem MessageBox"
 
 # ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
 # A auditoria pode esvaziar um preset (todos os itens viraram Cuidado/Removido). Sem esta guarda,
@@ -2340,7 +2408,10 @@ if ($SelfTest) {
     $wfRepEscrevem = @(
         'Invoke-WinForgeWmiRepair', 'Invoke-WinForgeStoreReregister', 'Enable-WinForgeDotNet35',
         'Install-WinForgeVcRedist', 'Install-WinForgePowerShell7',
-        'Invoke-WinForgeChkdskSchedule', 'Invoke-WinForgeMemoryDiagSchedule'
+        'Invoke-WinForgeChkdskSchedule', 'Invoke-WinForgeMemoryDiagSchedule',
+        # Passos do botão "Servidor NTP - Ativar": mexem num serviço do Windows, então caem na mesma
+        # regra - param() com -DryRun e recusa em modo SelfTest.
+        'Start-WinForgeTimeService', 'Restart-WinForgeTimeService'
     )
     try {
         if (-not $sync.SelfTest) { Write-Host "  [ERRO] Reparo (trava): `$sync.SelfTest deveria estar ligado dentro do SelfTest" -ForegroundColor Red; $wbErrors++ }
@@ -2454,6 +2525,228 @@ if ($SelfTest) {
         else { Write-Host "  Reparo (lookup): WPFWFRep* fora do caminho da config, despacho pelo switch com -Name" }
     } catch {
         Write-Host "  [ERRO] Reparo (lookup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Correções da aba Config ao vivo
+    # Os cinco botões do grupo "Correções" vieram da base e rodavam na THREAD DA JANELA, escrevendo
+    # num console que o lançador esconde: durante um sfc/DISM a interface congelava e não aparecia
+    # nada na tela. Agora eles passam pela mesma máquina de comandos do reparo - runspace para o
+    # trabalho, janela que ACOMPANHA o arquivo de saída enquanto ele cresce.
+    $wfStrNomes = @('NetworkReset', 'NtpPool', 'SystemRepair', 'WindowsUpdateReset', 'WingetReinstall')
+    $wfStrChaves = @{
+        NetworkReset       = 'WPFFixesNetwork'
+        NtpPool            = 'WPFFixesNTPPool'
+        SystemRepair       = 'WPFPanelDISM'
+        WindowsUpdateReset = 'WPFFixesUpdate'
+        WingetReinstall    = 'WPFFixesWinget'
+    }
+    $wfStrDir = Split-Path -Parent $sync.logPath
+    # 1. O fluxo ao vivo em si, com um comando inofensivo: duas linhas têm de chegar ao ARQUIVO (é o
+    # que a janela lê) e ao texto devolvido (é o que vai para o log).
+    try {
+        $wfStrArq = Join-Path $wfStrDir ("selftest-stream-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+        $wfStrRes = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'cmd.exe') -Arguments @('/c', 'echo a & echo b') -StreamTo $wfStrArq
+        if ($wfStrRes.ExitCode -ne 0) { Write-Host "  [ERRO] Correções (fluxo): código de saída $($wfStrRes.ExitCode), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfStrLinha in @('a', 'b')) {
+            if ([string]$wfStrRes.Text -notmatch "(?m)^$wfStrLinha\s*$") { Write-Host "  [ERRO] Correções (fluxo): a linha '$wfStrLinha' não voltou no texto" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (-not (Test-Path -LiteralPath $wfStrArq)) {
+            Write-Host "  [ERRO] Correções (fluxo): -StreamTo não gravou '$wfStrArq'" -ForegroundColor Red; $wbErrors++
+        } else {
+            $wfStrTexto = [System.IO.File]::ReadAllText($wfStrArq, [System.Text.Encoding]::UTF8)
+            foreach ($wfStrLinha in @('a', 'b')) {
+                if ($wfStrTexto -notmatch "(?m)^$wfStrLinha\s*$") { Write-Host "  [ERRO] Correções (fluxo): a linha '$wfStrLinha' não foi para o arquivo" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Correções (fluxo): cmd /c echo a & echo b -> $(@($wfStrTexto -split "`r?`n" | Where-Object { $_ -ne '' }).Count) linha(s) no arquivo e no texto"
+            Remove-Item -LiteralPath $wfStrArq -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Host "  [ERRO] Correções (fluxo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 1b. A outra ponta de escrita: o passo do tipo 'Function'. A saída dele tem de chegar ao arquivo
+    # LINHA A LINHA - um 'Out-File -Append' segura tudo no buffer até o passo terminar, e numa
+    # redefinição do Windows Update isso é a janela em branco por vários minutos.
+    try {
+        $wfStrFn = Join-Path $wfStrDir ("selftest-passo-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+        Write-WinForgeStreamLine -Path $wfStrFn -Text '> primeiro'
+        # O arquivo tem de ser legível JÁ, antes da segunda escrita: é isso que separa "ao vivo" de
+        # "no fim". Com buffer, a leitura aqui traria vazio.
+        $wfStrParcial = [System.IO.File]::ReadAllText($wfStrFn, [System.Text.Encoding]::UTF8)
+        Write-WinForgeStreamLine -Path $wfStrFn -Text 'segundo, com acento: configuração'
+        $wfStrFnTexto = [System.IO.File]::ReadAllText($wfStrFn, [System.Text.Encoding]::UTF8)
+        if ($wfStrParcial -notmatch '> primeiro') { Write-Host "  [ERRO] Correções (passo): a primeira linha não estava no arquivo antes da segunda" -ForegroundColor Red; $wbErrors++ }
+        if ($wfStrFnTexto -notmatch 'configuração') { Write-Host "  [ERRO] Correções (passo): o acréscimo perdeu o acento ou não aconteceu" -ForegroundColor Red; $wbErrors++ }
+        if (([regex]::Matches($wfStrFnTexto, '> primeiro')).Count -ne 1) { Write-Host "  [ERRO] Correções (passo): o acréscimo reescreveu o arquivo em vez de acrescentar" -ForegroundColor Red; $wbErrors++ }
+        $wfStrCorpo = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        # '\| Out-File' e não só 'Out-File': o comentário que explica por que ele não está ali cita o
+        # nome, e uma trava que casasse com o comentário nunca ficaria verde.
+        if ($wfStrCorpo -match '\|\s*Out-File') { Write-Host "  [ERRO] Correções (passo): o passo de função voltou a usar Out-File, que segura a saída até o fim" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Correções (passo): função escreve linha a linha, em UTF-8 e em acréscimo"
+        Remove-Item -LiteralPath $wfStrFn -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "  [ERRO] Correções (passo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 2. A janela que acompanha o arquivo. Com -NoShow o relógio não é ligado (não há laço de
+    # mensagens num build), então quem dá o tique é o próprio teste: é assim que dá para provar que
+    # o texto CRESCE depois de o arquivo crescer, sem abrir janela nenhuma na máquina de quem compila.
+    try {
+        $wfStrSeg = Join-Path $wfStrDir ("selftest-follow-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+        [System.IO.File]::WriteAllText($wfStrSeg, "primeira linha`r`n", (New-Object System.Text.UTF8Encoding($true)))
+        $wfStrJan = Show-WinForgeOutputWindow -Title 'SelfTest ao vivo' -FollowPath $wfStrSeg -NoShow
+        if ($wfStrJan -isnot [System.Windows.Window]) {
+            Write-Host "  [ERRO] Correções (janela ao vivo): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++
+        } else {
+            $wfStrCaixa = $wfStrJan.FindName('WFOutputText')
+            $wfStrCab = $wfStrJan.FindName('WFOutputHeader')
+            if ($null -eq $wfStrCab) { Write-Host "  [ERRO] Correções (janela ao vivo): falta o cabeçalho 'WFOutputHeader'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfStrCab.Text -notmatch 'Em andamento') { Write-Host "  [ERRO] Correções (janela ao vivo): o cabeçalho deveria dizer 'Em andamento', veio '$($wfStrCab.Text)'" -ForegroundColor Red; $wbErrors++ }
+            if ($null -eq $wfStrCaixa) { Write-Host "  [ERRO] Correções (janela ao vivo): falta o TextBox 'WFOutputText'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfStrCaixa.Text -notmatch 'primeira linha') { Write-Host "  [ERRO] Correções (janela ao vivo): a janela deveria abrir com o que o arquivo já tem" -ForegroundColor Red; $wbErrors++ }
+            else {
+                [System.IO.File]::AppendAllText($wfStrSeg, "segunda linha`r`n", (New-Object System.Text.UTF8Encoding($false)))
+                Invoke-WinForgeFollowTick -Window $wfStrJan
+                if ([string]$wfStrCaixa.Text -notmatch 'segunda linha') { Write-Host "  [ERRO] Correções (janela ao vivo): o tique não trouxe o que o arquivo ganhou" -ForegroundColor Red; $wbErrors++ }
+                # A linha que já estava na tela não pode entrar de novo: o tique lê do ponto em que parou.
+                if (([regex]::Matches([string]$wfStrCaixa.Text, 'primeira linha')).Count -ne 1) { Write-Host "  [ERRO] Correções (janela ao vivo): o tique repetiu o que já estava na tela" -ForegroundColor Red; $wbErrors++ }
+                $sync.WinForgeStreamExit[$wfStrSeg] = 0
+                $sync.WinForgeStreamDone[$wfStrSeg] = $true
+                Invoke-WinForgeFollowTick -Window $wfStrJan
+                if ([string]$wfStrCab.Text -notmatch 'Conclu') { Write-Host "  [ERRO] Correções (janela ao vivo): terminado, o cabeçalho deveria dizer 'Concluído', veio '$($wfStrCab.Text)'" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfStrCab.Text -notmatch 'código 0') { Write-Host "  [ERRO] Correções (janela ao vivo): o cabeçalho de conclusão deveria trazer o código de saída, veio '$($wfStrCab.Text)'" -ForegroundColor Red; $wbErrors++ }
+                else { Write-Host "  Correções (janela ao vivo): abre com o arquivo, cresce no tique e fecha com '$($wfStrCab.Text)'" }
+            }
+        }
+        Remove-Item -LiteralPath $wfStrSeg -Force -ErrorAction SilentlyContinue
+        [void]$sync.WinForgeStreamDone.Remove($wfStrSeg)
+        [void]$sync.WinForgeStreamExit.Remove($wfStrSeg)
+    } catch {
+        Write-Host "  [ERRO] Correções (janela ao vivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 3. As cinco linhas da tabela. Executável sempre por CAMINHO COMPLETO dentro do System32: o
+    # WinForge roda elevado e um 'netsh.exe' resolvido pelo PATH deixa a escolha do binário com uma
+    # variável de ambiente que qualquer processo de integridade média escreve.
+    try {
+        $wfStrSys = [string][Environment]::SystemDirectory
+        $wfStrPassos = 0
+        foreach ($wfStrNome in $wfStrNomes) {
+            $wfStrSpec = Get-WinForgeRepairCommand -Name $wfStrNome
+            if ([string]$wfStrSpec.Kind -ne 'repair') { Write-Host "  [ERRO] Correções $wfStrNome`: tipo '$($wfStrSpec.Kind)', esperado 'repair'" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wfStrSpec.Stream) { Write-Host "  [ERRO] Correções $wfStrNome`: a linha deveria estar marcada com Stream" -ForegroundColor Red; $wbErrors++ }
+            if ([string]::IsNullOrWhiteSpace($wfStrSpec.Title)) { Write-Host "  [ERRO] Correções $wfStrNome`: sem título" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfStrSpec.ConfigKey -ne $wfStrChaves[$wfStrNome]) { Write-Host "  [ERRO] Correções $wfStrNome`: ConfigKey '$($wfStrSpec.ConfigKey)', esperado '$($wfStrChaves[$wfStrNome])'" -ForegroundColor Red; $wbErrors++ }
+            $wfStrLista = @($wfStrSpec.Steps)
+            if (-not $wfStrLista.Count) { Write-Host "  [ERRO] Correções $wfStrNome`: sem passos" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfStrPasso in $wfStrLista) {
+                $wfStrPassos++
+                if ($wfStrPasso.Function) {
+                    if (-not (Get-Command ([string]$wfStrPasso.Function) -ErrorAction SilentlyContinue)) { Write-Host "  [ERRO] Correções $wfStrNome`: função '$($wfStrPasso.Function)' não existe" -ForegroundColor Red; $wbErrors++ }
+                    continue
+                }
+                $wfStrExe = [string]$wfStrPasso.FilePath
+                if ([string]::IsNullOrWhiteSpace($wfStrExe)) { Write-Host "  [ERRO] Correções $wfStrNome`: passo sem FilePath nem Function" -ForegroundColor Red; $wbErrors++; continue }
+                if (-not [System.IO.Path]::IsPathRooted($wfStrExe)) { Write-Host "  [ERRO] Correções $wfStrNome`: '$wfStrExe' não é caminho completo" -ForegroundColor Red; $wbErrors++ }
+                elseif (-not $wfStrExe.StartsWith($wfStrSys, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Correções $wfStrNome`: '$wfStrExe' fora de '$wfStrSys'" -ForegroundColor Red; $wbErrors++ }
+                elseif (-not (Test-Path -LiteralPath $wfStrExe -PathType Leaf)) { Write-Host "  [ERRO] Correções $wfStrNome`: '$wfStrExe' não existe nesta máquina" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # A verificação de corrupção é chkdsk, sfc e DISM, NESTA ORDEM: o disco primeiro (um setor
+        # ruim corrompe de novo o que o sfc acabou de consertar) e o DISM por último, porque é ele
+        # que repõe a fonte de onde o sfc copia.
+        $wfStrSR = @((Get-WinForgeRepairCommand -Name SystemRepair).Steps)
+        if ($wfStrSR.Count -ne 3) { Write-Host "  [ERRO] Correções SystemRepair: $($wfStrSR.Count) passo(s), esperado 3" -ForegroundColor Red; $wbErrors++ }
+        else {
+            foreach ($wfStrPar in @(@(0, 'chkdsk.exe'), @(1, 'sfc.exe'), @(2, 'dism.exe'))) {
+                $wfStrFolha = [string](Split-Path -Leaf ([string]$wfStrSR[$wfStrPar[0]].FilePath))
+                if ($wfStrFolha -ne [string]$wfStrPar[1]) { Write-Host "  [ERRO] Correções SystemRepair: passo $($wfStrPar[0] + 1) é '$wfStrFolha', esperado '$($wfStrPar[1])'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        Write-Host "  Correções (tabela): $($wfStrNomes.Count) linha(s) 'repair' com fluxo ao vivo, $wfStrPassos passo(s), executáveis por caminho completo"
+    } catch {
+        Write-Host "  [ERRO] Correções (tabela): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 4. Simulação e recusa. O -DryRun LISTA os passos e não roda nenhum; sem ele, em SelfTest, o
+    # despacho é recusado - este build não redefine rede nem roda DISM na máquina de quem compila.
+    try {
+        $wfStrAntes = @(Get-ChildItem -LiteralPath $wfStrDir -Filter 'repair-*.txt' -ErrorAction SilentlyContinue).Count
+        $wfStrTravaAntes = $sync.CommandRunning
+        $wfStrSecos = 0
+        foreach ($wfStrNome in $wfStrNomes) {
+            $wfStrSpec = Get-WinForgeRepairCommand -Name $wfStrNome
+            $wfStrLinhas = @(Start-WinForgeStreamedCommand -Name $wfStrNome -Spec $wfStrSpec -DryRun)
+            if ($wfStrLinhas.Count -ne @($wfStrSpec.Steps).Count) { Write-Host "  [ERRO] Correções $wfStrNome`: -DryRun listou $($wfStrLinhas.Count) passo(s), esperado $(@($wfStrSpec.Steps).Count)" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfStrLinha in $wfStrLinhas) {
+                if (-not ([string]$wfStrLinha).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Correções $wfStrNome`: -DryRun deveria prefixar '[simulação] ', veio '$wfStrLinha'" -ForegroundColor Red; $wbErrors++ }
+                else { $wfStrSecos++ }
+            }
+            $wfStrRecusa = $null
+            try { Start-WinForgeStreamedCommand -Name $wfStrNome -Spec $wfStrSpec | Out-Null } catch { $wfStrRecusa = [string]$_.Exception.Message }
+            if ($null -eq $wfStrRecusa) { Write-Host "  [ERRO] Correções $wfStrNome`: rodou de verdade em modo SelfTest" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfStrRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Correções $wfStrNome`: a recusa não fala em SelfTest: '$wfStrRecusa'" -ForegroundColor Red; $wbErrors++ }
+            $wfStrDec = Invoke-WinForgeRepairCommand -Name $wfStrNome -NoUI
+            if ($null -eq $wfStrDec -or $wfStrDec.Dispatched -or [string]$wfStrDec.Reason -ne 'confirmação') { Write-Host "  [ERRO] Correções $wfStrNome`: -NoUI deveria recusar com motivo 'confirmação', veio '$($wfStrDec.Reason)'" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfStrDepois = @(Get-ChildItem -LiteralPath $wfStrDir -Filter 'repair-*.txt' -ErrorAction SilentlyContinue).Count
+        if ($wfStrDepois -ne $wfStrAntes) { Write-Host "  [ERRO] Correções: a simulação gravou arquivo na pasta de logs ($wfStrAntes -> $wfStrDepois)" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.CommandRunning -ne $wfStrTravaAntes) { Write-Host "  [ERRO] Correções: a trava de comando em andamento ficou presa depois da simulação" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Correções (simulação): $wfStrSecos passo(s) listados, nenhum rodado, nenhum arquivo gravado"
+    } catch {
+        Write-Host "  [ERRO] Correções (simulação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 5. A pergunta antes de agir. A descrição vem da MESMA entrada da config que vira a dica do
+    # botão na aba Config; as duas que pedem reinicialização têm de dizer isso na própria pergunta.
+    try {
+        $wfStrConfOk = 0
+        foreach ($wfStrNome in $wfStrNomes) {
+            $wfStrChave = $wfStrChaves[$wfStrNome]
+            $wfStrDesc = [string]$sync.configs.feature.$wfStrChave.Description
+            if ([string]::IsNullOrWhiteSpace($wfStrDesc)) { Write-Host "  [ERRO] Correções (confirmação): $wfStrChave sem Description na config" -ForegroundColor Red; $wbErrors++; continue }
+            $wfStrConf = [string](Get-WinForgeRepairConfirmText -Name $wfStrNome)
+            if ($wfStrConf -notmatch [regex]::Escape($wfStrDesc.Trim())) { Write-Host "  [ERRO] Correções (confirmação) $wfStrNome`: o texto não veio da Description de $wfStrChave" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfStrConf -notmatch [regex]::Escape([string](Get-WinForgeRepairCommand -Name $wfStrNome).Title)) { Write-Host "  [ERRO] Correções (confirmação) $wfStrNome`: o texto não traz o título" -ForegroundColor Red; $wbErrors++ }
+            elseif (([regex]::Matches($wfStrConf, 'Continuar')).Count -ne 1) { Write-Host "  [ERRO] Correções (confirmação) $wfStrNome`: 'Continuar' deveria aparecer uma vez" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfStrConf.Length -lt 120) { Write-Host "  [ERRO] Correções (confirmação) $wfStrNome`: texto curto demais ($($wfStrConf.Length) caractere(s))" -ForegroundColor Red; $wbErrors++ }
+            else { $wfStrConfOk++ }
+        }
+        foreach ($wfStrNome in @('NetworkReset', 'WindowsUpdateReset')) {
+            if ([string](Get-WinForgeRepairConfirmText -Name $wfStrNome) -notmatch 'einici') { Write-Host "  [ERRO] Correções (confirmação) $wfStrNome`: a pergunta não avisa que pode ser preciso reiniciar" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Correções (confirmação): $wfStrConfOk texto(s) vindos da descrição da aba Config, com aviso de reinicialização onde cabe"
+    } catch {
+        Write-Host "  [ERRO] Correções (confirmação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 6. O caminho do clique no motor GERADO. Duas pontas: a guarda do lookup tira as cinco chaves do
+    # caminho da config (que chamaria $buttonConfig.function SEM argumento) e o switch as despacha com
+    # o -Name explícito. A chave 'function' também sai da entrada: sem ela, uma guarda quebrada cai no
+    # switch em vez de voltar a congelar a janela com a função da base.
+    try {
+        $wfStrLookup = [string](Get-Command Invoke-WPFButton).ScriptBlock
+        foreach ($wfStrNome in $wfStrNomes) {
+            $wfStrChave = $wfStrChaves[$wfStrNome]
+            if ($wfStrLookup -notmatch ([regex]::Escape("`"$wfStrChave`" {Invoke-WinForgeRepairCommand -Name $wfStrNome}"))) { Write-Host "  [ERRO] Correções (clique): o switch não despacha '$wfStrChave' para -Name $wfStrNome" -ForegroundColor Red; $wbErrors++ }
+            $wfStrEntrada = $sync.configs.feature.$wfStrChave
+            if ($null -eq $wfStrEntrada) { Write-Host "  [ERRO] Correções (clique): '$wfStrChave' não existe na config da aba Config" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfStrEntrada.PSObject.Properties['function']) { Write-Host "  [ERRO] Correções (clique): '$wfStrChave' ainda tem a chave 'function' morta ('$($wfStrEntrada.function)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A guarda do lookup tem de nomear as cinco chaves E usá-las de verdade na condição: a lista
+        # sozinha seria uma declaração bonita e morta.
+        if ($wfStrLookup -notmatch "\`$Button -notin \`$wfCorrecoes") { Write-Host "  [ERRO] Correções (clique): a guarda do lookup não usa a lista de correções" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfStrChave in @($wfStrChaves.Values | Sort-Object)) {
+            if ($wfStrLookup -notmatch "(?s)\`$wfCorrecoes = @\(.{0,300}?$([regex]::Escape($wfStrChave))") { Write-Host "  [ERRO] Correções (clique): a guarda do lookup não exclui '$wfStrChave'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E as funções da base que congelavam a janela não podem mais ser alcançadas por clique
+        # nenhum: nem pelo switch, nem por uma entrada de config que ainda as aponte.
+        foreach ($wfStrMorta in @('Invoke-WPFSystemRepair', 'Invoke-WPFFixesNetwork', 'Invoke-WPFFixesNTPPool')) {
+            if ($wfStrLookup -match [regex]::Escape($wfStrMorta)) { Write-Host "  [ERRO] Correções (clique): '$wfStrMorta' ainda aparece em Invoke-WPFButton" -ForegroundColor Red; $wbErrors++ }
+            $wfStrAponta = @($sync.configs.feature.PSObject.Properties | Where-Object { [string]$_.Value.function -eq $wfStrMorta } | ForEach-Object { $_.Name })
+            if ($wfStrAponta.Count) { Write-Host "  [ERRO] Correções (clique): '$wfStrMorta' ainda é a função de $($wfStrAponta -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Invoke-WPFFixesUpdate e Invoke-WPFFixesWinget continuam existindo - elas são o CONTEÚDO de
+        # dois dos passos -, mas rodam dentro do runspace, e lá elas mexem no ícone da barra de
+        # tarefas, que é objeto da janela. Sem a passagem pelo Dispatcher isso morre com "outra
+        # thread é dona deste objeto" na primeira linha, antes de qualquer saída.
+        if ([string](Get-Command Set-WinUtilTaskbaritem).ScriptBlock -notmatch 'CheckAccess') { Write-Host "  [ERRO] Correções (clique): Set-WinUtilTaskbaritem não volta para a thread da janela" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Correções (clique): $($wfStrNomes.Count) chave(s) fora do caminho da config e despachadas pelo switch com -Name"
+    } catch {
+        Write-Host "  [ERRO] Correções (clique): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # A janela de saída é montada em código, sem XAML: o -NoShow existe para o SelfTest provar que o
     # TextBox nasce com o texto certo sem abrir nada na tela (ShowDialog aqui travaria o build).
