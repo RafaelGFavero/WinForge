@@ -312,7 +312,7 @@ function Get-WinForgeRepairCommand {
                 Stream   = $true
                 Steps    = @(@{ Function = 'Invoke-WinForgeAclRestore' })
                 Final    = 'Reinicie o computador: serviços e programas já abertos continuam com as permissões antigas em cache até o próximo logon.'
-                Confirm  = 'Devolve as permissões do disco do Windows ao padrão de fábrica, em fases: verificação do disco, backup das listas atuais, raiz, secedit e pasta de usuário. Leva minutos e pede reinicialização no fim.'
+                Confirm  = 'Devolve as permissões do disco do Windows ao padrão de fábrica, em fases: chkdsk de verificação do volume, backup das listas atuais, a raiz do disco, as pastas do sistema uma a uma e a sua pasta de usuário. Leva minutos e pede reinicialização no fim.'
             }
         }
         'AclUndo' {
@@ -2099,16 +2099,20 @@ function Get-WinForgeAclRestorePlan {
         1. chkdsk /scan (só leitura). Reescrever a DACL de um volume com erro de sistema de arquivos
            é consertar o que vai corromper de novo. Se ele acusar erro, a restauração PARA aqui.
         2. Backup das listas atuais, uma por pasta: a raiz, cada pasta de primeiro nível (sem
-           recursão) e a pasta do usuário (com /T). É o que o botão Desfazer consome.
+           recursão), cada pasta ANINHADA da tabela de esperados que a fase 4 pode reescrever
+           ('Users\Public') e a pasta do usuário (com /T /L). É o que o botão Desfazer consome.
         3. A raiz. Negações fora ('/remove:d', só se houver), '/inheritance:r' + '/grant:r' com as
            ACEs padrão e um '/grant' separado para a segunda ACE dos Usuários Autenticados.
         4. Pasta por pasta: Windows, Program Files, Program Files (x86), ProgramData, Users e
            Users\Public. Para cada uma, '/setowner' (só se o dono estiver fora do padrão) e
            '/inheritance:r /grant:r' + '/grant' com as ACEs medidas de Get-WinForgeAclExpected -
            NA PASTA, sem '/T', sem '/reset'. E só nas pastas que a verificação acusou: quem decide
-           é Invoke-WinForgeAclRestore, com o relatório na mão.
+           é Invoke-WinForgeAclRestore, com o relatório na mão. Cada pasta traz ainda um par de
+           socorro condicional ('setowner-socorro' e 'setowner-devolver'): se a concessão responder
+           "acesso negado", a posse vai para os Administradores, a concessão é repetida uma vez e a
+           posse VOLTA ao dono padrão.
         5. A pasta do usuário: '/setowner' (condicional), negações fora (condicional), as três ACEs
-           padrão na RAIZ do perfil e, depois delas, '/inheritance:e /T' no CONTEÚDO. A ordem é
+           padrão na RAIZ do perfil e, depois delas, '/inheritance:e /T /L' no CONTEÚDO. A ordem é
            dependência: a herança só propaga o que já está concedido na raiz. '/reset /T' não é
            usado - ele apagaria as ACEs explícitas que os próprios aplicativos põem
            (AppData\Local\Packages, OneDrive), e '/inheritance:e' as preserva.
@@ -2125,8 +2129,14 @@ function Get-WinForgeAclRestorePlan {
         é anotada aqui, no único lugar em que a regra existe.
 
         Um '/grant' por SID por chamada: dentro de um mesmo '/grant' o icacls guarda só a ÚLTIMA
-        entrada de cada SID, então '*S-1-5-11:(OI)(CI)(IO)M' e '*S-1-5-11:AD' na mesma linha viram
+        entrada de cada SID, então '*S-1-5-11:(OI)(CI)(IO)M' e '*S-1-5-11:(AD)' na mesma linha viram
         uma ACE só - e o direito de criar arquivo na raiz sumiria sem nenhum erro.
+
+        Direito ESPECÍFICO vai entre parênteses, e isso foi medido: 'icacls <pasta> /grant
+        *S-1-5-11:AD' termina com código 87 ("Parâmetro inválido") e não concede nada. Sem
+        parênteses o icacls só aceita as letras de direito SIMPLES (F, M, RX, R, W, D). O -SelfTest
+        roda cada string de concessão deste plano contra uma pasta em %TEMP% justamente para que um
+        erro desses apareça no build, e não na máquina de quem clicou no botão.
     .OUTPUTS
         Vetor de hashtables com Phase, Title, FilePath, Arguments e, conforme o passo,
         Path/Backup/Target (fase 2), Folder/Kind (fases 3 a 5) e Conditional.
@@ -2171,6 +2181,21 @@ function Get-WinForgeAclRestorePlan {
         $folha = [string](Split-Path -Leaf $p)
         $alvos += @{ Path = $p; Slug = ([regex]::Replace($folha, '[^A-Za-z0-9._-]', '_')); Recursive = $false }
     }
+    # As pastas ANINHADAS da tabela de esperados - hoje só 'Users\Public' - não aparecem na
+    # listagem de primeiro nível, e a fase 4 reescreve a DACL delas. Sem esta volta o Desfazer
+    # devolveria tudo menos justamente uma pasta que a restauração mexeu. A regra é essa, e não a
+    # lista: toda pasta que a fase 4 pode tocar tem de ter backup na fase 2.
+    $jaSalvas = @{}
+    foreach ($a in $alvos) { $jaSalvas[([string]$a.Path).TrimEnd('\')] = $true }
+    foreach ($esp in @(Get-WinForgeAclExpected | Where-Object { $_.Direta })) {
+        $p = [string]$esp.Path
+        if ($jaSalvas.ContainsKey($p.TrimEnd('\'))) { continue }
+        # O apelido sai do caminho RELATIVO à raiz ('Users\Public' -> 'Users_Public'): só o nome da
+        # folha ('Public') colidiria com uma pasta de mesmo nome em outro lugar da árvore.
+        $rel = if ($p.StartsWith($raiz, [StringComparison]::OrdinalIgnoreCase)) { $p.Substring($raiz.Length) } else { [string](Split-Path -Leaf $p) }
+        $alvos += @{ Path = $p; Slug = ([regex]::Replace($rel.Trim('\'), '[^A-Za-z0-9._-]', '_')); Recursive = $false }
+        $jaSalvas[$p.TrimEnd('\')] = $true
+    }
     if (-not [string]::IsNullOrWhiteSpace($Profile)) {
         $alvos += @{ Path = $Profile; Slug = ('perfil-' + [regex]::Replace([string](Split-Path -Leaf $Profile), '[^A-Za-z0-9._-]', '_')); Recursive = $true }
     }
@@ -2181,7 +2206,12 @@ function Get-WinForgeAclRestorePlan {
         # restaurado da pasta em que o icacls gravou os nomes relativos, que é a pasta acima.
         $destino = if ([string]$alvo.Path -eq $raiz) { $raiz } else { [string](Split-Path -Parent ([string]$alvo.Path)) }
         $argumentos = @([string]$alvo.Path, '/save', $arquivo, '/C')
-        if ($alvo.Recursive) { $argumentos += '/T' }
+        # '/T' desce a árvore e SEGUE ponto de reanálise: dentro de um perfil isso é OneDrive,
+        # 'Meus Documentos' redirecionado e as junções de compatibilidade ('Dados de aplicativos'
+        # -> AppData\Roaming), que apontam para fora do perfil e às vezes para outro volume. '/L'
+        # manda o icacls trabalhar no LINK em vez de no destino - é o que mantém a caminhada
+        # dentro do perfil, aqui e na fase 5.
+        if ($alvo.Recursive) { $argumentos += @('/T', '/L') }
         $plano += @{
             Phase     = 2
             Title     = "Backup das permissões de '$($alvo.Path)'"
@@ -2226,7 +2256,7 @@ function Get-WinForgeAclRestorePlan {
         Folder    = $raiz
         Title     = "Direito de criar arquivo na raiz '$raiz' para os Usuários Autenticados"
         FilePath  = $icacls
-        Arguments = @($raiz, '/grant', "*$($sid.Autenticados):AD")
+        Arguments = @($raiz, '/grant', "*$($sid.Autenticados):(AD)")
     }
 
     # ---- Fase 4: as seis pastas do sistema, uma a uma, com a tabela de esperados.
@@ -2261,6 +2291,34 @@ function Get-WinForgeAclRestorePlan {
                 Title     = "Permissões herdáveis de '$pasta'"
                 FilePath  = $icacls
                 Arguments = @($pasta, '/grant') + @($esp.GrantExtra | ForEach-Object { [string]$_ })
+            }
+        }
+        # O par de socorro da pasta, que só roda se a concessão responder "acesso negado" (código
+        # 5). C:\Windows e C:\Program Files pertencem ao TrustedInstaller, e a ACE padrão dos
+        # Administradores ali é 'M' - modificar, não controle total. 'M' não inclui WRITE_DAC:
+        # elevado ou não, o administrador NÃO reescreve a DACL dessas pastas enquanto não for o
+        # dono. Tomar a posse, repetir a concessão uma vez e DEVOLVER a posse ao dono padrão é o
+        # caminho do próprio Windows - e devolver não é opcional, porque uma pasta do sistema que
+        # fica com os Administradores como dona passa a aceitar alteração de qualquer processo
+        # elevado, que é o oposto do que estes botões existem para restaurar.
+        if (-not [string]::IsNullOrWhiteSpace([string]$esp.Dono)) {
+            $plano += @{
+                Phase       = 4
+                Kind        = 'setowner-socorro'
+                Folder      = $pasta
+                Title       = "Posse de '$pasta' para os Administradores (só se a concessão responder acesso negado)"
+                FilePath    = $icacls
+                Arguments   = @($pasta, '/setowner', "*$($sid.Administradores)")
+                Conditional = $true
+            }
+            $plano += @{
+                Phase       = 4
+                Kind        = 'setowner-devolver'
+                Folder      = $pasta
+                Title       = "Devolver a posse de '$pasta' ao dono padrão depois da segunda tentativa"
+                FilePath    = $icacls
+                Arguments   = @($pasta, '/setowner', "*$([string]$esp.Dono)")
+                Conditional = $true
             }
         }
     }
@@ -2298,7 +2356,9 @@ function Get-WinForgeAclRestorePlan {
         # '/inheritance:e' LIGA a herança em cada item de dentro, e é o que faz as três ACEs da raiz
         # do perfil descerem. O que os aplicativos puseram à mão continua lá: as ACEs de pacote em
         # AppData\Local\Packages e as do OneDrive são explícitas, e ligar herança não apaga nenhuma.
-        $plano += @{ Phase = 5; Kind = 'inherit'; Folder = [string]$Profile; Title = "Herança do conteúdo de '$Profile'"; FilePath = $icacls; Arguments = @((Join-Path ([string]$Profile) '*'), '/inheritance:e', '/T', '/C', '/Q') }
+        # '/L' anda pelo LINK, e não pelo destino: sem ele o '/T' sai do perfil pelas junções de
+        # compatibilidade e pelo OneDrive redirecionado, e liga herança em pasta de outro volume.
+        $plano += @{ Phase = 5; Kind = 'inherit'; Folder = [string]$Profile; Title = "Herança do conteúdo de '$Profile'"; FilePath = $icacls; Arguments = @((Join-Path ([string]$Profile) '*'), '/inheritance:e', '/T', '/L', '/C', '/Q') }
     }
     $plano += @{
         Phase       = 6
@@ -2324,6 +2384,8 @@ function Select-WinForgeAclTargetedSteps {
         Duas regras, e é só isto que a função faz:
 
         - Pasta sem diferença, ou que não existe nesta máquina, não entra.
+        - O par de socorro de posse ('setowner-socorro' e 'setowner-devolver') nunca entra: ele
+          pertence a Invoke-WinForgeAclOwnerFallback e só roda com a resposta "acesso negado".
         - O '/setowner' só entra quando o relatório disse que o dono está fora do padrão
           ('OwnerOk' falso). Trocar o dono de uma pasta cujo dono já está certo não conserta nada e
           ainda quebra o '/restore' do Desfazer, que devolve DACL e não dono.
@@ -2353,6 +2415,10 @@ function Select-WinForgeAclTargetedSteps {
         $chave = ([string]$passo.Folder).TrimEnd('\')
         if (-not $acusadas.ContainsKey($chave)) { continue }
         if (([string]$passo.Kind -eq 'setowner') -and $acusadas[$chave]) { continue }
+        # O par de socorro ('setowner-socorro'/'setowner-devolver') nunca entra na fila: ele é
+        # procurado por Invoke-WinForgeAclOwnerFallback, e só quando a concessão responder código
+        # 5. Trocar o dono de uma pasta do sistema sem essa resposta é criar o estrago à toa.
+        if (([string]$passo.Kind) -like 'setowner-*') { continue }
         $saida += $passo
     }
     return @($saida)
@@ -2376,6 +2442,9 @@ function Invoke-WinForgeAclRestore {
           fica com as ACEs certas e o acesso continua negado.
         - Na fase 4, o RELATÓRIO. Só as pastas que a verificação acusou são reescritas, e o
           '/setowner' só roda onde o dono está fora do padrão (Select-WinForgeAclTargetedSteps).
+          Concessão que responde 5 numa pasta do TrustedInstaller cai em
+          Invoke-WinForgeAclOwnerFallback: posse para os Administradores, uma segunda tentativa e a
+          posse de volta ao dono padrão.
         - Depois da fase 3, o código do icacls. 5 é "acesso negado": a raiz pertence a alguém que
           nem o administrador alcança, e é o único caso em que o takeown da fase 6 roda - uma vez,
           só na raiz, sem recursão, seguido de UMA segunda tentativa da fase 3.
@@ -2389,8 +2458,8 @@ function Invoke-WinForgeAclRestore {
         cada /restore tem de rodar, porque o icacls grava nomes RELATIVOS à pasta em que foi
         invocado - adivinhar isso depois é o jeito de aplicar a DACL da pasta errada.
     .PARAMETER DryRun
-        Lista as fases, prefixadas com '[simulação] ', e para por aí: nada roda, nenhuma pasta é
-        criada, nenhum arquivo é gravado.
+        Lista as fases, prefixadas com '[simulação] ' e com os passos condicionais marcados, e para
+        por aí: nada roda, nenhuma pasta é criada, nenhum arquivo é gravado.
     .PARAMETER BackupRoot
         Pasta de backup alternativa. Existe para o teste; a conferência dela é a mesma da pasta
         padrão, sem afrouxamento nenhum.
@@ -2411,8 +2480,12 @@ function Invoke-WinForgeAclRestore {
     $plano = @(Get-WinForgeAclRestorePlan -Profile $perfil -UserSid $meuSid -BackupRoot $raizBackup)
 
     if ($DryRun) {
+        # Passo condicional aparece marcado: mais da metade do plano só roda em resposta a alguma
+        # coisa (negação encontrada, dono fora do padrão, acesso negado), e uma simulação que
+        # lista tudo em pé de igualdade promete estrago que não vai acontecer.
         return @($plano | ForEach-Object {
-            ("[simulação] Fase {0}: {1} {2}" -f $_.Phase, $_.FilePath, (@($_.Arguments) -join ' ')).TrimEnd()
+            $marca = if ($_.Conditional) { ' (condicional)' } else { '' }
+            ("[simulação] Fase {0}{1}: {2} {3}" -f $_.Phase, $marca, $_.FilePath, (@($_.Arguments) -join ' ')).TrimEnd()
         })
     }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeAclRestore'
@@ -2534,6 +2607,9 @@ function Invoke-WinForgeAclRestore {
             Write-Host "Fase 4 de 6 - $($passo.Title)"
             $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
             Write-Host ([string]$r.Text)
+            if (([int]$r.ExitCode -eq 5) -and ([string]$passo.Kind -ne 'setowner')) {
+                $r = Invoke-WinForgeAclOwnerFallback -Plan $plano -Step $passo
+            }
             if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
         }
     }
@@ -2565,6 +2641,62 @@ function Invoke-WinForgeAclRestore {
     Write-Host 'Restauração concluída. Reinicie o computador antes de julgar o resultado: serviços e programas já abertos seguem com as permissões antigas em cache.'
     Write-Host 'Depois de reiniciar, use "Permissões do disco C: - Verificar" para conferir, e "Desfazer (restaurar backup)" se algo tiver ficado pior.'
     Write-Host 'O Desfazer tem um limite: o icacls /restore devolve a LISTA DE PERMISSÕES, e não o DONO. Se alguma pasta trocou de dono nesta rodada (/setowner ou takeown), o dono novo continua depois de desfazer.'
+}
+
+function Invoke-WinForgeAclOwnerFallback {
+    <#
+    .SYNOPSIS
+        A saída para "acesso negado" numa pasta do TrustedInstaller: toma a posse, repete a
+        concessão uma vez e devolve a posse ao dono padrão.
+    .DESCRIPTION
+        C:\Windows e C:\Program Files pertencem ao TrustedInstaller, e a ACE padrão dos
+        Administradores neles é 'M'. 'M' (Modify) não carrega WRITE_DAC: elevado ou não, o
+        administrador não reescreve a DACL dessas pastas enquanto não for o dono - o icacls
+        responde 5 e a fase 4 terminaria em erro justamente nas duas pastas que mais importam.
+
+        Três movimentos, nesta ordem, e o terceiro não é opcional: pasta do sistema que fica com os
+        Administradores como dona passa a aceitar alteração de qualquer processo elevado, que é o
+        oposto do que estes botões restauram. A devolução roda mesmo quando a segunda tentativa
+        falha - deixar a posse trocada por causa de um erro é trocar um problema por outro.
+
+        Os dois passos de '/setowner' vêm do PLANO (Kind 'setowner-socorro' e 'setowner-devolver'),
+        e não são montados aqui: é o plano que sabe o dono padrão de cada pasta, e é ele que o
+        -SelfTest confere.
+    .PARAMETER Plan
+        A saída de Get-WinForgeAclRestorePlan.
+    .PARAMETER Step
+        O passo da fase 4 que respondeu 5.
+    .OUTPUTS
+        O resultado da segunda tentativa (ou o da primeira, quando o par de socorro não existe).
+    #>
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [Parameter(Mandatory)]$Step
+    )
+
+    $pasta = ([string]$Step.Folder).TrimEnd('\')
+    $socorro = @($Plan | Where-Object { [int]$_.Phase -eq 4 -and [string]$_.Kind -eq 'setowner-socorro' -and ([string]$_.Folder).TrimEnd('\') -eq $pasta })
+    $devolver = @($Plan | Where-Object { [int]$_.Phase -eq 4 -and [string]$_.Kind -eq 'setowner-devolver' -and ([string]$_.Folder).TrimEnd('\') -eq $pasta })
+    if (-not $socorro.Count -or -not $devolver.Count) {
+        Write-Warning "Acesso negado em '$pasta' e esta pasta não tem dono padrão no plano: a posse fica como está."
+        return @{ ExitCode = 5; Text = '' }
+    }
+    Write-Host ''
+    Write-Host "Acesso negado. $($socorro[0].Title)"
+    $rs = Invoke-WinForgeNativeCommand -FilePath ([string]$socorro[0].FilePath) -Arguments @($socorro[0].Arguments)
+    Write-Host ([string]$rs.Text)
+    if ([int]$rs.ExitCode -ne 0) {
+        Write-Error "A posse de '$pasta' não pôde ser assumida (código $($rs.ExitCode)); a concessão fica sem a segunda tentativa."
+        return $rs
+    }
+    Write-Host 'Segunda e última tentativa desta etapa.'
+    $rr = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments)
+    Write-Host ([string]$rr.Text)
+    Write-Host $devolver[0].Title
+    $rd = Invoke-WinForgeNativeCommand -FilePath ([string]$devolver[0].FilePath) -Arguments @($devolver[0].Arguments)
+    Write-Host ([string]$rd.Text)
+    if ([int]$rd.ExitCode -ne 0) { Write-Error "A posse de '$pasta' NÃO voltou ao dono padrão (código $($rd.ExitCode)): a pasta ficou com os Administradores como dona." }
+    return $rr
 }
 
 function Invoke-WinForgeAclDenyRemoval {

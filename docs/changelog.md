@@ -61,6 +61,15 @@ fica sem acesso às próprias pastas.
   responde acesso negado, um `takeown` sem recursão seguido de uma segunda tentativa. `/reset`, `/T`
   e `/R` não existem na raiz nem nas pastas do sistema — os três descem a árvore inteira apagando o
   que o Windows sabe e o WinForge não. Leva minutos e pede reinicialização no fim.
+- Três detalhes do `icacls` que só aparecem quando se roda o comando de verdade, e que agora o
+  build roda: direito **específico** vai entre parênteses (`*S-1-5-11:(AD)`; sem eles o icacls
+  responde 87, "Parâmetro inválido", e não concede nada), `/T` anda junto com `/L` para a recursão
+  não sair do alvo pelo primeiro OneDrive ou junção de compatibilidade, e `Users\Public` tem backup
+  próprio porque a fase por pasta reescreve a lista dela. Nas pastas do TrustedInstaller (`Windows`,
+  `Program Files`), onde o administrador só tem `M` e não consegue reescrever a lista, a concessão
+  que responde acesso negado toma a posse, tenta de novo uma vez e **devolve** a posse ao dono
+  padrão — pasta do sistema que ficasse com os Administradores como dona aceitaria alteração de
+  qualquer processo elevado.
 - O `secedit` com o `defltbase.inf` **não entrou**: foi medido nesta máquina e, no Windows 10 e no
   11, as seções `[Registry Keys]` e `[File Security]` desse arquivo vêm vazias — `/areas FILESTORE
   REGKEYS` levava minutos e não repunha DACL nenhuma. A fase por pasta faz esse trabalho de forma

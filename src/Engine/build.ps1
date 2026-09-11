@@ -2998,10 +2998,16 @@ if ($SelfTest) {
     # Restaurar padrões (chkdsk, backup, raiz, pasta a pasta, perfil, com takeown só em acesso
     # negado) e Desfazer (icacls /restore do conjunto de backup mais novo).
     #
-    # NADA deste bloco roda icacls, secedit, takeown ou chkdsk. O que roda de verdade é a LEITURA
+    # Nenhum caminho REAL do sistema é escrito aqui: nada deste bloco roda icacls, takeown ou
+    # chkdsk contra a raiz, uma pasta do sistema ou o perfil. O que roda de verdade é a LEITURA
     # (Get-Acl, somente leitura) e a comparação, que é função pura exercitada com listas de
     # permissão montadas na memória - é assim que dá para provar "acusa ACE faltando" e "acusa dono
     # errado" sem estragar as permissões da máquina de quem compila para depois consertá-las.
+    #
+    # A única exceção é o teste de SINTAXE (bloco 3b): ele roda as strings de concessão do plano
+    # contra pastas descartáveis em %TEMP%, com o alvo trocado. Sem ele, um erro de sintaxe do
+    # icacls (direito específico sem parênteses é código 87, "Parâmetro inválido") só apareceria na
+    # máquina de quem clicou no botão - foi assim que 'AD' virou '(AD)'.
     $wfAclNomes = @('AclVerify', 'AclRestore', 'AclUndo')
     # 1. A comparação. Ela é quem decide o veredito, e as três DACLs abaixo são o gabarito dela:
     # uma completa (nenhuma diferença), uma sem a ACE do SYSTEM e uma com o dono trocado.
@@ -3130,6 +3136,10 @@ if ($SelfTest) {
             }
             # '/reset', '/T' e '/R' apontados para a raiz ou para uma pasta do sistema descem a
             # árvore inteira apagando o que o Windows sabe e o WinForge não.
+            # '/T' desce a árvore SEGUINDO ponto de reanálise: dentro de um perfil isso é OneDrive,
+            # pasta redirecionada e junção de compatibilidade, que apontam para fora (às vezes para
+            # outro volume). '/L' manda trabalhar no LINK. Onde houver um, tem de haver o outro.
+            if (($wfAclArgs -contains '/T') -and ($wfAclArgs -notcontains '/L')) { Write-Host "  [ERRO] Permissões (plano): '$($wfAclPasso.Title)' usa '/T' sem '/L' - a caminhada sai do alvo pelo primeiro ponto de reanálise" -ForegroundColor Red; $wbErrors++ }
             $wfAclAlvoPasso = ([string]@($wfAclPasso.Arguments)[0]).TrimEnd('\')
             if ($wfAclProtegidas -contains $wfAclAlvoPasso) {
                 foreach ($wfAclFlag in @('/reset', '/T', '/R')) {
@@ -3152,12 +3162,28 @@ if ($SelfTest) {
         if ($wfAclAlvoPerfil.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): o perfil deveria ter exatamente um backup, tem $($wfAclAlvoPerfil.Count)" -ForegroundColor Red; $wbErrors++ }
         elseif ([string]$wfAclAlvoPerfil[0].Target -ne 'C:\Users') { Write-Host "  [ERRO] Permissões (plano): o /restore do perfil deveria mirar 'C:\Users', mira '$($wfAclAlvoPerfil[0].Target)'" -ForegroundColor Red; $wbErrors++ }
         elseif (@($wfAclAlvoPerfil[0].Arguments) -notcontains '/T') { Write-Host "  [ERRO] Permissões (plano): o backup do perfil deveria ser recursivo (/T)" -ForegroundColor Red; $wbErrors++ }
+        # Toda pasta que a fase 4 reescreve TEM de ter backup na fase 2, e o índice do Desfazer é
+        # montado desses passos (nome do arquivo + pasta de onde o /restore roda). 'Users\Public' é
+        # o caso: ela é de segundo nível e a listagem de primeiro nível não a alcança.
+        $wfAclBkPorPasta = @{}
+        foreach ($wfAclPasso in $wfAclBk) { $wfAclBkPorPasta[([string]$wfAclPasso.Path).TrimEnd('\')] = $wfAclPasso }
+        foreach ($wfAclNomeP in $wfAclSistemaNomes) {
+            $wfAclPastaP = (Join-Path $wfAclRaiz $wfAclNomeP).TrimEnd('\')
+            if (-not $wfAclBkPorPasta.ContainsKey($wfAclPastaP)) { Write-Host "  [ERRO] Permissões (plano): a fase 4 reescreve '$wfAclPastaP' e a fase 2 não guarda a lista dela - o Desfazer não devolveria essa pasta" -ForegroundColor Red; $wbErrors++; continue }
+            $wfAclBkP = $wfAclBkPorPasta[$wfAclPastaP]
+            $wfAclPaiP = [string](Split-Path -Parent $wfAclPastaP)
+            if (([string]$wfAclBkP.Target).TrimEnd('\') -ne $wfAclPaiP.TrimEnd('\')) { Write-Host "  [ERRO] Permissões (plano): o /restore de '$wfAclPastaP' deveria mirar '$wfAclPaiP', mira '$($wfAclBkP.Target)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]::IsNullOrWhiteSpace([string]$wfAclBkP.Backup)) { Write-Host "  [ERRO] Permissões (plano): o backup de '$wfAclPastaP' não tem arquivo, e o índice do Desfazer sai dele" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfAclBkNomes = @($wfAclBk | ForEach-Object { [string](Split-Path -Leaf ([string]$_.Backup)) })
+        $wfAclBkDup = @($wfAclBkNomes | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+        if ($wfAclBkDup.Count) { Write-Host "  [ERRO] Permissões (plano): '$($wfAclBkDup -join ', ')' é o nome de dois backups - um sobrescreveria o outro e o índice apontaria duas pastas para o mesmo arquivo" -ForegroundColor Red; $wbErrors++ }
         # Fase 3: a segunda ACE dos Usuários Autenticados na raiz sai numa chamada PRÓPRIA.
         $wfAclRaizGrant = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 3 -and [string]$_.Kind -eq 'grant' })
         $wfAclRaizExtra = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 3 -and [string]$_.Kind -eq 'grant-extra' })
         if ($wfAclRaizGrant.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): a fase 3 deveria ter uma concessão, tem $($wfAclRaizGrant.Count)" -ForegroundColor Red; $wbErrors++ }
-        if ($wfAclRaizExtra.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): '*S-1-5-11:AD' tem de sair numa chamada separada da raiz" -ForegroundColor Red; $wbErrors++ }
-        elseif (@($wfAclRaizExtra[0].Arguments | ForEach-Object { [string]$_ }) -notcontains '*S-1-5-11:AD') { Write-Host "  [ERRO] Permissões (plano): a chamada separada da raiz não concede '*S-1-5-11:AD'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAclRaizExtra.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): '*S-1-5-11:(AD)' tem de sair numa chamada separada da raiz" -ForegroundColor Red; $wbErrors++ }
+        elseif (@($wfAclRaizExtra[0].Arguments | ForEach-Object { [string]$_ }) -notcontains '*S-1-5-11:(AD)') { Write-Host "  [ERRO] Permissões (plano): a chamada separada da raiz não concede '*S-1-5-11:(AD)' - direito específico sem parênteses é código 87" -ForegroundColor Red; $wbErrors++ }
         # Fase 4: cada pasta do sistema, na PRÓPRIA pasta, com '/setowner' condicional e a tabela de
         # esperados. O secedit foi medido e não repõe nada no Windows 10/11 - ele não volta.
         $wfAclF4 = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 4 })
@@ -3183,9 +3209,39 @@ if ($SelfTest) {
                 'grant-extra' {
                     if ($wfAclArgs4 -contains '/grant:r') { Write-Host "  [ERRO] Permissões (plano): a segunda chamada de '$($wfAclPasso.Folder)' usa '/grant:r' e apagaria a primeira" -ForegroundColor Red; $wbErrors++ }
                 }
+                'setowner-socorro' {
+                    if (-not $wfAclPasso.Conditional) { Write-Host "  [ERRO] Permissões (plano): a posse de socorro de '$($wfAclPasso.Folder)' tem de ser condicional (só com acesso negado)" -ForegroundColor Red; $wbErrors++ }
+                    if ($wfAclArgs4 -notcontains '*S-1-5-32-544') { Write-Host "  [ERRO] Permissões (plano): a posse de socorro de '$($wfAclPasso.Folder)' deveria ir para os Administradores" -ForegroundColor Red; $wbErrors++ }
+                }
+                'setowner-devolver' {
+                    if (-not $wfAclPasso.Conditional) { Write-Host "  [ERRO] Permissões (plano): a devolução da posse de '$($wfAclPasso.Folder)' tem de ser condicional" -ForegroundColor Red; $wbErrors++ }
+                    if ($wfAclArgs4 -contains '*S-1-5-32-544') { Write-Host "  [ERRO] Permissões (plano): a devolução da posse de '$($wfAclPasso.Folder)' deixaria os Administradores como donos" -ForegroundColor Red; $wbErrors++ }
+                }
                 default { Write-Host "  [ERRO] Permissões (plano): passo de tipo '$($wfAclPasso.Kind)' na fase 4" -ForegroundColor Red; $wbErrors++ }
             }
         }
+        # O par de socorro existe em toda pasta da fase 4 que tem dono padrão, devolve a posse
+        # EXATAMENTE para esse dono, e nunca entra na fila de execução: quem o chama é
+        # Invoke-WinForgeAclOwnerFallback, e só depois de um código 5.
+        foreach ($wfAclEsp4F in @(Get-WinForgeAclExpected | Where-Object { $_.Direta -and -not [string]::IsNullOrWhiteSpace([string]$_.Dono) })) {
+            $wfAclPasta4F = ([string]$wfAclEsp4F.Path).TrimEnd('\')
+            foreach ($wfAclTipo4F in @('setowner-socorro', 'setowner-devolver')) {
+                $wfAclAchado = @($wfAclF4 | Where-Object { [string]$_.Kind -eq $wfAclTipo4F -and ([string]$_.Folder).TrimEnd('\') -eq $wfAclPasta4F })
+                if ($wfAclAchado.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): '$wfAclPasta4F' deveria ter um passo '$wfAclTipo4F', tem $($wfAclAchado.Count)" -ForegroundColor Red; $wbErrors++ }
+                elseif ($wfAclTipo4F -eq 'setowner-devolver' -and (@($wfAclAchado[0].Arguments | ForEach-Object { [string]$_ }) -notcontains "*$([string]$wfAclEsp4F.Dono)")) { Write-Host "  [ERRO] Permissões (plano): a devolução da posse de '$wfAclPasta4F' não repõe o dono '$($wfAclEsp4F.Dono)'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        $wfAclFonteF4 = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        # A busca é pela CHAMADA ('-Plan' junto), e não pelo nome: ele também aparece no bloco de
+        # ajuda da função, que passaria a trava sozinho.
+        if ($wfAclFonteF4.IndexOf('Invoke-WinForgeAclOwnerFallback -Plan', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (plano): a fase 4 não chama Invoke-WinForgeAclOwnerFallback - um acesso negado em C:\Windows terminaria em erro" -ForegroundColor Red; $wbErrors++ }
+        # A ordem dos três movimentos do socorro, lida do fonte: assumir a posse, repetir a
+        # concessão, DEVOLVER a posse. Sem o terceiro a pasta do sistema fica com os
+        # Administradores como dona e passa a aceitar alteração de qualquer processo elevado.
+        $wfAclFonteFb = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
+        $wfAclPosFb = @('$socorro[0].FilePath', '$Step.FilePath', '$devolver[0].FilePath') | ForEach-Object { $wfAclFonteFb.IndexOf($_, [StringComparison]::Ordinal) }
+        if (@($wfAclPosFb | Where-Object { $_ -lt 0 }).Count) { Write-Host "  [ERRO] Permissões (socorro): a função não roda os três movimentos (posse, segunda tentativa, devolução)" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not ($wfAclPosFb[0] -lt $wfAclPosFb[1] -and $wfAclPosFb[1] -lt $wfAclPosFb[2])) { Write-Host "  [ERRO] Permissões (socorro): a ordem é posse -> segunda tentativa -> devolução, e o fonte está em outra" -ForegroundColor Red; $wbErrors++ }
         # Fase 5: conceder na RAIZ do perfil antes de ligar a herança do conteúdo. Ao contrário, a
         # herança propagaria o que ainda não foi concedido - e '/reset' não entra aqui, porque
         # apagaria as ACEs explícitas que os aplicativos põem dentro do perfil.
@@ -3235,6 +3291,9 @@ if ($SelfTest) {
         $wfAclEscolhaPastas = @($wfAclEscolha | ForEach-Object { ([string]$_.Folder).TrimEnd('\') } | Sort-Object -Unique)
         if ($wfAclEscolhaPastas.Count -ne 1 -or [string]$wfAclEscolhaPastas[0] -ne (Join-Path $wfAclRaiz 'Windows')) { Write-Host "  [ERRO] Permissões (escolha): esperava só '$(Join-Path $wfAclRaiz 'Windows')', veio '$($wfAclEscolhaPastas -join ', ')'" -ForegroundColor Red; $wbErrors++ }
         $wfAclEscolhaTipos = @($wfAclEscolha | ForEach-Object { [string]$_.Kind })
+        # O par de socorro NUNCA entra na fila: rodá-lo sem o código 5 trocaria o dono de uma pasta
+        # do sistema à toa, e o Desfazer devolve lista, não posse.
+        if (@($wfAclEscolhaTipos | Where-Object { $_ -like 'setowner-*' }).Count) { Write-Host "  [ERRO] Permissões (escolha): o par de socorro de posse entrou na fila da fase 4 - ele só roda depois de um acesso negado" -ForegroundColor Red; $wbErrors++ }
         foreach ($wfAclTipoEsp in @('setowner', 'grant', 'grant-extra')) {
             if ($wfAclEscolhaTipos -notcontains $wfAclTipoEsp) { Write-Host "  [ERRO] Permissões (escolha): a pasta acusada não recebeu o passo '$wfAclTipoEsp'" -ForegroundColor Red; $wbErrors++ }
         }
@@ -3250,6 +3309,50 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Permissões (plano): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # 3b. A SINTAXE do icacls, medida e não suposta. Cada string de concessão do plano é rodada de
+    # verdade, com o alvo trocado por uma pasta descartável em %TEMP% - uma por passo, para que uma
+    # concessão não deixe a próxima sem acesso. Ficam de fora o que não é concessão ('/save',
+    # '/setowner', chkdsk, takeown) e tudo que tem '/T': recursão em pasta de teste não prova
+    # sintaxe e custa tempo. Quem paga a conta desta trava é o 'AD' que precisava ser '(AD)': o
+    # plano inteiro passava na revisão por leitura e o icacls respondia 87 na máquina do usuário.
+    try {
+        $wfAclSintRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\icacls-syntax'
+        $wfAclSintExe = Get-WinForgeSystemExe -Name 'icacls.exe'
+        # O plano do teste de sintaxe usa o SID REAL desta identidade: o icacls recusa um SID que
+        # não existe na máquina com 1332 ("nenhum mapeamento"), e isso não é erro de sintaxe.
+        $wfAclSintSid = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $wfAclSintPlano = @(Get-WinForgeAclRestorePlan -Profile (Join-Path $wfAclSintRaiz 'perfil') -UserSid $wfAclSintSid -BackupRoot 'C:\ProgramData\WinForge\acl-backup' -Stamp '20260911-120000')
+        $wfAclSintPassos = @($wfAclSintPlano | Where-Object { @('grant', 'grant-extra') -contains [string]$_.Kind })
+        if ($wfAclSintPassos.Count -lt 8) { Write-Host "  [ERRO] Permissões (sintaxe): $($wfAclSintPassos.Count) concessão(ões) no plano, esperado ao menos 8 (raiz, seis pastas e perfil)" -ForegroundColor Red; $wbErrors++ }
+        $wfAclSintN = 0
+        $wfAclSintRuins = @()
+        foreach ($wfAclSintP in $wfAclSintPassos) {
+            $wfAclSintArgs = @($wfAclSintP.Arguments | ForEach-Object { [string]$_ })
+            if ($wfAclSintArgs -contains '/T') { continue }
+            $wfAclSintN++
+            $wfAclSintPasta = Join-Path $wfAclSintRaiz ("p{0:d2}" -f $wfAclSintN)
+            New-Item -ItemType Directory -Path $wfAclSintPasta -Force | Out-Null
+            $wfAclSintArgs[0] = $wfAclSintPasta
+            $wfAclSintR = Invoke-WinForgeNativeCommand -FilePath $wfAclSintExe -Arguments $wfAclSintArgs
+            if ([int]$wfAclSintR.ExitCode -ne 0) {
+                $wfAclSintRuins += ("'{0}' -> código {1} ({2})" -f $wfAclSintP.Title, $wfAclSintR.ExitCode, (($wfAclSintArgs | Select-Object -Skip 1) -join ' '))
+            }
+        }
+        foreach ($wfAclSintRuim in $wfAclSintRuins) { Write-Host "  [ERRO] Permissões (sintaxe): o icacls recusou $wfAclSintRuim" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfAclSintN) { Write-Host "  [ERRO] Permissões (sintaxe): nenhuma concessão foi rodada - a trava não está provando nada" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not $wfAclSintRuins.Count) { Write-Host "  Permissões (sintaxe): $wfAclSintN concessão(ões) do plano aceitas pelo icacls numa pasta de %TEMP%, nenhum caminho real tocado" }
+    } catch {
+        Write-Host "  [ERRO] Permissões (sintaxe): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        # As concessões tiram o acesso desta identidade das pastas de teste; sem devolver a herança
+        # do %TEMP% antes, o Remove-Item deixaria a sujeira plantada (dono não é quem apaga).
+        $wfAclSintLimpa = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\icacls-syntax'
+        if (Test-Path -LiteralPath $wfAclSintLimpa) {
+            & (Get-WinForgeSystemExe -Name 'icacls.exe') $wfAclSintLimpa '/reset' '/T' '/L' '/C' '/Q' | Out-Null
+            Remove-Item -LiteralPath $wfAclSintLimpa -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $wfAclSintLimpa) { Write-Host "  [ERRO] Permissões (sintaxe): a pasta de teste '$wfAclSintLimpa' não pôde ser apagada" -ForegroundColor Red; $wbErrors++ }
+        }
+    }
     # 4. Simulação e recusa: com -DryRun as duas ações listam o que fariam; sem ele, em SelfTest,
     # recusam. Este build não reescreve as permissões do disco de quem compila.
     try {
@@ -3262,6 +3365,13 @@ if ($SelfTest) {
             if (([string]$wfAclLinha).IndexOf('secedit', [StringComparison]::OrdinalIgnoreCase) -ge 0) { Write-Host "  [ERRO] Permissões (simulação): '$wfAclLinha' ainda chama o secedit" -ForegroundColor Red; $wbErrors++ }
             if (([string]$wfAclLinha).IndexOf('defltbase', [StringComparison]::OrdinalIgnoreCase) -ge 0) { Write-Host "  [ERRO] Permissões (simulação): '$wfAclLinha' ainda cita o defltbase.inf" -ForegroundColor Red; $wbErrors++ }
         }
+        # O par de socorro de posse aparece na simulação, e aparece MARCADO como condicional: ele
+        # troca o dono de uma pasta do sistema, e ninguém pode ler isso como "vai acontecer".
+        $wfAclSecoCond = @($wfAclSeco | Where-Object { ([string]$_).IndexOf('(condicional)', [StringComparison]::Ordinal) -ge 0 })
+        if ($wfAclSecoCond.Count -lt 3) { Write-Host "  [ERRO] Permissões (simulação): $($wfAclSecoCond.Count) passo(s) marcados como condicionais, esperado ao menos 3" -ForegroundColor Red; $wbErrors++ }
+        $wfAclSecoPosse = @($wfAclSeco | Where-Object { ([string]$_).IndexOf('/setowner *S-1-5-32-544', [StringComparison]::Ordinal) -ge 0 })
+        if (-not $wfAclSecoPosse.Count) { Write-Host "  [ERRO] Permissões (simulação): o socorro de posse não aparece na simulação" -ForegroundColor Red; $wbErrors++ }
+        elseif (@($wfAclSecoPosse | Where-Object { ([string]$_).IndexOf('(condicional)', [StringComparison]::Ordinal) -lt 0 }).Count) { Write-Host "  [ERRO] Permissões (simulação): o socorro de posse aparece sem a marca de condicional" -ForegroundColor Red; $wbErrors++ }
         # A simulação não pode criar a pasta de backup nem gravar arquivo nenhum.
         if (Test-Path -LiteralPath (Get-WinForgeAclBackupRoot)) {
             $wfAclNaPasta = @(Get-ChildItem -LiteralPath (Get-WinForgeAclBackupRoot) -File -ErrorAction SilentlyContinue).Count
@@ -3383,6 +3493,13 @@ if ($SelfTest) {
             if ($wfAclPergunta.IndexOf($wfAclTermo, [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (confirmação) AclRestore: a pergunta não fala em '$wfAclTermo'" -ForegroundColor Red; $wbErrors++ }
         }
         if ($wfAclPergunta.IndexOf('secedit', [StringComparison]::OrdinalIgnoreCase) -ge 0) { Write-Host "  [ERRO] Permissões (confirmação) AclRestore: a pergunta promete secedit, que não existe mais no plano" -ForegroundColor Red; $wbErrors++ }
+        # A RESERVA da tabela ('Confirm') só aparece se a entrada da config sumir - e foi por isso
+        # que ela envelheceu prometendo secedit sem ninguém notar. Ela descreve as mesmas fases.
+        $wfAclReserva = [string](Get-WinForgeRepairCommand -Name AclRestore).Confirm
+        if ($wfAclReserva.IndexOf('secedit', [StringComparison]::OrdinalIgnoreCase) -ge 0) { Write-Host "  [ERRO] Permissões (confirmação) AclRestore: a reserva da tabela promete secedit, que não existe mais no plano" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfAclTermoR in @('chkdsk', 'backup', 'raiz', 'pastas do sistema', 'pasta de usuário', 'minuto', 'einici')) {
+            if ($wfAclReserva.IndexOf($wfAclTermoR, [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (confirmação) AclRestore: a reserva da tabela não fala em '$wfAclTermoR'" -ForegroundColor Red; $wbErrors++ }
+        }
         # O Desfazer diz o que NÃO devolve: /restore repõe a lista, nunca a posse.
         $wfAclPerguntaU = [string](Get-WinForgeRepairConfirmText -Name AclUndo)
         if ($wfAclPerguntaU.IndexOf('posse', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (confirmação) AclUndo: a pergunta não diz que o /restore não devolve a posse" -ForegroundColor Red; $wbErrors++ }

@@ -364,17 +364,23 @@ nesta ordem:
    nenhuma permissão é alterada: reescrever a DACL de um disco com problema é consertar o que vai
    corromper de novo.
 2. **Backup** das listas atuais com `icacls /save`, uma por pasta, em
-   `%ProgramData%\WinForge\acl-backup`: a raiz, cada pasta de primeiro nível e a sua pasta de
-   usuário. É o que o botão Desfazer consome.
+   `%ProgramData%\WinForge\acl-backup`: a raiz, cada pasta de primeiro nível, cada pasta aninhada
+   que a fase 4 pode reescrever (`Users\Public`) e a sua pasta de usuário. A regra é essa, e não
+   uma lista: pasta que a restauração toca tem backup. O do perfil é o único recursivo, com
+   `/T /L` — o `/L` mantém a caminhada dentro do perfil em vez de sair por um OneDrive ou por uma
+   junção de compatibilidade. É o que o botão Desfazer consome.
 3. A **raiz**: negações fora (`/remove:d`, só se houver alguma), `/inheritance:r` e as ACEs padrão
    por SID. O direito de criar arquivo dos Usuários Autenticados sai numa chamada separada — dentro
    de um mesmo `/grant` o `icacls` guarda só a última entrada de cada SID.
 4. As **pastas do sistema**, uma a uma: `Windows`, `Program Files`, `Program Files (x86)`,
    `ProgramData`, `Users` e `Users\Public`. Para cada uma, `/setowner` (só se o dono estiver fora do
    padrão) e `/inheritance:r /grant:r` com as ACEs medidas — na pasta, sem `/T` e sem `/reset`. E só
-   nas pastas que a **verificação acusou**: pasta no padrão não é tocada.
+   nas pastas que a **verificação acusou**: pasta no padrão não é tocada. `Windows` e
+   `Program Files` pertencem ao TrustedInstaller e dão só `M` ao administrador, que não inclui o
+   direito de reescrever a lista: quando a concessão responde "acesso negado", a posse vai para os
+   Administradores, a concessão é repetida uma vez e a posse **volta** ao dono padrão.
 5. A **sua pasta de usuário**: dono, negações, as três ACEs padrão na raiz do perfil e, depois
-   delas, `/inheritance:e /T` no conteúdo. A ordem é dependência — a herança só propaga o que já
+   delas, `/inheritance:e /T /L` no conteúdo. A ordem é dependência — a herança só propaga o que já
    está concedido na raiz. `/reset /T` não é usado: ele apagaria as ACEs explícitas que os próprios
    aplicativos põem dentro do perfil (`AppData\Local\Packages`, OneDrive), e `/inheritance:e` as
    preserva.
