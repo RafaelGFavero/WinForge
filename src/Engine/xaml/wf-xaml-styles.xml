@@ -141,8 +141,14 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Grid>
+                            <!-- Borda de 1 px SEMPRE, nos dois temas. Sem ela o botão do tema Claro
+                                 é #E8ECF1 sobre #F8FAFC - 1,1:1 de diferença, ou seja, uma mancha
+                                 quase invisível: nas fotos da Tarefa 6 os botões de página não
+                                 pareciam controles. A borda é o que diz onde o botão começa. -->
                             <Border Name="WFButtonBackground"
                                     Background="{TemplateBinding Background}"
+                                    BorderBrush="{DynamicResource BorderColor}"
+                                    BorderThickness="1"
                                     CornerRadius="{DynamicResource ButtonCornerRadius}"/>
                             <Border Name="WFHoverOverlay"
                                     Background="{DynamicResource ButtonBackgroundMouseoverColor}"
@@ -289,7 +295,11 @@
             <Setter Property="HorizontalContentAlignment" Value="Left"/>
         </Style>
         <Style TargetType="DataGridRow">
-            <Setter Property="Height" Value="26"/>
+            <!-- 30, e não 26: a coluna "Ação" leva um botão de 22 px, e com linha de 26 sobram
+                 2 px de folga - o botão de uma linha encosta no da linha de baixo e a coluna vira
+                 uma barra contínua (apareceu em dark/11 da Tarefa 6). Com 30 a margem de 4 px do
+                 botão fecha a conta e sobram 8 px entre um botão e o seguinte. -->
+            <Setter Property="Height" Value="30"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
             <Style.Triggers>
@@ -298,10 +308,27 @@
                 </Trigger>
             </Style.Triggers>
         </Style>
+        <!-- SEM Setter de Padding aqui: o gabarito padrão do WPF para DataGridCell é uma Border com
+             Background/BorderBrush/BorderThickness e um ContentPresenter, e NÃO amarra Padding em
+             lugar nenhum. O Setter que existia até a Tarefa 7 era escrito e ignorado - nas fotos do
+             tema Claro "SCSIADAPTER" encostava em "10.0.22029.3" e o fornecedor mais comprido
+             encostava na coluna Status, porque a largura Auto da coluna é exatamente o texto mais
+             largo, sem folga nenhuma.
+             Reescrever o gabarito da célula para amarrar o Padding FUNCIONA visualmente, mas quebra
+             a rolagem: com gabarito próprio, a roda repassada à aba deixa de mover o ScrollViewer
+             (VerticalOffset fica em 0, medido pelo -SelfTest da Tarefa 4). A folga vem então do
+             CONTEÚDO da célula - WFGridCellText abaixo -, que é o que as colunas das duas tabelas
+             do Diagnóstico usam. -->
         <Style TargetType="DataGridCell">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
-            <Setter Property="Padding" Value="8,0,8,0"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        </Style>
+        <!-- Folga entre colunas: 8 px de cada lado do texto. É o ElementStyle de toda coluna de
+             texto das tabelas do Diagnóstico. -->
+        <Style x:Key="WFGridCellText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+            <Setter Property="Margin" Value="8,0,8,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
         </Style>

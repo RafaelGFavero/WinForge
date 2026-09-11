@@ -1579,6 +1579,46 @@ if ($SelfTest) {
         if ([string]$wbSecCap.Skipped -notmatch 'não confiável') { Write-Host "  [ERRO] Backup (pasta aberta): o motivo não diz que a pasta não é confiável ('$($wbSecCap.Skipped)')" -ForegroundColor Red; $wbErrors++ }
         if ($null -ne $wbSecCap.Snapshot) { Write-Host "  [ERRO] Backup (pasta aberta): gravou backup numa pasta não confiável ('$($wbSecCap.Snapshot)')" -ForegroundColor Red; $wbErrors++ }
         if (@(Get-ChildItem -LiteralPath $wbSecAberto -Filter '*.json' -ErrorAction SilentlyContinue).Count -ne 0) { Write-Host "  [ERRO] Backup (pasta aberta): sobrou arquivo JSON na pasta não confiável" -ForegroundColor Red; $wbErrors++ }
+        # A máscara de ACE perigosa, direito a direito. A versão anterior somava FullControl
+        # (0x1F01FF) e Modify (0x301BF) à máscara, e os dois carregam os bits de LEITURA: qualquer
+        # ACE de 'Ler e executar' casava, e uma pasta com o 'Todos: Ler e executar' que metade do
+        # %ProgramData% tem era recusada como se fosse escrita para todo mundo. O teste é o par:
+        # leitura NÃO acusa, escrita acusa - e vale também para os nomes compostos, que continuam
+        # sendo pegos pelos bits de escrita que carregam.
+        $wbAceTodos = New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'
+        $wbAceCasos = @(
+            @{ Direito = 'ReadAndExecute';              Acusa = $false }
+            @{ Direito = 'Read';                        Acusa = $false }
+            @{ Direito = 'ListDirectory';               Acusa = $false }
+            @{ Direito = 'ReadPermissions';             Acusa = $false }
+            @{ Direito = 'Synchronize';                 Acusa = $false }
+            @{ Direito = 'Write';                       Acusa = $true  }
+            @{ Direito = 'WriteData';                   Acusa = $true  }
+            @{ Direito = 'AppendData';                  Acusa = $true  }
+            @{ Direito = 'Delete';                      Acusa = $true  }
+            @{ Direito = 'DeleteSubdirectoriesAndFiles'; Acusa = $true }
+            @{ Direito = 'ChangePermissions';           Acusa = $true  }
+            @{ Direito = 'TakeOwnership';               Acusa = $true  }
+            @{ Direito = 'Modify';                      Acusa = $true  }
+            @{ Direito = 'FullControl';                 Acusa = $true  }
+        )
+        $wbAceOk = 0
+        foreach ($wbAceCaso in $wbAceCasos) {
+            $wbAceRegra = New-Object System.Security.AccessControl.FileSystemAccessRule ($wbAceTodos, [System.Security.AccessControl.FileSystemRights]$wbAceCaso.Direito, 'Allow')
+            $wbAceQuem = Find-WinForgeSnapshotUnsafeAce -Access @($wbAceRegra) -Trusted @{}
+            if ($wbAceCaso.Acusa -and -not $wbAceQuem) { Write-Host "  [ERRO] máscara de ACE: '$($wbAceCaso.Direito)' para 'Todos' deveria ser recusado" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wbAceCaso.Acusa -and $wbAceQuem) { Write-Host "  [ERRO] máscara de ACE: '$($wbAceCaso.Direito)' para 'Todos' é só leitura e foi acusado como escrita" -ForegroundColor Red; $wbErrors++ }
+            else { $wbAceOk++ }
+        }
+        # E o SID confiável continua passando mesmo com escrita, senão a máscara recusaria a
+        # própria pasta padrão (SYSTEM e Administradores têm FullControl nela).
+        $wbAceSystem = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
+        $wbAceRegraS = New-Object System.Security.AccessControl.FileSystemAccessRule ($wbAceSystem, [System.Security.AccessControl.FileSystemRights]'FullControl', 'Allow')
+        if (Find-WinForgeSnapshotUnsafeAce -Access @($wbAceRegraS) -Trusted @{ 'S-1-5-18' = $true }) { Write-Host "  [ERRO] máscara de ACE: SID da lista de confiança foi recusado" -ForegroundColor Red; $wbErrors++ }
+        # Uma ACE de NEGAÇÃO de escrita não é permissão e não pode acusar ninguém.
+        $wbAceNega = New-Object System.Security.AccessControl.FileSystemAccessRule ($wbAceTodos, [System.Security.AccessControl.FileSystemRights]'FullControl', 'Deny')
+        if (Find-WinForgeSnapshotUnsafeAce -Access @($wbAceNega) -Trusted @{}) { Write-Host "  [ERRO] máscara de ACE: uma ACE de negação foi lida como permissão de escrita" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Máscara de ACE: $wbAceOk de $($wbAceCasos.Count) direito(s) classificado(s), leitura não acusa e escrita acusa"
         Write-Host "  Backup (segurança): forma do valor cobrada na leitura e na escrita, crivo 'server:' inteiro, pasta padrão só de SYSTEM/Administradores, aplicação recusada em pasta aberta"
     } catch {
         Write-Host "  [ERRO] Backup (segurança): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -2866,6 +2906,8 @@ if ($SelfTest) {
         # Chips de filtro da aba Instalar: o filtro compara o texto do chip com a categoria do
         # aplicativo, então o conjunto de chips (fora "Todos") tem de ser exatamente o conjunto de
         # grupos da lista. Um grupo novo sem chip fica sem filtro; um chip sem grupo não filtra nada.
+        # (A Tag, que é o que filtra de verdade, é conferida no BUILD: $sync.AppCategoryChips só é
+        # atribuído lá no fim do arquivo, depois deste bloco, então aqui ela ainda é $null.)
         $wfChips = @($wbWindow.FindName('WPFSearchChips').Children | Where-Object { $_ -is [System.Windows.Controls.Primitives.ToggleButton] } | ForEach-Object { [string]$_.Content })
         $wfChipsGrupos = @($wfChips | Where-Object { $_ -ne 'Todos' } | Sort-Object)
         if (($wfChipsGrupos -join '|') -ne (($wfAppsCategorias | Sort-Object) -join '|')) { Write-Host "  [ERRO] chips da aba Instalar: '$($wfChipsGrupos -join ', ')' não bate com os grupos '$($wfAppsCategorias -join ', ')'" -ForegroundColor Red; $wbErrors++ }
@@ -3656,21 +3698,39 @@ $src = Insert-Before $src "    </Window.Resources>" ((Get-WinForgeStyleSection $
 # cada um passou a ter a largura do próprio rótulo - uma coluna com a borda direita serrilhada.
 # Esticados, a coluna volta a ter uma borda só.
 $src = Replace-Once $src '                        $button.HorizontalAlignment = "Left"' '                        $button.HorizontalAlignment = "Stretch"' "alinhamento dos botões das configs"
-# Exceção: botão com largura declarada na config (ButtonWidth) continua à esquerda. Largura fixa
-# com alinhamento "Stretch" o WPF trata como "Center", e a coluna inteira ficaria com os botões
-# flutuando no meio - foi o que apareceu na aba Configurações na primeira leva de fotos.
+# A largura declarada na config (ButtonWidth) sai de cena: com Width fixa e HorizontalAlignment
+# "Stretch" o WPF trata o botão como "Center", e a aba Configurações ficava com uma fileira de
+# botões de 350 px boiando no meio de uma coluna de 700 (foto light/04 da Tarefa 6). A Tarefa 6
+# contornou devolvendo "Left" a esses botões, o que só trocou o defeito de lugar: a coluna voltava
+# a ter a borda direita serrilhada. Sem largura nenhuma, todo botão de config estica na coluna e a
+# coluna tem uma borda só. O campo continua no JSON da base - passa a ser ignorado.
 $src = Replace-Once $src @'
                         if ($entryInfo.ButtonWidth) {
                             $baseWidth = [int]$entryInfo.ButtonWidth
                             $button.Width = [math]::Max($baseWidth, 350)
                         }
 '@ @'
-                        if ($entryInfo.ButtonWidth) {
-                            $baseWidth = [int]$entryInfo.ButtonWidth
-                            $button.Width = [math]::Max($baseWidth, 350)
-                            $button.HorizontalAlignment = "Left"
-                        }
-'@ "largura declarada continua à esquerda"
+                        # WinForge: ButtonWidth da config é ignorado - o botão estica na coluna.
+'@ "botão da config estica na coluna"
+
+# A ordem dos botões da barra lateral da aba Instalar. A base ordena por tipo e depois pelo TEXTO,
+# e o campo "Order" do JSON (que existe só em appnavigation, nas 11 entradas daquela barra) não é
+# lido em lugar nenhum: em inglês a ordem alfabética ainda entregava "Install/Upgrade" primeiro por
+# acaso; em português virou "Atualizar todos, Desinstalar, Instalar/atualizar" - a ação principal
+# no fim. Aqui o Order passa a valer, e o texto continua desempatando quem não o declara.
+$src = Replace-Once $src @'
+            ButtonWidth = $entryInfo.ButtonWidth
+            GroupName   = $entryInfo.GroupName  # Added for RadioButton groupings
+'@ @'
+            ButtonWidth = $entryInfo.ButtonWidth
+            Order       = $entryInfo.Order
+            GroupName   = $entryInfo.GroupName  # Added for RadioButton groupings
+'@ "campo Order no objeto de entrada"
+$src = Replace-Once $src @'
+            }}, Content
+'@ @'
+            }}, @{Expression = { if ($_.Order) { [int]$_.Order } else { [int]::MaxValue } }}, Content
+'@ "ordem declarada antes da alfabética"
 
 # O hover do rótulo de categoria pintava a letra de branco fixo: no tema Claro é branco sobre
 # fundo claro, ou seja, some. A cor de título serve nos dois temas.
@@ -3683,6 +3743,123 @@ $src = Replace-Once $src @'
                     <Setter Property="Foreground" Value="{DynamicResource LabelboxForegroundColor}" />
                 </Trigger>
 '@ "hover do rótulo de categoria"
+
+# ---------------------------------------------------------------- varredura visual (Tarefa 7)
+# Estado desabilitado dos gabaritos que a base não deixou o WinForge reescrever (HoverButtonStyle,
+# ToggleButtonStyle, FilterChipStyle e o botão de janela): a base pintava o fundo com
+# ButtonBackgroundSelectedColor - que no WinForge é o AZUL DE SELEÇÃO -, ou seja, um controle
+# desabilitado ficava com a mesma cor de um selecionado. Aqui vale a mesma regra dos gabaritos
+# novos: fundo normal e 50 % de opacidade. Some junto o 'DimGray' fixo, que não é de tema nenhum.
+$src = Replace-All $src @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="BackgroundBorder" Property="Background" Value="{DynamicResource ButtonBackgroundSelectedColor}"/>
+                                <Setter Property="Foreground" Value="DimGray"/>
+                            </Trigger>
+'@ @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="BackgroundBorder" Property="Background" Value="{DynamicResource ButtonBackgroundColor}"/>
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+'@ "desabilitado sem a cor de seleção (BackgroundBorder)"
+$src = Replace-Once $src @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ChipBorder" Property="Background" Value="{DynamicResource ButtonBackgroundSelectedColor}"/>
+                                <Setter Property="Foreground" Value="DimGray"/>
+                            </Trigger>
+'@ @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ChipBorder" Property="Background" Value="{DynamicResource ButtonBackgroundColor}"/>
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+'@ "desabilitado sem a cor de seleção (ChipBorder)"
+
+# Faixa de progresso/situação do rodapé: fundo de cartão e um fio de 1 px em cima, como pede o
+# design (§7, "barra de status com fundo do cartão"). Com o fundo da janela ela não se separava
+# do conteúdo - a barra aparecia como se fosse mais uma linha da aba.
+$src = Replace-Once $src `
+    '<Border Name="WPFTweaksProgressBar" Grid.Row="3" Background="{DynamicResource MainBackgroundColor}" Visibility="Collapsed" Padding="10,6">' `
+    '<Border Name="WPFTweaksProgressBar" Grid.Row="3" Background="{DynamicResource CardBackgroundColor}" BorderBrush="{DynamicResource BorderColor}" BorderThickness="0,1,0,0" Visibility="Collapsed" Padding="10,6">' `
+    "fundo da barra de status"
+$src = Replace-Once $src `
+    '<TextBlock Name="WPFTweaksProgressLabel" Text="" Foreground="{DynamicResource MainForegroundColor}" FontSize="13" Background="Transparent" Margin="0,0,0,4"/>' `
+    '<TextBlock Name="WPFTweaksProgressLabel" Text="" Foreground="{DynamicResource MainForegroundColor}" FontSize="{DynamicResource FontSize}" Background="Transparent" Margin="0,0,0,4"/>' `
+    "fonte da barra de status"
+
+# Painel da direita da aba ISO: era o único cartão da interface desenhado na mão (fundo da JANELA,
+# raio 5) em vez de usar BorderStyle. Ficava com a cor do fundo, sem se destacar de nada.
+$src = Replace-Once $src @'
+                                <Border Grid.Column="1"
+                                        Background="{DynamicResource MainBackgroundColor}"
+                                        BorderBrush="{DynamicResource BorderColor}"
+                                        BorderThickness="1" CornerRadius="5"
+                                        Margin="5" Padding="15">
+'@ @'
+                                <Border Grid.Column="1"
+                                        Style="{StaticResource BorderStyle}"
+                                        Margin="5" Padding="15">
+'@ "cartão do painel da ISO"
+
+# Cores fixas da aba ISO. O aviso "use uma ISO oficial" vira DiscouragedColor (é um alerta, e o
+# token existe justamente para isso). Já os TRÊS BOTÕES destrutivos perdem a cor: 'OrangeRed' num
+# botão não passa em contraste nos dois temas, e nenhum token passa - DiscouragedColor sobre o
+# fundo de botão do tema Claro dá 4,23:1 e DangerColor sobre o do Escuro dá 3,82:1. O aviso fica
+# no texto acima do botão, que está sobre cartão e passa folgado; o rótulo do botão já diz o que
+# ele faz ("APAGA O PENDRIVE").
+$src = Replace-Once $src `
+    '                                                   Foreground="OrangeRed" Margin="0,0,0,10">' `
+    '                                                   Foreground="{DynamicResource DiscouragedColor}" Margin="0,0,0,10">' `
+    "aviso da ISO oficial"
+$src = Replace-All $src "`n                                            Foreground=`"OrangeRed`"`n" "`n" "botões destrutivos da ISO sem cor fixa"
+$src = Replace-Once $src "`n                                                Foreground=`"OrangeRed`"`n" "`n" "botão de gravar no pendrive sem cor fixa"
+
+# Aba Atualizações. Os três cartões traziam título de 20 px em negrito e letra miúda de 11 - fora
+# da escala do design (títulos 15 semibold, corpo 13). O cartão "Desativar atualizações" ainda
+# pintava quatro textos de 'Red' fixo, inclusive o botão.
+$src = Replace-All $src @'
+                                                   FontSize="20"
+                                                   FontWeight="Bold"
+'@ @'
+                                                   FontSize="{DynamicResource HeaderFontSize}"
+                                                   FontWeight="SemiBold"
+'@ "títulos dos cartões de Atualizações"
+$src = Replace-All $src @'
+                                                   FontSize="11"
+'@ @'
+                                                   FontSize="12"
+'@ "letra miúda dos cartões de Atualizações"
+$src = Replace-All $src @'
+                                                   Foreground="Red"/>
+'@ @'
+                                                   Foreground="{DynamicResource DangerColor}"/>
+'@ "vermelho fixo do cartão Desativar atualizações"
+# O botão perde o vermelho pelo mesmo motivo dos botões da ISO (3,82:1 no tema Escuro). Quem passa
+# a carregar o aviso é o CONTORNO do cartão, do jeito que o cartão "Recomendado" já fazia com o
+# verde do progresso.
+$src = Replace-Once $src "`n                                            Foreground=`"Red`"`n" "`n" "botão Desativar atualizações sem cor fixa"
+$src = Replace-Once $src @'
+                            <Border Style="{StaticResource BorderStyle}" Padding="16" MinHeight="300">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Grid.Row="0" Margin="0,0,0,14">
+                                        <TextBlock Text="Disable Updates"
+'@ @'
+                            <Border Style="{StaticResource BorderStyle}"
+                                    BorderBrush="{DynamicResource DangerColor}"
+                                    BorderThickness="2"
+                                    Padding="16" MinHeight="300">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Grid.Row="0" Margin="0,0,0,14">
+                                        <TextBlock Text="Disable Updates"
+'@ "contorno do cartão Desativar atualizações"
 
 # ---------------------------------------------------------------- XAML
 $src = Replace-Once $src '        Title="WinUtil">' '        Title="WinForge">' "xaml title"
@@ -3884,8 +4061,16 @@ Write-Host "Sintaxe PowerShell: OK"
 # A aba de abertura é decidida em duas linhas soltas do arquivo, longe uma da outra. Replace-Once
 # já falha se a âncora sumir, mas nada impediria uma substituição posterior de desfazer o resultado
 # - por isso a conferência é sobre o texto final.
-foreach ($wfEsperado in @('$sync.currentTab = "Diagnostico"', 'Invoke-WPFTab "WPFTab8BT"  # WinForge: abre no Diagnóstico')) {
-    if ($final.IndexOf($wfEsperado, [StringComparison]::Ordinal) -lt 0) { throw "Motor gerado sem a aba de abertura no Diagnóstico: falta $wfEsperado" }
+# As DUAS linhas são cobradas separadamente e com o fim de linha junto. A conferência antiga
+# procurava só o prefixo comum aos dois comentários, e a linha OFFLINE ("... (funciona offline)")
+# o contém: bastava ela existir para o teste passar, mesmo que o caminho ONLINE tivesse voltado a
+# abrir na aba Instalar - que é o caminho normal de quem tem internet.
+foreach ($wfEsperado in @(
+    "`$sync.currentTab = `"Diagnostico`"",
+    "Invoke-WPFTab `"WPFTab8BT`"  # WinForge: abre no Diagnóstico`r`n",
+    "Invoke-WPFTab `"WPFTab8BT`"  # WinForge: abre no Diagnóstico (funciona offline)`r`n"
+)) {
+    if ($final.IndexOf($wfEsperado, [StringComparison]::Ordinal) -lt 0) { throw "Motor gerado sem a aba de abertura no Diagnóstico: falta $($wfEsperado.TrimEnd("`r","`n"))" }
 }
 if ($final.IndexOf('Invoke-WPFTab "WPFTab1BT"', [StringComparison]::Ordinal) -ge 0) { throw "Motor gerado ainda abre na aba Instalar (Invoke-WPFTab `"WPFTab1BT`")" }
 Write-Host "Aba de abertura: Diagnóstico"
@@ -3916,6 +4101,62 @@ if ($wfMono -ne 1) { throw "Motor gerado: esperado exatamente 1 fonte monoespaç
 if ($wfTemaFinal -notmatch '"HeaderFontFamily": "Segoe UI Semibold"') { throw "Motor gerado: HeaderFontFamily não é 'Segoe UI Semibold'" }
 if ($wfTemaFinal -notmatch '"FontFamily": "Segoe UI"') { throw "Motor gerado: FontFamily não é 'Segoe UI'" }
 Write-Host "Tipografia: Segoe UI no XAML e nos temas, Consolas só na janela de saída de comandos"
+
+# Cor fixa no XAML. Todo pincel da interface tem de vir do tema: cor escrita à mão só funciona num
+# dos dois temas (foi assim que 'Foreground="Red"' do cartão de Atualizações e 'OrangeRed' da aba
+# ISO atravessaram o Plano 6 inteiro). A varredura é sobre os atributos que pintam alguma coisa e
+# aceita só o que está na lista abaixo, com motivo. Cor nova = build vermelho.
+$wfCorPermitida = @{
+    'Background="Transparent"'  = 'sem pintura: o controle mostra o que está atrás'
+    'BorderBrush="Transparent"' = 'sem contorno'
+    'Fill="Transparent"'        = 'área clicável invisível'
+    'Background="#8B0000"'      = 'faixa de modo offline: par fechado com o texto branco (10:1), não segue tema'
+    'Foreground="White"'        = 'texto da faixa de modo offline, sobre o #8B0000 acima'
+    'Background="#555555"'      = 'ToggleSwitchStyle: gabarito MORTO na base (nada o referencia)'
+    'Background="Black"'        = 'ToggleSwitchStyle: gabarito MORTO na base (nada o referencia)'
+}
+$wfCorRegex = [regex]'(?<attr>Foreground|Background|BorderBrush|Fill|Stroke)="(?<val>[^"{}]+)"'
+$wfCorNovas = @{}
+foreach ($wfCorM in $wfCorRegex.Matches($wfXamlFinal)) {
+    $wfCorTexto = '{0}="{1}"' -f $wfCorM.Groups['attr'].Value, $wfCorM.Groups['val'].Value
+    if ($wfCorPermitida.ContainsKey($wfCorTexto)) { continue }
+    if (-not $wfCorNovas.ContainsKey($wfCorTexto)) { $wfCorNovas[$wfCorTexto] = 0 }
+    $wfCorNovas[$wfCorTexto]++
+}
+if ($wfCorNovas.Count) {
+    $wfCorLista = @($wfCorNovas.GetEnumerator() | Sort-Object Name | ForEach-Object { "  $($_.Name) x$($_.Value)" })
+    throw "Motor gerado: cor fixa no XAML fora da lista permitida:`n$($wfCorLista -join "`n")"
+}
+Write-Host "Cores: nenhuma cor fixa no XAML fora das $($wfCorPermitida.Count) exceções conhecidas"
+
+# Chips de grupo da aba Instalar: rótulo x Tag. São DOIS literais independentes no motor - os
+# <ToggleButton> do XAML e a tabela $sync.AppCategoryChips, que a inicialização copia para a Tag
+# de cada chip. Quem filtra é a Tag; o rótulo é só o que se lê. Traduzir um e esquecer o outro dá
+# um chip com nome certo que não casa com aplicativo nenhum, e isso não aparece em teste de tela.
+# A conferência é aqui, e não no -SelfTest, porque a tabela só é atribuída depois do bloco dele.
+$wfChipXaml = @()
+foreach ($wfChipM in [regex]::Matches($wfXamlFinal, '<ToggleButton Name="(?<n>WPFSearchChip\w+)"\s+Content="(?<c>[^"]*)"')) {
+    $wfChipXaml += [pscustomobject]@{ Name = $wfChipM.Groups['n'].Value; Content = $wfChipM.Groups['c'].Value }
+}
+if ($wfChipXaml.Count -lt 2) { throw "Motor gerado: não achei os chips de grupo no XAML" }
+$wfChipTabelaTexto = Get-WinForgeGeneratedBlock $final "`$sync.AppCategoryChips = @(`r`n" "`r`n)`r`n" 'tabela de chips'
+$wfChipTabela = @()
+foreach ($wfChipM in [regex]::Matches($wfChipTabelaTexto, '@\{\s*Name\s*=\s*"(?<n>[^"]*)";\s*Category\s*=\s*"(?<c>[^"]*)"\s*\}')) {
+    $wfChipTabela += [pscustomobject]@{ Name = $wfChipM.Groups['n'].Value; Category = $wfChipM.Groups['c'].Value }
+}
+$wfChipRuins = @()
+if (($wfChipXaml.Name -join ',') -ne ($wfChipTabela.Name -join ',')) {
+    $wfChipRuins += "os chips do XAML ($($wfChipXaml.Name -join ', ')) não são os da tabela ($($wfChipTabela.Name -join ', '))"
+} else {
+    for ($i = 0; $i -lt $wfChipXaml.Count; $i++) {
+        $wfChipEsperada = if ($wfChipXaml[$i].Name -eq 'WPFSearchChipAll') { '' } else { $wfChipXaml[$i].Content }
+        if ($wfChipTabela[$i].Category -ne $wfChipEsperada) {
+            $wfChipRuins += "$($wfChipXaml[$i].Name) mostra '$($wfChipXaml[$i].Content)' e filtra por '$($wfChipTabela[$i].Category)'"
+        }
+    }
+}
+if ($wfChipRuins.Count) { throw "Motor gerado: chips de grupo inconsistentes:`n  $($wfChipRuins -join "`n  ")" }
+Write-Host "Chips de grupo: $($wfChipXaml.Count) com rótulo e Tag iguais (o 'Todos' com Tag vazia)"
 
 # ---------------------------------------------------------------- teste de marca no motor gerado
 # Antes de gerar o doc: uma falha de marca no motor e sobre o produto e tem de aparecer primeiro.
@@ -3993,6 +4234,46 @@ $jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src '
 # É a mesma tradução que Initialize-WinUtilBoostConfigs faz em tempo de execução - só que o doc lê
 # os blocos JSON direto, sem passar por lá.
 $i18nDict = (Get-WinForgeI18nData).WinForgeI18n
+
+# ------------------------------------------------- travas do dicionário por chave
+# As duas conferências que faltavam à cobertura do -SelfTest. Elas ficam AQUI e não lá porque
+# dependem do texto ORIGINAL da base, e em tempo de execução ele já não existe: a tradução é
+# aplicada em cima da própria entrada, então o -SelfTest só vê o resultado.
+#
+#   1. Content traduzido igual ao Content da base. A cobertura só perguntava "existe chave?".
+#      Uma entrada copiada e colada do inglês (ou uma tradução esquecida no meio de um lote)
+#      passava com nota máxima e ia para a tela em inglês.
+#   2. Aplicativo com 'Content' no dicionário. O bloco de aplicativos guarda o NOME DO PRODUTO em
+#      'content' e a busca de propriedade do PowerShell não diferencia maiúsculas: um 'Content' no
+#      dicionário de um aplicativo renomearia o produto (o "Firefox" viraria a tradução) e a lista
+#      de instalação deixaria de casar com o que o winget conhece.
+# Os blocos vêm de $src, e não do arquivo base: as chaves da base passam pelo rename global
+# (WPFWinUtilSSHServer -> WPFWinForgeSSHServer) e é a forma RENOMEADA que o dicionário usa. O
+# Content ainda está em inglês aqui - a tradução por chave só acontece em tempo de execução, e
+# nenhum par literal de config\wf-i18n-strings.ps1 mexe no Content de tweaks ou de feature (os
+# que mexem em "Content" são todos da barra da aba Instalar, o bloco appnavigation).
+$wfBaseTweaks = Get-JsonConfigBlock $src 'tweaks'
+$wfBaseFeature = Get-JsonConfigBlock $src 'feature'
+$wfBaseApps = Get-JsonConfigBlock $src 'applications'
+$wfDicIguais = @(); $wfDicAppContent = @(); $wfDicSemBase = @()
+foreach ($wfDicChave in @($i18nDict.Keys | Sort-Object)) {
+    $wfDicEntrada = $i18nDict[$wfDicChave]
+    $wfDicApp = $wfBaseApps.PSObject.Properties[$wfDicChave]
+    if ($wfDicApp) {
+        if ($wfDicEntrada.ContainsKey('Content')) { $wfDicAppContent += $wfDicChave }
+        continue
+    }
+    if (-not $wfDicEntrada.ContainsKey('Content')) { continue }
+    $wfDicBase = $wfBaseTweaks.PSObject.Properties[$wfDicChave]
+    if (-not $wfDicBase) { $wfDicBase = $wfBaseFeature.PSObject.Properties[$wfDicChave] }
+    if (-not $wfDicBase) { $wfDicSemBase += $wfDicChave; continue }
+    if ([string]$wfDicBase.Value.Content -eq [string]$wfDicEntrada['Content']) { $wfDicIguais += "$wfDicChave ('$($wfDicEntrada['Content'])')" }
+}
+if ($wfDicAppContent.Count) { throw "Dicionário por chave: aplicativo com 'Content' (o nome do produto não se traduz): $($wfDicAppContent -join ', ')" }
+if ($wfDicSemBase.Count) { throw "Dicionário por chave: 'Content' para chave que não existe em tweaks nem em feature da base: $($wfDicSemBase -join ', ')" }
+if ($wfDicIguais.Count) { throw "Dicionário por chave: $($wfDicIguais.Count) Content igual ao original da base (tradução esquecida): $($wfDicIguais -join ', ')" }
+Write-Host "Dicionário por chave: $(@($i18nDict.Keys).Count) entrada(s), nenhum Content igual ao original e nenhum aplicativo renomeado"
+
 foreach ($o in $jsonTweaks) {
     foreach ($p in $o.PSObject.Properties) {
         $t = $i18nDict[$p.Name]

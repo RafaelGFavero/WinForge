@@ -41,15 +41,14 @@
                                       HorizontalGridLinesBrush="{DynamicResource BorderColor}" BorderThickness="1"
                                       FontSize="{DynamicResource FontSize}">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Dispositivo" Binding="{Binding Device}" Width="*" MinWidth="180"/>
-                                    <DataGridTextColumn Header="Classe" Binding="{Binding Class}" Width="Auto"/>
-                                    <DataGridTextColumn Header="Versão" Binding="{Binding Version}" Width="Auto"/>
-                                    <DataGridTextColumn Header="Data" Binding="{Binding Date}" Width="Auto"/>
-                                    <DataGridTextColumn Header="Fornecedor" Binding="{Binding Provider}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Dispositivo" Binding="{Binding Device}" Width="*" MinWidth="180" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Classe" Binding="{Binding Class}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Versão" Binding="{Binding Version}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Data" Binding="{Binding Date}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Fornecedor" Binding="{Binding Provider}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
                                     <DataGridTextColumn Header="Status" Binding="{Binding StatusText}" Width="Auto">
                                         <DataGridTextColumn.ElementStyle>
-                                            <Style TargetType="TextBlock">
-                                                <Setter Property="Margin" Value="4,2"/>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource WFGridCellText}">
                                                 <Style.Triggers>
                                                     <DataTrigger Binding="{Binding Status}" Value="atualizar">
                                                         <Setter Property="Foreground" Value="{DynamicResource DangerColor}"/>
@@ -66,7 +65,7 @@
                                             <DataTemplate>
                                                 <Button Content="{Binding ActionLabel}" Tag="{Binding}" Visibility="{Binding ActionVisible}" ToolTip="{Binding ActionTip}"
                                                         IsEnabled="{Binding ActionEnabled}" ToolTipService.ShowOnDisabled="True"
-                                                        Margin="4,2" Padding="10,0" MinWidth="150" Height="22" MinHeight="0" HorizontalAlignment="Left"/>
+                                                        Margin="8,4" Padding="10,0" MinWidth="150" Height="22" MinHeight="0" HorizontalAlignment="Left"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -83,17 +82,17 @@
                                       HorizontalGridLinesBrush="{DynamicResource BorderColor}" BorderThickness="1"
                                       FontSize="{DynamicResource FontSize}">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Atualização" Binding="{Binding Title}" Width="*" MinWidth="180"/>
-                                    <DataGridTextColumn Header="Driver" Binding="{Binding Driver}" Width="Auto"/>
-                                    <DataGridTextColumn Header="Fornecedor" Binding="{Binding Provider}" Width="Auto"/>
-                                    <DataGridTextColumn Header="Versão" Binding="{Binding Version}" Width="Auto"/>
-                                    <DataGridTextColumn Header="Data" Binding="{Binding Date}" Width="Auto"/>
+                                    <DataGridTextColumn Header="Atualização" Binding="{Binding Title}" Width="*" MinWidth="180" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Driver" Binding="{Binding Driver}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Fornecedor" Binding="{Binding Provider}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Versão" Binding="{Binding Version}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Data" Binding="{Binding Date}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
                                     <DataGridTemplateColumn Header="Instalar" Width="Auto">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <Button Content="Instalar" Tag="{Binding}" ToolTip="{Binding ActionTip}"
                                                         IsEnabled="{Binding ActionEnabled}" ToolTipService.ShowOnDisabled="True"
-                                                        Margin="4,2" Padding="10,0" MinWidth="100" Height="22" MinHeight="0" HorizontalAlignment="Left"/>
+                                                        Margin="8,4" Padding="10,0" MinWidth="100" Height="22" MinHeight="0" HorizontalAlignment="Left"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
