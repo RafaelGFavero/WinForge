@@ -40,6 +40,9 @@
   SYSTEM e Administradores), tem a **assinatura digital conferida** contra o nome exato do
   certificado da NVIDIA e só então é aberto — pelo instalador da própria NVIDIA. Nos demais casos
   sobra **Página do fabricante**, que apenas abre um endereço no navegador.
+- O botão **Baixar** consulta o catálogo da NVIDIA na hora: o cache só alimenta a tela, e a versão,
+  o endereço e o tamanho que aparecem na confirmação — e o que é baixado — vêm dessa consulta ao
+  vivo, que recusa endereço fora do domínio oficial e versão que não seja mais nova que a instalada.
 - A tabela do Windows Update ganhou o botão **Instalar**, que **sempre pede confirmação** nomeando a
   atualização, e que fica desabilitado quando o WinForge não está elevado.
 
