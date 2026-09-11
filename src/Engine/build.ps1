@@ -4106,7 +4106,74 @@ if ($SelfTest) {
         Write-Host "  NVIDIA (rede): status=$($wbNv.Status) versão=$($wbNv.Version) lançamento=$($wbNv.ReleaseDate)"
         if ($wbNv.Status -ne 'ok' -or $wbNv.Version -notmatch '^\d{3}\.\d{2}$') { Write-Host "  [ERRO] Get-WinForgeNvidiaLatestDriver: esperado status 'ok' e versão no formato 000.00" -ForegroundColor Red; $wbErrors++ }
     }
-    # ---------------------------------------------------------------- ações por linha de driver
+    # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
+    # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os
+    # dois títulos trazem o mesmo DriverModel e versões diferentes. Mostrar as duas convida o usuário
+    # a instalar a antiga. A versão sai do título porque a API não tem campo para ela - e o título
+    # moderno traz o número entre parênteses, forma que o casamento antigo (número no FIM do título)
+    # não reconhecia: era daí que vinha a coluna "Versão" inteira em "n/d".
+    try {
+        $wfWuVerCasos = @(
+            @('Intel Corporation Display Driver Update (32.0.101.7088)', '32.0.101.7088'),
+            @('Intel Driver Update (2546.9.2.0)', '2546.9.2.0'),
+            @('Intel - Display - 32.0.101.7088', '32.0.101.7088'),
+            @('Realtek Semiconductor Corp. - MEDIA - 6.0.9622.1', '6.0.9622.1'),
+            @('Atualização de driver sem número', $null),
+            @('', $null)
+        )
+        foreach ($wfWuVerCaso in $wfWuVerCasos) {
+            $wfWuVerVeio = Get-WinForgeWindowsUpdateDriverVersion -Title ([string]$wfWuVerCaso[0])
+            if ([string]$wfWuVerVeio -ne [string]$wfWuVerCaso[1]) { Write-Host "  [ERRO] versão pelo título: '$($wfWuVerCaso[0])' deu '$wfWuVerVeio', esperado '$($wfWuVerCaso[1])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A busca real tem de usar ESTE parser, e não uma cópia do casamento antigo: ela é a única
+        # parte do caminho que o SelfTest não exercita (fala com o serviço do Windows Update).
+        if ([string]${function:Search-WinForgeWindowsUpdateDrivers} -notmatch 'Get-WinForgeWindowsUpdateDriverVersion') { Write-Host "  [ERRO] versão pelo título: Search-WinForgeWindowsUpdateDrivers não usa Get-WinForgeWindowsUpdateDriverVersion" -ForegroundColor Red; $wbErrors++ }
+        # Cinco ofertas, quatro dispositivos: as duas primeiras são a mesma placa. Modelo e fornecedor
+        # vêm com caixa diferente de propósito - o Windows Update não é consistente nisso.
+        $wfWuLinhas = @(
+            [pscustomobject]@{ Title = 'Intel Corporation Display Driver Update (32.0.101.7085)'; Driver = 'Intel(R) Iris(R) Xe Graphics'; Provider = 'Intel Corporation'; Version = '32.0.101.7085'; Date = '2026-08-01'; UpdateId = 'u-7085' },
+            [pscustomobject]@{ Title = 'Intel Corporation Display Driver Update (32.0.101.7088)'; Driver = 'intel(r) iris(r) xe graphics'; Provider = 'INTEL CORPORATION'; Version = '32.0.101.7088'; Date = '2026-09-01'; UpdateId = 'u-7088' },
+            [pscustomobject]@{ Title = 'Intel Corporation Display Driver Update (31.0.101.2111)'; Driver = 'Intel(R) UHD Graphics'; Provider = 'Intel Corporation'; Version = '31.0.101.2111'; Date = '2026-07-01'; UpdateId = 'u-uhd' },
+            [pscustomobject]@{ Title = 'Realtek Semiconductor Corp. - MEDIA - 6.0.9622.1'; Driver = 'Realtek High Definition Audio'; Provider = 'Realtek'; Version = '6.0.9622.1'; Date = '2026-06-01'; UpdateId = 'u-realtek' },
+            [pscustomobject]@{ Title = 'Atualização de driver sem modelo'; Driver = ''; Provider = 'Microsoft'; Version = $null; Date = '2026-05-01'; UpdateId = 'u-sem-modelo' }
+        )
+        $wfWuSel = Select-WinForgeWindowsUpdateLatest -Rows $wfWuLinhas
+        $wfWuMantidos = @($wfWuSel.Kept)
+        $wfWuOcultos = @($wfWuSel.Superseded)
+        if ($wfWuMantidos.Count -ne 4) { Write-Host "  [ERRO] uma linha por dispositivo: ficaram $($wfWuMantidos.Count) linha(s), esperado 4" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfWuMantidos | Where-Object { [string]$_.UpdateId -eq 'u-7088' }).Count -ne 1) { Write-Host "  [ERRO] uma linha por dispositivo: a oferta mais nova (u-7088) não ficou" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfWuMantidos | Where-Object { [string]$_.UpdateId -eq 'u-7085' }).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo: a oferta antiga (u-7085) continua na lista" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfWuId in @('u-uhd', 'u-realtek', 'u-sem-modelo')) {
+            if (@($wfWuMantidos | Where-Object { [string]$_.UpdateId -eq $wfWuId }).Count -ne 1) { Write-Host "  [ERRO] uma linha por dispositivo: '$wfWuId' é outro dispositivo e sumiu da lista" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfWuOcultos.Count -ne 1) { Write-Host "  [ERRO] uma linha por dispositivo: $($wfWuOcultos.Count) oferta(s) ocultada(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if ([string]$wfWuOcultos[0].UpdateId -ne 'u-7085') { Write-Host "  [ERRO] uma linha por dispositivo: a ocultada é '$($wfWuOcultos[0].UpdateId)', esperado 'u-7085'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfWuOcultos[0].ReplacedBy -ne 'u-7088') { Write-Host "  [ERRO] uma linha por dispositivo: ReplacedBy veio '$($wfWuOcultos[0].ReplacedBy)', esperado 'u-7088'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfWuOcultos[0].Title -notlike '*32.0.101.7085*') { Write-Host "  [ERRO] uma linha por dispositivo: a ocultada não leva o título [$($wfWuOcultos[0].Title)]" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem versão em lugar nenhum, quem decide é a data: DriverVerDate a API sempre traz.
+        $wfWuData = Select-WinForgeWindowsUpdateLatest -Rows @(
+            [pscustomobject]@{ Title = 'Driver sem número - antigo'; Driver = 'Placa X'; Provider = 'Fabricante'; Version = $null; Date = '2026-01-01'; UpdateId = 'd-velho' },
+            [pscustomobject]@{ Title = 'Driver sem número - novo'; Driver = 'Placa X'; Provider = 'Fabricante'; Version = $null; Date = '2026-05-05'; UpdateId = 'd-novo' }
+        )
+        if (@($wfWuData.Kept).Count -ne 1 -or [string]@($wfWuData.Kept)[0].UpdateId -ne 'd-novo') { Write-Host "  [ERRO] uma linha por dispositivo (sem versão): ficou [$(@($wfWuData.Kept | ForEach-Object { $_.UpdateId }) -join ', ')], esperado só 'd-novo'" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfWuData.Superseded).Count -ne 1 -or [string]@($wfWuData.Superseded)[0].ReplacedBy -ne 'd-novo') { Write-Host "  [ERRO] uma linha por dispositivo (sem versão): a ocultada não aponta para 'd-novo'" -ForegroundColor Red; $wbErrors++ }
+        # DriverModel vazio não identifica dispositivo nenhum: juntar duas linhas assim esconderia a
+        # oferta de outra placa. Cada uma fica sozinha.
+        $wfWuVazio = Select-WinForgeWindowsUpdateLatest -Rows @(
+            [pscustomobject]@{ Title = 'Sem modelo A (1.0.0.0)'; Driver = ''; Provider = 'Microsoft'; Version = '1.0.0.0'; Date = '2026-01-01'; UpdateId = 'v-a' },
+            [pscustomobject]@{ Title = 'Sem modelo B (2.0.0.0)'; Driver = ''; Provider = 'Microsoft'; Version = '2.0.0.0'; Date = '2026-02-01'; UpdateId = 'v-b' }
+        )
+        if (@($wfWuVazio.Kept).Count -ne 2) { Write-Host "  [ERRO] uma linha por dispositivo (sem modelo): $(@($wfWuVazio.Kept).Count) linha(s), esperado 2 - modelo vazio não pode agrupar" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfWuVazio.Superseded).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo (sem modelo): $(@($wfWuVazio.Superseded).Count) oculta(s), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        # Lista vazia é lista vazia, e não um item nulo.
+        $wfWuNada = Select-WinForgeWindowsUpdateLatest -Rows @()
+        if (@($wfWuNada.Kept).Count -ne 0 -or @($wfWuNada.Superseded).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo: lista vazia devolveu $(@($wfWuNada.Kept).Count)/$(@($wfWuNada.Superseded).Count)" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Windows Update (uma linha por dispositivo): $($wfWuVerCasos.Count) título(s) lidos | 5 ofertas -> $($wfWuMantidos.Count) dispositivo(s) e $($wfWuOcultos.Count) versão(ões) antiga(s) fora da tabela"
+    } catch {
+        Write-Host "  [ERRO] Windows Update (uma linha por dispositivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }    # ---------------------------------------------------------------- ações por linha de driver
     # A coluna "Ação" da tabela de drivers e o botão "Instalar" da tabela do Windows Update. Nada
     # aqui baixa nem instala nada: o SelfTest exercita a DECISÃO (que ação cada linha oferece) e as
     # três travas do caminho que escreve - domínio da URL, assinatura do arquivo e modo SelfTest.
@@ -5043,7 +5110,27 @@ if ($SelfTest) {
                 Update-WinForgeDiagnosticsWindowsUpdateGrid
                 $wfBtnWuLinha = @($sync.WPFDiagWU.ItemsSource)[0]
                 if ([string]$wfBtnWuLinha.UpdateId -ne 'id-de-teste') { Write-Host "  [ERRO] tabela do Windows Update: a linha não carrega o UpdateId (veio '$($wfBtnWuLinha.UpdateId)')" -ForegroundColor Red; $wbErrors++ }
-            } finally {
+                # Duas ofertas da MESMA placa: a tabela mostra só a mais nova, o rótulo conta as que
+                # ficaram de fora e a dica diz QUAIS - sem ela, a linha sumida seria um mistério.
+                $sync.DiagWUResults = @(
+                    [pscustomobject]@{ Title = 'Intel Corporation Display Driver Update (32.0.101.7088)'; Driver = 'Intel(R) Iris(R) Xe Graphics'; Provider = 'Intel Corporation'; Version = '32.0.101.7088'; Date = '2026-09-01'; UpdateId = 'wu-novo' },
+                    [pscustomobject]@{ Title = 'Intel Corporation Display Driver Update (32.0.101.7085)'; Driver = 'Intel(R) Iris(R) Xe Graphics'; Provider = 'Intel Corporation'; Version = '32.0.101.7085'; Date = '2026-08-01'; UpdateId = 'wu-velho' }
+                )
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+                $wfBtnWuVisiveis = @($sync.WPFDiagWU.ItemsSource)
+                if ($wfBtnWuVisiveis.Count -ne 1) { Write-Host "  [ERRO] tabela do Windows Update: $($wfBtnWuVisiveis.Count) linha(s) na tela, esperado 1 (mesma placa)" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfBtnWuVisiveis[0].UpdateId -ne 'wu-novo') { Write-Host "  [ERRO] tabela do Windows Update: sobrou '$($wfBtnWuVisiveis[0].UpdateId)', esperado 'wu-novo'" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfBtnWuVisiveis[0].Version -ne '32.0.101.7088') { Write-Host "  [ERRO] tabela do Windows Update: a coluna Versão veio '$($wfBtnWuVisiveis[0].Version)'" -ForegroundColor Red; $wbErrors++ }
+                $wfBtnWuRotulo = 'Drivers oferecidos pelo Windows Update (1) · 1 versão(ões) mais antiga(s) oculta(s)'
+                if ([string]$sync.WPFDiagWULabel.Text -ne $wfBtnWuRotulo) { Write-Host "  [ERRO] rótulo do Windows Update: veio '$($sync.WPFDiagWULabel.Text)', esperado '$wfBtnWuRotulo'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$sync.WPFDiagWULabel.ToolTip -notlike '*32.0.101.7085*') { Write-Host "  [ERRO] rótulo do Windows Update: a dica não lista o título oculto (veio '$($sync.WPFDiagWULabel.ToolTip)')" -ForegroundColor Red; $wbErrors++ }
+                # O que mudou foi a VISTA, não o que dá para instalar: o objeto COM da oferta antiga
+                # continua no cache, indexado pelo id.
+                # Nada oculto: nem sufixo no rótulo, nem dica pendurada da passada anterior.
+                $sync.DiagWUResults = @([pscustomobject]@{ Title = 'Driver de teste - 1.2.3.4'; Driver = 'Teste'; Provider = 'WinForge'; Version = '1.2.3.4'; Date = '2026-09-10'; UpdateId = 'id-de-teste' })
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+                if ([string]$sync.WPFDiagWULabel.Text -ne 'Drivers oferecidos pelo Windows Update (1)') { Write-Host "  [ERRO] rótulo do Windows Update: sem nada oculto ele veio '$($sync.WPFDiagWULabel.Text)'" -ForegroundColor Red; $wbErrors++ }
+                if ($null -ne $sync.WPFDiagWULabel.ToolTip) { Write-Host "  [ERRO] rótulo do Windows Update: a dica da passada anterior ficou pendurada ('$($sync.WPFDiagWULabel.ToolTip)')" -ForegroundColor Red; $wbErrors++ }            } finally {
                 $sync.DiagWUResults = $wfBtnWuAntes
                 Update-WinForgeDiagnosticsWindowsUpdateGrid
             }

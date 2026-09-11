@@ -1080,8 +1080,12 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
     # Instalar pelo Windows Update é o serviço COM baixando e instalando driver: sem elevação ele
     # recusa. Mesma regra do botão de download da NVIDIA - o botão nasce desabilitado dizendo isso.
     $elevado = [bool](Test-WinForgeRepairElevated)
+    # Uma linha por dispositivo. A filtragem é da VISTA: $sync.DiagWUResults e o mapa de objetos COM
+    # continuam inteiros, e é por isso que ela mora aqui e não na busca.
+    $selecao = Select-WinForgeWindowsUpdateLatest -Rows @($sync.DiagWUResults)
+    $ocultos = @($selecao.Superseded)
     $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
-    foreach ($u in @($sync.DiagWUResults)) {
+    foreach ($u in @($selecao.Kept)) {
         if ($null -eq $u) { continue }
         $rows.Add([pscustomobject]@{
             Title    = [string]$u.Title
@@ -1100,8 +1104,16 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
     $sync.WPFDiagWU.ItemsSource = $rows
     $sync.WPFDiagWU.Visibility = 'Visible'
     $sync.WPFDiagWULabel.Visibility = 'Visible'
+    # A dica é redefinida nos DOIS caminhos: sem o $null, a lista de títulos de uma busca anterior
+    # ficaria pendurada num rótulo que não esconde mais nada.
+    $sync.WPFDiagWULabel.ToolTip = $null
     $sync.WPFDiagWULabel.Text = if ($rows.Count -gt 0) {
-        "Drivers oferecidos pelo Windows Update ($($rows.Count))"
+        $texto = "Drivers oferecidos pelo Windows Update ($($rows.Count))"
+        if ($ocultos.Count -gt 0) {
+            $texto += " · $($ocultos.Count) versão(ões) mais antiga(s) oculta(s)"
+            $sync.WPFDiagWULabel.ToolTip = ((@($ocultos | ForEach-Object { "• $($_.Title)" })) -join [Environment]::NewLine)
+        }
+        $texto
     } elseif ($sync.LastWUError) {
         "Windows Update: a consulta falhou -> $($sync.LastWUError)"
     } else {
