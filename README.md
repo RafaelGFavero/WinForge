@@ -102,6 +102,13 @@ Servidor, e marcar lá marca a linha aqui. O contador ao lado dos botões (`N de
 marcados`) acompanha os dois sentidos. Os toggles ficam de fora do checklist: eles aplicam o
 ajuste no instante em que são ligados, e recomendação não muda o sistema.
 
+**E dá para aplicar sem sair daqui.** Ao lado do contador ficam **Aplicar marcados** e **Desfazer
+marcados**: eles chamam o mesmo caminho dos botões da aba Ajustes, sobre os mesmos itens marcados —
+inclusive o ponto de restauração, que é criado primeiro quando "Ponto de restauração - Criar"
+estiver entre eles. Não há um segundo caminho de aplicação: marcar a linha aqui marca a caixa de
+verdade na aba de destino, e é ela que é aplicada. Os dois ficam desabilitados enquanto já há
+trabalho em andamento.
+
 | Botão | O que faz |
 |---|---|
 | Atualizar diagnóstico | Coleta o perfil de novo e reavalia as recomendações. |
@@ -109,6 +116,8 @@ ajuste no instante em que são ligados, e recomendação não muda o sistema.
 | Exportar relatório HTML | Gera um relatório HTML com tudo desta aba e abre no navegador. |
 | Marcar todos | Marca todas as linhas do checklist — e, com elas, os itens correspondentes nas abas Ajustes, Jogos e Servidor. |
 | Desmarcar todos | O contrário. |
+| Aplicar marcados | Aplica os itens marcados, igual ao botão da aba Ajustes. |
+| Desfazer marcados | Desfaz os itens marcados, igual ao botão Desfazer da aba Ajustes. |
 
 ### Drivers: a coluna Ação
 
@@ -238,11 +247,11 @@ quem trabalhar só nesta aba não os verá.
 
 ## Reparo de componentes
 
-Na aba **Config**, o grupo **WinForge - Reparo de componentes** reúne doze botões para os problemas
-que não se resolvem com tweak: componente que sumiu, repositório corrompido, disco com suspeita de
-defeito. Eles ficam ao lado dos botões que já existiam ali — verificação de corrupção do sistema
-(SFC + DISM), reset do Windows Update, reset de rede e reinstalação do WinGet —, que continuam
-funcionando como sempre.
+Na aba **Configurações**, o grupo **WinForge - Reparo de componentes** reúne quinze botões para os
+problemas que não se resolvem com tweak: componente que sumiu, repositório corrompido, disco com
+suspeita de defeito, permissão de pasta perdida. Na mesma coluna fica o grupo **Correções**, que
+veio do utilitário de origem e ganhou nesta versão a mesma janela de saída ao vivo (ver
+[Correções](#correções-os-cinco-botões-que-demoram) mais abaixo).
 
 **Só leem, não mudam nada (e o do DirectX só abre uma página):**
 
@@ -271,6 +280,9 @@ funcionando como sempre.
 | Visual C++ 2005–2022 (x86/x64) via winget | Os 12 redistribuíveis (2005, 2008, 2010, 2012, 2013 e 2015-2022), nas duas arquiteturas. O que já está instalado é pulado. É o que resolve erro de VCRUNTIME140.dll e MSVCP140.dll. |
 | PowerShell 7 via winget | Instala o `Microsoft.PowerShell` lado a lado: o Windows PowerShell 5.1 continua instalado e é ele que roda o WinForge. |
 
+**Permissões do disco C: (três botões):** a seção [Permissões do disco C:](#permissões-do-disco-c)
+explica os três em detalhe, porque o que eles mexem não cabe numa linha de tabela.
+
 **Nada roda sem clique e confirmação.** Os botões que só leem rodam direto. Os que alteram o
 sistema ou instalam componente abrem antes uma caixa de Sim/Não com a descrição inteira do botão —
 o mesmo texto que está na aba, com o aviso na primeira linha. Responder "Não" não deixa rastro.
@@ -278,7 +290,9 @@ o mesmo texto que está na aba, com o aviso na primeira linha. Responder "Não" 
 Tudo roda fora da thread da interface: a janela continua respondendo enquanto o comando trabalha. A
 saída aparece numa janela própria, que não bloqueia o resto do programa, com **Copiar** e **Abrir
 arquivo**. O arquivo é `repair-<nome>-<data-hora>.txt`, na mesma pasta de logs do WinForge
-(`%LocalAppData%\WinForge\logs`).
+(`%LocalAppData%\WinForge\logs`). Nos comandos longos a janela mostra a saída **ao vivo**, linha a
+linha, e o cabeçalho conta o tempo: "Em andamento: `<título>` (mm:ss)" vira "Concluído em mm:ss
+(código N)" quando o trabalho termina.
 
 O que cada botão exige está escrito na descrição dele. Em resumo: WMI, chkdsk agendado, diagnóstico
 de memória, .NET 3.5 e Visual C++ precisam do WinForge aberto como administrador; sem elevação, as
@@ -294,6 +308,145 @@ O registro de novo da Store e do App Installer aplica o mesmo crivo antes de esc
 Pelo mesmo motivo, todo executável do Windows que o WinForge chama (`chkdsk`, `winmgmt`, `fsutil`,
 `bcdedit`, `powercfg`, `w32tm`, `dcdiag`, `repadmin`) é chamado pelo caminho completo em
 `%SystemRoot%\System32`, e não pelo nome.
+
+### Correções: os cinco botões que demoram
+
+O grupo **Correções** da aba Configurações tem cinco botões que não respondem em segundos: **Rede -
+Redefinir**, **Servidor NTP - Ativar**, **Verificação de corrupção do sistema - Executar**,
+**Windows Update - Redefinir** e **WinGet - Reinstalar**. Eles rodavam na thread da janela e
+escreviam num console que o lançador esconde — a aba congelava e nada aparecia na tela. Agora:
+
+- Rodam num runspace, com a **janela de saída ao vivo** descrita acima. A janela abre na hora, com o
+  cabeçalho, e se enche enquanto o comando trabalha.
+- Passam pela mesma caixa de Sim/Não das ações que alteram o sistema, com a descrição do botão
+  inteira — que foi reescrita para descrever o que de fato acontece.
+- Cada passo fecha com uma linha `== Passo N: <nome> — código X ==`, e no fim o cabeçalho diz qual
+  passo falhou. Num `chkdsk` + `sfc` + `DISM`, o código de um não apaga o erro do outro.
+- A frase de fechamento ("Configuração de rede redefinida. Reinicie o computador.") só aparece
+  quando **tudo** deu certo. Com erro, a última linha aponta o passo que falhou em vez de dizer que
+  deu certo logo abaixo da linha que diz que não deu.
+- **Fechar a janela no meio de um desses botões pergunta antes**, com "Não" como resposta padrão.
+  Fechar interrompe o trabalho onde ele estiver: uma restauração de permissões parada entre "tomar
+  a posse" e "devolver a posse" deixa a pasta do sistema aberta a qualquer processo elevado. Para
+  leitura e diagnóstico o fechamento continua imediato, sem pergunta.
+
+| Botão | O que roda |
+|---|---|
+| Rede - Redefinir | `netsh winsock reset` e `netsh int ip reset`. Conexões de VPN e proxy podem precisar ser refeitas; é preciso reiniciar para concluir. |
+| Servidor NTP - Ativar | Inicia o serviço de Horário do Windows, troca `time.windows.com` por `pool.ntp.org` (`w32tm /config`), reinicia o serviço e força um `/resync`. Em máquina de domínio não use: ali quem dita o horário é o controlador de domínio. |
+| Verificação de corrupção do sistema - Executar | `chkdsk /scan /perf`, depois `sfc /scannow`, depois `DISM /Online /Cleanup-Image /RestoreHealth`. A ordem é dependência: um setor ruim corrompe de novo o que o sfc consertou, e é o DISM que repõe a imagem de onde o sfc copia os arquivos bons. Pode levar mais de uma hora. |
+| Windows Update - Redefinir | Para os serviços, limpa a fila do BITS, renomeia a pasta de downloads, registra as DLLs de novo e remove as configurações de WSUS. **Vai além do Windows Update:** apaga a diretiva de grupo local inteira, e com ela os ajustes do WinForge que moram em diretiva (enxugamento do Edge e do Brave, bloqueio de ConsumerFeatures, políticas de telemetria), que precisam ser marcados de novo. O histórico de atualizações é preservado. Reinicie no fim. |
+| WinGet - Reinstalar | Se o winget já responde, não faz nada. Se não, instala o provedor NuGet, baixa da Galeria do PowerShell o módulo `Microsoft.WinGet.Client` e chama o `Repair-WinGetPackageManager`. Precisa de internet e confia na Galeria do PowerShell como fonte do módulo. |
+
+Uma ressalva sobre os dois últimos: o corpo deles vem do utilitário de origem e não foi reescrito.
+O WinForge resolve todo executável do sistema pelo **caminho completo** em `System32`, mas essas
+duas funções da base ainda chamam `netsh`, `secedit`, `regsvr32`, `gpupdate` e `cmd` pelo `PATH`.
+Numa máquina com o `PATH` adulterado é possível que um executável de mesmo nome seja encontrado
+antes do do Windows. O comportamento é o mesmo de antes desta versão; o que mudou foi a descrição,
+que agora diz tudo que essas funções fazem.
+
+### Permissões do disco C:
+
+O caso real: depois de uma atualização de fabricante, o disco do Windows perde a cadeia de
+permissões — o dono da máquina fica sem acesso às próprias pastas, programas não abrem, "acesso
+negado" em toda parte. São três botões, e a ordem entre eles é a do atendimento.
+
+Três regras atravessam os três: todo direito é concedido **por SID**, nunca por nome (uma linha de
+`icacls` com `Administradores` falha calada num Windows em inglês, e a máquina quebrada fica pior);
+nenhum comando é montado como texto, e todo executável vem pelo caminho completo em System32; e nas
+pastas do sistema o `icacls` só faz duas coisas, **na própria pasta**: `/setowner` quando o dono
+está fora do padrão e `/inheritance:r /grant:r` com as ACEs medidas. `/reset`, `/T` e `/R` não
+existem ali, porque os três descem a árvore inteira apagando o que o Windows sabe e o WinForge não.
+
+**Verificar** — só lê, e pode ser clicado sempre (a leitura não pede elevação). Confere dono e
+permissões da raiz do disco, de `Windows`, `Program Files`, `Program Files (x86)`, `ProgramData`,
+`Users`, `Users\Public` e da sua pasta de usuário contra o padrão de fábrica, e termina com a
+contagem das diferenças. Dois detalhes que explicam o resultado: a comparação é **por SID**, então
+vale igual em qualquer idioma do Windows; e o que se cobra é um **piso** ("este SID tem ao menos
+este direito"), não igualdade exata — ACE a mais não é diferença, porque uma pasta do sistema tem
+ACEs que variam com a edição e com o que já foi instalado. A exceção é a ACE de **negação**:
+qualquer uma conta, porque nenhuma dessas pastas tem negação de fábrica e a negação vence a
+permissão — uma linha `Deny Todos:(OI)(CI)F` plantada em `C:\Users` tranca o disco sem tirar uma
+única permissão da lista. Pasta que não existe nesta máquina não conta como diferença; pasta que
+existe e não deixa ler a lista, conta.
+
+**Restaurar padrões** — altera o sistema e pede reinicialização. Exige o WinForge aberto como
+administrador, e a pergunta pela elevação vem antes de a pasta de backup ser criada. Seis fases,
+nesta ordem:
+
+1. `chkdsk /scan` no disco do sistema. Se ele acusar erro no volume, a restauração **para aqui** e
+   nenhuma permissão é alterada: reescrever a DACL de um disco com problema é consertar o que vai
+   corromper de novo.
+2. **Backup** das listas atuais em `%ProgramData%\WinForge\acl-backup`, uma por pasta: a raiz, cada
+   pasta de primeiro nível, cada pasta aninhada que a fase 4 pode reescrever (`Users\Public`) e a
+   sua pasta de usuário. A regra é essa, e não uma lista: pasta que a restauração toca tem backup.
+   De cada uma vão para o **índice** (um JSON na mesma pasta protegida) a lista de permissões em
+   **SDDL** e o dono. Só a sua pasta de usuário ganha, além disso, um arquivo de
+   `icacls /save /T /L /C /Q` com o **conteúdo** dela — é a única pasta em que a restauração desce
+   a árvore; o `/L` mantém a caminhada dentro do perfil em vez de sair por um OneDrive ou por uma
+   junção de compatibilidade, e o `/Q` evita uma linha de saída por arquivo. É o que o botão
+   Desfazer consome.
+
+   O SDDL não é preciosismo: foi medido, com elevação, numa pasta descartável. O
+   `icacls <pasta>\ /save` grava a entrada da própria pasta com o **nome vazio**, e o
+   `icacls <pasta>\ /restore` **não aplica** essa entrada — ele monta o caminho `<pasta>\<descritor>`
+   e responde "arquivo não encontrado", deixando a lista alterada como estava. O `/save` desfaz os
+   filhos de uma pasta; a pasta em si, nunca. E as fases 3 e 4 mexem exatamente nas pastas em si.
+3. A **raiz**: negações fora (`/remove:d`, só se houver alguma), `/inheritance:r` e as ACEs padrão
+   por SID. O direito de criar arquivo dos Usuários Autenticados sai numa chamada separada — dentro
+   de um mesmo `/grant` o `icacls` guarda só a última entrada de cada SID.
+4. As **pastas do sistema**, uma a uma: `Windows`, `Program Files`, `Program Files (x86)`,
+   `ProgramData`, `Users` e `Users\Public`. Para cada uma, `/setowner` (só se o dono estiver fora do
+   padrão) e `/inheritance:r /grant:r` com as ACEs medidas — na pasta, sem `/T` e sem `/reset`. E só
+   nas pastas que a **verificação acusou**: pasta no padrão não é tocada. `Windows` e
+   `Program Files` pertencem ao TrustedInstaller e dão só `M` ao administrador, que não inclui o
+   direito de reescrever a lista: quando a concessão responde "acesso negado", a posse vai para os
+   Administradores, a concessão é repetida uma vez e a posse **volta** ao dono padrão.
+5. A **sua pasta de usuário**: dono, negações, as três ACEs padrão na raiz do perfil e, depois
+   delas, `/inheritance:e /T /L` no conteúdo. A ordem é dependência — a herança só propaga o que já
+   está concedido na raiz. `/reset /T` não é usado: ele apagaria as ACEs explícitas que os próprios
+   aplicativos põem dentro do perfil (`AppData\Local\Packages`, OneDrive), e `/inheritance:e` as
+   preserva.
+6. `takeown` na raiz, **sem recursão**, e só quando a fase 3 responder "acesso negado", seguido de
+   uma segunda e última tentativa da fase 3.
+
+O `secedit` com o `defltbase.inf` **saiu** desta lista. No Windows 10 e no 11 as seções
+`[Registry Keys]` e `[File Security]` desse arquivo vêm vazias, então `/areas FILESTORE REGKEYS` não
+repõe DACL nenhuma: ele levava minutos e não consertava nada. A fase 4 faz esse trabalho de forma
+explícita, com a mesma tabela que a verificação usa.
+
+**Desfazer (restaurar backup)** — reaplica o conjunto de backup mais recente, de duas formas
+conforme o item. A lista de cada **pasta** volta do SDDL guardado no índice, e logo depois dela vem
+uma tentativa **separada** de devolver o dono. O **conteúdo** da sua pasta de usuário volta por
+`icacls <pasta acima> /restore <arquivo> /C /L`, rodado a partir da pasta anotada no índice (o
+`icacls` grava nomes relativos à pasta em que foi invocado, e restaurar da pasta errada aplicaria a
+DACL de uma coisa em outra). Sem backup gravado, ele apenas diz isso e não toca em nada. Também
+exige elevação, conferida antes de qualquer pasta ser criada.
+
+O `/L` do `/restore` é obrigatório e é o par do `/T` do backup. Sem ele o `icacls` abre cada item
+**seguindo** o ponto de reanálise, e o perfil está cheio deles: as junções de compatibilidade
+(`Dados de aplicativos`, `Configurações locais`, `Cookies`) carregam uma negação de travessia para
+Todos, que é como o Windows impede que sejam percorridas. Restaurar sem `/L` derramaria essa
+negação em `AppData\Roaming`, `AppData\Local` e `InetCookies` — trancando você fora do próprio
+AppData com o botão que existe para destrancá-lo.
+
+Os limites do desfazer, que estão escritos na descrição dos botões:
+
+- **A posse volta quando dá.** Devolver a posse ao TrustedInstaller exige um privilégio que nem
+  todo administrador tem. Quando a lista volta e o dono não, o Desfazer diz em qual pasta — em vez
+  de ficar calado ou de deixar a lista de fora por causa disso.
+- O backup das pastas **fora do seu perfil** é sem recursão: volta a lista da pasta em si, não a de
+  tudo que está dentro dela. Só a pasta de usuário é salva com `/T`.
+
+A pasta de backup passa pela mesma conferência da pasta de downloads de driver — DACL própria sem
+herança, nenhum ponto de reanálise na cadeia, dono dentro de SYSTEM/Administradores e ninguém de
+fora deles com escrita —, e cada arquivo gravado é endurecido. O Desfazer recusa, sem nem ler,
+arquivo que não esteja diretamente nessa pasta ou cujo dono não seja o SYSTEM ou o grupo
+Administradores. Sem elevação a pasta nasce com a sua identidade como dona e a restauração inteira
+para: sem backup confiável não há desfazer, e restaurar sem desfazer transforma um problema em dois.
+
+Reinicie o computador depois de qualquer um dos dois botões que escrevem: serviços e programas já
+abertos continuam com as permissões antigas em cache.
 
 ## Classificação de risco
 
@@ -356,8 +509,8 @@ usa o `dist\WinForge.exe`. Em qualquer caso o programa sobe com `-NoRestorePoint
 de restauração é modal e travaria o passeio), e o script se recusa a rodar com CS2 ou CS:GO aberto,
 porque o jogo captura o mouse.
 
-Os outros dois inventários são de texto, e servem para achar o que traduzir — quem prova que
-acabou são as travas do `-SelfTest`:
+Os inventários de texto servem para achar o que traduzir — quem prova que acabou são as travas do
+`-SelfTest`:
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\List-EnglishStrings.ps1
@@ -371,6 +524,19 @@ JSON do arquivo base com o dicionário por chave (`src\Engine\config\wf-i18n-con
 as entradas que faltam já no formato de colar; com `-Orphans` lista também as chaves do dicionário
 que não existem mais na base.
 
+O terceiro é para revisar a descrição dos itens — o texto que decide se alguém marca ou não marca:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\List-Descriptions.ps1
+```
+
+`List-Descriptions.ps1` põe chave, título e descrição lado a lado, já com a tradução aplicada e
+somando as entradas do próprio WinForge. `-Grupo tweaks|config|apps` corta por origem, `-MenorQue N`
+mostra só as mais curtas e `-Csv` sai com tabulação, para colar em planilha. O `-SelfTest` reprova
+as formas conhecidas de descrição vazia (frase repetida dentro da mesma descrição ou entre duas,
+menos de 40 caracteres, texto que repete o título, duas "Origem:", "CUIDADO:" escrito à mão); o que
+ele não consegue julgar é se o texto é bom, e é para isso que serve a lista.
+
 ## Estrutura
 
 ```
@@ -383,7 +549,7 @@ src/Engine/         gerador do motor PowerShell/WPF
 src/Launcher/       WinForge.exe (C# net48): splash, elevação e hospedagem do motor
 src/Launcher.Tests/ testes do launcher
 tests/engine/       verificações do motor gerado (marca, mojibake)
-tools/              ícone, passeio de QA pela interface e os dois inventários de tradução
+tools/              ícone, passeio de QA pela interface e os inventários de texto visível
 docs/               changelog e documentação
 ```
 
@@ -391,8 +557,8 @@ docs/               changelog e documentação
 
 Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)), a
 detecção de hardware, drivers e papéis de servidor com as recomendações da aba Diagnóstico, a aba
-Servidor com os ajustes de Windows Server, IIS e Active Directory, e o reparo de componentes do
-Windows na aba Configurações.
+Servidor com os ajustes de Windows Server, IIS e Active Directory, o reparo de componentes do
+Windows na aba Configurações e a restauração das permissões padrão do disco do sistema.
 
 - Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
 

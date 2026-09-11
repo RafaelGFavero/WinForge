@@ -19,7 +19,7 @@ $sync.configs.wfrepair = @'
 {
   "WPFWFRepSecurityStatus": {
     "Content": "Estado de TPM, Secure Boot e BitLocker",
-    "Description": "Só lê. Mostra numa janela se o TPM está presente e pronto, se o Secure Boot está ligado, o estado do BitLocker de cada volume e se a segurança baseada em virtualização (VBS/Credential Guard) está configurada e rodando. Não muda nada. TPM e BitLocker só respondem com o WinForge aberto como administrador; sem elevação aparecem como 'n/d'.",
+    "Description": "Só lê, sem alterar nada. Mostra numa janela se o TPM está presente e pronto, se o Secure Boot está ligado, o estado do BitLocker de cada volume e se a segurança baseada em virtualização (VBS/Credential Guard) está configurada e rodando. TPM e BitLocker só respondem com o WinForge aberto como administrador; sem elevação aparecem como 'n/d'.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -27,7 +27,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepSmartReport": {
     "Content": "Saúde dos discos (SMART)",
-    "Description": "Só lê. Lista os discos físicos (modelo, tipo, tamanho, estado) e os contadores SMART de cada um: temperatura, horas ligado, desgaste e erros de leitura/escrita não corrigidos. Não muda nada. Os contadores dependem do disco e do controlador: em USB e em alguns RAID eles não existem, e aí a linha diz 'indisponíveis'.",
+    "Description": "Só lê, sem alterar nada. Lista os discos físicos (modelo, tipo, tamanho, estado) e os contadores SMART de cada um: temperatura, horas ligado, desgaste e erros de leitura/escrita não corrigidos. Os contadores dependem do disco e do controlador: em USB e em alguns RAID eles não existem, e aí a linha diz 'indisponíveis'.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -35,7 +35,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepDotNetStatus": {
     "Content": "Estado do .NET Framework 3.5 e 4.8",
-    "Description": "Só lê. Diz se o recurso NetFx3 (.NET Framework 3.5) está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro (528040 ou maior = 4.8). Não muda nada. A parte do 3.5 exige o WinForge aberto como administrador; sem elevação aparece como 'n/d'.",
+    "Description": "Só lê, sem alterar nada. Diz se o recurso NetFx3 (.NET Framework 3.5) está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro (528040 ou maior = 4.8). A parte do 3.5 exige o WinForge aberto como administrador; sem elevação aparece como 'n/d'.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -43,7 +43,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepChkdskScan": {
     "Content": "Verificar disco do sistema agora (chkdsk /scan)",
-    "Description": "Só lê. Roda 'chkdsk /scan' no disco do Windows: é a verificação online, com o sistema em uso, que relata problemas sem reparar nada e sem reiniciar. Pode demorar minutos num disco grande. Para reparar de verdade, use o botão de agendar o chkdsk /f.",
+    "Description": "Só lê, sem alterar nada. Roda 'chkdsk /scan' no disco do Windows: é a verificação online, com o sistema em uso, que relata problemas sem reparar nada e sem reiniciar. Pode demorar minutos num disco grande. Para reparar de verdade, use o botão de agendar o chkdsk /f.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -108,6 +108,30 @@ $sync.configs.wfrepair = @'
   "WPFWFRepDirectX": {
     "Content": "DirectX: abrir a página oficial da Microsoft",
     "Description": "Só abre uma página. Abre no navegador a página oficial de download do DirectX End-User Runtime Web Installer, no site da Microsoft. O download e a execução do dxwebsetup.exe são seus, no navegador: o WinForge não baixa nem executa arquivo nenhum da internet. O instalador é interativo e traz as bibliotecas antigas do DirectX (d3dx9, XInput) que jogos mais velhos pedem; o DirectX do sistema continua vindo pelo Windows Update. Precisa de internet.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepAclVerify": {
+    "Content": "Permissões do disco C: - Verificar",
+    "Description": "Só lê, sem alterar nada. Confere o dono e a lista de permissões da raiz do disco, de Windows, Program Files, Program Files (x86), ProgramData, Users, Users\\Public e da sua pasta de usuário contra o padrão de fábrica. O confronto é feito por SID, então o resultado vale igual num Windows em inglês e num em português. Toda ACE de negação de acesso entra como diferença: nenhuma dessas pastas tem negação de fábrica, e uma negação plantada tranca o acesso sem tirar uma única permissão da lista. Cada pasta sai marcada como 'padrão' ou com o que está faltando nela, e o texto termina com a contagem das diferenças.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepAclRestore": {
+    "Content": "Permissões do disco C: - Restaurar padrões",
+    "Description": "ALTERA O SISTEMA E PEDE REINICIALIZAÇÃO. É o reparo de 'depois da atualização do fabricante perdi o acesso às minhas pastas', em seis fases: chkdsk /scan para conferir o volume antes de qualquer coisa; backup das listas atuais em %ProgramData%\\WinForge\\acl-backup, guardando a lista e o dono de cada pasta em SDDL dentro do índice e, só para a sua pasta de usuário, um arquivo de icacls com o conteúdo inteiro; a raiz do disco, com as ACEs padrão por SID; as pastas do sistema (Windows, Program Files, Program Files (x86), ProgramData, Users e Users\\Public) uma a uma, com o icacls apontado só para a pasta e apenas naquelas que a verificação acusou; a sua pasta de usuário, religando a herança do conteúdo depois de conceder na raiz dela; e, só quando a raiz responde acesso negado, um takeown sem recursão seguido de nova tentativa. Negações de acesso saem antes das concessões, porque negar vence permitir. Se o chkdsk acusar erro no volume, nada é alterado. O Desfazer devolve a lista de permissões de cada pasta guardada e tenta devolver o dono; devolver a posse ao TrustedInstaller nem sempre é possível, e nesse caso ele diz em qual pasta. Leva vários minutos e é preciso reiniciar o computador no fim. Exige o WinForge aberto como administrador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepAclUndo": {
+    "Content": "Permissões do disco C: - Desfazer (restaurar backup)",
+    "Description": "ALTERA O SISTEMA. Reaplica as listas de permissão que o botão de restaurar padrões guardou antes de mexer no disco, a partir do conjunto mais recente. A lista de cada pasta volta pelo SDDL guardado no índice, e junto com ela vai uma tentativa de devolver o dono; o conteúdo da sua pasta de usuário volta por icacls /restore, com /L para o restauro não sair do perfil pelas junções de compatibilidade. Só aceita índice e arquivo que estejam diretamente na pasta protegida %ProgramData%\\WinForge\\acl-backup e cujo dono seja o SYSTEM ou o grupo Administradores; qualquer outro é recusado sem nem ser lido. Dois limites: devolver a posse ao TrustedInstaller exige um privilégio que nem todo administrador tem, e quando falha o botão diz em qual pasta; e fora do seu perfil volta a lista da pasta, não a de cada arquivo dentro dela. Sem nenhum backup gravado o botão apenas diz isso e não toca em nada. Exige o WinForge aberto como administrador.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",

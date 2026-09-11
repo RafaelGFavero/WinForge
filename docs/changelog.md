@@ -1,5 +1,167 @@
 # Changelog
 
+## 1.6.0 (2026-09-11)
+
+### Aba Diagnóstico
+
+- O checklist de recomendações deixou de ser só leitura: **Aplicar marcados** e **Desfazer
+  marcados** ficam ao lado do contador, na mesma faixa de Marcar todos / Desmarcar todos. Eles
+  chamam o MESMO caminho dos botões da aba Ajustes (`Invoke-WPFtweaksbutton` e `Invoke-WPFundoall`)
+  — marcar a linha no Diagnóstico já marca a caixa de verdade na aba de destino, e é ela que
+  alimenta a lista de aplicação. Não existe caminho de aplicação paralelo: a pergunta do ponto de
+  restauração, a trava de um trabalho por vez e o runspace continuam sendo os da base.
+- Os dois ficam desabilitados enquanto há trabalho em andamento, em vez de aceitar o clique e
+  responder com uma caixa de erro depois dele.
+
+### Correções da aba Configurações
+
+- Os cinco botões do grupo **Correções** que demoram — Rede - Redefinir, Servidor NTP - Ativar,
+  Verificação de corrupção do sistema, Windows Update - Redefinir e WinGet - Reinstalar — rodavam
+  na thread da janela e escreviam num console que o lançador esconde: a aba congelava e nada
+  aparecia na tela. Agora rodam num runspace, com a saída ao vivo numa **janela própria** que se
+  enche enquanto o comando trabalha (cabeçalho "Em andamento: `<título>` (mm:ss)", que vira
+  "Concluído em mm:ss (código N)" no fim), e a janela principal continua respondendo.
+- Cada passo fecha com uma linha `== Passo N: <nome> — código X ==`, e o cabeçalho final diz qual
+  passo falhou. Antes, um chkdsk + sfc + DISM saía emendado com um único código no fim, e não dava
+  para saber qual dos três tinha falhado.
+- A **Verificação de corrupção do sistema** passou a rodar `chkdsk /scan /perf` antes do
+  `sfc /scannow` e do `DISM /RestoreHealth`. A ordem é dependência: um setor ruim corrompe de novo o
+  que o sfc acabou de consertar, e é o DISM que repõe a imagem de onde o sfc copia os arquivos bons.
+- Os cinco passaram a pedir confirmação de Sim/Não antes de agir, com o texto da própria descrição
+  do botão — que foi reescrita para dizer o que de fato acontece. A do **Windows Update -
+  Redefinir** é a que mais mudou: além de mexer no Windows Update, ela apaga a diretiva de grupo
+  local inteira, e com ela os ajustes do WinForge que moram em diretiva (Edge, Brave,
+  ConsumerFeatures, telemetria), que precisam ser marcados de novo. O histórico de atualizações é
+  preservado.
+- A frase de fechamento de cada comando ("Configuração de rede redefinida. Reinicie o computador.")
+  passou a sair **só com código 0**. Ela é escrita no presente do indicativo e é a última linha que
+  a pessoa lê: imprimi-la logo abaixo de um `== Falhou no passo N ==` era dizer que deu certo no
+  exato lugar em que a saída diz que não deu. Com erro sai uma frase neutra, que aponta o passo.
+- **Fechar a janela principal no meio de um reparo agora pergunta antes**, com "Não" como resposta
+  padrão. O fechamento deixou de esperar pelo pool nesta versão (era o que travava o programa no
+  meio de um diagnóstico), e o preço disso é que as threads de segundo plano morrem onde estiverem:
+  uma restauração de permissões interrompida entre "tomar a posse" e "devolver a posse" deixa a
+  pasta do sistema aceitando alteração de qualquer processo elevado. Diagnóstico e busca de driver
+  continuam fechando direto, sem pergunta.
+- O `Requires` das linhas com fluxo ao vivo passou a ser conferido **antes** de abrir a janela e de
+  tomar as travas. Era dado morto: numa edição do Windows sem `w32tm.exe` a falta virava exceção de
+  `Start-Process` dentro do runspace, em vez da frase que a máquina de comandos tem para isso.
+- Os botões **Aplicar marcados** / **Desfazer marcados** da aba Diagnóstico passaram a ser
+  repintados no começo e no fim de cada comando com fluxo ao vivo. Antes só o contador de marcações
+  os repintava: eles ficavam habilitados durante o comando (a caixa de recusa vinha depois do
+  clique) e, se alguém marcasse uma caixa no meio, ficavam desabilitados até a marca seguinte.
+- A janela ao vivo passou a ter **teto por tique** (512 KB): um passo que despeja dezenas de MB de
+  uma vez congelava a thread da interface num `AppendText` só. O arquivo continua completo, e é ele
+  o resultado; a caixa recebe a última parte, com um aviso.
+- A saída fica em `repair-<nome>-<data-hora>.txt`, em `%LocalAppData%\WinForge\logs`, e a janela
+  tem **Copiar** e **Abrir arquivo**.
+
+### Permissões do disco C:
+
+Novo grupo de três botões no reparo de componentes, para o caso em que a cadeia de permissões do
+disco do Windows cai — depois de uma atualização de fabricante, por exemplo — e o dono da máquina
+fica sem acesso às próprias pastas.
+
+- **Verificar** só lê (`Get-Acl`, sem elevação). Confere dono e ACEs da raiz do disco, de Windows,
+  Program Files, Program Files (x86), ProgramData, Users, Users\Public e da pasta do usuário atual
+  contra o padrão de fábrica, e termina com a contagem das diferenças. O confronto é **por SID**,
+  então vale igual num Windows em inglês e num em português; e é um PISO, não um retrato: ACE a mais
+  não é diferença, porque uma pasta do sistema tem ACEs que variam com a edição e com o que já foi
+  instalado. A exceção é a ACE de NEGAÇÃO: qualquer uma conta, porque nenhuma dessas pastas tem
+  negação de fábrica e negar vence permitir — um `Deny Todos:(OI)(CI)F` plantado em `C:\Users`
+  tranca o disco sem tirar uma única permissão da lista. Pasta que não existe não conta; pasta que
+  existe e não deixa ler a lista, conta.
+- **Restaurar padrões** roda seis fases, nesta ordem: `chkdsk /scan` (se acusar erro no volume, para
+  aí e nada é alterado); backup das listas atuais em
+  `%ProgramData%\WinForge\acl-backup`; a raiz, com as negações fora, `/inheritance:r` e as ACEs
+  padrão por SID; as pastas do sistema (Windows, Program Files, Program Files (x86), ProgramData,
+  Users e Users\Public) **uma a uma**, com `/setowner` só onde o dono está errado e
+  `/inheritance:r /grant:r` na própria pasta, e **só naquelas que a verificação acusou**; a pasta do
+  usuário, com a herança do conteúdo religada depois da concessão na raiz dela; e, só quando a raiz
+  responde acesso negado, um `takeown` sem recursão seguido de uma segunda tentativa. `/reset`, `/T`
+  e `/R` não existem na raiz nem nas pastas do sistema — os três descem a árvore inteira apagando o
+  que o Windows sabe e o WinForge não. Leva minutos e pede reinicialização no fim.
+- Três detalhes do `icacls` que só aparecem quando se roda o comando de verdade, e que agora o
+  build roda: direito **específico** vai entre parênteses (`*S-1-5-11:(AD)`; sem eles o icacls
+  responde 87, "Parâmetro inválido", e não concede nada), `/T` anda junto com `/L` para a recursão
+  não sair do alvo pelo primeiro OneDrive ou junção de compatibilidade, e `Users\Public` tem backup
+  próprio porque a fase por pasta reescreve a lista dela. Nas pastas do TrustedInstaller (`Windows`,
+  `Program Files`), onde o administrador só tem `M` e não consegue reescrever a lista, a concessão
+  que responde acesso negado toma a posse, tenta de novo uma vez e **devolve** a posse ao dono
+  padrão — pasta do sistema que ficasse com os Administradores como dona aceitaria alteração de
+  qualquer processo elevado.
+- O `secedit` com o `defltbase.inf` **não entrou**: foi medido nesta máquina e, no Windows 10 e no
+  11, as seções `[Registry Keys]` e `[File Security]` desse arquivo vêm vazias — `/areas FILESTORE
+  REGKEYS` levava minutos e não repunha DACL nenhuma. A fase por pasta faz esse trabalho de forma
+  explícita, com a mesma tabela de esperados que a verificação usa.
+- As duas ações que escrevem conferem a **elevação antes de criar a pasta de backup**: sem
+  administrador a pasta nasceria com a identidade atual como dona e ficaria plantada em
+  `%ProgramData%`, fazendo a conferência recusar todas as restaurações seguintes da máquina.
+- **O backup da pasta em si passou a ser SDDL, guardado no índice**, e não mais um arquivo de
+  `icacls /save`. Foi medido, com elevação, numa pasta descartável: `icacls <pasta>\ /save f /C`
+  grava a entrada da própria pasta com o **nome vazio**, e `icacls <pasta>\ /restore f /C /L`
+  **não** a aplica — monta o caminho `<pasta>\<descritor>`, responde "arquivo não encontrado" e a
+  lista alterada fica como estava. Ou seja: o `/save` desfaz os filhos de uma pasta, nunca a pasta
+  em si — que é exatamente o que as fases 3 e 4 reescrevem. Agora a DACL e o dono de cada pasta
+  guardada vão para o índice (JSON, na mesma pasta protegida) e voltam por
+  `SetSecurityDescriptorSddlForm` + `DirectoryInfo.SetAccessControl`. O único arquivo de `icacls`
+  que sobra é o do **conteúdo** do perfil, salvo com `/T /L /C /Q`.
+- Quem escreve o descritor é `DirectoryInfo.SetAccessControl`, e **não** o `Set-Acl`: foi medido
+  numa pasta de `%TEMP%` que, com `Set-Acl`, um descritor que só teve `SetOwner()` chamado
+  reescreve **também a DACL**, apagando toda ACE explícita e deixando só as herdadas. Numa pasta do
+  sistema restaurada com `/inheritance:r`, onde tudo é explícito, o passo do dono apagaria a lista
+  que o passo anterior acabou de devolver — e a única pista seria o disco continuar quebrado depois
+  do Desfazer. O `-SelfTest` prova as duas seções como independentes.
+- **Desfazer** aplica esses dois caminhos: o SDDL na pasta, e `icacls <pasta acima> /restore
+  <arquivo> /C /L` no conteúdo do perfil, a partir da pasta anotada no índice (o icacls grava nomes
+  relativos à pasta em que foi invocado). Sem backup gravado, ele apenas diz isso.
+- **O `/L` do `/restore` faltava, e a falta era grave.** O backup do perfil é gravado com `/T /L`,
+  então o arquivo tem uma entrada para cada junção de compatibilidade de dentro dele (`Dados de
+  aplicativos`, `Configurações locais`, `Cookies`), com a DACL da própria junção — que carrega uma
+  negação de travessia para Todos, que é como o Windows impede que sejam percorridas. Sem `/L` o
+  `/restore` abre cada item seguindo o ponto de reanálise e derramaria essa negação em
+  `AppData\Roaming`, `AppData\Local` e `InetCookies`, trancando o usuário fora do próprio AppData
+  com o botão que existe para destrancá-lo. A trava do build agora cobra `/L` em todo `/restore`,
+  como já cobrava em todo `/T`.
+- **A posse voltou a ser tentada.** Junto com a lista de cada pasta vai uma tentativa separada de
+  devolver o dono guardado. Devolver a posse ao TrustedInstaller exige um privilégio que nem todo
+  administrador tem: quando falha, o Desfazer diz em qual pasta, e a lista volta do mesmo jeito.
+- O nome dos arquivos de backup passou a ser **injetivo** (codificação por porcentagem, byte a
+  byte). O anterior trocava tudo que não fosse `[A-Za-z0-9._-]` por `_`, e `Program Files` e
+  `Program_Files` viravam o mesmo nome: como qualquer Usuário Autenticado cria pasta na raiz do
+  disco (a ACE `(AD)` que a própria restauração repõe), uma `C:\Program_Files` plantada sem
+  elevação sobrescrevia o backup da pasta do Windows, e o Desfazer devolvia a lista do invasor,
+  calado.
+- O `/save` do perfil ganhou `/Q` e passou a ter o **código de saída conferido**. Sem `/Q` o icacls
+  escreve "arquivo processado: `<caminho>`" por arquivo — centenas de milhares de linhas indo para
+  a janela num bloco só. E um `/save` que termina em acesso negado ainda deixa um arquivo no disco:
+  contá-lo pela simples existência inflava o "N pasta(s) guardadas" com rede de segurança que não
+  existia. Agora a fase imprime o número de entradas lido do arquivo.
+- Dois limites que a descrição dos botões não esconde: o backup das pastas fora do perfil é **sem
+  recursão** (volta a lista da pasta em si, não a do conteúdo); e a restauração não acontece sem
+  backup, em nenhuma das duas pontas (pasta de backup que não passa na conferência, ou nenhum
+  backup gravado, param tudo antes de a primeira permissão ser alterada).
+- A pasta de backup passa pela mesma conferência da pasta de downloads de driver: DACL própria sem
+  herança, nenhum ponto de reanálise na cadeia, dono dentro de SYSTEM/Administradores e ninguém de
+  fora deles com escrita. Cada arquivo gravado é endurecido, e o Desfazer recusa arquivo que não
+  esteja diretamente na pasta ou cujo dono não seja o SYSTEM ou o grupo Administradores. Sem
+  elevação a pasta nasce com a identidade atual como dona e a restauração inteira para.
+
+### Descrições
+
+- Toda descrição visível foi revisada para dizer as três coisas que decidem se alguém marca ou não
+  marca o item: o mecanismo em palavras simples, o efeito prático e o custo. As que só repetiam o
+  título ("IPv6 - Desativar" → "Desativa o IPv6.") ou diziam a mesma frase duas vezes dentro de si
+  mesmas foram reescritas, e sete botões de ação que não tinham descrição nenhuma ganharam uma.
+- Nova trava no `-SelfTest`, sobre `Description` de tweaks e Config e `description` dos aplicativos,
+  já mesclados e traduzidos: nenhuma frase repetida dentro da mesma descrição nem **entre**
+  descrições, 40 caracteres no mínimo, nada de ser igual ao título nem começar por ele, no máximo
+  uma "Origem:" e nenhum "CUIDADO:" escrito à mão — quem prefixa isso é a auditoria de risco.
+  Descrição em branco só passa para 14 botões de painel clássico do Windows, numa lista explícita
+  que o próprio teste cobra por tamanho.
+- `tools/List-Descriptions.ps1` põe chave, título e descrição lado a lado para a revisão que a
+  trava não consegue fazer — se o texto é bom. Tem `-Grupo`, `-MenorQue` e `-Csv`.
+
 ## 1.5.0 (2026-09-10)
 
 ### Interface em português

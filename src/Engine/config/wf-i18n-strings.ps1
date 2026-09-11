@@ -328,8 +328,9 @@ $WinForgeI18nStrings += @(
 $WinForgeI18nStrings += @(
     @('$msg = "Please check the tweaks you wish to perform."', '$msg = "Marque os ajustes que você quer aplicar."'),
     @('$msg = "Please check the tweaks you wish to undo."', '$msg = "Marque os ajustes que você quer desfazer."'),
-    @('$MessageboxTitle = "Reset Windows Update "', '$MessageboxTitle = "Restaurar o Windows Update "'),
-    @('$Messageboxbody = ("Stock settings loaded.`n Please reboot your computer")', '$Messageboxbody = ("Configuração de fábrica restaurada.`n Reinicie o computador")'),
+    # A caixa de "Reset Windows Update" saiu da tradução porque saiu do programa: o botão agora roda
+    # em runspace com saída ao vivo, e uma MessageBox modal aberta de outra thread ficaria sem dono e
+    # seguraria a trava de comando em andamento. O build a troca por uma linha da própria saída.
     @('$MessageboxTitle = "Are you sure?"', '$MessageboxTitle = "Tem certeza?"'),
     @('$Messageboxbody = ("This will uninstall the following applications: `n $($PackagesToUninstall | Select-Object Name, Description| Out-String)")',
       '$Messageboxbody = ("Isto vai desinstalar os aplicativos abaixo: `n $($PackagesToUninstall | Select-Object Name, Description| Out-String)")'),

@@ -342,6 +342,30 @@ function Get-WinForgeRecommendationControl {
     return $control
 }
 
+function Update-WinForgeDiagActionButtons {
+    <#
+    .SYNOPSIS
+        Liga e desliga "Aplicar marcados" / "Desfazer marcados" conforme já existe trabalho em andamento.
+    .DESCRIPTION
+        Os dois botões chamam Invoke-WPFtweaksbutton / Invoke-WPFundoall, que recusam com
+        $sync.ProcessRunning ligado mostrando uma caixa de mensagem. Desabilitar é dar esse aviso
+        ANTES do clique, em vez de depois dele.
+        ESTA FUNÇÃO NÃO ESCREVE EM $sync: ela é chamada de Update-WinForgeDiagRecommendationCount,
+        que por sua vez roda dentro de Sync-WinForgeRecommendationMirror - caminho que percorre
+        $sync com GetEnumerator() e derruba os presets se alguém escrever ali (ver o comentário
+        daquela função). Ler $sync[<nome>] e mexer na propriedade do botão é seguro.
+        Sai calada quando os botões ainda não existem: o contador roda antes de a janela estar
+        montada (primeiro diagnóstico, SelfTest).
+    #>
+    if ($null -eq $sync) { return }
+
+    $habilitado = -not $sync.ProcessRunning
+    foreach ($nome in 'WPFDiagApplySelected', 'WPFDiagUndoSelected') {
+        $botao = $sync[$nome]
+        if ($botao -is [System.Windows.Controls.Button]) { $botao.IsEnabled = $habilitado }
+    }
+}
+
 function Update-WinForgeDiagRecommendationCount {
     <#
     .SYNOPSIS
@@ -352,7 +376,11 @@ function Update-WinForgeDiagRecommendationCount {
         esta máquina - ninguém consegue marcá-la, e contá-la no M deixaria o contador parado em
         "15 de 16" com tudo marcado, o que parece defeito.
     #>
-    if ($null -eq $sync -or $null -eq $sync.WPFDiagRecCount) { return }
+    if ($null -eq $sync) { return }
+    # Antes da saída antecipada do contador: os botões de ação não dependem do rótulo existir, e
+    # este é o ponto da interface que roda a cada marca, a cada diagnóstico e a cada aba montada.
+    Update-WinForgeDiagActionButtons
+    if ($null -eq $sync.WPFDiagRecCount) { return }
 
     $total = 0
     $marcados = 0

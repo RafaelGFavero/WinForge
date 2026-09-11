@@ -229,7 +229,7 @@ function Initialize-WinUtilBoostConfigs {
         }
         $entry = [PSCustomObject]@{
             Content     = $g.Name
-            Description = "Prioridade de CPU ALTA para: $($g.Exes -join ', ') (IFEO\PerfOptions CpuPriorityClass=3). O Windows passa a iniciar o processo com prioridade Alta. Marque + 'Desfazer selecionados' para remover."
+            Description = "Grava CpuPriorityClass=3 em IFEO\PerfOptions para $($g.Exes -join ', '), então o Windows já abre esse executável na classe Alta em vez da Normal. O jogo ganha a disputa por processador contra navegador, antivírus e o resto do que estiver rodando, o que ajuda em queda de quadros esporádica e não muda nada se a CPU já estava sobrando. Reversível: marque a linha e use 'Desfazer selecionados'."
             category    = "Prioridade de CPU por jogo (IFEO)"
             panel       = "1"
             tab         = "Jogos"
@@ -272,6 +272,19 @@ function Initialize-WinUtilBoostConfigs {
     }
     Write-WinUtilLog -Component "Boost" -Message "Aba Instalar: $wfRemovidos aplicativo(s) removido(s), $(@($sync.configs.applications.PSObject.Properties).Count) na lista."
 
+    # Correções da aba Config: as cinco entradas abaixo vieram da base apontando para funções que
+    # rodavam NA THREAD DA JANELA e escreviam num console que o lançador esconde - a aba congelava e
+    # nada aparecia. Agora quem as despacha é o switch de Invoke-WPFButton, com o nome curto do
+    # comando e a máquina de saída ao vivo. A chave 'function' sai daqui porque ela é o caminho que
+    # levava de volta ao comportamento antigo: sem ela, uma guarda de lookup quebrada cai no switch
+    # em vez de congelar a janela de novo.
+    foreach ($k in @('WPFFixesNetwork', 'WPFFixesNTPPool', 'WPFPanelDISM', 'WPFFixesUpdate', 'WPFFixesWinget')) {
+        $entradaCorrecao = $sync.configs.feature.PSObject.Properties[$k]
+        if ($entradaCorrecao -and $entradaCorrecao.Value.PSObject.Properties['function']) {
+            $entradaCorrecao.Value.PSObject.Properties.Remove('function')
+        }
+    }
+
     # Tradução por chave do texto que veio do arquivo base (config\wf-i18n-configs.ps1).
     # Roda DEPOIS das mesclas - assim vê as chaves da base e as do WinForge de uma vez - e ANTES de
     # Initialize-WinForgeAudit, que prefixa "CUIDADO: ..." na descrição dos itens de risco: se a
@@ -287,8 +300,15 @@ function Initialize-WinUtilBoostConfigs {
             foreach ($campo in @('Content', 'Description')) {
                 if (-not $t.ContainsKey($campo)) { continue }
                 $prop = $p.Value.PSObject.Properties[$campo]
-                if (-not $prop) { continue }
-                $prop.Value = $t[$campo]
+                if ($prop) {
+                    $prop.Value = $t[$campo]
+                } else {
+                    # Campo que a base não tem. Quatro dos cinco botões de "Correções" chegam SEM
+                    # Description nenhuma, e é dela que sai a dica do botão e o texto da caixa de
+                    # confirmação: enquanto isto era um 'continue', a descrição escrita no dicionário
+                    # era simplesmente ignorada, em silêncio.
+                    $p.Value | Add-Member -NotePropertyName $campo -NotePropertyValue $t[$campo] -Force
+                }
                 $wfTraduzidos++
             }
         }
