@@ -1,4 +1,4 @@
-#region ===== WinForge - configurações adicionais =====
+﻿#region ===== WinForge - configurações adicionais =====
 
 # Entradas do WinUtil que só fazem sentido no Windows 11 (ficam ocultas no Windows 10)
 $sync.WinForgeWin11OnlyTweaks = @(
