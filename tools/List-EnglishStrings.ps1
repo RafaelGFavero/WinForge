@@ -64,7 +64,12 @@ for ($i = 0; $i -lt $lines.Count; $i++) {
 if ($xamlStart -lt 0 -or $xamlEnd -lt 0) { throw "Não achei a região do `$inputXML no motor gerado." }
 
 $attrRegex  = [regex]'(?<attr>Content|Text|Header|ToolTip|Placeholder|Watermark)\s*=\s*"(?<val>[^"]*)"'
-$msgRegex   = [regex]'\[System\.Windows\.MessageBox\]::Show\(\s*(?:"(?<val>[^"]*)"|''(?<val>[^'']*)'')'
+# A chamada de MessageBox quebra em várias linhas com frequência (mensagem numa linha, título na
+# de baixo). Por isso a varredura não é por linha: quando uma linha abre ::Show(, o bloco é lido
+# até o parêntese que fecha. Lendo linha a linha, o inventário via só a primeira - foi assim que o
+# título "Error" e o texto do oscdimg atravessaram o Plano 6 inteiro sem aparecer na lista.
+$showOpenRegex = [regex]'\[System\.Windows\.MessageBox\]::Show\('
+$literalRegex  = [regex]'"(?<val>[^"]*)"|''(?<val>[^'']*)'''
 $hostRegex  = [regex]'Write-Host\s+(?:"(?<val>[^"]*)"|''(?<val>[^'']*)'')'
 # Wrapper de diálogo do motor: Show-WinForgeMessage -Message "..." -Title "..." (a maioria das caixas
 # vem por aqui, não pelo MessageBox direto - sem este padrão o inventário dava a interface por pronta).
@@ -105,9 +110,21 @@ if ('Code' -in $Section) {
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($i -ge $xamlStart -and $i -le $xamlEnd) { continue }
         $line = $lines[$i]
-        foreach ($m in $msgRegex.Matches($line)) {
-            $v = $m.Groups['val'].Value
-            if ($All -or (Test-English $v)) { $hits.Add([pscustomobject]@{ Kind = 'MessageBox'; Line = $i + 1; Value = $v }) }
+        if ($showOpenRegex.IsMatch($line)) {
+            $bloco = $line
+            $j = $i
+            while ($bloco -notmatch '\)\s*$' -and ($j - $i) -lt 8 -and ($j + 1) -lt $lines.Count) {
+                $j++
+                $bloco += "`n" + $lines[$j]
+            }
+            # Só os DOIS primeiros literais interessam: Show(mensagem, título, botões, ícone). Do
+            # terceiro em diante são nomes de enum ("OK", "YesNo", "Error", "Warning") que não são
+            # texto de interface - listá-los encheria o inventário de falso positivo.
+            $args2 = @($literalRegex.Matches($bloco) | Select-Object -First 2)
+            foreach ($m in $args2) {
+                $v = $m.Groups['val'].Value
+                if ($All -or (Test-English $v)) { $hits.Add([pscustomobject]@{ Kind = 'MessageBox'; Line = $i + 1; Value = $v }) }
+            }
         }
         foreach ($m in $hostRegex.Matches($line)) {
             $v = $m.Groups['val'].Value

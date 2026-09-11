@@ -12,7 +12,6 @@
 # Fonte: os blocos JSON do arquivo BASE (src\Engine\base\winutil-26.08.19.ps1). Nenhuma
 # transformação do build mexe em Content/Description desses três blocos, então o texto impresso
 # aqui é exatamente o que o dicionário tem de casar. Ficam fora:
-#   - as chaves 'Removido' da auditoria (config\wf-audit.ps1): somem do programa;
 #   - os aplicativos de $sync.WinForgeRemovedApps (config\wf-apps.ps1): saem da aba Instalar;
 #   - as duas entradas de perfil do PowerShell do projeto original, que o build apaga por regex.
 # As entradas do próprio WinForge não estão no arquivo base e por isso nunca aparecem aqui - elas
@@ -48,9 +47,7 @@ function Get-JsonConfigBlock([string]$text, [string]$name) {
 $baseText = [System.IO.File]::ReadAllText($basePath, [System.Text.Encoding]::UTF8) -replace "`r`n", "`n"
 
 $sync = @{}
-. (Get-ScriptBlockUtf8 (Join-Path $engineDir "config\wf-audit.ps1"))
 . (Get-ScriptBlockUtf8 (Join-Path $engineDir "config\wf-apps.ps1"))
-$removidos   = @($sync.WinForgeAudit.Keys | Where-Object { $sync.WinForgeAudit[$_].Class -eq 'Removido' })
 $removedApps = @($sync.WinForgeRemovedApps)
 # Apagadas por regex em src\Engine\build.ps1 (perfil do PowerShell do projeto original).
 $removedFeature = @('WPFWinUtilInstallPSProfile', 'WPFWinUtilUninstallPSProfile')
@@ -69,7 +66,7 @@ if (Test-Path $dictPath) {
 # Campo do texto visível: nos tweaks e nos recursos é Content/Description; nos aplicativos o nome
 # ('content') fica em inglês de propósito - é nome de produto - e só a 'description' é traduzida.
 $grupos = @(
-    @{ Nome = 'tweaks';       Bloco = 'tweaks';       Titulo = 'Content'; Texto = 'Description'; Excluir = $removidos }
+    @{ Nome = 'tweaks';       Bloco = 'tweaks';       Titulo = 'Content'; Texto = 'Description'; Excluir = @() }
     @{ Nome = 'feature';      Bloco = 'feature';      Titulo = 'Content'; Texto = 'Description'; Excluir = $removedFeature }
     @{ Nome = 'applications'; Bloco = 'applications'; Titulo = $null;     Texto = 'description'; Excluir = $removedApps }
 )

@@ -174,7 +174,7 @@ $WinForgeI18nStrings = @(
     @('Content="Save as an ISO File"', 'Content="Salvar como arquivo ISO"'),
     @('Content="Write Directly to a USB Drive (ERASES DRIVE)"', 'Content="Gravar direto num pendrive (APAGA O PENDRIVE)"'),
     @('<Run FontWeight="Bold" Foreground="OrangeRed">!! All data on the selected USB drive will be permanently erased !!</Run>',
-      '<Run FontWeight="Bold" Foreground="OrangeRed">!! Tudo o que estiver no pendrive escolhido será apagado !!</Run>'),
+      '<Run FontWeight="Bold" Foreground="{DynamicResource DangerColor}">!! Tudo o que estiver no pendrive escolhido será apagado !!</Run>'),
     @('Select a removable USB drive below, then click Erase &amp; Write.', 'Escolha um pendrive na lista abaixo e clique em Apagar e gravar.'),
     @('Content="Refresh"', 'Content="Atualizar lista"'),
     @('Content="Erase &amp; Write to USB"', 'Content="Apagar e gravar no pendrive"'),
@@ -384,6 +384,22 @@ $WinForgeI18nStrings += @(
     @('"USB Ready", "OK", "Info")', '"Pendrive pronto", "OK", "Info")'),
     @('[System.Windows.MessageBox]::Show("USB write failed:`n`n$_", "USB Write Error", "OK", "Error")',
       '[System.Windows.MessageBox]::Show("A gravação no pendrive falhou:`n`n$_", "Erro na gravação", "OK", "Error")'),
+    # --- caixas que ficaram para trás no Plano 6 porque a chamada ::Show( quebra em várias linhas:
+    # o inventário de tools\List-EnglishStrings.ps1 lia linha a linha e não enxergava o texto na
+    # linha de baixo. A ferramenta passou a ler a chamada inteira (Tarefa 7) e apontou estas.
+    # O título "Error" é o único que sobrou solto no arquivo - os outros ::Show de uma linha só já
+    # foram traduzidos com a mensagem junto.
+    @('                    "Error", "OK", "Error")', '                    "Erro", "OK", "Error")'),
+    @('"oscdimg.exe could not be found or installed automatically.`n`nPlease install it manually:`n  winget install -e --id Microsoft.OSCDIMG`n`nOr install the Windows ADK from:`nhttps://learn.microsoft.com/windows-hardware/get-started/adk-install",',
+      '"Não encontrei o oscdimg.exe e a instalação automática não funcionou.`n`nInstale à mão:`n  winget install -e --id Microsoft.OSCDIMG`n`nOu instale o Windows ADK a partir de:`nhttps://learn.microsoft.com/windows-hardware/get-started/adk-install",'),
+    @('"No settings are selected to export. Please select at least one app, tweak, toggle, feature, or AppX package before exporting.",',
+      '"Nada foi marcado para exportar. Marque pelo menos um aplicativo, ajuste, chave, recurso ou pacote AppX antes de exportar.",'),
+    @('"Nothing to Export", "OK", "Warning")', '"Nada para exportar", "OK", "Warning")'),
+    @('"The selected file contains no settings to import. No changes have been made.",',
+      '"O arquivo escolhido não traz nenhum item para importar. Nada foi alterado.",'),
+    @('"Empty Configuration", "OK", "Warning")', '"Configuração vazia", "OK", "Warning")'),
+    @('Write-Error "An error occurred while exporting: $_"', 'Write-Error "Deu erro ao exportar: $_"'),
+    @('Write-Error "An error occurred while importing: $_"', 'Write-Error "Deu erro ao importar: $_"'),
     # --- "processo em andamento": as duas chamadas que o par repetido lá embaixo NÃO resolve sozinho.
     # O par repetido casa ' Install process is currently running."' (com o espaço da frente) e por isso
     # deixava para trás o "An" de "[Invoke-WPFInstall] An Install process...", produzindo a frase

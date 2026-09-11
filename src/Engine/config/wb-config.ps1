@@ -426,8 +426,8 @@ $sync.configs.wbfeatures = @'
     "function": "Invoke-WinUtilBoostCreateRestorePoint"
   },
   "WPFPanelWBRegistryBackup": {
-    "Content": "Backup do Registro - Exportar HKLM/HKCU/HKCR/HKU/HKCC",
-    "Description": "Exporta as 5 chaves raiz para arquivos .reg em %LocalAppData%\\WinForge\\Backup_Regedit\\<data>. Demora alguns minutos e ocupa centenas de MB. Origem: 'Fazer backup do Windows.bat'.",
+    "Content": "Backup do Registro - Exportar chaves raiz",
+    "Description": "Exporta as 5 chaves raiz (HKLM, HKCU, HKCR, HKU e HKCC) para arquivos .reg em %LocalAppData%\\WinForge\\Backup_Regedit\\<data>. Demora alguns minutos e ocupa centenas de MB. Origem: 'Fazer backup do Windows.bat'.",
     "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
