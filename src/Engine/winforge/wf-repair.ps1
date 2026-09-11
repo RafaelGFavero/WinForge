@@ -284,6 +284,48 @@ function Get-WinForgeRepairCommand {
                 OpensExternal = $true
             }
         }
+        # ------------------------------------------------- Permissões do disco do sistema
+        # O caso que deu origem a estes três botões: uma atualização de fabricante derrubou a cadeia
+        # de permissões do disco do Windows e o dono da máquina ficou sem acesso às próprias pastas.
+        #
+        # As duas ações que escrevem são 'Stream' com UM passo de função, e não com a lista de
+        # fases em 'Steps'. O motivo é que o plano não é uma fila fixa: ele PARA quando o chkdsk
+        # acusa erro no volume (mexer em DACL de um disco com problema é consertar o que vai
+        # corromper de novo), e a fase do takeown só existe se a raiz responder "acesso negado".
+        # Invoke-WinForgeStreamedSteps roda todos os passos, um atrás do outro, sempre - decisão
+        # nenhuma cabe nele. Quem conduz as fases é a função; o fluxo ao vivo continua sendo o
+        # mesmo, porque o passo de função manda cada linha para o arquivo assim que ela sai.
+        'AclVerify' {
+            return @{
+                Title    = 'Permissões do disco C: - Verificar'
+                Command  = 'Get-WinForgeAclReport'
+                Requires = $null
+                Native   = $false
+                Kind     = 'read'
+            }
+        }
+        'AclRestore' {
+            return @{
+                Title    = 'Permissões do disco C: - Restaurar padrões'
+                Requires = (Get-WinForgeSystemExe -Name 'icacls.exe')
+                Kind     = 'repair'
+                Stream   = $true
+                Steps    = @(@{ Function = 'Invoke-WinForgeAclRestore' })
+                Final    = 'Reinicie o computador: serviços e programas já abertos continuam com as permissões antigas em cache até o próximo logon.'
+                Confirm  = 'Devolve as permissões do disco do Windows ao padrão de fábrica, em fases: verificação do disco, backup das listas atuais, raiz, secedit e pasta de usuário. Leva minutos e pede reinicialização no fim.'
+            }
+        }
+        'AclUndo' {
+            return @{
+                Title    = 'Permissões do disco C: - Desfazer (restaurar backup)'
+                Requires = (Get-WinForgeSystemExe -Name 'icacls.exe')
+                Kind     = 'repair'
+                Stream   = $true
+                Steps    = @(@{ Function = 'Invoke-WinForgeAclUndo' })
+                Final    = 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
+                Confirm  = 'Reaplica as listas de permissão guardadas na última restauração de padrões, arquivo por arquivo, a partir da pasta protegida do WinForge. Sem backup gravado, não faz nada.'
+            }
+        }
     }
     throw "Comando de reparo desconhecido: '$Name'."
 }
@@ -1428,6 +1470,875 @@ function Invoke-WinForgeRepairCommand {
     }
 
     Invoke-WinForgeCommandButton -Spec $cmd -Name $Name -Component 'Repair' -Prefix 'repair'
+}
+
+# =============================================================== Permissões do disco do sistema
+# O caso real: depois de uma atualização de fabricante, o disco do Windows perdeu a cadeia de
+# permissões - o dono da máquina sem acesso às próprias pastas, programas que não abrem, "acesso
+# negado" em toda parte. São três botões, e a ordem entre eles é a do atendimento:
+#
+#   Verificar          - só lê (Get-Acl) e diz o que está fora do padrão. Pode ser clicado sempre.
+#   Restaurar padrões  - as seis fases abaixo, com backup antes de qualquer alteração.
+#   Desfazer           - reaplica o backup mais recente, arquivo por arquivo.
+#
+# Três regras atravessam tudo o que está aqui embaixo:
+#
+# 1. SID, nunca nome. 'Administradores' só existe em português; 'Administrators' só em inglês. Uma
+#    linha de icacls com nome localizado falha calada num Windows de outro idioma - e a máquina
+#    quebrada fica pior do que estava. Todo direito concedido sai como '*S-1-5-32-544:(OI)(CI)F'.
+# 2. Nada é montado como TEXTO de comando. Cada chamada é -FilePath + -Arguments, com o vetor de
+#    argumentos inteiro, e todo executável vem por caminho completo de Get-WinForgeSystemExe.
+# 3. O icacls nunca é apontado para dentro de Windows nem de Program Files. Quem repõe as DACLs
+#    dessas duas (e as do registro) é o secedit com o defltbase.inf, que é o procedimento
+#    documentado pela Microsoft. '/reset /T' na raiz e 'takeown /R' também não existem aqui: os
+#    dois descem a árvore inteira apagando o que o Windows sabe e o WinForge não.
+
+function Get-WinForgeAclWellKnownSid {
+    <#
+    .SYNOPSIS
+        Os SIDs conhecidos usados pela verificação e pela restauração de permissões.
+    .DESCRIPTION
+        Uma tabela só, para o texto do SID aparecer UMA vez no programa. O do TrustedInstaller é o
+        que mais se escreve errado: ele é um SID de serviço (S-1-5-80 + o hash do nome
+        'TrustedInstaller'), igual em toda instalação do Windows, e é ele o dono de C:\Windows e de
+        C:\Program Files - não o grupo Administradores.
+    .OUTPUTS
+        Hashtable de apelido -> SID.
+    #>
+    return @{
+        Sistema          = 'S-1-5-18'
+        Administradores  = 'S-1-5-32-544'
+        Usuarios         = 'S-1-5-32-545'
+        Autenticados     = 'S-1-5-11'
+        Todos            = 'S-1-1-0'
+        TrustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    }
+}
+
+function Get-WinForgeSystemDriveRoot {
+    <#
+    .SYNOPSIS
+        A raiz do volume em que o Windows está instalado ('C:\' na esmagadora maioria das máquinas).
+    .DESCRIPTION
+        A âncora é [Environment]::SystemDirectory, e não %SystemDrive%, pelo mesmo motivo de
+        Get-WinForgeSystemExe: variável de ambiente de processo nasce do bloco do usuário em
+        HKCU\Environment, que qualquer processo de integridade média da conta escreve. Com
+        'SystemDrive' apontando para outro volume, a restauração reescreveria as permissões do disco
+        errado - com elevação e sem perguntar mais nada.
+    .OUTPUTS
+        A raiz com a barra final ('C:\').
+    #>
+    $dir = ''
+    try { $dir = [string][Environment]::SystemDirectory } catch { $dir = '' }
+    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = 'C:\Windows\System32' }
+    $raiz = ''
+    try { $raiz = [string][System.IO.Path]::GetPathRoot($dir) } catch { $raiz = '' }
+    if ([string]::IsNullOrWhiteSpace($raiz)) { $raiz = 'C:\' }
+    return $raiz
+}
+
+function ConvertTo-WinForgeAclMask {
+    <#
+    .SYNOPSIS
+        Traduz os quatro bits GENÉRICOS de uma ACE para os bits de acesso a arquivo correspondentes.
+    .DESCRIPTION
+        Sem isto a conferência acusa permissão faltando numa pasta impecável, e a raiz do disco é o
+        exemplo: a ACE dos Usuários Autenticados lá é '(OI)(CI)(IO)M', herdável e de SOMENTE
+        HERANÇA, e uma ACE assim guarda GENERIC_READ/GENERIC_WRITE/GENERIC_EXECUTE (0xE0010000) em
+        vez dos bits de arquivo. Comparada direto contra FileSystemRights::Modify (0x301BF) ela não
+        casa em nada, e o relatório diria que a máquina está quebrada.
+
+        O mapeamento é o GENERIC_MAPPING do sistema de arquivos do Windows, o mesmo que o próprio
+        kernel aplica quando abre o objeto. Os quatro bits genéricos saem da máscara depois de
+        traduzidos: eles não significam nada na comparação.
+    .OUTPUTS
+        A máscara efetiva, como número.
+    #>
+    param([Parameter(Mandatory)][int]$Rights)
+
+    # O enum é Int32 e os bits genéricos moram na ponta alta, então um valor com GENERIC_READ chega
+    # aqui NEGATIVO. Passar por [long] e mascarar em 32 bits devolve o padrão de bits real.
+    $bruto = (([long]$Rights) -band 0xFFFFFFFFL)
+    $efetivo = $bruto -band 0x0FFFFFFFL
+    if ($bruto -band 0x80000000L) { $efetivo = $efetivo -bor 0x00120089L }  # GENERIC_READ
+    if ($bruto -band 0x40000000L) { $efetivo = $efetivo -bor 0x00120116L }  # GENERIC_WRITE
+    if ($bruto -band 0x20000000L) { $efetivo = $efetivo -bor 0x001200A0L }  # GENERIC_EXECUTE
+    if ($bruto -band 0x10000000L) { $efetivo = $efetivo -bor 0x001F01FFL }  # GENERIC_ALL
+    return [long]$efetivo
+}
+
+function Get-WinForgeAclName {
+    <#
+    .SYNOPSIS
+        O nome legível de um SID, com o próprio SID como resposta quando ele não traduz.
+    .DESCRIPTION
+        A comparação é toda por SID (é o que funciona em qualquer idioma), mas o relatório é lido por
+        gente: 'S-1-5-32-544' não diz nada e 'BUILTIN\Administradores' diz tudo. SID de conta apagada
+        e SID de pacote de aplicativo não traduzem - aí o próprio SID é a melhor resposta possível.
+    .OUTPUTS
+        Texto.
+    #>
+    param([Parameter(Mandatory)][string]$Sid)
+
+    try {
+        $s = New-Object System.Security.Principal.SecurityIdentifier $Sid
+        return [string]$s.Translate([System.Security.Principal.NTAccount]).Value
+    } catch {
+        return $Sid
+    }
+}
+
+function Get-WinForgeAclExpected {
+    <#
+    .SYNOPSIS
+        O padrão do Windows para as oito pastas que a verificação olha: donos aceitos e ACEs
+        obrigatórias, tudo por SID.
+    .DESCRIPTION
+        Dado puro, separado da leitura: é a tabela que o -SelfTest exercita com listas de permissão
+        montadas na memória, sem tocar em pasta nenhuma.
+
+        Duas escolhas explicam o resto:
+
+        - 'Donos' é uma LISTA, e não um valor. O dono de C:\ é o TrustedInstaller em instalações
+          recentes e o SYSTEM em outras, e as duas formas são padrão de fábrica. Cobrar um só faria
+          o relatório acusar diferença em metade das máquinas saudáveis, que é o jeito mais rápido
+          de a verificação deixar de ser lida.
+        - As ACEs são um PISO, não um retrato. O que se cobra é "este SID tem ao menos este
+          direito"; ACE a mais (pacotes de aplicativo, CREATOR OWNER, Todos em Users\Public) não é
+          diferença. Uma pasta do sistema tem ACEs que variam com a edição e com o que já foi
+          instalado, e exigir igualdade exata daria diferença em tudo.
+
+        Windows, Program Files e Program Files (x86) pedem dono TrustedInstaller e só 'Modify' para
+        SYSTEM e Administradores: é o padrão do Windows moderno, em que nem o administrador tem
+        controle total sobre os arquivos do sistema sem antes tomar a posse deles.
+    .OUTPUTS
+        Vetor de hashtables com Path, Nome, Donos e Aces.
+    #>
+    $sid = Get-WinForgeAclWellKnownSid
+    $raiz = Get-WinForgeSystemDriveRoot
+    $perfil = ''
+    try { $perfil = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile) } catch { $perfil = '' }
+    $meu = ''
+    try { $meu = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $meu = '' }
+
+    $F = [int][System.Security.AccessControl.FileSystemRights]::FullControl
+    $M = [int][System.Security.AccessControl.FileSystemRights]::Modify
+    $RX = [int][System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+
+    $itens = @()
+    $itens += @{
+        Path  = $raiz
+        Nome  = "Raiz do disco do sistema ($raiz)"
+        Donos = @($sid.Sistema, $sid.Administradores, $sid.TrustedInstaller)
+        Aces  = @(
+            @{ Sid = $sid.Sistema;         Rights = $F;  Rotulo = 'SYSTEM com controle total' }
+            @{ Sid = $sid.Administradores; Rights = $F;  Rotulo = 'Administradores com controle total' }
+            @{ Sid = $sid.Usuarios;        Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
+            @{ Sid = $sid.Autenticados;    Rights = $M;  Rotulo = 'Usuários Autenticados podendo modificar o que criarem' }
+        )
+    }
+    foreach ($nome in @('Windows', 'Program Files', 'Program Files (x86)')) {
+        $itens += @{
+            Path  = (Join-Path $raiz $nome)
+            Nome  = $nome
+            Donos = @($sid.TrustedInstaller)
+            Aces  = @(
+                @{ Sid = $sid.Sistema;          Rights = $M;  Rotulo = 'SYSTEM podendo modificar' }
+                @{ Sid = $sid.Administradores;  Rights = $M;  Rotulo = 'Administradores podendo modificar' }
+                @{ Sid = $sid.Usuarios;         Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
+                @{ Sid = $sid.TrustedInstaller; Rights = $F;  Rotulo = 'TrustedInstaller com controle total' }
+            )
+        }
+    }
+    $itens += @{
+        Path  = (Join-Path $raiz 'ProgramData')
+        Nome  = 'ProgramData'
+        Donos = @($sid.Sistema, $sid.Administradores)
+        Aces  = @(
+            @{ Sid = $sid.Sistema;         Rights = $F;  Rotulo = 'SYSTEM com controle total' }
+            @{ Sid = $sid.Administradores; Rights = $F;  Rotulo = 'Administradores com controle total' }
+            @{ Sid = $sid.Usuarios;        Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
+        )
+    }
+    $itens += @{
+        Path  = (Join-Path $raiz 'Users')
+        Nome  = 'Users'
+        Donos = @($sid.Sistema, $sid.Administradores)
+        Aces  = @(
+            @{ Sid = $sid.Sistema;         Rights = $F;  Rotulo = 'SYSTEM com controle total' }
+            @{ Sid = $sid.Administradores; Rights = $F;  Rotulo = 'Administradores com controle total' }
+            @{ Sid = $sid.Usuarios;        Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
+            @{ Sid = $sid.Todos;           Rights = $RX; Rotulo = 'Todos podendo ler e executar' }
+        )
+    }
+    $itens += @{
+        Path  = (Join-Path $raiz 'Users\Public')
+        Nome  = 'Users\Public'
+        Donos = @($sid.Sistema, $sid.Administradores)
+        Aces  = @(
+            @{ Sid = $sid.Sistema;         Rights = $F; Rotulo = 'SYSTEM com controle total' }
+            @{ Sid = $sid.Administradores; Rights = $F; Rotulo = 'Administradores com controle total' }
+        )
+    }
+    if (-not [string]::IsNullOrWhiteSpace($perfil)) {
+        $aces = @(
+            @{ Sid = $sid.Sistema;         Rights = $F; Rotulo = 'SYSTEM com controle total' }
+            @{ Sid = $sid.Administradores; Rights = $F; Rotulo = 'Administradores com controle total' }
+        )
+        # Sem o SID da identidade atual (conta de serviço, token estranho) a linha do dono da pasta
+        # some da conferência em vez de virar uma diferença que ninguém consegue explicar.
+        if (-not [string]::IsNullOrWhiteSpace($meu)) {
+            $aces += @{ Sid = $meu; Rights = $F; Rotulo = 'o usuário atual com controle total' }
+        }
+        $itens += @{
+            Path  = $perfil
+            Nome  = "Pasta do usuário atual ($perfil)"
+            Donos = @($sid.Sistema, $sid.Administradores, $meu)
+            Aces  = $aces
+        }
+    }
+    return @($itens)
+}
+
+function Compare-WinForgeAclExpected {
+    <#
+    .SYNOPSIS
+        Compara uma lista de permissões contra o padrão esperado e devolve as diferenças, em texto.
+    .DESCRIPTION
+        Função pura: recebe o objeto de segurança já lido e a linha da tabela, não abre arquivo
+        nenhum. É o que permite provar "acusa ACE faltando" e "acusa dono errado" com objetos
+        montados na memória, sem estragar as permissões da máquina de quem compila para depois
+        consertá-las.
+
+        A comparação é por SID dos dois lados. A identidade de uma ACE chega como NTAccount quando o
+        SID traduz e como SecurityIdentifier quando não - por isso a tradução explícita, e por isso
+        uma ACE cuja identidade não traduz para SID é PULADA em vez de derrubar a conferência.
+
+        As ACEs de um mesmo SID são somadas antes de comparar. Elas costumam vir em pares - uma
+        efetiva na própria pasta e uma herdável de somente herança para o que nascer abaixo - e cada
+        uma sozinha é um pedaço do direito. Só as de PERMISSÃO entram: uma ACE de negação é assunto
+        de quem a criou, e tratá-la aqui faria a verificação opinar sobre configuração legítima.
+    .OUTPUTS
+        Vetor de textos, vazio quando está tudo no padrão.
+    #>
+    param(
+        [Parameter(Mandatory)]$Acl,
+        [Parameter(Mandatory)][hashtable]$Expected
+    )
+
+    $dif = New-Object System.Collections.Generic.List[string]
+
+    $dono = $null
+    try { $dono = $Acl.GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { $dono = $null }
+    $donos = @($Expected.Donos | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($null -eq $dono) {
+        $dif.Add('o dono não pôde ser lido')
+    } elseif ($donos.Count -and ($donos -notcontains [string]$dono.Value)) {
+        $dif.Add("dono '$(Get-WinForgeAclName -Sid ([string]$dono.Value))' fora do padrão (esperado $((@($donos | ForEach-Object { Get-WinForgeAclName -Sid ([string]$_) })) -join ' ou '))")
+    }
+
+    $mascaras = @{}
+    foreach ($ace in @($Acl.Access)) {
+        if ([string]$ace.AccessControlType -ne 'Allow') { continue }
+        $s = $ace.IdentityReference
+        try {
+            if ($s -isnot [System.Security.Principal.SecurityIdentifier]) { $s = $s.Translate([System.Security.Principal.SecurityIdentifier]) }
+        } catch { continue }
+        $chave = [string]$s.Value
+        $mascaras[$chave] = ([long]$mascaras[$chave]) -bor (ConvertTo-WinForgeAclMask -Rights ([int]$ace.FileSystemRights))
+    }
+
+    foreach ($esp in @($Expected.Aces)) {
+        $chave = [string]$esp.Sid
+        if ([string]::IsNullOrWhiteSpace($chave)) { continue }
+        $exigido = ConvertTo-WinForgeAclMask -Rights ([int]$esp.Rights)
+        $tem = [long]$mascaras[$chave]
+        if (($tem -band $exigido) -ne $exigido) {
+            $dif.Add("falta $($esp.Rotulo) [$chave]")
+        }
+    }
+    return @($dif)
+}
+
+function Get-WinForgeAclReport {
+    <#
+    .SYNOPSIS
+        Dono e lista de permissões das pastas do sistema, com as diferenças em relação ao padrão do
+        Windows e um veredito no fim. SÓ LÊ.
+    .DESCRIPTION
+        O botão que se clica ANTES de qualquer reparo, e o que se clica DEPOIS para conferir. Não
+        altera nada: a leitura é Get-Acl, que não pede elevação para as pastas do sistema.
+
+        Pasta que não existe (Program Files (x86) numa instalação de 32 bits, por exemplo) sai como
+        'não existe nesta máquina' e NÃO conta como diferença. Pasta que existe e não deixa ler a
+        lista conta: a verificação só tem uma defesa, que é olhar, e o que não pôde ser olhado não é
+        um "está tudo bem".
+    .PARAMETER AsObject
+        Devolve @{ Text; Differences; Items } em vez do texto. É o que o -SelfTest usa para cobrar o
+        veredito como número; o botão recebe o texto, que é o que a janela de saída mostra.
+    .OUTPUTS
+        Texto pronto para a janela, ou o hashtable com -AsObject.
+    #>
+    param([switch]$AsObject)
+
+    $linhas = New-Object System.Collections.Generic.List[string]
+    $itens = @()
+    $total = 0
+
+    $linhas.Add('Permissões das pastas do sistema, comparadas com o padrão do Windows.')
+    $linhas.Add('A comparação é por SID, então ela vale em qualquer idioma do Windows.')
+
+    foreach ($esp in @(Get-WinForgeAclExpected)) {
+        $linhas.Add('')
+        $linhas.Add("$($esp.Nome)")
+        $linhas.Add('-' * 78)
+        if (-not (Test-Path -LiteralPath $esp.Path)) {
+            $linhas.Add('  Não existe nesta máquina.')
+            $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @(); Missing = $true }
+            continue
+        }
+        $lista = $null
+        try { $lista = Get-Acl -LiteralPath $esp.Path -ErrorAction Stop } catch { $lista = $null }
+        if ($null -eq $lista) {
+            $linhas.Add('  A lista de permissões não pôde ser lida.')
+            $total++
+            $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @('a lista de permissões não pôde ser lida'); Missing = $false }
+            continue
+        }
+
+        $dono = $null
+        try { $dono = $lista.GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { $dono = $null }
+        $linhas.Add("  Dono: $(if ($dono) { "$(Get-WinForgeAclName -Sid ([string]$dono.Value)) [$($dono.Value)]" } else { 'não pôde ser lido' })")
+        foreach ($ace in @($lista.Access)) {
+            $s = $ace.IdentityReference
+            try {
+                if ($s -isnot [System.Security.Principal.SecurityIdentifier]) { $s = $s.Translate([System.Security.Principal.SecurityIdentifier]) }
+            } catch { }
+            $linhas.Add("  $($ace.AccessControlType) $(Get-WinForgeAclName -Sid ([string]$s)) : $($ace.FileSystemRights) | herança $($ace.InheritanceFlags)/$($ace.PropagationFlags)")
+        }
+        $dif = @(Compare-WinForgeAclExpected -Acl $lista -Expected $esp)
+        if ($dif.Count -eq 0) {
+            $linhas.Add('  -> padrão')
+        } else {
+            foreach ($d in $dif) { $linhas.Add("  -> DIFERENÇA: $d") }
+            $total += $dif.Count
+        }
+        $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @($dif); Missing = $false }
+    }
+
+    $linhas.Add('')
+    $linhas.Add('=' * 78)
+    if ($total -eq 0) {
+        $linhas.Add('Veredito: padrão. Nenhuma diferença encontrada nas pastas conferidas.')
+    } else {
+        $linhas.Add("Veredito: $total diferença(s) em relação ao padrão do Windows.")
+        $linhas.Add('O botão "Permissões do disco C: - Restaurar padrões" desfaz esse estrago; ele guarda um backup antes de mexer em qualquer coisa.')
+    }
+    $texto = ($linhas -join "`r`n")
+    if ($AsObject) { return @{ Text = $texto; Differences = [int]$total; Items = @($itens) } }
+    return $texto
+}
+
+function Get-WinForgeAclBackupRoot {
+    <#
+    .SYNOPSIS
+        Pasta dos backups de permissões (%ProgramData%\WinForge\acl-backup). -Root existe para o
+        -SelfTest não escrever em %ProgramData%.
+    .DESCRIPTION
+        A base é Get-WinForgeMachineDataRoot (API de pastas do Windows), a MESMA da pasta de backup
+        de servidor e da de downloads, e nunca a variável de ambiente - ver lá o porquê. O caminho é
+        normalizado uma vez ([System.IO.Path]::GetFullPath): daqui para baixo todo mundo conta com a
+        mesma forma, e é essa forma que a conferência da cadeia de pastas usa.
+    .OUTPUTS
+        O caminho normalizado.
+    #>
+    param([string]$Root)
+
+    $alvo = if ($Root) { $Root } else { (Join-Path (Get-WinForgeMachineDataRoot) 'WinForge\acl-backup') }
+    try { return [System.IO.Path]::GetFullPath($alvo) } catch { return $alvo }
+}
+
+function Confirm-WinForgeAclBackupRoot {
+    <#
+    .SYNOPSIS
+        Garante que a pasta dos backups de permissões existe e é confiável, ANTES de o primeiro
+        backup ser gravado.
+    .DESCRIPTION
+        Mesmas regras e mesmas funções da pasta de downloads: DACL própria sem herança
+        (New-WinForgeSnapshotRoot), nenhum ponto de reanálise na cadeia, dono dentro de
+        SYSTEM/Administradores, ninguém de fora deles com escrita (Test-WinForgeSnapshotRootTrusted)
+        e a ACE herdável de OWNER RIGHTS (Repair-WinForgeSnapshotRootOwnerRight).
+
+        E, como na pasta de downloads, o afrouxamento que a pasta de teste usa NUNCA é passado, nem
+        quando -Root vem preenchido. O que sai desta pasta é aplicado por um icacls /restore elevado
+        sobre o disco inteiro: se um processo de integridade média da mesma conta puder escrever
+        aqui, ele escolhe as permissões do sistema. É o mesmo furo do instalador trocado, com a
+        diferença de que aqui o estrago é a máquina inteira.
+
+        Consequência prática: sem elevação a pasta nasce com a identidade atual como dona e esta
+        função RECUSA. O backup não acontece e a restauração inteira para, o que é melhor do que
+        alterar o disco guardando o desfazer numa pasta que a própria conta reescreve.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <pasta> }.
+    #>
+    param([string]$Root)
+
+    $dir = Get-WinForgeAclBackupRoot $Root
+    if (-not (Test-Path -LiteralPath $dir)) {
+        try { New-WinForgeSnapshotRoot -Root $dir | Out-Null }
+        catch { return @{ Ok = $false; Reason = "não foi possível criar '$dir': $($_.Exception.Message)"; Path = $dir } }
+        if (-not (Test-Path -LiteralPath $dir)) { return @{ Ok = $false; Reason = "a pasta '$dir' não pôde ser criada"; Path = $dir } }
+    }
+    $t = Test-WinForgeSnapshotRootTrusted -Root $dir
+    if (-not $t.Trusted) { return @{ Ok = $false; Reason = $t.Reason; Path = $dir } }
+    $dono = Repair-WinForgeSnapshotRootOwnerRight -Root $dir
+    if (-not $dono.Ok) { return @{ Ok = $false; Reason = "pasta de backup de permissões sem proteção de dono ('$dir'): $($dono.Reason)"; Path = $dir } }
+    return @{ Ok = $true; Reason = ''; Path = $dir }
+}
+
+function Test-WinForgeAclBackupFile {
+    <#
+    .SYNOPSIS
+        Diz se um arquivo pode ser usado como backup de permissões: dentro da pasta protegida, direto
+        nela, e com dono e DACL de backup.
+    .DESCRIPTION
+        Três perguntas, nesta ordem, e a primeira é a que o índice do backup torna necessária. O
+        índice é um arquivo de texto, e o que ele nomeia vira argumento de um /restore elevado: um
+        'sub\..\..\Users\Public\meu.txt' plantado nele apontaria para fora da pasta protegida sem
+        nenhum caractere suspeito à vista. Por isso o caminho é normalizado e tem de ficar
+        DIRETAMENTE na pasta - subpasta também não, porque a conferência de dono e DACL é feita na
+        pasta, e uma subpasta pode ter outra.
+
+        A terceira pergunta é Test-WinForgeSnapshotFileTrusted, sem o afrouxamento da pasta de
+        teste: dono fora de SYSTEM/Administradores, ACE de escrita para quem não devia ou ponto de
+        reanálise recusam o arquivo.
+    .OUTPUTS
+        @{ Trusted = <bool>; Reason = <string> }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    $completo = ''
+    try { $completo = [System.IO.Path]::GetFullPath($Path) } catch { return @{ Trusted = $false; Reason = "caminho inválido: '$Path'" } }
+    $raiz = ''
+    try { $raiz = ([System.IO.Path]::GetFullPath($Root)).TrimEnd('\') } catch { return @{ Trusted = $false; Reason = "pasta de backup inválida: '$Root'" } }
+    if (-not $completo.StartsWith(($raiz + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+        return @{ Trusted = $false; Reason = "'$completo' está fora da pasta de backup '$raiz'" }
+    }
+    $pai = ''
+    try { $pai = ([string][System.IO.Path]::GetDirectoryName($completo)).TrimEnd('\') } catch { $pai = '' }
+    if ($pai -ne $raiz) { return @{ Trusted = $false; Reason = "'$completo' não está diretamente na pasta de backup '$raiz'" } }
+    if (-not (Test-Path -LiteralPath $completo -PathType Leaf)) { return @{ Trusted = $false; Reason = "'$completo' não existe" } }
+    return (Test-WinForgeSnapshotFileTrusted -Path $completo)
+}
+
+function Get-WinForgeAclRestorePlan {
+    <#
+    .SYNOPSIS
+        As seis fases da restauração de permissões, em ordem, como passos de executável.
+    .DESCRIPTION
+        Dado puro: monta caminhos e vetores de argumentos, não roda nada e não cria pasta nenhuma. É
+        assim que o -SelfTest confere a ORDEM das fases, o caminho completo de cada executável e o
+        fato de todo direito sair por SID, sem reescrever as permissões do disco de quem compila.
+
+        As fases, e por que nesta ordem:
+
+        1. chkdsk /scan (só leitura). Reescrever a DACL de um volume com erro de sistema de arquivos
+           é consertar o que vai corromper de novo. Se ele acusar erro, a restauração PARA aqui.
+        2. Backup das listas atuais, uma por pasta: a raiz, cada pasta de primeiro nível (sem
+           recursão) e a pasta do usuário (com /T). É o que o botão Desfazer consome.
+        3. A raiz. '/inheritance:r' + um '/grant:r' com as cinco ACEs padrão, por SID.
+        4. secedit com o defltbase.inf. É ELE quem repõe as DACLs de Windows, Program Files,
+           ProgramData, Users e do registro - o icacls não é apontado para dentro dessas pastas.
+        5. A pasta do usuário: as três ACEs padrão nela e '/reset /T' ABAIXO dela, que devolve a
+           herança ao conteúdo. '/reset /T' aqui é seguro porque o alvo é uma pasta de perfil; na
+           raiz ele apagaria a DACL de tudo que existe no disco.
+        6. takeown /F <raiz> /A, SEM recursão, e só quando a fase 3 responder "acesso negado". O
+           passo vem marcado com 'Conditional' e quem decide rodá-lo é Invoke-WinForgeAclRestore.
+
+        Cada passo de backup carrega 'Backup' (o arquivo que vai ser gravado) e 'Target' (a pasta a
+        partir da qual o /restore tem de rodar). O alvo não é adivinhado depois: o icacls grava
+        NOMES RELATIVOS à pasta em que foi invocado, então o Desfazer precisa da mesma pasta, e ela
+        é anotada aqui, no único lugar em que a regra existe.
+    .OUTPUTS
+        Vetor de hashtables com Phase, Title, FilePath, Arguments e, no backup, Path/Backup/Target.
+    #>
+    param(
+        [string]$Profile,
+        [string]$UserSid,
+        [string]$BackupRoot,
+        [string]$Stamp
+    )
+
+    $sid = Get-WinForgeAclWellKnownSid
+    $raiz = Get-WinForgeSystemDriveRoot
+    $unidade = $raiz.TrimEnd('\')
+    $icacls = Get-WinForgeSystemExe -Name 'icacls.exe'
+    $secedit = Get-WinForgeSystemExe -Name 'secedit.exe'
+    $takeown = Get-WinForgeSystemExe -Name 'takeown.exe'
+    $chkdsk = Get-WinForgeSystemExe -Name 'chkdsk.exe'
+    $windir = ''
+    try { $windir = [string][System.IO.Path]::GetDirectoryName([string][Environment]::SystemDirectory) } catch { $windir = '' }
+    if ([string]::IsNullOrWhiteSpace($windir)) { $windir = Join-Path $raiz 'Windows' }
+    if ([string]::IsNullOrWhiteSpace($Stamp)) { $Stamp = (Get-Date).ToString('yyyyMMdd-HHmmss') }
+    if ([string]::IsNullOrWhiteSpace($BackupRoot)) { $BackupRoot = Get-WinForgeAclBackupRoot }
+
+    $plano = @()
+    $plano += @{
+        Phase     = 1
+        Title     = "Verificação do disco $unidade (chkdsk /scan, só leitura)"
+        FilePath  = $chkdsk
+        Arguments = @($unidade, '/scan')
+    }
+
+    # As pastas de primeiro nível saem de uma listagem, e não de uma lista escrita à mão: cada
+    # máquina tem as suas. Ponto de reanálise fica de fora - 'C:\Documents and Settings' é uma
+    # junção para 'C:\Users', e salvar (ou restaurar) por ela seria mexer no destino por outro nome.
+    $primeiroNivel = @()
+    try {
+        $primeiroNivel = @(Get-ChildItem -LiteralPath $raiz -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
+            Sort-Object Name | ForEach-Object { $_.FullName })
+    } catch { $primeiroNivel = @() }
+
+    $alvos = @()
+    $alvos += @{ Path = $raiz; Slug = 'raiz'; Recursive = $false }
+    foreach ($p in $primeiroNivel) {
+        $folha = [string](Split-Path -Leaf $p)
+        $alvos += @{ Path = $p; Slug = ([regex]::Replace($folha, '[^A-Za-z0-9._-]', '_')); Recursive = $false }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+        $alvos += @{ Path = $Profile; Slug = ('perfil-' + [regex]::Replace([string](Split-Path -Leaf $Profile), '[^A-Za-z0-9._-]', '_')); Recursive = $true }
+    }
+
+    foreach ($alvo in $alvos) {
+        $arquivo = Join-Path $BackupRoot ("acl-{0}-{1}.txt" -f $alvo.Slug, $Stamp)
+        # O destino do /restore: a raiz salva a si mesma (não há pasta acima dela), e todo o resto é
+        # restaurado da pasta em que o icacls gravou os nomes relativos, que é a pasta acima.
+        $destino = if ([string]$alvo.Path -eq $raiz) { $raiz } else { [string](Split-Path -Parent ([string]$alvo.Path)) }
+        $argumentos = @([string]$alvo.Path, '/save', $arquivo, '/C')
+        if ($alvo.Recursive) { $argumentos += '/T' }
+        $plano += @{
+            Phase     = 2
+            Title     = "Backup das permissões de '$($alvo.Path)'"
+            FilePath  = $icacls
+            Arguments = $argumentos
+            Path      = [string]$alvo.Path
+            Backup    = $arquivo
+            Target    = $destino
+        }
+    }
+
+    $plano += @{
+        Phase     = 3
+        Title     = "Permissões padrão da raiz '$raiz'"
+        FilePath  = $icacls
+        Arguments = @(
+            $raiz, '/inheritance:r', '/grant:r',
+            "*$($sid.Administradores):(OI)(CI)F",
+            "*$($sid.Sistema):(OI)(CI)F",
+            "*$($sid.Usuarios):(OI)(CI)RX",
+            "*$($sid.Autenticados):(OI)(CI)(IO)M",
+            "*$($sid.Autenticados):AD"
+        )
+    }
+    $plano += @{
+        Phase     = 4
+        Title     = 'DACLs padrão do Windows e do registro (secedit com o defltbase.inf)'
+        FilePath  = $secedit
+        Arguments = @('/configure', '/cfg', (Join-Path $windir 'inf\defltbase.inf'), '/db', (Join-Path $BackupRoot 'defltbase.sdb'), '/areas', 'FILESTORE', 'REGKEYS', '/verbose')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+        $grant = @([string]$Profile, '/inheritance:r', '/grant:r')
+        if (-not [string]::IsNullOrWhiteSpace($UserSid)) { $grant += "*$($UserSid):(OI)(CI)F" }
+        $grant += "*$($sid.Sistema):(OI)(CI)F"
+        $grant += "*$($sid.Administradores):(OI)(CI)F"
+        $plano += @{ Phase = 5; Title = "Permissões padrão da pasta '$Profile'"; FilePath = $icacls; Arguments = $grant }
+        $plano += @{ Phase = 5; Title = "Herança do conteúdo de '$Profile'"; FilePath = $icacls; Arguments = @([string]$Profile, '/reset', '/T', '/C', '/Q') }
+    }
+    $plano += @{
+        Phase       = 6
+        Title       = "Assumir a posse da raiz '$raiz' (só se a fase 3 responder acesso negado)"
+        FilePath    = $takeown
+        Arguments   = @('/F', $raiz, '/A')
+        Conditional = $true
+    }
+    return @($plano)
+}
+
+function Invoke-WinForgeAclRestore {
+    <#
+    .SYNOPSIS
+        Devolve as permissões do disco do sistema ao padrão do Windows, guardando antes as atuais.
+    .DESCRIPTION
+        Conduz as fases de Get-WinForgeAclRestorePlan com as duas decisões que uma lista fixa de
+        passos não sabe tomar:
+
+        - Depois da fase 1, o código do chkdsk. Diferente de zero significa erro no volume, e aí a
+          função PARA sem alterar permissão nenhuma e manda agendar o chkdsk /f.
+        - Depois da fase 3, o código do icacls. 5 é "acesso negado": a raiz pertence a alguém que
+          nem o administrador alcança, e é o único caso em que o takeown da fase 6 roda - uma vez,
+          só na raiz, sem recursão, seguido de UMA segunda tentativa da fase 3.
+
+        A fase 2 é bloqueante das duas pontas: se a pasta protegida não passar na conferência, nada
+        é alterado; se nenhum backup chegar a ser gravado, também não. Restaurar sem desfazer é o
+        tipo de ajuda que transforma um problema em dois.
+
+        Cada arquivo gravado é endurecido (Protect-WinForgeSnapshotFile: dono Administradores, DACL
+        fechada) e anotado num índice, que é o que o Desfazer lê. O índice guarda a pasta de onde
+        cada /restore tem de rodar, porque o icacls grava nomes RELATIVOS à pasta em que foi
+        invocado - adivinhar isso depois é o jeito de aplicar a DACL da pasta errada.
+    .PARAMETER DryRun
+        Lista as fases, prefixadas com '[simulação] ', e para por aí: nada roda, nenhuma pasta é
+        criada, nenhum arquivo é gravado.
+    .PARAMETER BackupRoot
+        Pasta de backup alternativa. Existe para o teste; a conferência dela é a mesma da pasta
+        padrão, sem afrouxamento nenhum.
+    .OUTPUTS
+        Com -DryRun, as linhas do plano. Sem ele, escreve o andamento (é um passo de fluxo ao vivo).
+    #>
+    param(
+        [switch]$DryRun,
+        [string]$BackupRoot
+    )
+
+    $perfil = ''
+    try { $perfil = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile) } catch { $perfil = '' }
+    $meuSid = ''
+    try { $meuSid = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $meuSid = '' }
+    $raizBackup = Get-WinForgeAclBackupRoot $BackupRoot
+    $plano = @(Get-WinForgeAclRestorePlan -Profile $perfil -UserSid $meuSid -BackupRoot $raizBackup)
+
+    if ($DryRun) {
+        return @($plano | ForEach-Object {
+            ("[simulação] Fase {0}: {1} {2}" -f $_.Phase, $_.FilePath, (@($_.Arguments) -join ' ')).TrimEnd()
+        })
+    }
+    Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeAclRestore'
+
+    if ([string]::IsNullOrWhiteSpace($perfil) -or [string]::IsNullOrWhiteSpace($meuSid)) {
+        Write-Error 'Não foi possível descobrir a pasta e o SID do usuário atual. Nada foi alterado.'
+        return
+    }
+    $conf = Confirm-WinForgeAclBackupRoot -Root $BackupRoot
+    if (-not $conf.Ok) {
+        Write-Error "A pasta de backup de permissões não é confiável ($($conf.Reason)). Nada foi alterado - sem backup não há Desfazer."
+        return
+    }
+    Write-Host "Backup das permissões atuais em: $($conf.Path)"
+
+    # ---- Fase 1: o disco antes das permissões.
+    $fase1 = @($plano | Where-Object { [int]$_.Phase -eq 1 })[0]
+    Write-Host ''
+    Write-Host "Fase 1 de 6 - $($fase1.Title). Num disco grande isso leva minutos."
+    $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase1.FilePath) -Arguments @($fase1.Arguments)
+    Write-Host ([string]$r.Text)
+    if ([int]$r.ExitCode -ne 0) {
+        Write-Error "O chkdsk terminou com código $($r.ExitCode): o volume tem erro de sistema de arquivos. PARADO antes de alterar qualquer permissão - use o botão 'Agendar chkdsk /f na próxima reinicialização', reinicie e volte aqui."
+        return
+    }
+
+    # ---- Fase 2: o desfazer, antes de qualquer alteração.
+    $indice = New-Object System.Collections.Generic.List[string]
+    $gravados = 0
+    foreach ($passo in @($plano | Where-Object { [int]$_.Phase -eq 2 })) {
+        Write-Host ''
+        Write-Host "Fase 2 de 6 - $($passo.Title)"
+        $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
+        Write-Host ([string]$r.Text)
+        if (-not (Test-Path -LiteralPath ([string]$passo.Backup) -PathType Leaf)) {
+            Write-Warning "Nada foi gravado em '$($passo.Backup)'; esta pasta fica de fora do Desfazer."
+            continue
+        }
+        $prot = Protect-WinForgeSnapshotFile -Path ([string]$passo.Backup)
+        if (-not $prot.Hardened) {
+            Remove-Item -LiteralPath ([string]$passo.Backup) -Force -ErrorAction SilentlyContinue
+            Write-Warning "O backup de '$($passo.Path)' não pôde ser protegido ($($prot.Reason)) e foi apagado."
+            continue
+        }
+        $indice.Add(("{0}|{1}" -f [string](Split-Path -Leaf ([string]$passo.Backup)), [string]$passo.Target))
+        $gravados++
+    }
+    if ($gravados -eq 0) {
+        Write-Error 'Nenhum backup de permissões pôde ser gravado. Nada foi alterado.'
+        return
+    }
+    $carimbo = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $arquivoIndice = Join-Path $conf.Path ("acl-index-{0}.txt" -f $carimbo)
+    Set-Content -LiteralPath $arquivoIndice -Value @($indice) -Encoding UTF8 -ErrorAction Stop
+    $protIndice = Protect-WinForgeSnapshotFile -Path $arquivoIndice
+    if (-not $protIndice.Hardened) {
+        Remove-Item -LiteralPath $arquivoIndice -Force -ErrorAction SilentlyContinue
+        Write-Error "O índice do backup não pôde ser protegido ($($protIndice.Reason)). Nada foi alterado - sem o índice o Desfazer não sabe de que pasta restaurar cada arquivo."
+        return
+    }
+    Write-Host ''
+    Write-Host "$gravados pasta(s) guardadas no conjunto $carimbo. O botão Desfazer usa exatamente este conjunto."
+
+    # ---- Fase 3 (e, só em acesso negado, a 6 seguida de uma segunda tentativa da 3).
+    $fase3 = @($plano | Where-Object { [int]$_.Phase -eq 3 })[0]
+    Write-Host ''
+    Write-Host "Fase 3 de 6 - $($fase3.Title)"
+    $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase3.FilePath) -Arguments @($fase3.Arguments)
+    Write-Host ([string]$r.Text)
+    if ([int]$r.ExitCode -eq 5) {
+        $fase6 = @($plano | Where-Object { [int]$_.Phase -eq 6 })[0]
+        Write-Host ''
+        Write-Host "Acesso negado na raiz. Fase 6 de 6 - $($fase6.Title)"
+        $rt = Invoke-WinForgeNativeCommand -FilePath ([string]$fase6.FilePath) -Arguments @($fase6.Arguments)
+        Write-Host ([string]$rt.Text)
+        Write-Host 'Segunda e última tentativa das permissões da raiz.'
+        $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase3.FilePath) -Arguments @($fase3.Arguments)
+        Write-Host ([string]$r.Text)
+    }
+    if ([int]$r.ExitCode -ne 0) {
+        # Segue assim mesmo: o secedit da fase 4 conserta Windows, Program Files, ProgramData e
+        # Users independentemente da raiz, e parar aqui deixaria a máquina no meio do caminho.
+        Write-Error "As permissões da raiz não puderam ser aplicadas (código $($r.ExitCode)). As fases seguintes continuam."
+    }
+
+    # ---- Fase 4: quem cuida de Windows e Program Files.
+    $fase4 = @($plano | Where-Object { [int]$_.Phase -eq 4 })[0]
+    Write-Host ''
+    Write-Host "Fase 4 de 6 - $($fase4.Title). É a fase mais demorada."
+    $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase4.FilePath) -Arguments @($fase4.Arguments)
+    Write-Host ([string]$r.Text)
+    if ([int]$r.ExitCode -ne 0) { Write-Error "O secedit terminou com código $($r.ExitCode); veja o %windir%\security\logs\scesrv.log." }
+
+    # ---- Fase 5: a pasta do usuário.
+    foreach ($passo in @($plano | Where-Object { [int]$_.Phase -eq 5 })) {
+        Write-Host ''
+        Write-Host "Fase 5 de 6 - $($passo.Title)"
+        $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
+        Write-Host ([string]$r.Text)
+        if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
+    }
+
+    Write-Host ''
+    Write-Host 'Restauração concluída. Reinicie o computador antes de julgar o resultado: serviços e programas já abertos seguem com as permissões antigas em cache.'
+    Write-Host 'Depois de reiniciar, use "Permissões do disco C: - Verificar" para conferir, e "Desfazer (restaurar backup)" se algo tiver ficado pior.'
+}
+
+function Get-WinForgeAclBackupSet {
+    <#
+    .SYNOPSIS
+        O conjunto de backup de permissões mais recente: o índice, o carimbo de tempo e os arquivos.
+    .DESCRIPTION
+        Só lê. O mais recente sai da ordenação por NOME, e não pela data do sistema de arquivos, que
+        uma cópia de pasta reescreve: o nome carrega '<aaaaMMdd-HHmmss>', campo de largura fixa.
+
+        Cada linha do índice é '<nome do arquivo>|<pasta de onde restaurar>'. Linha em branco,
+        comentário e linha sem a barra são ignorados; o que sobra ainda passa, um a um, por
+        Test-WinForgeAclBackupFile antes de virar argumento de coisa alguma.
+    .OUTPUTS
+        @{ Stamp; Index; Items = @(@{ File; Target }); Reason }.
+    #>
+    param([string]$Root)
+
+    $dir = Get-WinForgeAclBackupRoot $Root
+    if (-not (Test-Path -LiteralPath $dir)) {
+        return @{ Stamp = ''; Index = ''; Items = @(); Reason = "a pasta '$dir' não existe - nenhuma restauração foi feita nesta máquina" }
+    }
+    $indices = @(Get-ChildItem -LiteralPath $dir -Filter 'acl-index-*.txt' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+    if (-not $indices.Count) {
+        return @{ Stamp = ''; Index = ''; Items = @(); Reason = "nenhum índice de backup em '$dir'" }
+    }
+    $novo = $indices[$indices.Count - 1]
+    $carimbo = [string]([System.IO.Path]::GetFileNameWithoutExtension($novo.Name)) -replace '^acl-index-', ''
+    $itens = @()
+    foreach ($linha in @(Get-Content -LiteralPath $novo.FullName -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        $t = ([string]$linha).Trim()
+        if ([string]::IsNullOrWhiteSpace($t) -or $t.StartsWith('#')) { continue }
+        $partes = $t -split '\|', 2
+        if ($partes.Count -ne 2) { continue }
+        $itens += @{ File = (Join-Path $dir ([string]$partes[0]).Trim()); Target = ([string]$partes[1]).Trim() }
+    }
+    return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @($itens); Reason = '' }
+}
+
+function Invoke-WinForgeAclUndo {
+    <#
+    .SYNOPSIS
+        Reaplica as permissões guardadas pela última restauração de padrões.
+    .DESCRIPTION
+        Um icacls /restore por arquivo do conjunto mais recente, rodado a partir da pasta anotada no
+        índice - o icacls grava nomes RELATIVOS à pasta em que foi invocado, e restaurar da pasta
+        errada aplicaria a DACL de uma coisa em outra.
+
+        Duas conferências antes de qualquer argumento ser montado: a PASTA
+        (Confirm-WinForgeAclBackupRoot, regras da pasta padrão) e cada ARQUIVO
+        (Test-WinForgeAclBackupFile: dentro da pasta, direto nela, dono e DACL de backup). Arquivo
+        recusado é pulado com o motivo na tela; ele não derruba os outros, porque um backup adulterado
+        no meio do conjunto não é razão para deixar o disco pela metade.
+
+        Sem conjunto nenhum a função apenas DIZ isso. É o caso de quem clica no Desfazer sem nunca
+        ter restaurado nada, e ele não é erro.
+    .PARAMETER DryRun
+        Lista os /restore que seriam feitos, prefixados com '[simulação] ', sem rodar nada e sem
+        criar a pasta de backup.
+    .PARAMETER BackupRoot
+        Pasta de backup alternativa, para o teste. Vale a conferência da pasta padrão.
+    .OUTPUTS
+        Com -DryRun, as linhas do plano. Sem ele, escreve o andamento (é um passo de fluxo ao vivo).
+    #>
+    param(
+        [switch]$DryRun,
+        [string]$BackupRoot
+    )
+
+    $icacls = Get-WinForgeSystemExe -Name 'icacls.exe'
+    $conjunto = Get-WinForgeAclBackupSet -Root $BackupRoot
+
+    if ($DryRun) {
+        if (-not @($conjunto.Items).Count) { return @("[simulação] nada a desfazer: $($conjunto.Reason)") }
+        return @($conjunto.Items | ForEach-Object {
+            "[simulação] $icacls $($_.Target) /restore $($_.File) /C"
+        })
+    }
+    Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeAclUndo'
+
+    $conf = Confirm-WinForgeAclBackupRoot -Root $BackupRoot
+    if (-not $conf.Ok) {
+        Write-Error "A pasta de backup de permissões não é confiável ($($conf.Reason)). Nada foi restaurado."
+        return
+    }
+    $conjunto = Get-WinForgeAclBackupSet -Root $BackupRoot
+    if (-not @($conjunto.Items).Count) {
+        Write-Host "Nada a desfazer: $($conjunto.Reason)."
+        return
+    }
+    $julgIndice = Test-WinForgeAclBackupFile -Path ([string]$conjunto.Index) -Root ([string]$conf.Path)
+    if (-not $julgIndice.Trusted) {
+        Write-Error "O índice do backup foi recusado ($($julgIndice.Reason)). Nada foi restaurado."
+        return
+    }
+    Write-Host "Conjunto de backup $($conjunto.Stamp): $(@($conjunto.Items).Count) pasta(s) para restaurar."
+
+    $aplicados = 0
+    $recusados = 0
+    foreach ($item in @($conjunto.Items)) {
+        $julg = Test-WinForgeAclBackupFile -Path ([string]$item.File) -Root ([string]$conf.Path)
+        if (-not $julg.Trusted) {
+            Write-Error "Backup recusado ('$($item.File)'): $($julg.Reason)."
+            $recusados++
+            continue
+        }
+        if (-not (Test-Path -LiteralPath ([string]$item.Target) -PathType Container)) {
+            Write-Warning "A pasta '$($item.Target)' não existe mais; '$(Split-Path -Leaf ([string]$item.File))' fica de fora."
+            $recusados++
+            continue
+        }
+        Write-Host ''
+        Write-Host "Restaurando '$(Split-Path -Leaf ([string]$item.File))' a partir de '$($item.Target)'."
+        $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', [string]$item.File, '/C')
+        Write-Host ([string]$r.Text)
+        if ([int]$r.ExitCode -ne 0) { Write-Error "Este arquivo terminou com código $($r.ExitCode)." } else { $aplicados++ }
+    }
+    Write-Host ''
+    Write-Host "Desfazer concluído: $aplicados pasta(s) restauradas, $recusados fora."
+    Write-Host 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
 }
 
 #endregion
