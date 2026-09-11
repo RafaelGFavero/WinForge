@@ -115,7 +115,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepAclVerify": {
     "Content": "Permissões do disco C: - Verificar",
-    "Description": "Só lê, sem alterar nada. Confere o dono e a lista de permissões da raiz do disco, de Windows, Program Files, Program Files (x86), ProgramData, Users, Users\\Public e da sua pasta de usuário contra o padrão de fábrica. O confronto é feito por SID, então o resultado vale igual num Windows em inglês e num em português. Cada pasta sai marcada como 'padrão' ou com o que está faltando nela, e o texto termina com a contagem das diferenças.",
+    "Description": "Só lê, sem alterar nada. Confere o dono e a lista de permissões da raiz do disco, de Windows, Program Files, Program Files (x86), ProgramData, Users, Users\\Public e da sua pasta de usuário contra o padrão de fábrica. O confronto é feito por SID, então o resultado vale igual num Windows em inglês e num em português. Toda ACE de negação de acesso entra como diferença: nenhuma dessas pastas tem negação de fábrica, e uma negação plantada tranca o acesso sem tirar uma única permissão da lista. Cada pasta sai marcada como 'padrão' ou com o que está faltando nela, e o texto termina com a contagem das diferenças.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -123,7 +123,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepAclRestore": {
     "Content": "Permissões do disco C: - Restaurar padrões",
-    "Description": "ALTERA O SISTEMA E PEDE REINICIALIZAÇÃO. É o reparo de 'depois da atualização do fabricante perdi o acesso às minhas pastas', em seis fases: chkdsk /scan para conferir o volume antes de qualquer coisa, backup das listas atuais em %ProgramData%\\WinForge\\acl-backup, reescrita da raiz com as ACEs padrão por SID, secedit com o defltbase.inf (é ele, e não o icacls, que repõe Windows, Program Files, ProgramData e Users), conserto da sua pasta de usuário e, só quando a raiz responde acesso negado, um takeown sem recursão seguido de nova tentativa. Se o chkdsk acusar erro no volume, nada é alterado. Leva vários minutos e é preciso reiniciar o computador no fim. Exige o WinForge aberto como administrador.",
+    "Description": "ALTERA O SISTEMA E PEDE REINICIALIZAÇÃO. É o reparo de 'depois da atualização do fabricante perdi o acesso às minhas pastas', em seis fases: chkdsk /scan para conferir o volume antes de qualquer coisa; backup das listas atuais em %ProgramData%\\WinForge\\acl-backup; a raiz do disco, com as ACEs padrão por SID; as pastas do sistema (Windows, Program Files, Program Files (x86), ProgramData, Users e Users\\Public) uma a uma, com o icacls apontado só para a pasta e apenas naquelas que a verificação acusou; a sua pasta de usuário, religando a herança do conteúdo depois de conceder na raiz dela; e, só quando a raiz responde acesso negado, um takeown sem recursão seguido de nova tentativa. Negações de acesso saem antes das concessões, porque negar vence permitir. Se o chkdsk acusar erro no volume, nada é alterado. O que o Desfazer devolve é a lista de permissões, nunca a posse: pasta que trocar de dono aqui fica com o dono novo. Leva vários minutos e é preciso reiniciar o computador no fim. Exige o WinForge aberto como administrador.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -131,7 +131,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepAclUndo": {
     "Content": "Permissões do disco C: - Desfazer (restaurar backup)",
-    "Description": "ALTERA O SISTEMA. Reaplica com icacls /restore as listas de permissão que o botão de restaurar padrões guardou antes de mexer no disco, uma pasta por arquivo do conjunto mais recente. Só aceita arquivo que esteja diretamente na pasta protegida %ProgramData%\\WinForge\\acl-backup e cujo dono seja o SYSTEM ou o grupo Administradores; qualquer outro é recusado sem nem ser lido. Sem nenhum backup gravado o botão apenas diz isso e não toca em nada. Exige o WinForge aberto como administrador.",
+    "Description": "ALTERA O SISTEMA. Reaplica com icacls /restore as listas de permissão que o botão de restaurar padrões guardou antes de mexer no disco, uma pasta por arquivo do conjunto mais recente. Só aceita arquivo que esteja diretamente na pasta protegida %ProgramData%\\WinForge\\acl-backup e cujo dono seja o SYSTEM ou o grupo Administradores; qualquer outro é recusado sem nem ser lido. Dois limites: o /restore repõe a lista e não a posse, então troca de dono feita pela restauração permanece; e o backup fora do seu perfil é sem recursão, então volta a lista da pasta, não a de cada arquivo dentro dela. Sem nenhum backup gravado o botão apenas diz isso e não toca em nada. Exige o WinForge aberto como administrador.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",

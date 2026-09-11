@@ -1488,10 +1488,16 @@ function Invoke-WinForgeRepairCommand {
 #    quebrada fica pior do que estava. Todo direito concedido sai como '*S-1-5-32-544:(OI)(CI)F'.
 # 2. Nada é montado como TEXTO de comando. Cada chamada é -FilePath + -Arguments, com o vetor de
 #    argumentos inteiro, e todo executável vem por caminho completo de Get-WinForgeSystemExe.
-# 3. O icacls nunca é apontado para dentro de Windows nem de Program Files. Quem repõe as DACLs
-#    dessas duas (e as do registro) é o secedit com o defltbase.inf, que é o procedimento
-#    documentado pela Microsoft. '/reset /T' na raiz e 'takeown /R' também não existem aqui: os
-#    dois descem a árvore inteira apagando o que o Windows sabe e o WinForge não.
+# 3. Nas pastas do sistema (Windows, Program Files, Program Files (x86), ProgramData, Users,
+#    Users\Public) o icacls só faz duas coisas, e só NA PASTA: '/setowner' quando o dono está
+#    fora do padrão e '/inheritance:r /grant:r' com as ACEs medidas. '/reset', '/T' e '/R' não
+#    existem ali - os três descem a árvore inteira apagando o que o Windows sabe e o WinForge não.
+#
+# O secedit com o defltbase.inf foi tirado daqui depois de medido: no Windows 10 e no 11 as seções
+# [Registry Keys] e [File Security] desse arquivo vêm VAZIAS, então '/areas FILESTORE REGKEYS' não
+# repõe DACL nenhuma. Ele demorava minutos e não consertava nada. No lugar dele entrou a fase 4,
+# que aplica, pasta por pasta, a mesma tabela de esperados que a verificação usa - e só nas pastas
+# que a verificação acusou.
 
 function Get-WinForgeAclWellKnownSid {
     <#
@@ -1506,12 +1512,18 @@ function Get-WinForgeAclWellKnownSid {
         Hashtable de apelido -> SID.
     #>
     return @{
-        Sistema          = 'S-1-5-18'
-        Administradores  = 'S-1-5-32-544'
-        Usuarios         = 'S-1-5-32-545'
-        Autenticados     = 'S-1-5-11'
-        Todos            = 'S-1-1-0'
-        TrustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+        Sistema           = 'S-1-5-18'
+        Administradores   = 'S-1-5-32-544'
+        Usuarios          = 'S-1-5-32-545'
+        Autenticados      = 'S-1-5-11'
+        Todos             = 'S-1-1-0'
+        Criador           = 'S-1-3-0'
+        Lote              = 'S-1-5-3'
+        Interativo        = 'S-1-5-4'
+        Servico           = 'S-1-5-6'
+        PacotesApp        = 'S-1-15-2-1'
+        PacotesAppRestr   = 'S-1-15-2-2'
+        TrustedInstaller  = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
     }
 }
 
@@ -1611,8 +1623,22 @@ function Get-WinForgeAclExpected {
         Windows, Program Files e Program Files (x86) pedem dono TrustedInstaller e só 'Modify' para
         SYSTEM e Administradores: é o padrão do Windows moderno, em que nem o administrador tem
         controle total sobre os arquivos do sistema sem antes tomar a posse deles.
+
+        Além do piso de conferência, cada linha carrega o que a RESTAURAÇÃO aplica naquela pasta -
+        é a mesma tabela dos dois lados, para não existir um padrão para conferir e outro para
+        escrever. São três chaves:
+
+        - 'Dono': o SID que o '/setowner' repõe quando o dono está fora da lista aceita.
+        - 'Grant': as ACEs EFETIVAS na própria pasta, do '/inheritance:r /grant:r'.
+        - 'GrantExtra': as ACEs herdáveis de SOMENTE HERANÇA, de um '/grant' separado. Elas não
+          cabem na mesma chamada: o icacls só guarda a ÚLTIMA entrada de cada SID dentro de um
+          '/grant', então '*S-1-5-18:M' e '*S-1-5-18:(OI)(CI)(IO)F' juntos viram uma ACE só.
+        - 'Direta': a fase 4 conserta esta pasta. A raiz é da fase 3 e o perfil é da fase 5.
+
+        As ACEs saíram de Get-Acl nas pastas desta máquina (Windows 11 Pro 26200, pt-BR), e não de
+        documentação: é o que o Windows realmente tem quando ninguém mexeu.
     .OUTPUTS
-        Vetor de hashtables com Path, Nome, Donos e Aces.
+        Vetor de hashtables com Path, Nome, Donos, Aces, Dono, Grant, GrantExtra e Direta.
     #>
     $sid = Get-WinForgeAclWellKnownSid
     $raiz = Get-WinForgeSystemDriveRoot
@@ -1627,22 +1653,48 @@ function Get-WinForgeAclExpected {
 
     $itens = @()
     $itens += @{
-        Path  = $raiz
-        Nome  = "Raiz do disco do sistema ($raiz)"
-        Donos = @($sid.Sistema, $sid.Administradores, $sid.TrustedInstaller)
-        Aces  = @(
+        Path       = $raiz
+        Nome       = "Raiz do disco do sistema ($raiz)"
+        Donos      = @($sid.Sistema, $sid.Administradores, $sid.TrustedInstaller)
+        Dono       = ''
+        Direta     = $false
+        Grant      = @()
+        GrantExtra = @()
+        Aces       = @(
             @{ Sid = $sid.Sistema;         Rights = $F;  Rotulo = 'SYSTEM com controle total' }
             @{ Sid = $sid.Administradores; Rights = $F;  Rotulo = 'Administradores com controle total' }
             @{ Sid = $sid.Usuarios;        Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
             @{ Sid = $sid.Autenticados;    Rights = $M;  Rotulo = 'Usuários Autenticados podendo modificar o que criarem' }
         )
     }
+    # Windows, Program Files e Program Files (x86) têm a MESMA lista nesta máquina: cada princípio
+    # aparece duas vezes, uma valendo na própria pasta e uma de somente herança para o que nascer
+    # abaixo. O TrustedInstaller é o único cuja ACE herdável é só de container ((CI), sem (OI)).
     foreach ($nome in @('Windows', 'Program Files', 'Program Files (x86)')) {
         $itens += @{
-            Path  = (Join-Path $raiz $nome)
-            Nome  = $nome
-            Donos = @($sid.TrustedInstaller)
-            Aces  = @(
+            Path       = (Join-Path $raiz $nome)
+            Nome       = $nome
+            Donos      = @($sid.TrustedInstaller)
+            Dono       = $sid.TrustedInstaller
+            Direta     = $true
+            Grant      = @(
+                "*$($sid.Sistema):M"              # SYSTEM, modificar, na pasta
+                "*$($sid.Administradores):M"      # Administradores, modificar, na pasta
+                "*$($sid.Usuarios):RX"            # Usuários, ler e executar
+                "*$($sid.TrustedInstaller):F"     # TrustedInstaller, controle total
+                "*$($sid.PacotesApp):RX"          # TODOS OS PACOTES DE APLICATIVOS
+                "*$($sid.PacotesAppRestr):RX"     # TODOS OS PACOTES DE APLICATIVOS RESTRITOS
+            )
+            GrantExtra = @(
+                "*$($sid.Criador):(OI)(CI)(IO)F"           # CREATOR OWNER no que for criado abaixo
+                "*$($sid.Sistema):(OI)(CI)(IO)F"
+                "*$($sid.Administradores):(OI)(CI)(IO)F"
+                "*$($sid.Usuarios):(OI)(CI)(IO)RX"
+                "*$($sid.TrustedInstaller):(CI)(IO)F"      # só subpastas, como no padrão medido
+                "*$($sid.PacotesApp):(OI)(CI)(IO)RX"
+                "*$($sid.PacotesAppRestr):(OI)(CI)(IO)RX"
+            )
+            Aces       = @(
                 @{ Sid = $sid.Sistema;          Rights = $M;  Rotulo = 'SYSTEM podendo modificar' }
                 @{ Sid = $sid.Administradores;  Rights = $M;  Rotulo = 'Administradores podendo modificar' }
                 @{ Sid = $sid.Usuarios;         Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
@@ -1650,32 +1702,77 @@ function Get-WinForgeAclExpected {
             )
         }
     }
+    # ProgramData: as ACEs de SYSTEM, Administradores e Usuários valem na pasta E abaixo (sem (IO)).
+    # A segunda ACE dos Usuários é o direito de CRIAR sem poder alterar o que já existe, que é o que
+    # deixa um programa gravar a própria subpasta de dados sem mexer na dos outros.
     $itens += @{
-        Path  = (Join-Path $raiz 'ProgramData')
-        Nome  = 'ProgramData'
-        Donos = @($sid.Sistema, $sid.Administradores)
-        Aces  = @(
+        Path       = (Join-Path $raiz 'ProgramData')
+        Nome       = 'ProgramData'
+        Donos      = @($sid.Sistema, $sid.Administradores)
+        Dono       = $sid.Sistema
+        Direta     = $true
+        Grant      = @(
+            "*$($sid.Sistema):(OI)(CI)F"
+            "*$($sid.Administradores):(OI)(CI)F"
+            "*$($sid.Usuarios):(OI)(CI)RX"
+        )
+        GrantExtra = @(
+            "*$($sid.Criador):(OI)(CI)(IO)F"
+            "*$($sid.Usuarios):(CI)(WD,AD,WEA,WA)"
+        )
+        Aces       = @(
             @{ Sid = $sid.Sistema;         Rights = $F;  Rotulo = 'SYSTEM com controle total' }
             @{ Sid = $sid.Administradores; Rights = $F;  Rotulo = 'Administradores com controle total' }
             @{ Sid = $sid.Usuarios;        Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
         )
     }
     $itens += @{
-        Path  = (Join-Path $raiz 'Users')
-        Nome  = 'Users'
-        Donos = @($sid.Sistema, $sid.Administradores)
-        Aces  = @(
+        Path       = (Join-Path $raiz 'Users')
+        Nome       = 'Users'
+        Donos      = @($sid.Sistema, $sid.Administradores)
+        Dono       = $sid.Sistema
+        Direta     = $true
+        Grant      = @(
+            "*$($sid.Todos):RX"
+            "*$($sid.Sistema):(OI)(CI)F"
+            "*$($sid.Administradores):(OI)(CI)F"
+            "*$($sid.Usuarios):RX"
+        )
+        GrantExtra = @(
+            "*$($sid.Todos):(OI)(CI)(IO)RX"
+            "*$($sid.Usuarios):(OI)(CI)(IO)RX"
+        )
+        Aces       = @(
             @{ Sid = $sid.Sistema;         Rights = $F;  Rotulo = 'SYSTEM com controle total' }
             @{ Sid = $sid.Administradores; Rights = $F;  Rotulo = 'Administradores com controle total' }
             @{ Sid = $sid.Usuarios;        Rights = $RX; Rotulo = 'Usuários podendo ler e executar' }
             @{ Sid = $sid.Todos;           Rights = $RX; Rotulo = 'Todos podendo ler e executar' }
         )
     }
+    # Users\Public é a pasta compartilhada: quem entrou na máquina de verdade (INTERATIVO, LOTE,
+    # SERVIÇO) pode criar e apagar dentro dela, e é por isso que ela tem ACE para esses três e não
+    # para 'Usuários'. '(M,DC)' é modificar mais apagar subpasta; '(RX,WD,AD)' é ler, executar e
+    # criar, sem poder alterar o que já está lá.
     $itens += @{
-        Path  = (Join-Path $raiz 'Users\Public')
-        Nome  = 'Users\Public'
-        Donos = @($sid.Sistema, $sid.Administradores)
-        Aces  = @(
+        Path       = (Join-Path $raiz 'Users\Public')
+        Nome       = 'Users\Public'
+        Donos      = @($sid.Sistema, $sid.Administradores)
+        Dono       = $sid.Sistema
+        Direta     = $true
+        Grant      = @(
+            "*$($sid.Lote):(RX,WD,AD)"
+            "*$($sid.Interativo):(RX,WD,AD)"
+            "*$($sid.Servico):(RX,WD,AD)"
+            "*$($sid.Sistema):(OI)(CI)F"
+            "*$($sid.Administradores):(OI)(CI)F"
+        )
+        GrantExtra = @(
+            "*$($sid.Criador):(OI)(CI)(IO)F"
+            "*$($sid.Lote):(OI)(CI)(IO)(M,DC)"
+            "*$($sid.Interativo):(OI)(CI)(IO)(M,DC)"
+            "*$($sid.Servico):(OI)(CI)(IO)(M,DC)"
+        )
+        Aces       = @(
             @{ Sid = $sid.Sistema;         Rights = $F; Rotulo = 'SYSTEM com controle total' }
             @{ Sid = $sid.Administradores; Rights = $F; Rotulo = 'Administradores com controle total' }
         )
@@ -1691,10 +1788,14 @@ function Get-WinForgeAclExpected {
             $aces += @{ Sid = $meu; Rights = $F; Rotulo = 'o usuário atual com controle total' }
         }
         $itens += @{
-            Path  = $perfil
-            Nome  = "Pasta do usuário atual ($perfil)"
-            Donos = @($sid.Sistema, $sid.Administradores, $meu)
-            Aces  = $aces
+            Path       = $perfil
+            Nome       = "Pasta do usuário atual ($perfil)"
+            Donos      = @($sid.Sistema, $sid.Administradores, $meu)
+            Dono       = $meu
+            Direta     = $false
+            Grant      = @()
+            GrantExtra = @()
+            Aces       = $aces
         }
     }
     return @($itens)
@@ -1714,10 +1815,15 @@ function Compare-WinForgeAclExpected {
         SID traduz e como SecurityIdentifier quando não - por isso a tradução explícita, e por isso
         uma ACE cuja identidade não traduz para SID é PULADA em vez de derrubar a conferência.
 
-        As ACEs de um mesmo SID são somadas antes de comparar. Elas costumam vir em pares - uma
-        efetiva na própria pasta e uma herdável de somente herança para o que nascer abaixo - e cada
-        uma sozinha é um pedaço do direito. Só as de PERMISSÃO entram: uma ACE de negação é assunto
-        de quem a criou, e tratá-la aqui faria a verificação opinar sobre configuração legítima.
+        As ACEs de PERMISSÃO de um mesmo SID são somadas antes de comparar. Elas costumam vir em
+        pares - uma efetiva na própria pasta e uma herdável de somente herança para o que nascer
+        abaixo - e cada uma sozinha é um pedaço do direito.
+
+        ACE de NEGAÇÃO é diferença, qualquer uma. Nenhuma das oito pastas conferidas tem negação no
+        padrão de fábrica, e a negação VENCE a permissão: uma linha 'Deny Todos:(OI)(CI)F' plantada
+        em C:\Users tranca o disco inteiro sem tirar uma única ACE de permissão da lista. Somar só
+        as permissões deixaria essa pasta passar como 'padrão' - que é exatamente o sintoma que
+        estes três botões existem para explicar.
     .OUTPUTS
         Vetor de textos, vazio quando está tudo no padrão.
     #>
@@ -1739,12 +1845,17 @@ function Compare-WinForgeAclExpected {
 
     $mascaras = @{}
     foreach ($ace in @($Acl.Access)) {
-        if ([string]$ace.AccessControlType -ne 'Allow') { continue }
         $s = $ace.IdentityReference
         try {
             if ($s -isnot [System.Security.Principal.SecurityIdentifier]) { $s = $s.Translate([System.Security.Principal.SecurityIdentifier]) }
-        } catch { continue }
-        $chave = [string]$s.Value
+        } catch { $s = $null }
+        $chave = if ($null -eq $s) { '' } else { [string]$s.Value }
+        if ([string]$ace.AccessControlType -ne 'Allow') {
+            $quem = if ([string]::IsNullOrWhiteSpace($chave)) { [string]$ace.IdentityReference } else { "$(Get-WinForgeAclName -Sid $chave) [$chave]" }
+            $dif.Add("negação de acesso para $quem ($($ace.FileSystemRights)) - não existe no padrão e vence qualquer permissão")
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($chave)) { continue }
         $mascaras[$chave] = ([long]$mascaras[$chave]) -bor (ConvertTo-WinForgeAclMask -Rights ([int]$ace.FileSystemRights))
     }
 
@@ -1758,6 +1869,39 @@ function Compare-WinForgeAclExpected {
         }
     }
     return @($dif)
+}
+
+function Get-WinForgeAclDenySid {
+    <#
+    .SYNOPSIS
+        Quais dos SIDs procurados têm ACE de NEGAÇÃO nesta lista de permissões. Função pura.
+    .DESCRIPTION
+        A restauração precisa saber disto antes de conceder: '/grant' ADICIONA permissão e não tira
+        negação, e a negação vence. Numa pasta com 'Deny Todos:F' a fase de concessão termina com
+        código 0, a lista fica com as ACEs certas e o acesso continua negado - o pior resultado
+        possível, porque parece que funcionou.
+
+        Só se procura pelos SIDs pedidos, e o '/remove:d' só roda quando algum deles aparece:
+        apagar negação que ninguém conferiu é decidir por configuração legítima de outra pessoa.
+    .OUTPUTS
+        Vetor com os SIDs (texto) que têm negação, na ordem em que foram pedidos. Vazio quando não
+        há nenhuma.
+    #>
+    param(
+        [Parameter(Mandatory)]$Acl,
+        [Parameter(Mandatory)][string[]]$Sids
+    )
+
+    $achados = @{}
+    foreach ($ace in @($Acl.Access)) {
+        if ([string]$ace.AccessControlType -eq 'Allow') { continue }
+        $s = $ace.IdentityReference
+        try {
+            if ($s -isnot [System.Security.Principal.SecurityIdentifier]) { $s = $s.Translate([System.Security.Principal.SecurityIdentifier]) }
+        } catch { continue }
+        $achados[[string]$s.Value] = $true
+    }
+    return @($Sids | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) -and $achados.ContainsKey([string]$_) } | ForEach-Object { [string]$_ })
 }
 
 function Get-WinForgeAclReport {
@@ -1794,7 +1938,7 @@ function Get-WinForgeAclReport {
         $linhas.Add('-' * 78)
         if (-not (Test-Path -LiteralPath $esp.Path)) {
             $linhas.Add('  Não existe nesta máquina.')
-            $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @(); Missing = $true }
+            $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @(); Missing = $true; OwnerOk = $true }
             continue
         }
         $lista = $null
@@ -1802,12 +1946,19 @@ function Get-WinForgeAclReport {
         if ($null -eq $lista) {
             $linhas.Add('  A lista de permissões não pôde ser lida.')
             $total++
-            $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @('a lista de permissões não pôde ser lida'); Missing = $false }
+            $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @('a lista de permissões não pôde ser lida'); Missing = $false; OwnerOk = $true }
             continue
         }
 
         $dono = $null
         try { $dono = $lista.GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { $dono = $null }
+        # O '/setowner' da restauração só roda quando o dono está fora da lista aceita: trocar o
+        # dono de uma pasta que já está no padrão é mexer onde não havia problema.
+        $donoOk = $false
+        if ($dono) {
+            $aceitos = @($esp.Donos | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $donoOk = ((-not $aceitos.Count) -or ($aceitos -contains [string]$dono.Value))
+        }
         $linhas.Add("  Dono: $(if ($dono) { "$(Get-WinForgeAclName -Sid ([string]$dono.Value)) [$($dono.Value)]" } else { 'não pôde ser lido' })")
         foreach ($ace in @($lista.Access)) {
             $s = $ace.IdentityReference
@@ -1823,7 +1974,7 @@ function Get-WinForgeAclReport {
             foreach ($d in $dif) { $linhas.Add("  -> DIFERENÇA: $d") }
             $total += $dif.Count
         }
-        $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @($dif); Missing = $false }
+        $itens += @{ Path = $esp.Path; Nome = $esp.Nome; Differences = @($dif); Missing = $false; OwnerOk = $donoOk }
     }
 
     $linhas.Add('')
@@ -1949,21 +2100,36 @@ function Get-WinForgeAclRestorePlan {
            é consertar o que vai corromper de novo. Se ele acusar erro, a restauração PARA aqui.
         2. Backup das listas atuais, uma por pasta: a raiz, cada pasta de primeiro nível (sem
            recursão) e a pasta do usuário (com /T). É o que o botão Desfazer consome.
-        3. A raiz. '/inheritance:r' + um '/grant:r' com as cinco ACEs padrão, por SID.
-        4. secedit com o defltbase.inf. É ELE quem repõe as DACLs de Windows, Program Files,
-           ProgramData, Users e do registro - o icacls não é apontado para dentro dessas pastas.
-        5. A pasta do usuário: as três ACEs padrão nela e '/reset /T' ABAIXO dela, que devolve a
-           herança ao conteúdo. '/reset /T' aqui é seguro porque o alvo é uma pasta de perfil; na
-           raiz ele apagaria a DACL de tudo que existe no disco.
+        3. A raiz. Negações fora ('/remove:d', só se houver), '/inheritance:r' + '/grant:r' com as
+           ACEs padrão e um '/grant' separado para a segunda ACE dos Usuários Autenticados.
+        4. Pasta por pasta: Windows, Program Files, Program Files (x86), ProgramData, Users e
+           Users\Public. Para cada uma, '/setowner' (só se o dono estiver fora do padrão) e
+           '/inheritance:r /grant:r' + '/grant' com as ACEs medidas de Get-WinForgeAclExpected -
+           NA PASTA, sem '/T', sem '/reset'. E só nas pastas que a verificação acusou: quem decide
+           é Invoke-WinForgeAclRestore, com o relatório na mão.
+        5. A pasta do usuário: '/setowner' (condicional), negações fora (condicional), as três ACEs
+           padrão na RAIZ do perfil e, depois delas, '/inheritance:e /T' no CONTEÚDO. A ordem é
+           dependência: a herança só propaga o que já está concedido na raiz. '/reset /T' não é
+           usado - ele apagaria as ACEs explícitas que os próprios aplicativos põem
+           (AppData\Local\Packages, OneDrive), e '/inheritance:e' as preserva.
         6. takeown /F <raiz> /A, SEM recursão, e só quando a fase 3 responder "acesso negado". O
            passo vem marcado com 'Conditional' e quem decide rodá-lo é Invoke-WinForgeAclRestore.
+
+        O secedit saiu do plano: no Windows 10 e no 11 o defltbase.inf tem [Registry Keys] e
+        [File Security] VAZIAS, então '/areas FILESTORE REGKEYS' não repõe DACL nenhuma. A fase 4
+        faz esse trabalho explicitamente, com a tabela medida.
 
         Cada passo de backup carrega 'Backup' (o arquivo que vai ser gravado) e 'Target' (a pasta a
         partir da qual o /restore tem de rodar). O alvo não é adivinhado depois: o icacls grava
         NOMES RELATIVOS à pasta em que foi invocado, então o Desfazer precisa da mesma pasta, e ela
         é anotada aqui, no único lugar em que a regra existe.
+
+        Um '/grant' por SID por chamada: dentro de um mesmo '/grant' o icacls guarda só a ÚLTIMA
+        entrada de cada SID, então '*S-1-5-11:(OI)(CI)(IO)M' e '*S-1-5-11:AD' na mesma linha viram
+        uma ACE só - e o direito de criar arquivo na raiz sumiria sem nenhum erro.
     .OUTPUTS
-        Vetor de hashtables com Phase, Title, FilePath, Arguments e, no backup, Path/Backup/Target.
+        Vetor de hashtables com Phase, Title, FilePath, Arguments e, conforme o passo,
+        Path/Backup/Target (fase 2), Folder/Kind (fases 3 a 5) e Conditional.
     #>
     param(
         [string]$Profile,
@@ -1976,12 +2142,8 @@ function Get-WinForgeAclRestorePlan {
     $raiz = Get-WinForgeSystemDriveRoot
     $unidade = $raiz.TrimEnd('\')
     $icacls = Get-WinForgeSystemExe -Name 'icacls.exe'
-    $secedit = Get-WinForgeSystemExe -Name 'secedit.exe'
     $takeown = Get-WinForgeSystemExe -Name 'takeown.exe'
     $chkdsk = Get-WinForgeSystemExe -Name 'chkdsk.exe'
-    $windir = ''
-    try { $windir = [string][System.IO.Path]::GetDirectoryName([string][Environment]::SystemDirectory) } catch { $windir = '' }
-    if ([string]::IsNullOrWhiteSpace($windir)) { $windir = Join-Path $raiz 'Windows' }
     if ([string]::IsNullOrWhiteSpace($Stamp)) { $Stamp = (Get-Date).ToString('yyyyMMdd-HHmmss') }
     if ([string]::IsNullOrWhiteSpace($BackupRoot)) { $BackupRoot = Get-WinForgeAclBackupRoot }
 
@@ -2031,8 +2193,23 @@ function Get-WinForgeAclRestorePlan {
         }
     }
 
+    # ---- Fase 3: a raiz. As negações saem antes da concessão porque negação vence permissão.
+    $negarRaiz = @($sid.Todos, $sid.Autenticados)
+    if (-not [string]::IsNullOrWhiteSpace($UserSid)) { $negarRaiz = @($UserSid) + $negarRaiz }
+    $plano += @{
+        Phase       = 3
+        Kind        = 'remove-deny'
+        Folder      = $raiz
+        DenySids    = $negarRaiz
+        Title       = "Retirar negações de acesso da raiz '$raiz' (só se houver alguma)"
+        FilePath    = $icacls
+        Arguments   = @($raiz) + @($negarRaiz | ForEach-Object { '/remove:d'; "*$_" })
+        Conditional = $true
+    }
     $plano += @{
         Phase     = 3
+        Kind      = 'grant'
+        Folder    = $raiz
         Title     = "Permissões padrão da raiz '$raiz'"
         FilePath  = $icacls
         Arguments = @(
@@ -2040,26 +2217,93 @@ function Get-WinForgeAclRestorePlan {
             "*$($sid.Administradores):(OI)(CI)F",
             "*$($sid.Sistema):(OI)(CI)F",
             "*$($sid.Usuarios):(OI)(CI)RX",
-            "*$($sid.Autenticados):(OI)(CI)(IO)M",
-            "*$($sid.Autenticados):AD"
+            "*$($sid.Autenticados):(OI)(CI)(IO)M"
         )
     }
     $plano += @{
-        Phase     = 4
-        Title     = 'DACLs padrão do Windows e do registro (secedit com o defltbase.inf)'
-        FilePath  = $secedit
-        Arguments = @('/configure', '/cfg', (Join-Path $windir 'inf\defltbase.inf'), '/db', (Join-Path $BackupRoot 'defltbase.sdb'), '/areas', 'FILESTORE', 'REGKEYS', '/verbose')
+        Phase     = 3
+        Kind      = 'grant-extra'
+        Folder    = $raiz
+        Title     = "Direito de criar arquivo na raiz '$raiz' para os Usuários Autenticados"
+        FilePath  = $icacls
+        Arguments = @($raiz, '/grant', "*$($sid.Autenticados):AD")
     }
+
+    # ---- Fase 4: as seis pastas do sistema, uma a uma, com a tabela de esperados.
+    foreach ($esp in @(Get-WinForgeAclExpected | Where-Object { $_.Direta })) {
+        $pasta = [string]$esp.Path
+        if (-not [string]::IsNullOrWhiteSpace([string]$esp.Dono)) {
+            $plano += @{
+                Phase       = 4
+                Kind        = 'setowner'
+                Folder      = $pasta
+                Title       = "Dono padrão de '$pasta'"
+                FilePath    = $icacls
+                Arguments   = @($pasta, '/setowner', "*$([string]$esp.Dono)")
+                Conditional = $true
+            }
+        }
+        if (@($esp.Grant).Count) {
+            $plano += @{
+                Phase     = 4
+                Kind      = 'grant'
+                Folder    = $pasta
+                Title     = "Permissões padrão de '$pasta'"
+                FilePath  = $icacls
+                Arguments = @($pasta, '/inheritance:r', '/grant:r') + @($esp.Grant | ForEach-Object { [string]$_ })
+            }
+        }
+        if (@($esp.GrantExtra).Count) {
+            $plano += @{
+                Phase     = 4
+                Kind      = 'grant-extra'
+                Folder    = $pasta
+                Title     = "Permissões herdáveis de '$pasta'"
+                FilePath  = $icacls
+                Arguments = @($pasta, '/grant') + @($esp.GrantExtra | ForEach-Object { [string]$_ })
+            }
+        }
+    }
+
+    # ---- Fase 5: o perfil. Concessão na RAIZ do perfil primeiro, herança do conteúdo DEPOIS.
     if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+        if (-not [string]::IsNullOrWhiteSpace($UserSid)) {
+            $plano += @{
+                Phase       = 5
+                Kind        = 'setowner'
+                Folder      = [string]$Profile
+                Title       = "Dono da pasta '$Profile'"
+                FilePath    = $icacls
+                Arguments   = @([string]$Profile, '/setowner', "*$UserSid")
+                Conditional = $true
+            }
+        }
+        $negarPerfil = @($sid.Todos, $sid.Autenticados)
+        if (-not [string]::IsNullOrWhiteSpace($UserSid)) { $negarPerfil = @($UserSid) + $negarPerfil }
+        $plano += @{
+            Phase       = 5
+            Kind        = 'remove-deny'
+            Folder      = [string]$Profile
+            DenySids    = $negarPerfil
+            Title       = "Retirar negações de acesso de '$Profile' (só se houver alguma)"
+            FilePath    = $icacls
+            Arguments   = @([string]$Profile) + @($negarPerfil | ForEach-Object { '/remove:d'; "*$_" })
+            Conditional = $true
+        }
         $grant = @([string]$Profile, '/inheritance:r', '/grant:r')
         if (-not [string]::IsNullOrWhiteSpace($UserSid)) { $grant += "*$($UserSid):(OI)(CI)F" }
         $grant += "*$($sid.Sistema):(OI)(CI)F"
         $grant += "*$($sid.Administradores):(OI)(CI)F"
-        $plano += @{ Phase = 5; Title = "Permissões padrão da pasta '$Profile'"; FilePath = $icacls; Arguments = $grant }
-        $plano += @{ Phase = 5; Title = "Herança do conteúdo de '$Profile'"; FilePath = $icacls; Arguments = @([string]$Profile, '/reset', '/T', '/C', '/Q') }
+        $plano += @{ Phase = 5; Kind = 'grant'; Folder = [string]$Profile; Title = "Permissões padrão da pasta '$Profile'"; FilePath = $icacls; Arguments = $grant }
+        # '/inheritance:e' LIGA a herança em cada item de dentro, e é o que faz as três ACEs da raiz
+        # do perfil descerem. O que os aplicativos puseram à mão continua lá: as ACEs de pacote em
+        # AppData\Local\Packages e as do OneDrive são explícitas, e ligar herança não apaga nenhuma.
+        $plano += @{ Phase = 5; Kind = 'inherit'; Folder = [string]$Profile; Title = "Herança do conteúdo de '$Profile'"; FilePath = $icacls; Arguments = @((Join-Path ([string]$Profile) '*'), '/inheritance:e', '/T', '/C', '/Q') }
     }
     $plano += @{
         Phase       = 6
+        Kind        = 'takeown'
+        Folder      = $raiz
         Title       = "Assumir a posse da raiz '$raiz' (só se a fase 3 responder acesso negado)"
         FilePath    = $takeown
         Arguments   = @('/F', $raiz, '/A')
@@ -2068,16 +2312,70 @@ function Get-WinForgeAclRestorePlan {
     return @($plano)
 }
 
+function Select-WinForgeAclTargetedSteps {
+    <#
+    .SYNOPSIS
+        Quais passos da fase 4 rodam, dado o relatório da verificação. Função pura.
+    .DESCRIPTION
+        A fase 4 não passa por todas as seis pastas: passa pelas que a verificação ACUSOU. Numa
+        máquina em que só o ProgramData ficou torto, reescrever a lista de C:\Windows é criar risco
+        onde não havia problema - e é onde mora o estrago irreversível deste botão.
+
+        Duas regras, e é só isto que a função faz:
+
+        - Pasta sem diferença, ou que não existe nesta máquina, não entra.
+        - O '/setowner' só entra quando o relatório disse que o dono está fora do padrão
+          ('OwnerOk' falso). Trocar o dono de uma pasta cujo dono já está certo não conserta nada e
+          ainda quebra o '/restore' do Desfazer, que devolve DACL e não dono.
+
+        Ser pura é o que permite provar as duas com um relatório montado na memória, sem tocar em
+        pasta nenhuma da máquina de quem compila.
+    .PARAMETER Plan
+        A saída de Get-WinForgeAclRestorePlan.
+    .PARAMETER Report
+        O objeto de Get-WinForgeAclReport -AsObject (ou um equivalente montado no teste).
+    .OUTPUTS
+        O subconjunto dos passos da fase 4, na mesma ordem do plano.
+    #>
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [Parameter(Mandatory)]$Report
+    )
+
+    $acusadas = @{}
+    foreach ($item in @($Report.Items)) {
+        if ($item.Missing) { continue }
+        if (-not @($item.Differences).Count) { continue }
+        $acusadas[([string]$item.Path).TrimEnd('\')] = [bool]$item.OwnerOk
+    }
+    $saida = @()
+    foreach ($passo in @($Plan | Where-Object { [int]$_.Phase -eq 4 })) {
+        $chave = ([string]$passo.Folder).TrimEnd('\')
+        if (-not $acusadas.ContainsKey($chave)) { continue }
+        if (([string]$passo.Kind -eq 'setowner') -and $acusadas[$chave]) { continue }
+        $saida += $passo
+    }
+    return @($saida)
+}
+
 function Invoke-WinForgeAclRestore {
     <#
     .SYNOPSIS
         Devolve as permissões do disco do sistema ao padrão do Windows, guardando antes as atuais.
     .DESCRIPTION
-        Conduz as fases de Get-WinForgeAclRestorePlan com as duas decisões que uma lista fixa de
-        passos não sabe tomar:
+        Conduz as fases de Get-WinForgeAclRestorePlan com as decisões que uma lista fixa de passos
+        não sabe tomar:
 
+        - Antes de tudo, a elevação. Sem ela nada roda: a pasta de backup nasceria com a identidade
+          atual como dona e o icacls não escreveria em pasta nenhuma do sistema. A pergunta vem
+          antes da primeira pasta ser criada, para a recusa não deixar rastro.
         - Depois da fase 1, o código do chkdsk. Diferente de zero significa erro no volume, e aí a
           função PARA sem alterar permissão nenhuma e manda agendar o chkdsk /f.
+        - Nas fases 3 e 5, a existência de ACE de NEGAÇÃO. '/grant' adiciona permissão e não tira
+          negação, e negação vence: sem o '/remove:d' antes, a fase termina com código 0, a lista
+          fica com as ACEs certas e o acesso continua negado.
+        - Na fase 4, o RELATÓRIO. Só as pastas que a verificação acusou são reescritas, e o
+          '/setowner' só roda onde o dono está fora do padrão (Select-WinForgeAclTargetedSteps).
         - Depois da fase 3, o código do icacls. 5 é "acesso negado": a raiz pertence a alguém que
           nem o administrador alcança, e é o único caso em que o takeown da fase 6 roda - uma vez,
           só na raiz, sem recursão, seguido de UMA segunda tentativa da fase 3.
@@ -2108,6 +2406,7 @@ function Invoke-WinForgeAclRestore {
     try { $perfil = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile) } catch { $perfil = '' }
     $meuSid = ''
     try { $meuSid = [string][System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $meuSid = '' }
+    $raiz = Get-WinForgeSystemDriveRoot
     $raizBackup = Get-WinForgeAclBackupRoot $BackupRoot
     $plano = @(Get-WinForgeAclRestorePlan -Profile $perfil -UserSid $meuSid -BackupRoot $raizBackup)
 
@@ -2118,6 +2417,13 @@ function Invoke-WinForgeAclRestore {
     }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeAclRestore'
 
+    # A elevação vem antes de QUALQUER efeito colateral, inclusive o de criar a pasta de backup:
+    # sem elevação ela nasceria com a identidade atual como dona e ficaria plantada, fazendo a
+    # conferência recusar todas as restaurações seguintes desta máquina.
+    if (-not (Test-WinForgeRepairElevated)) {
+        Write-Error 'Esta ação precisa do WinForge aberto como administrador. Nada foi alterado e nenhuma pasta foi criada.'
+        return
+    }
     if ([string]::IsNullOrWhiteSpace($perfil) -or [string]::IsNullOrWhiteSpace($meuSid)) {
         Write-Error 'Não foi possível descobrir a pasta e o SID do usuário atual. Nada foi alterado.'
         return
@@ -2177,8 +2483,15 @@ function Invoke-WinForgeAclRestore {
     Write-Host ''
     Write-Host "$gravados pasta(s) guardadas no conjunto $carimbo. O botão Desfazer usa exatamente este conjunto."
 
+    # ---- O retrato de antes. É ele que diz QUAIS pastas a fase 4 reescreve, e é o mesmo texto que
+    # o botão Verificar mostra - tirado aqui, com o backup já gravado e nada ainda alterado.
+    $relatorio = Get-WinForgeAclReport -AsObject
+    Write-Host ''
+    Write-Host "Verificação antes de alterar: $($relatorio.Differences) diferença(s) em relação ao padrão do Windows."
+
     # ---- Fase 3 (e, só em acesso negado, a 6 seguida de uma segunda tentativa da 3).
-    $fase3 = @($plano | Where-Object { [int]$_.Phase -eq 3 })[0]
+    $fase3 = @($plano | Where-Object { [int]$_.Phase -eq 3 -and [string]$_.Kind -eq 'grant' })[0]
+    Invoke-WinForgeAclDenyRemoval -Plan $plano -Phase 3 -Path $raiz
     Write-Host ''
     Write-Host "Fase 3 de 6 - $($fase3.Title)"
     $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase3.FilePath) -Arguments @($fase3.Arguments)
@@ -2194,23 +2507,55 @@ function Invoke-WinForgeAclRestore {
         Write-Host ([string]$r.Text)
     }
     if ([int]$r.ExitCode -ne 0) {
-        # Segue assim mesmo: o secedit da fase 4 conserta Windows, Program Files, ProgramData e
-        # Users independentemente da raiz, e parar aqui deixaria a máquina no meio do caminho.
+        # Segue assim mesmo: as fases 4 e 5 consertam as pastas do sistema e o perfil
+        # independentemente da raiz, e parar aqui deixaria a máquina no meio do caminho.
         Write-Error "As permissões da raiz não puderam ser aplicadas (código $($r.ExitCode)). As fases seguintes continuam."
+    } else {
+        foreach ($passo in @($plano | Where-Object { [int]$_.Phase -eq 3 -and [string]$_.Kind -eq 'grant-extra' })) {
+            Write-Host "Fase 3 de 6 - $($passo.Title)"
+            $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
+            Write-Host ([string]$r.Text)
+            if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
+        }
     }
 
-    # ---- Fase 4: quem cuida de Windows e Program Files.
-    $fase4 = @($plano | Where-Object { [int]$_.Phase -eq 4 })[0]
+    # ---- Fase 4: as pastas do sistema que a verificação acusou, uma a uma. Pasta no padrão não é
+    # tocada: reescrever a lista de C:\Windows numa máquina em que ela está certa é criar o
+    # problema que este botão existe para resolver.
+    $fase4 = @(Select-WinForgeAclTargetedSteps -Plan $plano -Report $relatorio)
     Write-Host ''
-    Write-Host "Fase 4 de 6 - $($fase4.Title). É a fase mais demorada."
-    $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase4.FilePath) -Arguments @($fase4.Arguments)
-    Write-Host ([string]$r.Text)
-    if ([int]$r.ExitCode -ne 0) { Write-Error "O secedit terminou com código $($r.ExitCode); veja o %windir%\security\logs\scesrv.log." }
+    if (-not $fase4.Count) {
+        Write-Host 'Fase 4 de 6 - nenhuma pasta do sistema está fora do padrão; nada a reescrever aqui.'
+    } else {
+        $quantas = @($fase4 | ForEach-Object { [string]$_.Folder } | Sort-Object -Unique).Count
+        Write-Host "Fase 4 de 6 - $quantas pasta(s) do sistema fora do padrão."
+        foreach ($passo in $fase4) {
+            Write-Host ''
+            Write-Host "Fase 4 de 6 - $($passo.Title)"
+            $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
+            Write-Host ([string]$r.Text)
+            if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
+        }
+    }
 
-    # ---- Fase 5: a pasta do usuário.
+    # ---- Fase 5: a pasta do usuário. A ordem é dependência: dono, negações, concessão na raiz do
+    # perfil e SÓ ENTÃO a herança do conteúdo, que é o que faz as três ACEs descerem.
+    $perfilOk = $true
+    foreach ($item in @($relatorio.Items)) {
+        if (([string]$item.Path).TrimEnd('\') -eq ([string]$perfil).TrimEnd('\')) { $perfilOk = [bool]$item.OwnerOk }
+    }
     foreach ($passo in @($plano | Where-Object { [int]$_.Phase -eq 5 })) {
-        Write-Host ''
-        Write-Host "Fase 5 de 6 - $($passo.Title)"
+        if ([string]$passo.Kind -eq 'setowner') {
+            if ($perfilOk) { continue }
+            Write-Host ''
+            Write-Host "Fase 5 de 6 - $($passo.Title)"
+        } elseif ([string]$passo.Kind -eq 'remove-deny') {
+            Invoke-WinForgeAclDenyRemoval -Plan $plano -Phase 5 -Path $perfil
+            continue
+        } else {
+            Write-Host ''
+            Write-Host "Fase 5 de 6 - $($passo.Title)"
+        }
         $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
         Write-Host ([string]$r.Text)
         if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
@@ -2219,6 +2564,43 @@ function Invoke-WinForgeAclRestore {
     Write-Host ''
     Write-Host 'Restauração concluída. Reinicie o computador antes de julgar o resultado: serviços e programas já abertos seguem com as permissões antigas em cache.'
     Write-Host 'Depois de reiniciar, use "Permissões do disco C: - Verificar" para conferir, e "Desfazer (restaurar backup)" se algo tiver ficado pior.'
+    Write-Host 'O Desfazer tem um limite: o icacls /restore devolve a LISTA DE PERMISSÕES, e não o DONO. Se alguma pasta trocou de dono nesta rodada (/setowner ou takeown), o dono novo continua depois de desfazer.'
+}
+
+function Invoke-WinForgeAclDenyRemoval {
+    <#
+    .SYNOPSIS
+        Roda o '/remove:d' de uma fase, e só quando a pasta realmente tem ACE de negação.
+    .DESCRIPTION
+        Lê a lista da pasta (Get-Acl, só leitura), pergunta a Get-WinForgeAclDenySid se algum dos
+        SIDs do passo está negado e, só aí, executa. Sem negação nenhuma a função não roda nada e
+        diz isso: apagar negação que ninguém conferiu é decidir por configuração legítima de outra
+        pessoa, e o Desfazer não traria essa ACE de volta com o dono certo.
+    .OUTPUTS
+        Nada. Escreve o andamento (é chamada de dentro de um passo de fluxo ao vivo).
+    #>
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [Parameter(Mandatory)][int]$Phase,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $passo = @($Plan | Where-Object { [int]$_.Phase -eq $Phase -and [string]$_.Kind -eq 'remove-deny' })
+    if (-not $passo.Count) { return }
+    $passo = $passo[0]
+    $lista = $null
+    try { $lista = Get-Acl -LiteralPath $Path -ErrorAction Stop } catch { $lista = $null }
+    if ($null -eq $lista) {
+        Write-Warning "A lista de '$Path' não pôde ser lida; as negações de acesso ficam como estão."
+        return
+    }
+    $negados = @(Get-WinForgeAclDenySid -Acl $lista -Sids @($passo.DenySids | ForEach-Object { [string]$_ }))
+    if (-not $negados.Count) { return }
+    Write-Host ''
+    Write-Host "$($passo.Title) - $($negados.Count) negação(ões) encontrada(s)."
+    $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
+    Write-Host ([string]$r.Text)
+    if ([int]$r.ExitCode -ne 0) { Write-Error "A retirada das negações terminou com código $($r.ExitCode)." }
 }
 
 function Get-WinForgeAclBackupSet {
@@ -2299,6 +2681,11 @@ function Invoke-WinForgeAclUndo {
     }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeAclUndo'
 
+    # Mesma razão da restauração: a pergunta vem antes de a pasta de backup ser criada ou conferida.
+    if (-not (Test-WinForgeRepairElevated)) {
+        Write-Error 'Esta ação precisa do WinForge aberto como administrador. Nada foi restaurado e nenhuma pasta foi criada.'
+        return
+    }
     $conf = Confirm-WinForgeAclBackupRoot -Root $BackupRoot
     if (-not $conf.Ok) {
         Write-Error "A pasta de backup de permissões não é confiável ($($conf.Reason)). Nada foi restaurado."
@@ -2338,6 +2725,8 @@ function Invoke-WinForgeAclUndo {
     }
     Write-Host ''
     Write-Host "Desfazer concluído: $aplicados pasta(s) restauradas, $recusados fora."
+    Write-Host 'O que voltou foi a LISTA DE PERMISSÕES. O icacls /restore não devolve o DONO: pasta cujo dono a restauração trocou (/setowner ou takeown) continua com o dono novo.'
+    Write-Host 'O backup das pastas fora do seu perfil é sem recursão: volta a lista da pasta em si, não a de cada arquivo dentro dela.'
     Write-Host 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
 }
 
