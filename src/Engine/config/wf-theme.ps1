@@ -150,6 +150,13 @@ $WinForgeTheme = [ordered]@{
 # perigo). Eram três hexadecimais fixos no código - verde #2E7D32 e laranja #EF6C00 -, e cor fixa
 # não serve para dois temas: no fundo escuro novo o verde caía para 3,6:1 e a lista de
 # recomendações, que é a tela principal do WinForge, ficava mais apagada que o texto ao lado.
+#
+# RowSuccessBackgroundColor / RowFailureBackgroundColor são o fundo da LINHA na tabela do Windows
+# Update depois que o driver foi instalado ou falhou. Fundo, e não cor de texto: o que mudou é a
+# linha inteira, e pintar só uma célula faria a tabela parecer suja em vez de informada. Os dois
+# hexadecimais são o extremo escuro (900) e o extremo claro (100) da mesma escala de verde e
+# vermelho, um para cada tema - o texto da linha continua sendo o MainForegroundColor, e é esse par
+# que o -SelfTest confere.
 $WinForgeThemeNovos = [ordered]@{
     Light = [ordered]@{
         ButtonForegroundSelectedColor = '#FFFFFF'
@@ -158,6 +165,8 @@ $WinForgeThemeNovos = [ordered]@{
         RecommendedColor              = '#15803D'
         DiscouragedColor              = '#B45309'
         DangerColor                   = '#B91C1C'
+        RowSuccessBackgroundColor     = '#DCFCE7'
+        RowFailureBackgroundColor     = '#FEE2E2'
     }
     Dark = [ordered]@{
         ButtonForegroundSelectedColor = '#FFFFFF'
@@ -166,5 +175,7 @@ $WinForgeThemeNovos = [ordered]@{
         RecommendedColor              = '#22C55E'
         DiscouragedColor              = '#F59E0B'
         DangerColor                   = '#EF4444'
+        RowSuccessBackgroundColor     = '#14532D'
+        RowFailureBackgroundColor     = '#7F1D1D'
     }
 }

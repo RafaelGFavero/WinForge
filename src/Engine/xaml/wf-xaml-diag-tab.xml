@@ -82,6 +82,7 @@
                                       Background="{DynamicResource CardBackgroundColor}"
                                       Foreground="{DynamicResource MainForegroundColor}" BorderBrush="{DynamicResource BorderColor}"
                                       HorizontalGridLinesBrush="{DynamicResource BorderColor}" BorderThickness="1"
+                                      RowStyle="{StaticResource WFWindowsUpdateRow}"
                                       FontSize="{DynamicResource FontSize}">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Atualização" Binding="{Binding Title}" Width="*" MinWidth="180" ElementStyle="{StaticResource WFGridCellText}"/>
@@ -89,6 +90,7 @@
                                     <DataGridTextColumn Header="Fornecedor" Binding="{Binding Provider}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
                                     <DataGridTextColumn Header="Versão" Binding="{Binding Version}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
                                     <DataGridTextColumn Header="Data" Binding="{Binding Date}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
+                                    <DataGridTextColumn Header="Situação" Binding="{Binding StatusText}" Width="Auto" ElementStyle="{StaticResource WFGridCellText}"/>
                                     <DataGridTemplateColumn Header="Instalar" Width="Auto">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>

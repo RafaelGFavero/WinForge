@@ -1171,6 +1171,10 @@ if ($SelfTest) {
     $wfTemaPares += @{ Fg = 'ButtonForegroundSelectedColor'; Bg = 'ButtonBackgroundSelectedColor';  Nome = 'texto do botão selecionado' }
     $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'AppInstallUnselectedColor';      Nome = 'nome do aplicativo' }
     $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'AppInstallSelectedColor';        Nome = 'nome do aplicativo marcado' }
+    # Linha instalada e linha que falhou na tabela do Windows Update: o texto da célula é o
+    # MainForegroundColor do estilo da linha, e é ele que tem de sobreviver ao fundo colorido.
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowSuccessBackgroundColor';      Nome = 'linha instalada' }
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowFailureBackgroundColor';      Nome = 'linha que falhou' }
     foreach ($wfTemaNome in @('Dark', 'Light')) {
         $wfTemaSec = $sync.configs.themes.$wfTemaNome
         if ($null -eq $wfTemaSec) { Write-Host "  [ERRO] tema: seção '$wfTemaNome' não existe no bloco de temas" -ForegroundColor Red; $wbErrors++; continue }
@@ -1221,7 +1225,8 @@ if ($SelfTest) {
         '<Style TargetType="Button">' = 1
         '<Style TargetType="CheckBox">' = 1
         'x:Key="BorderStyle"'        = 1
-        'TargetType="DataGridRow"'   = 1
+        '<Style TargetType="DataGridRow">' = 1
+        'x:Key="WFWindowsUpdateRow"' = 1
     }
     foreach ($wfEstiloChave in @($wfEstilosUnicos.Keys)) {
         $wfEstiloQtd = ([regex]::Matches($inputXML, [regex]::Escape($wfEstiloChave))).Count
@@ -5210,6 +5215,115 @@ if ($SelfTest) {
             Write-Host "  Botões que exigem elevação: este build roda $(if ($wfElevado) { 'ELEVADO' } else { 'SEM elevação' }) - 'Baixar' e 'Instalar' $(if ($wfElevado) { 'habilitados' } else { 'desabilitados, com a dica de elevação' })"
         } catch {
             Write-Host "  [ERRO] botões que exigem elevação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Estado de instalação na tabela do Windows Update. A queixa era direta: depois de instalar um
+        # driver a tabela continuava idêntica - mesmo botão, mesma linha -, e não havia como saber se
+        # tinha dado certo. Agora o estado da SESSÃO mora em $sync.DiagWUState (por id da atualização),
+        # a coluna "Situação" diz em palavras e o fundo da linha diz em cor.
+        # NADA aqui instala coisa alguma: todo estado é escrito à mão e desfeito no fim.
+        $wfWuEstAntes = $sync.DiagWUResults
+        $wfWuEstMapa = $sync.DiagWUState
+        $wfWuEstElevSalvo = ${function:Test-WinForgeRepairElevated}
+        try {
+            $sync.DiagWUState = @{}
+            # A elevação é forçada para $true enquanto este bloco roda, e devolvida no finally. Sem
+            # isso o teste não prova nada numa máquina sem elevação: lá TODO botão já nasce
+            # desabilitado, e "desabilitado porque já está instalado" ficaria indistinguível de
+            # "desabilitado porque falta elevação" - que é exatamente a confusão que ele existe para
+            # pegar. A troca é da FUNÇÃO, e não um parâmetro novo: a tabela não precisa de uma porta
+            # de teste no código de produção para ser conferida.
+            ${function:Test-WinForgeRepairElevated} = { return $true }
+            $wfWuEstElevado = $true
+            $sync.DiagWUResults = @(
+                [pscustomobject]@{ Title = 'Driver de teste A'; Driver = 'A'; Provider = 'WinForge'; Version = '1.0'; Date = '2026-09-10'; UpdateId = 'wu-a' },
+                [pscustomobject]@{ Title = 'Driver de teste B'; Driver = 'B'; Provider = 'WinForge'; Version = '1.0'; Date = '2026-09-10'; UpdateId = 'wu-b' },
+                [pscustomobject]@{ Title = 'Driver de teste C'; Driver = 'C'; Provider = 'WinForge'; Version = '1.0'; Date = '2026-09-10'; UpdateId = 'wu-c' },
+                [pscustomobject]@{ Title = 'Driver de teste D'; Driver = 'D'; Provider = 'WinForge'; Version = '1.0'; Date = '2026-09-10'; UpdateId = 'wu-d' }
+            )
+            # Texto solto no mapa vale como estado sem detalhe - é o formato mais fácil de escrever
+            # errado, e é por isso que ele é aceito aqui em vez de estourar.
+            $sync.DiagWUState['wu-a'] = 'instalado'
+            $sync.DiagWUState['wu-b'] = @{ State = 'instalado'; Text = 'instalado (reinicie)' }
+            $sync.DiagWUState['wu-c'] = @{ State = 'falhou'; Text = 'falhou (código 4)' }
+            $sync.DiagWUState['wu-d'] = @{ State = 'instalando'; Text = 'instalando...' }
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfWuEstLinhas = @{}
+            foreach ($wfWuEstL in @($sync.WPFDiagWU.ItemsSource)) { $wfWuEstLinhas[[string]$wfWuEstL.UpdateId] = $wfWuEstL }
+            # Instalado e instalando não podem ser clicados de novo; falhou pode - é a hora de tentar
+            # outra vez, e a única coisa que ainda barra o botão é a falta de elevação.
+            foreach ($wfWuEstE in @(
+                @('wu-a', 'instalado',  'instalado',            $false),
+                @('wu-b', 'instalado',  'instalado (reinicie)', $false),
+                @('wu-c', 'falhou',     'falhou (código 4)',    $wfWuEstElevado),
+                @('wu-d', 'instalando', 'instalando...',        $false)
+            )) {
+                $wfWuEstLinha = $wfWuEstLinhas[[string]$wfWuEstE[0]]
+                if ($null -eq $wfWuEstLinha) { Write-Host "  [ERRO] estado do Windows Update: a linha '$($wfWuEstE[0])' sumiu da tabela" -ForegroundColor Red; $wbErrors++; continue }
+                if ([string]$wfWuEstLinha.State -ne [string]$wfWuEstE[1]) { Write-Host "  [ERRO] estado do Windows Update: '$($wfWuEstE[0])' veio State '$($wfWuEstLinha.State)', esperado '$($wfWuEstE[1])'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfWuEstLinha.StatusText -ne [string]$wfWuEstE[2]) { Write-Host "  [ERRO] estado do Windows Update: '$($wfWuEstE[0])' veio StatusText '$($wfWuEstLinha.StatusText)', esperado '$($wfWuEstE[2])'" -ForegroundColor Red; $wbErrors++ }
+                if ([bool]$wfWuEstLinha.ActionEnabled -ne [bool]$wfWuEstE[3]) { Write-Host "  [ERRO] estado do Windows Update: '$($wfWuEstE[0])' veio ActionEnabled '$($wfWuEstLinha.ActionEnabled)', esperado '$([bool]$wfWuEstE[3])'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Linha sem estado nenhum: pendente, sem texto na coluna e botão preso só à elevação.
+            $sync.DiagWUState = @{}
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfWuEstPend = @($sync.WPFDiagWU.ItemsSource)[0]
+            if ([string]$wfWuEstPend.State -ne 'pendente') { Write-Host "  [ERRO] estado do Windows Update: linha sem estado veio '$($wfWuEstPend.State)', esperado 'pendente'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfWuEstPend.StatusText -ne '') { Write-Host "  [ERRO] estado do Windows Update: linha pendente deveria ter a coluna Situação vazia, veio '$($wfWuEstPend.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+            if ([bool]$wfWuEstPend.ActionEnabled -ne $wfWuEstElevado) { Write-Host "  [ERRO] estado do Windows Update: linha pendente veio ActionEnabled '$($wfWuEstPend.ActionEnabled)', esperado '$wfWuEstElevado'" -ForegroundColor Red; $wbErrors++ }
+            # O resultado do serviço COM vira estado: 2 e 3 são sucesso (3 é "com avisos"), o resto é
+            # falha. O código entra no texto porque é ele que o usuário tem para pesquisar.
+            foreach ($wfWuEstRes in @(
+                @(2,  $false, 'instalado', 'instalado'),
+                @(2,  $true,  'instalado', 'instalado (reinicie)'),
+                @(3,  $false, 'instalado', 'instalado'),
+                @(4,  $false, 'falhou',    'falhou (código 4)'),
+                @(-1, $false, 'falhou',    'falhou')
+            )) {
+                $wfWuEstR = Set-WinForgeWindowsUpdateInstallResult -UpdateId 'wu-a' -ResultCode ([int]$wfWuEstRes[0]) -RebootRequired ([bool]$wfWuEstRes[1])
+                if ([string]$wfWuEstR.State -ne [string]$wfWuEstRes[2]) { Write-Host "  [ERRO] resultado do Windows Update: código $($wfWuEstRes[0]) virou State '$($wfWuEstR.State)', esperado '$($wfWuEstRes[2])'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfWuEstR.Text -ne [string]$wfWuEstRes[3]) { Write-Host "  [ERRO] resultado do Windows Update: código $($wfWuEstRes[0]) virou Text '$($wfWuEstR.Text)', esperado '$($wfWuEstRes[3])'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$sync.DiagWUState['wu-a'].State -ne [string]$wfWuEstRes[2]) { Write-Host "  [ERRO] resultado do Windows Update: o mapa da sessão não guardou o estado do código $($wfWuEstRes[0])" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A ação recusa linha já instalada, e -NoUI nunca instala nem mexe no mapa.
+            $sync.DiagWUState = @{}
+            $sync.DiagWUState['wu-a'] = 'instalado'
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfWuEstA = @(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [string]$_.UpdateId -eq 'wu-a' })[0]
+            $wfWuEstB = @(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [string]$_.UpdateId -eq 'wu-b' })[0]
+            $wfWuEstAcaoA = [string](Invoke-WinForgeWindowsUpdateAction -Row $wfWuEstA -NoUI)
+            if ($wfWuEstAcaoA -ne 'já instalado') { Write-Host "  [ERRO] ação do Windows Update: linha já instalada deveria dar 'já instalado', deu '$wfWuEstAcaoA'" -ForegroundColor Red; $wbErrors++ }
+            $wfWuEstAcaoB = [string](Invoke-WinForgeWindowsUpdateAction -Row $wfWuEstB -NoUI)
+            if ($wfWuEstAcaoB -ne 'pendente') { Write-Host "  [ERRO] ação do Windows Update: -NoUI numa linha pendente deveria dar 'pendente', deu '$wfWuEstAcaoB'" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.DiagWUState.ContainsKey('wu-b')) { Write-Host "  [ERRO] ação do Windows Update: -NoUI escreveu estado para 'wu-b' - a simulação não pode mexer no mapa" -ForegroundColor Red; $wbErrors++ }
+            # A coluna "Situação" é o mesmo texto, em palavras: a cor sozinha não serve a quem não a
+            # distingue, e ela é a única parte da linha que sobrevive a uma captura de tela em cinza.
+            $wfWuEstCol = @($sync.WPFDiagWU.Columns | Where-Object { [string]$_.Header -eq 'Situação' })[0]
+            if ($null -eq $wfWuEstCol) { Write-Host "  [ERRO] tabela do Windows Update: falta a coluna 'Situação'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfWuEstCol.Binding.Path.Path -ne 'StatusText') { Write-Host "  [ERRO] tabela do Windows Update: a coluna 'Situação' liga em '$($wfWuEstCol.Binding.Path.Path)', esperado 'StatusText'" -ForegroundColor Red; $wbErrors++ }
+            # O fundo da linha. O estilo é PRÓPRIO da tabela do Windows Update (a de drivers não tem
+            # estado de instalação) e herda o DataGridRow da janela - sem o BasedOn a linha perderia
+            # altura, cor de texto e o realce do mouse.
+            $wfWuEstEstilo = $sync.WPFDiagWU.RowStyle
+            if ($null -eq $wfWuEstEstilo) { Write-Host "  [ERRO] fundo da linha: a tabela do Windows Update não tem RowStyle" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ($null -eq $wfWuEstEstilo.BasedOn) { Write-Host "  [ERRO] fundo da linha: o RowStyle da tabela do Windows Update não herda o estilo DataGridRow da janela" -ForegroundColor Red; $wbErrors++ }
+                foreach ($wfWuEstPar in @(@('instalado', 'RowSuccessBackgroundColor'), @('falhou', 'RowFailureBackgroundColor'))) {
+                    $wfWuEstTrig = @(@($wfWuEstEstilo.Triggers) | Where-Object { $_ -is [System.Windows.DataTrigger] -and [string]$_.Binding.Path.Path -eq 'State' -and [string]$_.Value -eq [string]$wfWuEstPar[0] })[0]
+                    if ($null -eq $wfWuEstTrig) { Write-Host "  [ERRO] fundo da linha: sem gatilho para State='$($wfWuEstPar[0])'" -ForegroundColor Red; $wbErrors++; continue }
+                    $wfWuEstSet = @(@($wfWuEstTrig.Setters) | Where-Object { $_.Property -eq [System.Windows.Controls.Control]::BackgroundProperty })[0]
+                    if ($null -eq $wfWuEstSet) { Write-Host "  [ERRO] fundo da linha: o gatilho de '$($wfWuEstPar[0])' não pinta o Background" -ForegroundColor Red; $wbErrors++ }
+                    elseif ([string]$wfWuEstSet.Value.ResourceKey -ne [string]$wfWuEstPar[1]) { Write-Host "  [ERRO] fundo da linha: o gatilho de '$($wfWuEstPar[0])' usa '$($wfWuEstSet.Value.ResourceKey)', esperado o recurso dinâmico '$($wfWuEstPar[1])'" -ForegroundColor Red; $wbErrors++ }
+                    if ($sync.Form -and $sync.Form.TryFindResource($wfWuEstPar[1]) -isnot [System.Windows.Media.SolidColorBrush]) { Write-Host "  [ERRO] fundo da linha: '$($wfWuEstPar[1])' não chegou ao dicionário da janela como pincel" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+            Write-Host "  Estado na tabela do Windows Update: pendente/instalando/instalado/falhou por id, coluna 'Situação', fundo verde e vermelho por gatilho, botão preso ao estado"
+        } catch {
+            Write-Host "  [ERRO] estado do Windows Update: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            ${function:Test-WinForgeRepairElevated} = $wfWuEstElevSalvo
+            $sync.DiagWUState = $(if ($null -eq $wfWuEstMapa) { @{} } else { $wfWuEstMapa })
+            $sync.DiagWUResults = $wfWuEstAntes
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
         }
         # Checklist das recomendações + contador na tela. Uma linha por recomendação, e caixa de
         # marcar só nas que a aba de destino aceita marcar: Toggle aplica o tweak no clique, e

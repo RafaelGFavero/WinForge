@@ -868,6 +868,83 @@ function Invoke-WinForgeDriverAction {
     return 'nvidia-download'
 }
 
+function Get-WinForgeWindowsUpdateRowState {
+    <#
+    .SYNOPSIS
+        O estado de instalação de uma atualização nesta sessão.
+    .DESCRIPTION
+        O mapa é $sync.DiagWUState, indexado pelo id da atualização, e vale só enquanto a janela
+        estiver aberta: o Windows Update é a fonte da verdade entre uma sessão e outra, e guardar
+        "instalado" em disco significaria mentir na próxima abertura se a instalação for revertida.
+        Aceita tanto o registro completo (@{ State; Text }) quanto um texto solto com o nome do
+        estado - o texto é a forma mais fácil de escrever à mão, inclusive nos testes.
+        Id desconhecido é 'pendente' com texto vazio: a coluna "Situação" fica em branco enquanto
+        nada aconteceu, que é o que uma tabela recém-buscada tem a dizer.
+    .OUTPUTS
+        @{ State = 'pendente'|'instalando'|'instalado'|'falhou'; Text = [string] }
+    #>
+    param([string]$UpdateId)
+
+    $vazio = @{ State = 'pendente'; Text = '' }
+    if ([string]::IsNullOrWhiteSpace($UpdateId) -or $null -eq $sync.DiagWUState) { return $vazio }
+    $bruto = $sync.DiagWUState[[string]$UpdateId]
+    if ($null -eq $bruto) { return $vazio }
+    if ($bruto -is [string]) { return @{ State = [string]$bruto; Text = [string]$bruto } }
+    $estado = [string]$bruto.State
+    if ([string]::IsNullOrWhiteSpace($estado)) { return $vazio }
+    return @{ State = $estado; Text = [string]$bruto.Text }
+}
+
+function Set-WinForgeWindowsUpdateRowState {
+    <#
+    .SYNOPSIS
+        Escreve o estado de instalação de uma atualização no mapa da sessão.
+    .DESCRIPTION
+        Escrita só pela thread da janela (o clique e o callback), que é a mesma que lê o mapa ao
+        remontar a tabela - por isso uma tabela de hash comum basta.
+    .OUTPUTS
+        O registro gravado.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$UpdateId,
+        [Parameter(Mandatory)][string]$State,
+        [string]$Text
+    )
+
+    if ($null -eq $sync.DiagWUState) { $sync.DiagWUState = @{} }
+    $registro = @{ State = $State; Text = [string]$Text }
+    $sync.DiagWUState[$UpdateId] = $registro
+    return $registro
+}
+
+function Set-WinForgeWindowsUpdateInstallResult {
+    <#
+    .SYNOPSIS
+        Transforma o resultado do serviço COM no estado que a linha vai mostrar.
+    .DESCRIPTION
+        2 e 3 são os códigos de sucesso do Windows Update (3 é "concluído com avisos"); qualquer
+        outro é falha. O código entra no texto da linha porque é a única coisa pesquisável que
+        sobra de uma falha do Windows Update - menos o -1, que é a nossa marca para "estourou antes
+        de chegar a um código" e não significa nada para quem for procurar.
+        Função à parte do callback de propósito: assim o -SelfTest prova o mapeamento sem precisar
+        de janela, de caixa de mensagem e, principalmente, sem instalar nada.
+    .OUTPUTS
+        O registro gravado (@{ State; Text }).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$UpdateId,
+        [int]$ResultCode,
+        [bool]$RebootRequired
+    )
+
+    if ($ResultCode -in @(2, 3)) {
+        $texto = $(if ($RebootRequired) { 'instalado (reinicie)' } else { 'instalado' })
+        return (Set-WinForgeWindowsUpdateRowState -UpdateId $UpdateId -State 'instalado' -Text $texto)
+    }
+    $textoFalha = $(if ($ResultCode -gt 0) { "falhou (código $ResultCode)" } else { 'falhou' })
+    return (Set-WinForgeWindowsUpdateRowState -UpdateId $UpdateId -State 'falhou' -Text $textoFalha)
+}
+
 function Invoke-WinForgeWindowsUpdateAction {
     <#
     .SYNOPSIS
@@ -880,14 +957,33 @@ function Invoke-WinForgeWindowsUpdateAction {
         A caixa de mensagem no fim só aparece quando é preciso REINICIAR: o resto do resultado vai
         para a barra de status e para o log, que é onde o usuário já está olhando. Reinício pendente
         é a única coisa que ele precisa saber antes de continuar mexendo na máquina.
+
+        Linha já instalada (ou instalando) é recusada AQUI, e não só pelo botão desabilitado: o
+        botão é uma cortesia da tela, e o clique pode chegar por um caminho que não passou pela
+        última remontagem da tabela. Instalar o mesmo driver duas vezes é minutos de máquina
+        ocupada para nada.
+    .PARAMETER NoUI
+        Devolve o que FARIA, sem caixa, sem rede e sem instalar nada. É o que o -SelfTest usa para
+        provar a recusa da linha já instalada.
     .OUTPUTS
         Texto curto com o que foi feito.
     #>
-    param($Row)
+    param($Row, [switch]$NoUI)
 
     if ($null -eq $Row) { return 'none' }
     $id = [string]$Row.UpdateId
     if ([string]::IsNullOrWhiteSpace($id)) { return 'none' }
+
+    $estadoAtual = [string](Get-WinForgeWindowsUpdateRowState -UpdateId $id).State
+    if ($estadoAtual -eq 'instalado') {
+        Write-WinForgeLog -Component "Diag" -Message "Instalação de '$($Row.Title)' recusada: já foi instalada nesta sessão."
+        return 'já instalado'
+    }
+    if ($estadoAtual -eq 'instalando') {
+        Write-WinForgeLog -Component "Diag" -Message "Instalação de '$($Row.Title)' recusada: já está em andamento."
+        return 'instalando'
+    }
+    if ($NoUI) { return 'pendente' }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeWindowsUpdateAction'
 
     # ProcessRunning junto com CommandRunning: instalar driver pelo Windows Update no meio de uma
@@ -904,33 +1000,61 @@ function Invoke-WinForgeWindowsUpdateAction {
         return 'cancelado'
     }
 
-    # Nasce na runspace principal, como todo bloco que o Dispatcher vai executar.
+    # Nasce na runspace principal, como todo bloco que o Dispatcher vai executar. Ele roda em TODO
+    # desfecho, e não só quando é preciso reiniciar: é ele que pinta a linha de verde ou vermelho,
+    # e uma instalação que falha calada é exatamente a queixa que trouxe este estado até aqui.
     $sync.WinForgeWUInstallCallback = {
         try {
-            [System.Windows.MessageBox]::Show($sync.Form, [string]$sync.LastWUInstallText + "`r`n`r`nÉ preciso reiniciar o computador para concluir.", "WinForge", "OK", "Information") | Out-Null
+            $wfEstado = Set-WinForgeWindowsUpdateInstallResult -UpdateId ([string]$sync.LastWUInstallId) -ResultCode ([int]$sync.LastWUInstallCode) -RebootRequired ([bool]$sync.LastWUInstallReboot)
+            # Remontar a tabela inteira é o refresco mais simples que existe aqui: as linhas são
+            # pscustomobject, que não avisa a interface quando um campo muda, e trocar isso por uma
+            # classe com INotifyPropertyChanged seria um Add-Type inteiro para pintar uma linha.
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            Write-WinForgeLog -Component "Diag" -Message "Windows Update: '$($sync.LastWUInstallId)' -> $($wfEstado.State) ($($wfEstado.Text))."
+            if ($sync.LastWUInstallReboot) {
+                [System.Windows.MessageBox]::Show($sync.Form, [string]$sync.LastWUInstallText + "`r`n`r`nÉ preciso reiniciar o computador para concluir.", "WinForge", "OK", "Information") | Out-Null
+            }
         } catch { }
     }
+
+    # O estado entra ANTES do despacho, ainda na thread da janela: é o que apaga o botão e escreve
+    # "instalando..." na linha no mesmo instante do clique. Sem isto, a única resposta ao clique
+    # seria a barra lá embaixo, e o usuário clicaria de novo.
+    $null = Set-WinForgeWindowsUpdateRowState -UpdateId $id -State 'instalando' -Text 'instalando...'
+    Update-WinForgeDiagnosticsWindowsUpdateGrid
 
     $sync.CommandRunning = $true
     $corpo = {
         param($wfArgs)
+        $sync.LastWUInstallId = [string]$wfArgs.UpdateId
+        $sync.LastWUInstallCode = -1
+        $sync.LastWUInstallReboot = $false
         try {
             $null = Set-WinForgeDiagProgress -Label "Instalando '$($wfArgs.Title)' pelo Windows Update..." -Percent 10
             $wfRes = Install-WinForgeWindowsUpdateDriver -UpdateId $wfArgs.UpdateId
+            $sync.LastWUInstallCode = [int]$wfRes.ResultCode
+            $sync.LastWUInstallReboot = [bool]$wfRes.RebootRequired
             $sync.LastWUInstallText = [string]$wfRes.Text
             $null = Set-WinForgeDiagProgress -Label ([string]$wfRes.Text) -Percent $(if ([int]$wfRes.ResultCode -in @(2, 3)) { 100 } else { 0 })
-            if ($wfRes.RebootRequired -and -not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUInstallCallback }
         } catch {
-            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update falhou: $($_.Exception.Message)"
-            $null = Set-WinForgeDiagProgress -Label "Instalação pelo Windows Update falhou: $($_.Exception.Message)" -Percent 0
+            $sync.LastWUInstallText = "Instalação pelo Windows Update falhou: $($_.Exception.Message)"
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $sync.LastWUInstallText
+            $null = Set-WinForgeDiagProgress -Label ([string]$sync.LastWUInstallText) -Percent 0
         } finally {
             $sync.CommandRunning = $false
+            # Janela fechando: o Dispatcher já está desligando e Invoke-WPFUIThread ficaria parado
+            # esperando por ele. A linha não tem mais para quem ser pintada.
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUInstallCallback }
         }
     }
     try {
         Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ UpdateId = $id; Title = $titulo } | Out-Null
     } catch {
+        # Despacho que falha nunca roda o corpo nem o callback: a linha ficaria "instalando..." para
+        # sempre, com o botão apagado e nada acontecendo.
         $sync.CommandRunning = $false
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId $id -State 'pendente' -Text ''
+        Update-WinForgeDiagnosticsWindowsUpdateGrid
         Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update não pôde começar: $($_.Exception.Message)"
         $null = Set-WinForgeDiagProgress -Label "Instalação pelo Windows Update não pôde começar: $($_.Exception.Message)" -Percent 0
     }
@@ -1087,6 +1211,12 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
     $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
     foreach ($u in @($selecao.Kept)) {
         if ($null -eq $u) { continue }
+        # O estado da sessão é reaplicado a CADA remontagem: a tabela é refeita inteira depois de
+        # cada instalação (é assim que a linha muda de cor), e sem isto ela voltaria a dizer
+        # "pendente" justamente na linha que acabou de ser instalada.
+        $wuId = [string]$u.UpdateId
+        $estado = Get-WinForgeWindowsUpdateRowState -UpdateId $wuId
+        $emAndamento = ([string]$estado.State -in @('instalando', 'instalado'))
         $rows.Add([pscustomobject]@{
             Title    = [string]$u.Title
             Driver   = (Format-WinForgeDiagValue $u.Driver)
@@ -1095,9 +1225,17 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
             Date     = (Format-WinForgeDiagValue $u.Date)
             # O id, e não o título, é o que identifica a atualização na hora de instalar: dois
             # drivers do mesmo dispositivo saem com títulos parecidos e ids diferentes.
-            UpdateId = [string]$u.UpdateId
-            ActionEnabled = $elevado
-            ActionTip     = $(if ($elevado) { 'Baixa e instala este driver pelo Windows Update.' } else { $WinForgeElevationTip })
+            UpdateId = $wuId
+            # State pinta a linha (gatilho do estilo WFWindowsUpdateRow); StatusText é a mesma
+            # informação em palavras, na coluna "Situação".
+            State      = [string]$estado.State
+            StatusText = [string]$estado.Text
+            # Falhou continua clicável: é a hora de tentar de novo. Instalado e instalando, não.
+            ActionEnabled = ($elevado -and -not $emAndamento)
+            ActionTip     = $(if (-not $elevado) { $WinForgeElevationTip }
+                              elseif ([string]$estado.State -eq 'instalado') { 'Este driver já foi instalado nesta sessão.' }
+                              elseif ([string]$estado.State -eq 'instalando') { 'Instalação em andamento.' }
+                              else { 'Baixa e instala este driver pelo Windows Update.' })
         })
     }
 
