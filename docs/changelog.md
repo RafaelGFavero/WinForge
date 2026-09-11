@@ -11,14 +11,21 @@
 - A linha nessa situação ganha um `· aplicado` ao lado da caixa, nas abas Ajustes, Jogos e
   Servidor, e a dica passa a começar com "✔ Já aplicado neste sistema.".
 - No checklist do Diagnóstico o contador virou `N de M recomendados marcados · A já aplicados`, e
-  **Marcar todos** deixa de fora o que já está aplicado. Marcar na mão continua valendo: a marca
-  informa, não impede.
+  **Marcar todos** deixa de fora o que já está aplicado. Marcar uma dessas linhas na mão continua
+  possível, mas não muda o resultado: **Aplicar** pula o que está aplicado de qualquer jeito. Para
+  aplicar de novo é **Desfazer** e depois **Aplicar** — não há outro caminho.
 - **Aplicar** refaz a detecção no momento do clique — você pode ter desfeito algo desde que a
   janela abriu — e pula as entradas que já estão em vigor. A barra fecha com "Aplicados: A · já
   estavam aplicados: S", e o total de passos já desconta os pulados, para a barra não parar em
   8/12. A detecção roda dentro do runspace, e não no caminho do clique: feita ali, a janela
   congelaria enquanto ela durasse, porque quem pintaria a barra é a mesma thread que estaria
-  esperando.
+  esperando. Ao terminar, a detecção é refeita e as linhas são repintadas: o que acabou de ser
+  aplicado já aparece com a marca, sem esperar o próximo diagnóstico.
+- Detecção que **falha** (registro ou serviço fora do lugar) não apaga mais o que se sabia. Ela
+  devolvia uma lista vazia, indistinguível de "nada aplicado", e quem chamava gravava essa
+  ignorância por cima do conjunto bom: as marcas sumiam das linhas e o contador voltava a zero com
+  o sistema exatamente como estava. Agora a falha vira aviso no log, o conjunto anterior fica de
+  pé e nada é pulado enquanto a dúvida durar.
 - Três coisas nunca são puladas: o ponto de restauração, os toggles, botões e listas — que agem no
   instante do clique e não têm estado a detectar — e todo ajuste que também roda um script. A
   detecção enxerga registro e serviço; a hibernação, por exemplo, grava duas chaves **e** chama
@@ -28,17 +35,21 @@
 ### Drivers do Windows Update
 
 - A tabela trazia a mesma placa duas vezes, uma linha por revisão oferecida pelo serviço, e
-  convidava a instalar a antiga. Agora é **uma linha por dispositivo** (Driver + Fornecedor), com
-  a versão mais nova; o rótulo avisa `· M versão(ões) mais antiga(s) oculta(s)` e a dica lista os
-  títulos que ficaram de fora. Quando não há revisão repetida, o rótulo não muda.
+  convidava a instalar a antiga. Agora é **uma linha por dispositivo** (Driver + Fornecedor +
+  Classe), com a versão mais nova; o rótulo avisa `· M versão(ões) mais antiga(s) oculta(s)` e a
+  dica lista os títulos que ficaram de fora. Quando não há revisão repetida, o rótulo não muda.
+  A classe entra na conta porque o driver base e o INF de extensão da mesma placa chegam com
+  driver e fornecedor iguais — são pacotes que se completam, e sem ela um escondia o outro como
+  se fosse revisão velha.
 - A coluna **Versão** dizia "n/d" em todas as linhas. O número está no título, entre parênteses —
   "Intel Corporation - Display Driver Update (32.0.101.7088)" —, e o programa só o procurava no
   fim do texto, que termina em `)`. Agora sai a versão de verdade.
 - Depois do clique em **Instalar**, a linha conta o que aconteceu: "instalando…", depois
   "instalado" ou "instalado (reinicie)" em verde claro, ou "falhou (código N)" em vermelho claro.
   A coluna nova **Situação** repete em palavras o que a cor diz — cor sozinha não serve a quem não
-  a distingue, nem sobrevive a uma captura de tela em cinza. O botão some da linha instalada e
-  continua na que falhou, que é a hora de tentar de novo.
+  a distingue, nem sobrevive a uma captura de tela em cinza. O botão continua na linha e fica
+  desabilitado enquanto ela estiver "instalando…" ou "instalado"; na que falhou ele segue
+  clicável, que é a hora de tentar de novo.
 - Esse estado vale só enquanto a janela estiver aberta. Quem sabe o que está instalado é o Windows
   Update: guardar "instalado" em disco seria mentir na abertura seguinte se a instalação tivesse
   sido revertida.

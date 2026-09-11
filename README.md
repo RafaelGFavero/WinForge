@@ -127,11 +127,13 @@ máquina. O que estiver aplicado aparece assim:
 - Nas abas Ajustes, Jogos e Servidor, a linha ganha um `· aplicado` ao lado da caixa, e a dica
   começa com "✔ Já aplicado neste sistema.".
 - No checklist do Diagnóstico, o contador soma a conta: `N de M recomendados marcados · A já
-  aplicados`. **Marcar todos** deixa essas linhas de fora — marcar na mão continua valendo, a
-  marca informa, não impede.
+  aplicados`. **Marcar todos** deixa essas linhas de fora. Você pode marcá-las na mão, mas isso
+  não força nada: **Aplicar** pula o que está aplicado, com ou sem a caixa marcada. Para aplicar
+  de novo, **Desfazer** primeiro e **Aplicar** em seguida — é o único caminho.
 - **Aplicar** refaz a detecção no momento do clique, porque você pode ter desfeito algo desde que
   a janela abriu, e pula o que já está em vigor. No fim, a barra diz "Aplicados: A · já estavam
-  aplicados: S".
+  aplicados: S", e as linhas que acabaram de ser aplicadas já aparecem marcadas — a detecção é
+  refeita ao terminar, sem esperar o próximo diagnóstico.
 
 Nunca são pulados: o ponto de restauração, os toggles, botões e listas — que agem no instante do
 clique e não têm estado a detectar — e todo ajuste que, além de mexer no registro ou num serviço,
@@ -163,12 +165,15 @@ WinForge não está elevado, porque instalar driver exige administrador.
 
 É **uma linha por dispositivo**. O serviço costuma oferecer mais de uma revisão do mesmo driver, e
 mostrar as duas é convidar a instalar a antiga: a tabela mantém só a mais nova, avisa no título
-quantas escondeu (`· M versão(ões) mais antiga(s) oculta(s)`) e lista os títulos na dica. A coluna
-**Versão** sai do próprio título da atualização.
+quantas escondeu (`· M versão(ões) mais antiga(s) oculta(s)`) e lista os títulos na dica. O que
+conta como "mesmo driver" é modelo, fornecedor **e** classe juntos: o driver base e o INF de
+extensão de uma mesma placa chegam com modelo e fornecedor iguais, são pacotes que se completam e
+por isso ficam os dois. A coluna **Versão** sai do próprio título da atualização.
 
 Depois do clique em Instalar, a linha conta o que aconteceu: "instalando…", depois "instalado" (ou
 "instalado (reinicie)") em verde, ou "falhou (código N)" em vermelho. A coluna **Situação** repete
-em palavras o que a cor diz. O botão some da linha instalada e continua na que falhou. Esse estado
+em palavras o que a cor diz. O botão continua na linha, desabilitado enquanto ela estiver
+"instalando…" ou "instalado", e clicável de novo na que falhou. Esse estado
 vale só enquanto a janela estiver aberta: quem sabe o que está instalado é o Windows Update, e na
 próxima abertura é ele que responde.
 
