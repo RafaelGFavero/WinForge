@@ -2580,6 +2580,43 @@ if ($SelfTest) {
         if ($wfAcSeco.Verified -ne $false) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: Verified deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfAcSeco.Text -notmatch '616\.92') { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: o texto não fala da versão ('$($wfAcSeco.Text)')" -ForegroundColor Red; $wbErrors++ }
         if (Test-Path -LiteralPath ([string]$wfAcSeco.Path)) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: a simulação criou '$($wfAcSeco.Path)'" -ForegroundColor Red; $wbErrors++ }
+        # Limpeza dos instaladores antigos: cada versão são uns 700 MB, e antes nada apagava o
+        # anterior. O que se prova aqui é a ESCOLHA - só 'nvidia-*.exe', nunca o recém-aberto,
+        # nunca um arquivo que o WinForge não pôs ali - primeiro em simulação e depois apagando de
+        # verdade, numa pasta de teste com arquivos criados aqui mesmo.
+        $wfLimpDir = Join-Path $env:TEMP 'WinForge-SelfTest\limpeza'
+        New-Item -ItemType Directory -Path $wfLimpDir -Force | Out-Null
+        $wfLimpNovo = Join-Path $wfLimpDir 'nvidia-616.92.exe'
+        $wfLimpVelho = Join-Path $wfLimpDir 'nvidia-566.36.exe'
+        $wfLimpAlheio = Join-Path $wfLimpDir 'outro-programa.exe'
+        foreach ($wfLimpArq in @($wfLimpNovo, $wfLimpVelho, $wfLimpAlheio)) { Set-Content -LiteralPath $wfLimpArq -Value 'MZ' -Encoding Ascii }
+        $wfLimpSeco = Remove-WinForgeOldNvidiaInstallers -Folder $wfLimpDir -Keep $wfLimpNovo -DryRun
+        if (@($wfLimpSeco.Candidates).Count -ne 1 -or [string]@($wfLimpSeco.Candidates)[0] -ne $wfLimpVelho) {
+            Write-Host "  [ERRO] limpeza de instaladores: a escolha deveria ser só '$wfLimpVelho', veio '$(@($wfLimpSeco.Candidates) -join ' | ')'" -ForegroundColor Red; $wbErrors++
+        }
+        if (@($wfLimpSeco.Removed).Count) { Write-Host "  [ERRO] limpeza de instaladores: a simulação apagou $(@($wfLimpSeco.Removed).Count) arquivo(s)" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpReal = Remove-WinForgeOldNvidiaInstallers -Folder $wfLimpDir -Keep $wfLimpNovo
+        if (@($wfLimpReal.Removed).Count -ne 1 -or [string]@($wfLimpReal.Removed)[0] -ne $wfLimpVelho) {
+            Write-Host "  [ERRO] limpeza de instaladores: apagou '$(@($wfLimpReal.Removed) -join ' | ')', esperado só '$wfLimpVelho'" -ForegroundColor Red; $wbErrors++
+        }
+        if (Test-Path -LiteralPath $wfLimpVelho) { Write-Host "  [ERRO] limpeza de instaladores: o instalador antigo continua no disco" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLimpArq in @($wfLimpNovo, $wfLimpAlheio)) {
+            if (-not (Test-Path -LiteralPath $wfLimpArq)) { Write-Host "  [ERRO] limpeza de instaladores: '$wfLimpArq' foi apagado e não devia" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A cadeia de pastas é reconferida antes de apagar: sem isso, uma junção plantada no lugar
+        # de 'downloads' faria desta função um apagador de arquivos escolhidos por outra pessoa.
+        $wfLimpDefL = [string]${function:Remove-WinForgeOldNvidiaInstallers}
+        if ($wfLimpDefL.IndexOf('Test-WinForgeSnapshotRootPath', [StringComparison]::Ordinal) -lt 0 -or
+            $wfLimpDefL.IndexOf('Test-WinForgeSnapshotRootPath', [StringComparison]::Ordinal) -gt $wfLimpDefL.IndexOf('Remove-Item -LiteralPath $velho', [StringComparison]::Ordinal)) {
+            Write-Host "  [ERRO] limpeza de instaladores: a cadeia não é conferida antes de apagar" -ForegroundColor Red; $wbErrors++
+        }
+        # E é o Install que chama a limpeza, DEPOIS do Start-Process e com o pino já solto - apagar
+        # exige DELETE, que é justamente o que o pino nega.
+        $wfLimpDef = [string]${function:Install-WinForgeNvidiaDriver}
+        if ($wfLimpDef -notmatch 'Remove-WinForgeOldNvidiaInstallers -Folder') { Write-Host "  [ERRO] limpeza de instaladores: Install-WinForgeNvidiaDriver não chama Remove-WinForgeOldNvidiaInstallers" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpDef.IndexOf('Start-Process -FilePath $destino', [StringComparison]::Ordinal) -gt $wfLimpDef.IndexOf('Remove-WinForgeOldNvidiaInstallers -Folder', [StringComparison]::Ordinal)) {
+            Write-Host "  [ERRO] limpeza de instaladores: a limpeza acontece antes do Start-Process" -ForegroundColor Red; $wbErrors++
+        }
         # URL fora do domínio é recusada ANTES do -DryRun: uma simulação com URL de terceiro não é
         # simulação de nada, e o dia em que o -DryRun se perder de novo a recusa já terá acontecido.
         foreach ($wfAcRuim in @('http://evil/x.exe', 'https://nvidia.com.evil.com/x.exe')) {
@@ -2674,8 +2711,133 @@ if ($SelfTest) {
         Write-Host "  [ERRO] ações de driver: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
         Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\assinatura') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\limpeza') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- o cache do catálogo é de TELA
+    # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
+    # qualquer processo de integridade média da mesma conta. Enquanto ele só pintava o rótulo
+    # "Baixar <versão>" na tabela, tudo bem. O problema era que a LINHA - e portanto o cache -
+    # também dizia ao motor ELEVADO que endereço baixar e abrir, e um
+    # '{ "Version": "999.99", "DownloadURL": "https://us.download.nvidia.com/<outro pacote>" }'
+    # plantado ali passava por TODAS as travas seguintes por construção: o host é da nvidia.com, a
+    # assinatura é da NVIDIA, a pasta é a protegida. O usuário via "⬆ atualizar" e clicava.
+    #
+    # O conserto é o clique refazer as três consultas sem ler cache nenhum. O que se prova aqui, sem
+    # um byte de rede (a costura -Resolver responde no lugar do catálogo):
+    #   1. com cache, o veneno É lido - sem isto o teste não estaria provando nada;
+    #   2. com -NoCache, as três respostas vêm do catálogo e nada do arquivo aparece;
+    #   3. o clique (-DryRun) usa a consulta ao vivo, e não o que a linha carrega;
+    #   4. o clique RECUSA quando a resposta ao vivo não serve - versão que não é mais nova que a
+    #      instalada (o instalador antigo continua assinado e continua vindo do host certo),
+    #      endereço fora do domínio, ou catálogo que não respondeu.
+    function New-WinForgeSelfTestCachePoison {
+        <#
+        .SYNOPSIS
+            Planta um cache de catálogo INTEIRO (as duas listas e a busca do driver) escolhendo
+            psid, pfid, versão e endereço.
+        #>
+        param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Url)
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        (@([pscustomobject]@{ Name = 'GeForce RTX 30 Series'; Value = '999' }) | ConvertTo-Json -Depth 6) |
+            Set-Content -LiteralPath (Join-Path $Dir 'nvidia-lookup-2-1.json') -Encoding UTF8
+        (@([pscustomobject]@{ Name = 'GeForce RTX 3070'; Value = '888' }) | ConvertTo-Json -Depth 6) |
+            Set-Content -LiteralPath (Join-Path $Dir 'nvidia-lookup-3-999.json') -Encoding UTF8
+        # A busca do driver é plantada para os DOIS pares psid/pfid: o do próprio veneno (999/888,
+        # que é onde as listas envenenadas levam) e o que a consulta ao vivo encontra (101/202).
+        # Sem o segundo, um -NoCache que esquecesse justamente esta terceira leitura passaria batido
+        # - o arquivo com o nome do par ao vivo é o único jeito de flagrar isso.
+        # E os dois osID (135 = Windows 11, 57 = Windows 10), porque o clique lê o do perfil desta
+        # máquina e o teste não pode depender de em qual Windows o build está rodando.
+        foreach ($wfCatPar in @('999-888', '101-202')) {
+            foreach ($wfCatOs in @(135, 57)) {
+                ([pscustomobject]@{ Version = '999.99'; DownloadURL = $Url; ReleaseDateTime = 'Thu Sep 03, 2026' } | ConvertTo-Json -Depth 6) |
+                    Set-Content -LiteralPath (Join-Path $Dir "nvidia-$wfCatPar-$wfCatOs.json") -Encoding UTF8
+            }
+        }
+    }
+    $wfCatRaiz = Join-Path $env:TEMP 'WinForge-SelfTest\catalogo'
+    try {
+        $wfCatVeneno = 'https://us.download.nvidia.com/Windows/999.99/veneno.exe'
+        $wfCatVersaoViva = '616.92'
+        $wfCatUrlViva = 'https://us.download.nvidia.com/Windows/616.92/616.92-desktop-win10-win11-64bit-international-dch-whql.exe'
+        $wfCatFalha = $false
+        # A costura: responde as três consultas do catálogo. psid/pfid diferentes dos do veneno de
+        # propósito - é assim que se vê de qual das duas fontes cada número veio.
+        $wfCatResolver = {
+            param($wfCatUri)
+            if ($wfCatFalha) { throw "catálogo fora do ar (simulado)" }
+            if ($wfCatUri -match 'TypeID=2') {
+                return [pscustomobject]@{ LookupValueSearch = [pscustomobject]@{ LookupValues = [pscustomobject]@{ LookupValue = @([pscustomobject]@{ Name = 'GeForce RTX 30 Series'; Value = '101' }) } } }
+            }
+            if ($wfCatUri -match 'TypeID=3') {
+                if ($wfCatUri -notmatch 'ParentID=101') { throw "psid inesperado na consulta: '$wfCatUri'" }
+                return [pscustomobject]@{ LookupValueSearch = [pscustomobject]@{ LookupValues = [pscustomobject]@{ LookupValue = @([pscustomobject]@{ Name = 'GeForce RTX 3070'; Value = '202' }) } } }
+            }
+            if ($wfCatUri -match 'DriverManualLookup') {
+                if ($wfCatUri -notmatch 'psid=101&pfid=202&') { throw "produto inesperado na consulta: '$wfCatUri'" }
+                return [pscustomobject]@{ IDS = @([pscustomobject]@{ downloadInfo = [pscustomobject]@{ Version = $wfCatVersaoViva; DownloadURL = $wfCatUrlViva; ReleaseDateTime = 'Thu Sep 03, 2026' } }) }
+            }
+            throw "consulta inesperada: '$wfCatUri'"
+        }
+        # 1. O cenário. Sem esta primeira metade, o teste seguinte passaria mesmo com o cache morto.
+        $wfCatDirCache = Join-Path $wfCatRaiz 'com-cache'
+        New-WinForgeSelfTestCachePoison -Dir $wfCatDirCache -Url $wfCatVeneno
+        $wfCatComCache = Get-WinForgeNvidiaLatestDriver -GpuName 'NVIDIA GeForce RTX 3070' -Root $wfCatDirCache -Resolver $wfCatResolver
+        if ([string]$wfCatComCache.Version -ne '999.99' -or [string]$wfCatComCache.Url -ne $wfCatVeneno) {
+            Write-Host "  [ERRO] cache do catálogo: o cenário não vale - o cache plantado deveria ser lido sem -NoCache (veio '$($wfCatComCache.Version)' / '$($wfCatComCache.Url)')" -ForegroundColor Red; $wbErrors++
+        }
+        # 2. Com -NoCache o arquivo não é lido em NENHUMA das três consultas: nem a série (999), nem
+        #    o produto (888), nem a versão/endereço.
+        $wfCatDirVivo = Join-Path $wfCatRaiz 'ao-vivo'
+        New-WinForgeSelfTestCachePoison -Dir $wfCatDirVivo -Url $wfCatVeneno
+        $wfCatVivo = Get-WinForgeNvidiaLatestDriver -GpuName 'NVIDIA GeForce RTX 3070' -NoCache -Root $wfCatDirVivo -Resolver $wfCatResolver
+        if ([string]$wfCatVivo.Status -ne 'ok') { Write-Host "  [ERRO] cache do catálogo: a consulta ao vivo deveria responder 'ok', veio '$($wfCatVivo.Status)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCatVivo.Version -ne $wfCatVersaoViva -or [string]$wfCatVivo.Url -ne $wfCatUrlViva) {
+            Write-Host "  [ERRO] cache do catálogo: a consulta ao vivo devolveu '$($wfCatVivo.Version)' / '$($wfCatVivo.Url)'" -ForegroundColor Red; $wbErrors++
+        }
+        if ([string]$wfCatVivo.Version -eq '999.99' -or [string]$wfCatVivo.Url -eq $wfCatVeneno) {
+            Write-Host "  [ERRO] cache do catálogo: o arquivo plantado chegou à consulta ao vivo" -ForegroundColor Red; $wbErrors++
+        }
+        # 3 e 4. O clique. A linha carrega o veneno (é o que a tabela desenhou a partir do cache) e
+        #        uma versão instalada de 616.56; o que sai é sempre o da consulta ao vivo.
+        #        Caso: @(nome, versão ao vivo, endereço ao vivo, catálogo fora do ar, trecho esperado)
+        $wfCatLinha = [pscustomobject]@{
+            Device = 'NVIDIA GeForce RTX 3070'; Version = '32.0.16.1656'; Latest = '999.99'
+            ActionKind = 'nvidia-download'; ActionLabel = 'Baixar 999.99'; ActionUrl = $wfCatVeneno
+        }
+        $wfCatCasos = @(
+            @('versão nova',            '616.92', $wfCatUrlViva,                          $false, 'baixaria o driver NVIDIA 616.92'),
+            @('mesma versão instalada', '616.56', $wfCatUrlViva,                          $false, 'não é mais nova que a instalada'),
+            @('versão mais antiga',     '566.36', $wfCatUrlViva,                          $false, 'não é mais nova que a instalada'),
+            @('endereço fora do domínio', '616.92', 'https://nvidia.com.evil.com/x.exe',  $false, 'não é um https de um host da nvidia.com'),
+            @('catálogo fora do ar',    '616.92', $wfCatUrlViva,                          $true,  "respondeu 'indisponível'")
+        )
+        $wfCatCliqueOk = 0
+        foreach ($wfCatCaso in $wfCatCasos) {
+            $wfCatVersaoViva = [string]$wfCatCaso[1]
+            $wfCatUrlViva = [string]$wfCatCaso[2]
+            $wfCatFalha = [bool]$wfCatCaso[3]
+            $wfCatDirCaso = Join-Path $wfCatRaiz ('clique-' + $wfCatCliqueOk)
+            New-WinForgeSelfTestCachePoison -Dir $wfCatDirCaso -Url $wfCatVeneno
+            $wfCatTexto = [string](Invoke-WinForgeDriverAction -Row $wfCatLinha -DryRun -Root $wfCatDirCaso -Resolver $wfCatResolver)
+            if ($wfCatTexto -notmatch 'consulta ao vivo') { Write-Host "  [ERRO] clique de download ($($wfCatCaso[0])): o texto não diz que houve consulta ao vivo ('$wfCatTexto')" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfCatTexto -notlike "*$($wfCatCaso[4])*") { Write-Host "  [ERRO] clique de download ($($wfCatCaso[0])): esperado '$($wfCatCaso[4])' no texto, veio '$wfCatTexto'" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfCatTexto -match '999\.99' -or $wfCatTexto -match 'veneno') { Write-Host "  [ERRO] clique de download ($($wfCatCaso[0])): o que a linha carregava vazou para o texto ('$wfCatTexto')" -ForegroundColor Red; $wbErrors++ }
+            else { $wfCatCliqueOk++ }
+        }
+        $wfCatFalha = $false
+        # O tamanho da caixa de confirmação é informação, não trava: endereço que não passa na
+        # conferência de domínio nem chega a virar requisição e volta com o texto genérico.
+        if ((Get-WinForgeNvidiaDownloadSizeText -Url 'https://nvidia.com.evil.com/x.exe') -ne 'várias centenas de MB') {
+            Write-Host "  [ERRO] tamanho do download: endereço fora do domínio deveria voltar o texto genérico" -ForegroundColor Red; $wbErrors++
+        }
+        Write-Host "  Cache do catálogo: é de tela - com cache o arquivo plantado é lido, com -NoCache não aparece em nenhuma das 3 consultas; clique julgado em $wfCatCliqueOk de $($wfCatCasos.Count) cenário(s) pela consulta ao vivo"
+    } catch {
+        Write-Host "  [ERRO] cache do catálogo: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wfCatRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- cadeia inteira da pasta protegida
     # Conferir só a ÚLTIMA pasta deixava um caminho aberto: '%ProgramData%\WinForge' criado com a ACL
@@ -2756,13 +2918,23 @@ if ($SelfTest) {
     #      o que permite renomear 'downloads' e plantar uma junção no lugar.
     # As duas variáveis são apontadas para esses valores DE PROPÓSITO aqui, e nada pode mudar. Nada
     # é criado nem escrito: só se pergunta que caminho as funções montam e que cadeia elas conferem.
+    #
+    # %LOCALAPPDATA% entra na mesma lista. O que mora lá é do usuário e continua gravável por ele -
+    # por isso o cache do catálogo é de TELA e o clique consulta ao vivo -, mas a PASTA não pode ser
+    # escolhida pela variável: o relatório HTML é gravado pelo motor elevado e aberto em seguida com
+    # Start-Process, e um 'LOCALAPPDATA=<pasta do atacante>' escolheria onde.
     $wfAmbPdAntes = $env:ProgramData
     $wfAmbTmpAntes = $env:TEMP
+    $wfAmbLadAntes = $env:LOCALAPPDATA
     try {
         $wfAmbBase = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
         $wfAmbMeio = Join-Path $wfAmbBase 'WinForge'
         $env:ProgramData = 'C:\Users\Public\WinForge-Ambiente-Falso'
         $env:TEMP = $wfAmbMeio
+        $env:LOCALAPPDATA = 'C:\Users\Public\WinForge-Ambiente-Falso'
+        $wfAmbLadReal = ([string][Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)).TrimEnd('\')
+        if ((Get-WinForgeUserDataRoot) -ne $wfAmbLadReal) { Write-Host "  [ERRO] raiz de confiança: com `$env:LOCALAPPDATA sequestrado, Get-WinForgeUserDataRoot veio '$(Get-WinForgeUserDataRoot)'" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeCacheRoot) -ne (Join-Path $wfAmbLadReal 'WinForge\cache')) { Write-Host "  [ERRO] raiz de confiança: com `$env:LOCALAPPDATA sequestrado, Get-WinForgeCacheRoot veio '$(Get-WinForgeCacheRoot)'" -ForegroundColor Red; $wbErrors++ }
         $wfAmbBk = Get-WinForgeSnapshotRoot
         $wfAmbDl = Get-WinForgeDownloadRoot
         if ($wfAmbBk -ne (Join-Path $wfAmbBase 'WinForge\iis-backup')) { Write-Host "  [ERRO] raiz de confiança: com `$env:ProgramData sequestrado, Get-WinForgeSnapshotRoot veio '$wfAmbBk'" -ForegroundColor Red; $wbErrors++ }
@@ -2782,9 +2954,10 @@ if ($SelfTest) {
     } finally {
         $env:ProgramData = $wfAmbPdAntes
         $env:TEMP = $wfAmbTmpAntes
+        $env:LOCALAPPDATA = $wfAmbLadAntes
     }
     # O teste não pode deixar o ambiente estragado para os blocos seguintes.
-    if ($env:ProgramData -ne $wfAmbPdAntes -or $env:TEMP -ne $wfAmbTmpAntes) { Write-Host "  [ERRO] raiz de confiança: o ambiente não voltou ao que era" -ForegroundColor Red; $wbErrors++ }
+    if ($env:ProgramData -ne $wfAmbPdAntes -or $env:TEMP -ne $wfAmbTmpAntes -or $env:LOCALAPPDATA -ne $wfAmbLadAntes) { Write-Host "  [ERRO] raiz de confiança: o ambiente não voltou ao que era" -ForegroundColor Red; $wbErrors++ }
     # Com -ExplicitRoot (o caminho do -SelfTest) a parada de %TEMP% volta, e é o %TEMP% DE VERDADE:
     # a cadeia de uma pasta de teste começa logo abaixo dele. Sem a chave, a mesma pasta é conferida
     # até a raiz do volume - é essa diferença que faz a pasta padrão não ganhar parada de graça.
@@ -2803,7 +2976,7 @@ if ($SelfTest) {
         $wfAmbNova = Join-Path $wfAmbTmpReal ('WinForge-SelfTest\ainda-nao-existe-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $wfAmbNovaT = Test-WinForgeSnapshotRootTrusted -Root $wfAmbNova -ExplicitRoot
         if (-not $wfAmbNovaT.Trusted) { Write-Host "  [ERRO] raiz de confiança: pasta inexistente deveria ser confiável ('$($wfAmbNovaT.Reason)')" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Raiz de confiança: base e paradas vêm da API de pastas; `$env:ProgramData e `$env:TEMP sequestrados não movem nada e o ambiente volta ao que era"
+        Write-Host "  Raiz de confiança: base e paradas vêm da API de pastas; `$env:ProgramData, `$env:TEMP e `$env:LOCALAPPDATA sequestrados não movem nada e o ambiente volta ao que era"
     } catch {
         Write-Host "  [ERRO] raiz de confiança (-ExplicitRoot): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
@@ -3142,6 +3315,14 @@ if ($SelfTest) {
                 if ($wfRelTam -lt 5KB) { Write-Host "  [ERRO] Diagnóstico: relatório com $wfRelTam byte(s), esperado mais de 5 KB" -ForegroundColor Red; $wbErrors++ }
                 $wfCpuHtml = [System.Net.WebUtility]::HtmlEncode([string]$sync.Profile.CPU.Name)
                 if (-not $wfRelHtml.Contains($wfCpuHtml)) { Write-Host "  [ERRO] Diagnóstico: relatório sem o nome da CPU ('$wfCpuHtml')" -ForegroundColor Red; $wbErrors++ }
+                # O relatório é escrito num nome temporário e renomeado: o arquivo final nunca
+                # existe pela metade, e o '.parcial' não pode ficar para trás.
+                if (Test-Path -LiteralPath "$wfRelPath.parcial") { Write-Host "  [ERRO] Diagnóstico: o arquivo temporário '$wfRelPath.parcial' ficou no disco" -ForegroundColor Red; $wbErrors++ }
+                # E o caminho padrão sai da API de pastas, não de $env:LocalAppData: o relatório é
+                # gravado pelo motor elevado e aberto em seguida com Start-Process.
+                $wfRelDef = [string]${function:Export-WinForgeDiagnosticsReport}
+                if ($wfRelDef -match '\$env:LocalAppData') { Write-Host "  [ERRO] Diagnóstico: o caminho do relatório ainda vem de `$env:LocalAppData" -ForegroundColor Red; $wbErrors++ }
+                if ($wfRelDef -notmatch 'Join-Path \(Get-WinForgeUserDataRoot\)') { Write-Host "  [ERRO] Diagnóstico: o caminho do relatório não vem de Get-WinForgeUserDataRoot" -ForegroundColor Red; $wbErrors++ }
                 Write-Host "  Aba Diagnóstico: $wfCards cartões, $wfDrvUI drivers, $($sync.WPFDiagRecs.Items.Count) recomendações | relatório $([math]::Round($wfRelTam / 1KB)) KB"
                 if (-not $env:WINFORGE_KEEP_REPORT) { Remove-Item -Path $wfRel -Force -ErrorAction SilentlyContinue }
             }
@@ -3227,7 +3408,14 @@ if ($SelfTest) {
             $wfBtnWu.Tag = [pscustomobject]@{ Title = 'Driver de teste'; UpdateId = 'id-de-teste' }
             $sync.WPFDiagWU.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent), $wfBtnWu))
             if ([string]$sync.LastDriverAction -notmatch 'SelfTest') { Write-Host "  [ERRO] clique de ação: o botão Instalar do Windows Update deveria ser recusado em SelfTest, deu '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
-            Write-Host "  Colunas de ação: 'Ação' e 'Instalar' com Button ligado à linha; clique roteado pelas duas tabelas e recusado em SelfTest"
+            # Nenhuma das duas tabelas pode escrever RowBackground: o valor é coagido para
+            # DataGridRow.Background com precedência Local, que vence o Setter e o gatilho de
+            # IsMouseOver do estilo. Com ele, o realce do mouse existia no XAML e nunca aparecia.
+            foreach ($wfGradeNome in @('WPFDiagDrivers', 'WPFDiagWU')) {
+                $wfGradeFonte = [System.Windows.DependencyPropertyHelper]::GetValueSource($sync[$wfGradeNome], [System.Windows.Controls.DataGrid]::RowBackgroundProperty).BaseValueSource
+                if ([string]$wfGradeFonte -eq 'Local') { Write-Host "  [ERRO] realce da linha: $wfGradeNome tem RowBackground local, que mata o gatilho de IsMouseOver do estilo" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Colunas de ação: 'Ação' e 'Instalar' com Button ligado à linha; clique roteado pelas duas tabelas e recusado em SelfTest | sem RowBackground local nas duas tabelas"
         } catch {
             Write-Host "  [ERRO] colunas de ação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
@@ -3476,7 +3664,27 @@ if ($SelfTest) {
             $wbLabelAntes = $sync.ProfileJobLabel
             if ((Set-WinForgeProfileProgress -Label "não deveria aparecer" -Percent 50) -ne $false) { Write-Host "  [ERRO] job: escreveu na barra com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
             if ($sync.ProfileJobLabel -ne $wbLabelAntes) { Write-Host "  [ERRO] job: rótulo da barra mudou com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            # Uma AÇÃO de botão é o contrário do diagnóstico automático: o usuário clicou e está
+            # esperando resposta, então ela escreve mesmo com outro trabalho em andamento - senão o
+            # resultado do download ia só para o log. Janela fechando continua sendo recusa, porque
+            # escrever é um Dispatcher.Invoke e o Dispatcher já está desligando.
+            if ((Set-WinForgeDiagProgress -Label "ação do usuário com trabalho em andamento" -Percent 50) -ne $true) { Write-Host "  [ERRO] barra: Set-WinForgeDiagProgress cedeu a vez com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
             $sync.ProcessRunning = $false
+            $sync.WinForgeClosing = $true
+            if ((Set-WinForgeDiagProgress -Label "não deveria aparecer" -Percent 50) -ne $false) { Write-Host "  [ERRO] barra: Set-WinForgeDiagProgress escreveu com a janela fechando" -ForegroundColor Red; $wbErrors++ }
+            $sync.WinForgeClosing = $false
+            # E as duas ações da aba usam ESTA função, não a que cede a vez.
+            foreach ($wfBarraFn in @('Invoke-WinForgeDriverAction', 'Invoke-WinForgeWindowsUpdateAction')) {
+                $wfBarraDef = [string](Get-Command $wfBarraFn).ScriptBlock
+                if ($wfBarraDef -match 'Set-WinForgeProfileProgress') { Write-Host "  [ERRO] barra: $wfBarraFn ainda escreve pela função que cede a vez" -ForegroundColor Red; $wbErrors++ }
+                if ($wfBarraDef -notmatch 'Set-WinForgeDiagProgress') { Write-Host "  [ERRO] barra: $wfBarraFn não escreve na barra" -ForegroundColor Red; $wbErrors++ }
+                # Um trabalho por vez vale para os dois tipos de trava: comando e processo.
+                if ($wfBarraDef -notmatch '\$sync\.CommandRunning -or \$sync\.ProcessRunning') { Write-Host "  [ERRO] barra: $wfBarraFn não recusa com `$sync.ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E o corpo do download cala o medidor de progresso do Invoke-WebRequest: no PowerShell
+            # 5.1 ele emite um registro por bloco lido e fica uma ordem de grandeza mais lento num
+            # arquivo de 700 MB.
+            if ([string]${function:Invoke-WinForgeDriverAction} -notmatch "ProgressPreference = 'SilentlyContinue'") { Write-Host "  [ERRO] barra: o corpo do download não desliga `$ProgressPreference" -ForegroundColor Red; $wbErrors++ }
             Write-Host "  Job de diagnóstico: OK | barra: $($sync.ProfileJobLabel)"
         } catch {
             Write-Host "  [ERRO] job de diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -4171,7 +4379,7 @@ if (-not $SkipBrandTest) {
 # (tweaks da base + wbtweaks do WinForge) e da lista de jogos de config\wb-config.ps1.
 
 # Dot-source de arquivo NAO serve aqui: o PowerShell 5.1 decodifica um .ps1 sem BOM pela code page
-# ANSI, e config\wb-config.ps1 e UTF-8 sem BOM - "Ragnarök" chegaria como "RagnarÃ¶k" no doc.
+# ANSI, e bastaria um arquivo de config perder o BOM para "Ragnarök" virar "RagnarÃ¶k" no doc.
 # Ler o texto em UTF-8 e executar um scriptblock mantem o encoding independente do BOM.
 function Get-ConfigScriptBlock([string]$relativePath) {
     $full = Join-Path $PSScriptRoot $relativePath

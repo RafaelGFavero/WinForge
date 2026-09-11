@@ -161,7 +161,8 @@ function Get-WinForgeCommandOutputPath {
 
     $dir = $null
     if ($null -ne $sync -and $sync.logPath) { $dir = Split-Path -Parent $sync.logPath }
-    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Join-Path $env:LocalAppData 'WinForge\logs' }
+    # Get-WinForgeUserDataRoot, e não $env:LocalAppData: a mesma regra das outras pastas do motor.
+    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Join-Path (Get-WinForgeUserDataRoot) 'WinForge\logs' }
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     return (Join-Path $dir ("{0}-{1}-{2}.txt" -f $Prefix, $Name, (Get-Date -Format 'yyyyMMdd-HHmmss')))
 }

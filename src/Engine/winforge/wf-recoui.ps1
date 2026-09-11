@@ -193,6 +193,30 @@ function Set-WinForgeProfileProgress {
     return $true
 }
 
+function Set-WinForgeDiagProgress {
+    <#
+    .SYNOPSIS
+        Escreve na barra de progresso em nome de uma AÇÃO pedida pelo usuário na aba Diagnóstico
+        (download de driver, instalação pelo Windows Update), mesmo com outro trabalho em andamento.
+    .DESCRIPTION
+        Set-WinForgeProfileProgress cede a vez enquanto $sync.ProcessRunning está ligado, e é o
+        certo para o diagnóstico automático: ninguém pediu por ele, e apagar o texto do trabalho que
+        o usuário está olhando seria pior que ficar calado. Uma ação de BOTÃO é o contrário disso -
+        o usuário clicou, está esperando resposta, e sem esta função o resultado do download ia só
+        para o log. Cedida a vez, escreve direto.
+        A janela fechando continua sendo recusa: escrever é um Dispatcher.Invoke, e a thread do pool
+        ficaria parada esperando um Dispatcher que já está desligando.
+    .OUTPUTS
+        $true se escreveu, $false se a janela está fechando.
+    #>
+    param([string]$Label, [int]$Percent)
+
+    if (Set-WinForgeProfileProgress -Label $Label -Percent $Percent) { return $true }
+    if ($sync.WinForgeClosing) { return $false }
+    Set-WinForgeTweaksProgressIndicator -Visible $true -Label $Label -Percent $Percent
+    return $true
+}
+
 function Start-WinForgeProfileJob {
     <#
     .SYNOPSIS

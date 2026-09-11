@@ -310,6 +310,38 @@ function Get-WinForgeMachineDataRoot {
     try { return ([System.IO.Path]::GetFullPath($base)).TrimEnd('\') } catch { return $base.TrimEnd('\') }
 }
 
+function Get-WinForgeUserDataRoot {
+    <#
+    .SYNOPSIS
+        A base do perfil do usuário (%LocalAppData%), lida da API de pastas do Windows e NUNCA da
+        variável de ambiente.
+    .DESCRIPTION
+        A mesma regra de Get-WinForgeMachineDataRoot, e pelo mesmo motivo: LOCALAPPDATA mora em
+        HKCU\Environment, qualquer processo da conta a reescreve e o motor elevado HERDA o ambiente
+        de quem o abriu. Com 'LOCALAPPDATA=C:\Users\Public\evil' o cache do catálogo, os logs e o
+        relatório HTML mudavam de pasta sem ninguém perceber - e o relatório é aberto com
+        Start-Process depois de gravado.
+
+        O que fica aqui continua sendo do usuário e gravável por ele: ler a pasta pela API tira do
+        caminho o DESVIO da variável, não transforma a pasta em raiz de confiança. É por isso que o
+        cache do catálogo da NVIDIA é de TELA e o clique em "Baixar" consulta o catálogo ao vivo
+        (Get-WinForgeNvidiaLatestDriver -NoCache); o que precisa de pasta confiável de verdade
+        (o instalador baixado) mora em Get-WinForgeMachineDataRoot, atrás de
+        Confirm-WinForgeDownloadRoot.
+
+        A reserva não volta para o ambiente: sai do perfil do usuário, também pela API de pastas.
+    .OUTPUTS
+        O caminho normalizado, sem barra final.
+    #>
+    $base = ''
+    try { $base = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData) } catch { $base = '' }
+    if ([string]::IsNullOrWhiteSpace($base)) {
+        try { $base = Join-Path ([string][Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) 'AppData\Local' } catch { $base = '' }
+    }
+    if ([string]::IsNullOrWhiteSpace($base)) { return '' }
+    try { return ([System.IO.Path]::GetFullPath($base)).TrimEnd('\') } catch { return $base.TrimEnd('\') }
+}
+
 function Get-WinForgeSnapshotRoot {
     <#
     .SYNOPSIS

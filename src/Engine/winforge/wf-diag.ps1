@@ -605,6 +605,13 @@ function Invoke-WinForgeDriverAction {
         download da NVIDIA pergunta antes, porque são centenas de megabytes e porque o instalador vai
         abrir uma janela na cara de quem clicou.
 
+        O que a linha diz sobre a VERSÃO e o ENDEREÇO do driver não é usado para baixar nada: a
+        linha foi desenhada a partir do cache do catálogo, que mora no perfil do usuário. No clique,
+        Resolve-WinForgeNvidiaDownloadTarget refaz a consulta ao catálogo ao vivo e é o resultado
+        DELA que vai para Install-WinForgeNvidiaDriver - inclusive a versão que aparece na caixa de
+        confirmação. Recusa da consulta ao vivo (sem rede, endereço fora do domínio, versão que não
+        é mais nova que a instalada) não vira caixa nenhuma: vai para a barra de status e para o log.
+
         A trava de SelfTest vem ANTES da caixa de confirmação, pela mesma razão de
         Invoke-WinForgeRepairCommand: num build sem ninguém na frente, uma caixa modal pendura tudo.
 
@@ -613,10 +620,18 @@ function Invoke-WinForgeDriverAction {
         e travaria no primeiro pipeline quando o Dispatcher o executasse - o mesmo laço descrito em
         Start-WinForgeProfileJob. E os dados viajam como ARGUMENTO, nunca concatenados num texto de
         comando: o endereço vem da rede, e texto de fora não vira código.
+    .PARAMETER DryRun
+        Faz a consulta ao vivo e devolve o que FARIA, sem caixa, sem rede de download e sem disco.
+        É o que o -SelfTest usa para provar que o endereço vem da consulta e não da linha.
+    .PARAMETER Root
+        Pasta de cache própria (usada pelo -SelfTest).
+    .PARAMETER Resolver
+        Costura de teste da consulta ao catálogo - ver Get-WinForgeNvidiaCatalog.
     .OUTPUTS
-        Texto curto com o que foi feito ('none', 'vendor-page', 'nvidia-download', 'ocupado').
+        Texto curto com o que foi feito ('none', 'vendor-page', 'nvidia-download', 'ocupado',
+        'recusado').
     #>
-    param($Row)
+    param($Row, [switch]$DryRun, [string]$Root, [scriptblock]$Resolver)
 
     if ($null -eq $Row) { return 'none' }
     $tipo = [string]$Row.ActionKind
@@ -645,16 +660,40 @@ function Invoke-WinForgeDriverAction {
     }
 
     if ($tipo -ne 'nvidia-download') { return 'none' }
+
+    # A simulação sai antes da trava de SelfTest e antes de qualquer caixa: ela existe justamente
+    # para o -SelfTest poder exercitar a consulta ao vivo com a costura de Get-WinForgeNvidiaCatalog.
+    if ($DryRun) {
+        $alvoSeco = Resolve-WinForgeNvidiaDownloadTarget -Row $Row -Root $Root -Resolver $Resolver
+        if (-not $alvoSeco.Ok) { return "[simulação] consulta ao vivo recusou o download: $($alvoSeco.Reason)" }
+        return "[simulação] consulta ao vivo: baixaria o driver NVIDIA $($alvoSeco.Version) de '$($alvoSeco.Url)'"
+    }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeDriverAction (nvidia-download)'
 
-    if ($sync.CommandRunning) {
+    # ProcessRunning junto com CommandRunning: um ajuste, um AppX ou a criação do ISO também mexem
+    # na máquina e também podem pedir reinício, e a barra de progresso é uma só para todos.
+    if ($sync.CommandRunning -or $sync.ProcessRunning) {
         [System.Windows.MessageBox]::Show("Já existe um trabalho em andamento. Espere ele terminar.", "WinForge", "OK", "Warning") | Out-Null
         return 'ocupado'
     }
 
-    $versao = [string]$Row.Latest
+    # A consulta ao vivo acontece AQUI, na thread do clique, porque é ela que decide o texto da
+    # caixa de confirmação: perguntar por uma versão e baixar outra seria pedir permissão para uma
+    # coisa e fazer outra. São três requisições de 5 s no pior caso.
+    $null = Set-WinForgeDiagProgress -Label "Consultando o catálogo da NVIDIA..." -Percent 5
+    $alvo = Resolve-WinForgeNvidiaDownloadTarget -Row $Row -Root $Root -Resolver $Resolver
+    if (-not $alvo.Ok) {
+        $recusa = "Download do driver NVIDIA recusado: $($alvo.Reason)."
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $recusa
+        $null = Set-WinForgeDiagProgress -Label $recusa -Percent 0
+        return 'recusado'
+    }
+    $versao = [string]$alvo.Version
+    $tamanho = Get-WinForgeNvidiaDownloadSizeText -Url ([string]$alvo.Url)
+    $null = Set-WinForgeDiagProgress -Label "Catálogo da NVIDIA: versão $versao disponível." -Percent 0
+
     $resposta = [System.Windows.MessageBox]::Show($sync.Form,
-        "Baixar o driver NVIDIA $versao do site oficial (várias centenas de MB)? O instalador abrirá para você concluir.",
+        "Baixar o driver NVIDIA $versao do site oficial ($tamanho)? O instalador abrirá para você concluir.",
         "WinForge", "YesNo", "Warning")
     if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
         Write-WinForgeLog -Component "Diag" -Message "Download do driver NVIDIA $versao cancelado pelo usuário."
@@ -664,25 +703,29 @@ function Invoke-WinForgeDriverAction {
     $sync.CommandRunning = $true
     $corpo = {
         param($wfArgs)
+        # Sem isto o Invoke-WebRequest do PowerShell 5.1 emite um registro de progresso por bloco
+        # lido e fica uma ordem de grandeza mais lento num arquivo de 700 MB - e o corpo roda num
+        # runspace preso ao host do console, que desenha esses registros.
+        $ProgressPreference = 'SilentlyContinue'
         try {
-            $null = Set-WinForgeProfileProgress -Label "Baixando o driver NVIDIA $($wfArgs.Version) do site oficial..." -Percent 10
+            $null = Set-WinForgeDiagProgress -Label "Baixando o driver NVIDIA $($wfArgs.Version) do site oficial..." -Percent 10
             $wfRes = Install-WinForgeNvidiaDriver -Url $wfArgs.Url -Version $wfArgs.Version
-            $null = Set-WinForgeProfileProgress -Label ([string]$wfRes.Text) -Percent $(if ($wfRes.Started) { 100 } else { 0 })
+            $null = Set-WinForgeDiagProgress -Label ([string]$wfRes.Text) -Percent $(if ($wfRes.Started) { 100 } else { 0 })
         } catch {
             Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA falhou: $($_.Exception.Message)"
-            $null = Set-WinForgeProfileProgress -Label "Download do driver NVIDIA falhou: $($_.Exception.Message)" -Percent 0
+            $null = Set-WinForgeDiagProgress -Label "Download do driver NVIDIA falhou: $($_.Exception.Message)" -Percent 0
         } finally {
             $sync.CommandRunning = $false
         }
     }
     try {
-        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Url = [string]$Row.ActionUrl; Version = $versao } | Out-Null
+        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Url = [string]$alvo.Url; Version = $versao } | Out-Null
     } catch {
         # Despacho que falha (pool fechado, sem thread livre) nunca roda o 'finally' do corpo: sem
         # este catch a trava ficaria ligada e nenhum outro comando começaria.
         $sync.CommandRunning = $false
         Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)"
-        $null = Set-WinForgeProfileProgress -Label "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)" -Percent 0
+        $null = Set-WinForgeDiagProgress -Label "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)" -Percent 0
     }
     return 'nvidia-download'
 }
@@ -709,7 +752,9 @@ function Invoke-WinForgeWindowsUpdateAction {
     if ([string]::IsNullOrWhiteSpace($id)) { return 'none' }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeWindowsUpdateAction'
 
-    if ($sync.CommandRunning) {
+    # ProcessRunning junto com CommandRunning: instalar driver pelo Windows Update no meio de uma
+    # leva de ajustes é mexer na máquina duas vezes ao mesmo tempo, e os dois pedem reinício.
+    if ($sync.CommandRunning -or $sync.ProcessRunning) {
         [System.Windows.MessageBox]::Show("Já existe um trabalho em andamento. Espere ele terminar.", "WinForge", "OK", "Warning") | Out-Null
         return 'ocupado'
     }
@@ -732,14 +777,14 @@ function Invoke-WinForgeWindowsUpdateAction {
     $corpo = {
         param($wfArgs)
         try {
-            $null = Set-WinForgeProfileProgress -Label "Instalando '$($wfArgs.Title)' pelo Windows Update..." -Percent 10
+            $null = Set-WinForgeDiagProgress -Label "Instalando '$($wfArgs.Title)' pelo Windows Update..." -Percent 10
             $wfRes = Install-WinForgeWindowsUpdateDriver -UpdateId $wfArgs.UpdateId
             $sync.LastWUInstallText = [string]$wfRes.Text
-            $null = Set-WinForgeProfileProgress -Label ([string]$wfRes.Text) -Percent $(if ([int]$wfRes.ResultCode -in @(2, 3)) { 100 } else { 0 })
+            $null = Set-WinForgeDiagProgress -Label ([string]$wfRes.Text) -Percent $(if ([int]$wfRes.ResultCode -in @(2, 3)) { 100 } else { 0 })
             if ($wfRes.RebootRequired -and -not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUInstallCallback }
         } catch {
             Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update falhou: $($_.Exception.Message)"
-            $null = Set-WinForgeProfileProgress -Label "Instalação pelo Windows Update falhou: $($_.Exception.Message)" -Percent 0
+            $null = Set-WinForgeDiagProgress -Label "Instalação pelo Windows Update falhou: $($_.Exception.Message)" -Percent 0
         } finally {
             $sync.CommandRunning = $false
         }
@@ -749,7 +794,7 @@ function Invoke-WinForgeWindowsUpdateAction {
     } catch {
         $sync.CommandRunning = $false
         Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update não pôde começar: $($_.Exception.Message)"
-        $null = Set-WinForgeProfileProgress -Label "Instalação pelo Windows Update não pôde começar: $($_.Exception.Message)" -Percent 0
+        $null = Set-WinForgeDiagProgress -Label "Instalação pelo Windows Update não pôde começar: $($_.Exception.Message)" -Percent 0
     }
     return 'windows-update'
 }
@@ -1088,7 +1133,9 @@ function Export-WinForgeDiagnosticsReport {
         os acentos sem depender da code page do sistema.
     .PARAMETER Path
         Caminho do arquivo. Sem parâmetro:
-        %LocalAppData%\WinForge\reports\diagnostico-<aaaaMMdd-HHmmss>.html
+        %LocalAppData%\WinForge\reports\diagnostico-<aaaaMMdd-HHmmss>.html, com a base vinda da API
+        de pastas (Get-WinForgeUserDataRoot) e não da variável de ambiente - o arquivo é gravado
+        pelo motor elevado e aberto logo em seguida com Start-Process.
         Com os segundos no nome, dois relatórios seguidos não se sobrescrevem.
     .PARAMETER NoOpen
         Não abre o arquivo depois de gravar (usado pelo -SelfTest).
@@ -1104,7 +1151,7 @@ function Export-WinForgeDiagnosticsReport {
     }
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
-        $Path = Join-Path $env:LocalAppData ("WinForge\reports\diagnostico-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $Path = Join-Path (Get-WinForgeUserDataRoot) ("WinForge\reports\diagnostico-{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
     }
     $parent = Split-Path -Parent $Path
     if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
@@ -1211,8 +1258,15 @@ footer { margin-top: 40px; color: #7d8288; font-size: 12px;
     [void]$html.AppendLine("<footer>Gerado pelo WinForge $(ConvertTo-WinForgeDiagHtml $sync.version) em $(ConvertTo-WinForgeDiagHtml (Get-Date).ToString('dd/MM/yyyy HH:mm')). Este relatório descreve o estado do computador; nenhuma alteração foi aplicada ao gerá-lo.</footer>")
     [void]$html.AppendLine('</body></html>')
 
-    # BOM: sem ele o navegador pode adivinhar a code page do sistema e comer os acentos
-    [System.IO.File]::WriteAllText($Path, $html.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+    # BOM: sem ele o navegador pode adivinhar a code page do sistema e comer os acentos.
+    # A gravação é em nome temporário e só depois vira o nome final. Dois motivos: um relatório
+    # interrompido no meio não fica no disco com cara de relatório pronto, e a escrita do conteúdo
+    # não acontece num nome que alguém possa ter transformado em link entre a criação da pasta e a
+    # gravação - o Move-Item para o nome final é uma operação só.
+    $temporario = "$Path.parcial"
+    Remove-Item -LiteralPath $temporario -Force -ErrorAction SilentlyContinue
+    [System.IO.File]::WriteAllText($temporario, $html.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+    Move-Item -LiteralPath $temporario -Destination $Path -Force
     Write-WinForgeLog -Component "Diag" -Message "Relatório de diagnóstico gerado: $Path"
 
     if (-not $NoOpen) {
