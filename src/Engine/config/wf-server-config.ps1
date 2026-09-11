@@ -133,7 +133,7 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFIisNoIdleTimeout": {
     "Content": "Pools: sem tempo limite de ociosidade",
-    "Description": "Zera o processModel.idleTimeout de todos os pools (padrão: 20 minutos), então o pool deixa de ser desligado por ficar sem requisições e o primeiro acesso depois de um período parado não paga a subida do processo. O pool ocioso continua ocupando memória. Os valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta.",
+    "Description": "Zera o processModel.idleTimeout de todos os pools (padrão: 20 minutos), então o pool deixa de ser desligado por ficar sem requisições e o primeiro acesso depois de um período parado não paga a subida do processo. O pool ocioso continua ocupando memória. O idleTimeout anterior de cada pool é gravado em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' devolve pool por pool o tempo que estava lá.",
     "category": "IIS",
     "panel": "2",
     "tab": "Servidor",
@@ -148,7 +148,7 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFIisMemoryRecycling": {
     "Content": "Pools: reciclar por memória, não por tempo",
-    "Description": "Desliga a reciclagem por tempo (recycling.periodicRestart.time = 00:00:00, que por padrão derruba o pool a cada 29 horas, muitas vezes no meio do expediente) e coloca no lugar um limite de memória privada por pool: 60% da RAM dividido pela quantidade de pools, preso entre 1 GB e 8 GB. Os valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta.",
+    "Description": "Desliga a reciclagem por tempo (recycling.periodicRestart.time = 00:00:00, que por padrão derruba o pool a cada 29 horas, muitas vezes no meio do expediente) e coloca no lugar um limite de memória privada por pool: 60% da RAM dividido pela quantidade de pools, preso entre 1 GB e 8 GB. O horário de reciclagem e o limite de memória que cada pool tinha são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' repõe os dois de uma vez.",
     "category": "IIS",
     "panel": "2",
     "tab": "Servidor",
@@ -163,7 +163,7 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFIisPreload": {
     "Content": "Sites: pré-carregar (preloadEnabled)",
-    "Description": "Liga applicationDefaults.preloadEnabled em todos os sites: o IIS carrega o aplicativo assim que o pool sobe, sem esperar o primeiro visitante. O que muda é o PADRÃO DO SITE - o aplicativo que já tem preloadEnabled definido explicitamente continua com o valor dele, ligado ou desligado. Depende do recurso 'Inicialização de Aplicativos' (Web-AppInit); se ele não estiver instalado, o item avisa e não altera nada - o WinForge não instala recursos do Windows. Os valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta.",
+    "Description": "Liga applicationDefaults.preloadEnabled em todos os sites: o IIS carrega o aplicativo assim que o pool sobe, sem esperar o primeiro visitante. O que muda é o PADRÃO DO SITE - o aplicativo que já tem preloadEnabled definido explicitamente continua com o valor dele, ligado ou desligado. Depende do recurso 'Inicialização de Aplicativos' (Web-AppInit); se ele não estiver instalado, o item avisa e não altera nada - o WinForge não instala recursos do Windows. O preloadEnabled anterior de cada site é gravado em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' percorre esse arquivo e repõe site por site.",
     "category": "IIS",
     "panel": "2",
     "tab": "Servidor",
@@ -178,7 +178,7 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFIisCompression": {
     "Content": "Compressão estática e dinâmica",
-    "Description": "Liga doStaticCompression e doDynamicCompression na seção system.webServer/urlCompression do servidor: menos banda por resposta, mais CPU por resposta (a parte dinâmica comprime a cada requisição). A compressão dinâmica depende do recurso Web-Dyn-Compression; sem ele, só a estática é ligada e o item avisa. Os valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta.",
+    "Description": "Liga doStaticCompression e doDynamicCompression na seção system.webServer/urlCompression do servidor: menos banda por resposta, mais CPU por resposta (a parte dinâmica comprime a cada requisição). A compressão dinâmica depende do recurso Web-Dyn-Compression; sem ele, só a estática é ligada e o item avisa. O estado anterior das duas compressões é gravado em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' religa ou desliga cada uma conforme estava.",
     "category": "IIS",
     "panel": "2",
     "tab": "Servidor",
@@ -193,7 +193,7 @@ $sync.configs.wfserver = @'
   },
   "WPFTweaksWFIisOutputCache": {
     "Content": "Cache de saída e cache de kernel",
-    "Description": "Liga enabled e enableKernelCache na seção system.webServer/caching: respostas que podem ser reaproveitadas passam a sair do cache, e as elegíveis saem direto do kernel (http.sys), sem entrar no modo usuário. Conteúdo que muda a cada requisição não entra no cache de kernel. Os valores anteriores são gravados em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' lê esse backup de volta.",
+    "Description": "Liga enabled e enableKernelCache na seção system.webServer/caching: respostas que podem ser reaproveitadas passam a sair do cache, e as elegíveis saem direto do kernel (http.sys), sem entrar no modo usuário. Conteúdo que muda a cada requisição não entra no cache de kernel. O estado anterior do cache e do cache de kernel é gravado em %ProgramData%\\WinForge\\iis-backup antes da mudança; 'Desfazer' devolve os dois valores.",
     "category": "IIS",
     "panel": "2",
     "tab": "Servidor",

@@ -1214,14 +1214,37 @@ if ($SelfTest) {
         @{ Nome = 'aplicativos'; Config = $sync.configs.applications; Campo = 'description' }
     )
     $wfDescMin = 40
+    # (g) Descrição em branco só é permitida nestes 14 botões: eles abrem um painel conhecido do
+    # Windows, o rótulo já é a resposta e não há efeito colateral a avisar. A lista é explícita de
+    # propósito - a versão anterior pulava QUALQUER descrição vazia, então apagar o texto de um item
+    # de risco passava calado pela trava, que é o oposto do que ela existe para fazer.
+    $wfDescSemTexto = @(
+        'WPFPanelComputer', 'WPFPanelControl', 'WPFPanelFirewall', 'WPFPanelMouse', 'WPFPanelNetwork'
+        'WPFPanelPower', 'WPFPanelPrinter', 'WPFPanelPrograms', 'WPFPanelRegion', 'WPFPanelRestore'
+        'WPFPanelSecurity', 'WPFPanelSound', 'WPFPanelSystem', 'WPFPanelTimedate'
+    )
+    # (f) Frase repetida ENTRE entradas. A regra (a) só via dentro de uma descrição, e o vício
+    # apenas mudou de lugar: dois botões de driver traziam o mesmo par de frases, ponto por ponto.
+    # Quem lê duas entradas seguidas e encontra o mesmo parágrafo aprende a não ler a terceira.
+    # O corte em 60 caracteres deixa passar a ressalva curta ("Só lê, não altera nada.", "Exige
+    # reinício.") e pega o bloco de texto copiado. Não há allowlist: as 68 linhas de prioridade por
+    # jogo contam como UMA entrada porque são um só literal em wb-functions.ps1, parametrizado pela
+    # lista de executáveis - contá-las de uma em uma acusaria 67 repetições de uma frase escrita
+    # uma vez.
+    $wfDescFraseMin = 60
+    $wfDescCruzada = @{}
+    $wfDescBranco = 0
     $wfDescProblemas = @()
     $wfDescTotal = 0
     foreach ($wfAlvo in $wfDescAlvos) {
         foreach ($p in $wfAlvo.Config.PSObject.Properties) {
             $wfDescProp = $p.Value.PSObject.Properties[$wfAlvo.Campo]
-            if (-not $wfDescProp) { continue }
-            $wfDesc = ([string]$wfDescProp.Value).Trim()
-            if ([string]::IsNullOrWhiteSpace($wfDesc)) { continue }
+            $wfDesc = if ($wfDescProp) { ([string]$wfDescProp.Value).Trim() } else { '' }
+            if ([string]::IsNullOrWhiteSpace($wfDesc)) {
+                if ($wfDescSemTexto -contains $p.Name) { $wfDescBranco++; continue }
+                $wfDescProblemas += "$($wfAlvo.Nome):$($p.Name) -> sem descrição, e a chave não está na lista dos painéis clássicos do Windows"
+                continue
+            }
             $wfDescAud = $sync.WinForgeAudit[$p.Name]
             if ($wfDescAud -and $wfDescAud.Class -eq 'Cuidado') {
                 $wfDescPre = "CUIDADO: {0}. " -f ([string]$wfDescAud.Reason).TrimEnd('.')
@@ -1240,6 +1263,13 @@ if ($SelfTest) {
             }
             $wfDescRepetida = @($wfDescFrases | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
             if ($wfDescRepetida.Count) { $wfDescProblemas += "$wfDescOnde -> frase repetida: '$($wfDescRepetida[0])'" }
+            # (f) as frases longas desta entrada vão para a conferência entre entradas
+            $wfDescFamilia = if ($p.Name -like 'WPFTweaksWBGame*') { 'tweaks:WPFTweaksWBGame*' } else { $wfDescOnde }
+            foreach ($wfFraseN in ($wfDescFrases | Select-Object -Unique)) {
+                if ($wfFraseN.Length -le $wfDescFraseMin) { continue }
+                if (-not $wfDescCruzada.ContainsKey($wfFraseN)) { $wfDescCruzada[$wfFraseN] = @() }
+                if ($wfDescCruzada[$wfFraseN] -notcontains $wfDescFamilia) { $wfDescCruzada[$wfFraseN] += $wfDescFamilia }
+            }
             # (b) tamanho mínimo: abaixo disso não cabe mecanismo + efeito
             if ($wfDesc.Length -lt $wfDescMin) { $wfDescProblemas += "$wfDescOnde -> $($wfDesc.Length) caractere(s), mínimo $wfDescMin" }
             # (c) descrição que só repete o título não informa nada
@@ -1254,11 +1284,22 @@ if ($SelfTest) {
             if ($wfDesc.IndexOf('CUIDADO:', [StringComparison]::Ordinal) -ge 0) { $wfDescProblemas += "$wfDescOnde -> 'CUIDADO:' escrito na descrição de origem (quem prefixa é a auditoria)" }
         }
     }
+    foreach ($wfFraseChave in @($wfDescCruzada.Keys | Sort-Object)) {
+        $wfDescDonos = @($wfDescCruzada[$wfFraseChave])
+        if ($wfDescDonos.Count -gt 1) {
+            $wfDescProblemas += "$($wfDescDonos -join ' = ') -> a mesma frase nas $($wfDescDonos.Count) entradas: '$wfFraseChave'"
+        }
+    }
+    # A lista de dispensa envelhece calada: se um painel clássico ganhar descrição ou sumir da
+    # config, ela passa a proteger uma chave que não existe mais.
+    if ($wfDescBranco -ne $wfDescSemTexto.Count) {
+        $wfDescProblemas += "painéis clássicos sem descrição: $wfDescBranco encontrado(s), $($wfDescSemTexto.Count) na lista de dispensa"
+    }
     if ($wfDescProblemas.Count) {
         Write-Host "  [ERRO] descrições: $($wfDescProblemas.Count) problema(s) em $wfDescTotal descrição(ões)" -ForegroundColor Red; $wbErrors++
         foreach ($wfDescP in $wfDescProblemas) { Write-Host "         $wfDescP" -ForegroundColor Red }
     }
-    else { Write-Host "  Descrições: $wfDescTotal com $wfDescMin+ caracteres, sem frase repetida, sem repetir o título e com no máximo uma 'Origem:'" }
+    else { Write-Host "  Descrições: $wfDescTotal com $wfDescMin+ caracteres, sem frase repetida dentro nem entre entradas, sem repetir o título e com no máximo uma 'Origem:' ($($wfDescSemTexto.Count) painéis clássicos dispensados)" }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {

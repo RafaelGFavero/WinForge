@@ -257,7 +257,7 @@ function Get-WinForgeRepairCommand {
                     @{ Function = 'Invoke-WPFFixesWinget' }
                 )
                 Final     = 'Reinstalação do WinGet concluída.'
-                Confirm   = 'Reinstala o WinGet (Gerenciador de Pacotes do Windows) baixando o App Installer da Microsoft. Precisa de internet. Os programas já instalados por ele continuam onde estão.'
+                Confirm   = 'Age só quando o WinGet está ausente ou quebrado: se ele já responde, este botão não faz nada. Caso contrário, instala o provedor NuGet, baixa da Galeria do PowerShell o módulo Microsoft.WinGet.Client e chama o Repair-WinGetPackageManager, que repõe o Gerenciador de Pacotes do Windows para todos os usuários. Precisa de internet. Os programas já instalados por ele continuam onde estão.'
             }
         }
         'DirectX' {

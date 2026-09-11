@@ -172,15 +172,15 @@ $sync.WinForgeI18n = @{
     }
     'WPFTweaksIPv46' = @{
         Content     = 'IPv6 - Preferir IPv4'
-        Description = 'Grava DisabledComponents = 0x20 em Tcpip6, que é a forma recomendada pela Microsoft de dar preferência ao IPv4 na tabela de políticas de prefixo. O IPv6 continua ligado, mas só é usado quando não há caminho por IPv4 - o que corta a espera de um IPv6 mal configurado na rede local. Exige reiniciar o computador para valer.'
+        Description = 'Grava DisabledComponents = 0x20 em Tcpip6, que é a forma recomendada pela Microsoft de dar preferência ao IPv4 na tabela de políticas de prefixo. O IPv6 continua ligado, mas só é usado quando não há caminho por IPv4 - o que corta a espera de um IPv6 mal configurado na rede local. É a mais branda das três opções de IPv6 desta lista: nada é desligado, só reordenado. O valor é lido quando a pilha TCP/IP sobe, então reinicie o computador depois de marcar.'
     }
     'WPFTweaksTeredo' = @{
         Content     = 'Teredo - Desativar'
-        Description = 'Grava DisabledComponents = 0x01 e roda "netsh interface teredo set state disabled", desligando os túneis de IPv6 sobre IPv4 (Teredo, 6to4 e ISATAP). Some uma camada de encapsulamento que em algumas redes só acrescenta latência. Exige reiniciar o computador para valer.'
+        Description = 'Grava DisabledComponents = 0x01 e roda "netsh interface teredo set state disabled", desligando os túneis de IPv6 sobre IPv4 (Teredo, 6to4 e ISATAP). Some uma camada de encapsulamento que em algumas redes só acrescenta latência. O comando netsh vale na hora e derruba os túneis já levantados; a chave de registro só passa a valer no próximo início do Windows.'
     }
     'WPFTweaksDisableIPv6' = @{
         Content     = 'IPv6 - Desativar'
-        Description = 'Grava DisabledComponents = 0xFF e desmarca o Protocolo IP Versão 6 em todas as placas de rede. A máquina passa a falar só IPv4, o que às vezes resolve DNS lento e site que demora a abrir numa rede onde o IPv6 é anunciado mas não funciona. Exige reiniciar o computador para valer.'
+        Description = 'Grava DisabledComponents = 0xFF e desmarca o Protocolo IP Versão 6 em todas as placas de rede. A máquina passa a falar só IPv4, o que às vezes resolve DNS lento e site que demora a abrir numa rede onde o IPv6 é anunciado mas não funciona. É a mais drástica das três opções de IPv6 desta lista: DirectAccess e qualquer serviço que só escute em IPv6 param de funcionar, e a Microsoft não recomenda desligar o protocolo inteiro. Só passa a valer depois de reiniciar.'
     }
     'WPFTweaksDisableBGapps' = @{
         Content     = 'Aplicativos em segundo plano - Desativar'
@@ -364,7 +364,7 @@ $sync.WinForgeI18n = @{
     }
     'WPFFixesUpdate' = @{
         Content     = 'Windows Update - Redefinir'
-        Description = 'Para os serviços BITS, wuauserv, appidsvc e cryptsvc, apaga a fila de trabalhos do BITS e o log, renomeia a pasta de downloads, registra de novo as DLLs e remove as configurações de WSUS. Vai bem além do Windows Update: apaga as chaves de diretiva local em HKLM\Software\Policies e HKCU\Software\Policies, exclui as pastas GroupPolicy e GroupPolicyUsers do System32, roda "secedit /configure" com o defltbase.inf e um "gpupdate /force", e usa o netsh para redefinir o Winsock, a pilha IP e o proxy do winhttp. É o que se tenta quando a busca por atualizações trava ou volta sempre com o mesmo código de erro, mas leva junto toda diretiva de grupo local da máquina, inclusive as que não têm nada a ver com atualização. O histórico é zerado e é preciso reiniciar o computador depois.'
+        Description = 'Para os serviços BITS, wuauserv, appidsvc e cryptsvc, apaga a fila de trabalhos do BITS e o log antigo, renomeia a pasta de downloads, registra de novo as DLLs e remove as configurações de WSUS. Vai bem além do Windows Update: apaga a diretiva de grupo local inteira - HKLM\Software\Policies, HKCU\Software\Policies e as chaves CurrentVersion\Policies das duas raízes -, exclui as pastas GroupPolicy e GroupPolicyUsers do System32, roda "secedit /configure /cfg defltbase.inf" seguido de "gpupdate /force" e usa o netsh para redefinir o Winsock, a pilha IP e o proxy do winhttp. Isso apaga também os ajustes do próprio WinForge que moram em diretiva: o enxugamento do Edge e do Brave, o bloqueio de ConsumerFeatures e as políticas de telemetria voltam ao padrão do Windows e precisam ser marcados de novo. O histórico de atualizações é preservado - a renomeação da pasta DataStore, que é o que o apagaria, só acontece no modo agressivo, que este botão não usa. É o que se tenta quando a busca por atualizações trava ou volta sempre com o mesmo código de erro; reinicie o computador no fim.'
     }
     'WPFFixesNetwork' = @{
         Content     = 'Rede - Redefinir'
@@ -462,7 +462,7 @@ $sync.WinForgeI18n = @{
     'WPFInstalldropbox' = @{ Description = 'Cliente de armazenamento em nuvem que sincroniza uma pasta do computador com o servidor e com os outros dispositivos. Instale se a sua equipe ou o seu backup já vivem no Dropbox.' }
     'WPFInstalleaapp' = @{ Description = 'Loja e lançador da Electronic Arts, por onde passam FIFA, Battlefield, The Sims e Apex Legends. Instale se você joga algum título da EA: é por ele que o jogo baixa e atualiza.' }
     'WPFInstalleartrumpet' = @{ Description = 'Controle de volume por aplicativo na área de notificação, com troca rápida de dispositivo de saída e de entrada. Resolve a vida de quem alterna entre fone e caixa de som ou quer abaixar só o navegador.' }
-    'WPFInstalledge' = @{ Description = 'Navegador da Microsoft baseado no Chromium, integrado à conta corporativa e ao Windows Hello. Instale para reinstalar o Edge depois de removê-lo, ou em quem precisa dele para um site interno.' }
+    'WPFInstalledge' = @{ Description = 'Navegador da Microsoft baseado no Chromium, integrado à conta corporativa e ao Windows Hello. Instale para reinstalar o Edge depois de removê-lo, ou se você precisa dele para um site interno.' }
     'WPFInstallepicgames' = @{ Description = 'Loja e lançador da Epic, com Fortnite e um jogo gratuito por semana. Instale para resgatar esses gratuitos e para os títulos que saem só nessa loja.' }
     'WPFInstallfirefox' = @{ Description = 'Navegador da Mozilla, o único grande que não usa o motor do Chromium, com isolamento de cookies por site e perfis separados. Instale para não ficar dependente de um motor só e para usar extensões que o Chrome não permite mais.' }
     'WPFInstallflux' = @{ Description = 'Reduz o azul da tela conforme o horário, deixando a imagem mais quente à noite. Ajuda quem trabalha até tarde e sente os olhos cansados ou demora a pegar no sono.' }
@@ -547,7 +547,7 @@ $sync.WinForgeI18n = @{
     'WPFInstalltotalcommander' = @{ Description = 'Gerenciador de arquivos de dois painéis, com comparação de pastas, renomeação em lote, cliente FTP e tudo operável pelo teclado. Programa pago, com teste sem prazo; instale para mover arquivo em volume sem tirar a mão do teclado.' }
     'WPFInstalltreesize' = @{ Description = 'Mostra o tamanho de cada pasta em árvore ordenada, do maior para o menor, para achar quem comeu o disco. Instale quando o C: enche e ninguém sabe por quê.' }
     'WPFInstallttaskbar' = @{ Description = 'Deixa a barra de tarefas transparente ou opaca conforme a situação: janela maximizada, menu Iniciar aberto, área de trabalho à mostra. É personalização visual, com consumo próximo de zero.' }
-    'WPFInstallubisoft' = @{ Description = 'Loja e lançador da Ubisoft, por onde passam Assassins Creed, Far Cry e Rainbow Six. Instale se joga algum título da casa: mesmo comprado em outra loja, ele costuma exigir este cliente.' }
+    'WPFInstallubisoft' = @{ Description = 'Loja e lançador da Ubisoft, por onde passam Assassin''s Creed, Far Cry e Rainbow Six. Instale se joga algum título da casa: mesmo comprado em outra loja, ele costuma exigir este cliente.' }
     'WPFInstalleverything' = @{ Description = 'Busca arquivo por nome instantaneamente lendo o índice do próprio NTFS, em vez do índice do Windows - digitar e achar é a mesma coisa. Instale para nunca mais esperar a pesquisa do Explorador.' }
     'WPFInstallvc2015_32' = @{ Description = 'Bibliotecas de execução do Visual C++ 2015 a 2022 na versão de 32 bits. Instale quando um programa reclama de VCRUNTIME140.dll ou MSVCP140.dll ausente - vários jogos e utilitários dependem delas.' }
     'WPFInstallvc2015_64' = @{ Description = 'Bibliotecas de execução do Visual C++ 2015 a 2022 na versão de 64 bits. Instale junto com a de 32 bits: a maioria das máquinas precisa das duas, porque programa antigo continua sendo de 32 bits.' }

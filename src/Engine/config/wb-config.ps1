@@ -230,7 +230,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBMMCSSGames": {
     "Content": "Prioridade das tarefas de jogos (MMCSS) - Alta",
-    "Description": "Sobe o perfil 'Games' do MMCSS (Priority 6, Scheduling Category High, SFIO High, GPU Priority 8), zera o SystemResponsiveness - que por padrão reserva 20% da CPU para tarefas de multimídia em segundo plano - e tira o limite de pacotes por milissegundo do NetworkThrottlingIndex. O jogo passa a ganhar a disputa por CPU, disco e rede contra o que roda atrás dele, o que se nota mais em queda de quadros esporádica do que na média. Só vale para quem declara a tarefa 'Games' ao MMCSS, ou seja, a maioria dos jogos, mas não todos. Origem: 'Forçar o windows a priorizar tarefas de jogos.reg', 'Otimizar Foreground.reg' e scripts por jogo.",
+    "Description": "Sobe o perfil 'Games' do MMCSS (Priority 6, Scheduling Category High, SFIO High, GPU Priority 8), zera o SystemResponsiveness - que por padrão reserva 20% da CPU para as tarefas comuns de segundo plano e deixa os outros 80% para a multimídia, e em 0 acaba com essa reserva - e tira o limite de pacotes por milissegundo do NetworkThrottlingIndex. O jogo passa a ganhar a disputa por CPU, disco e rede contra o que roda atrás dele, o que se nota mais em queda de quadros esporádica do que na média. Só vale para quem declara a tarefa 'Games' ao MMCSS, ou seja, a maioria dos jogos, mas não todos. Origem: 'Forçar o windows a priorizar tarefas de jogos.reg', 'Otimizar Foreground.reg' e scripts por jogo.",
     "category": "Otimizações para jogos",
     "panel": "2",
     "tab": "Jogos",
@@ -245,7 +245,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBWin32PrioritySeparation": {
     "Content": "Prioridade do programa em primeiro plano (Win32PrioritySeparation = 0x26)",
-    "Description": "Grava Win32PrioritySeparation = 0x26 no lugar do padrão 2: fatia de tempo curta, de tamanho fixo, e o triplo de fatias para a janela que está em primeiro plano. O jogo em foco é interrompido com menos frequência por processo de fundo, ao custo de o resto da máquina ficar visivelmente mais lento enquanto ele roda. Vale para qualquer processador, não só Intel, apesar do nome do script de origem. Origem: 'Intel Priority Optimization.bat'.",
+    "Description": "Grava Win32PrioritySeparation = 0x26 no lugar do padrão 2: fatia de tempo curta, de duração variável, e o triplo de fatias para a janela que está em primeiro plano. Num Windows de mesa a diferença é pequena, porque o padrão 2 manda o sistema escolher e ele já escolhe exatamente isto - curta, variável e 3:1; o que o 0x26 faz é deixar a escolha escrita, o que só muda algo em máquina configurada como servidor ou onde outro utilitário já mexeu neste valor. Vale para qualquer processador, não só Intel, apesar do nome do script de origem. Origem: 'Intel Priority Optimization.bat'.",
     "category": "Otimizações para jogos",
     "panel": "2",
     "tab": "Jogos",
@@ -316,7 +316,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBNvidiaDriver": {
     "Content": "Baixar driver NVIDIA (site oficial)",
-    "Description": "Abre a página oficial de drivers da NVIDIA no seu navegador, onde se escolhe a placa e se baixa o pacote. O WinForge não baixa nem instala nada: o download e a execução do instalador são seus. Use quando a aba Diagnóstico apontar driver de vídeo antigo e você preferir o instalador oficial ao Windows Update.",
+    "Description": "Abre a página oficial de drivers da NVIDIA no seu navegador, onde se escolhe a série da placa e se baixa o pacote Game Ready ou Studio. Quem baixa e executa o instalador é você, no navegador: este botão só abre o endereço. Use quando a aba Diagnóstico apontar driver de vídeo antigo e você quiser o Game Ready recém-lançado para um jogo, que o Windows Update demora semanas a entregar.",
     "category": "GPU NVIDIA",
     "panel": "2",
     "tab": "Jogos",
@@ -387,7 +387,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBAmdDriver": {
     "Content": "Baixar driver AMD (site oficial)",
-    "Description": "Abre a página oficial de suporte e drivers da AMD no seu navegador, onde se escolhe a placa e se baixa o Adrenalin. O WinForge não baixa nem instala nada: o download e a execução do instalador são seus. Use quando a aba Diagnóstico apontar driver de vídeo antigo e você preferir o instalador oficial ao Windows Update.",
+    "Description": "Abre a página oficial de suporte e drivers da AMD no seu navegador, onde se informa o modelo da placa e se baixa o pacote Adrenalin. O download e a execução do instalador ficam por sua conta - nenhum arquivo chega à máquina por este botão. Use quando a aba Diagnóstico apontar driver de vídeo antigo: o Adrenalin completo traz o painel de controle da AMD, que a versão vinda do Windows Update não instala.",
     "category": "GPU AMD",
     "panel": "2",
     "tab": "Jogos",
@@ -418,7 +418,7 @@ $sync.configs.wbfeatures = @'
 {
   "WPFPanelWBRestorePoint": {
     "Content": "Ponto de restauração - Criar agora",
-    "Description": "Liga a Proteção do Sistema no disco do Windows se preciso e grava um ponto de restauração agora - é a mesma coisa que o WinForge oferece na pergunta ao abrir. Serve para marcar um estado bom antes de aplicar uma leva de ajustes. Leva de segundos a alguns minutos e ocupa espaço dentro da cota da Proteção do Sistema.",
+    "Description": "Liga a Proteção do Sistema no disco do Windows se preciso e grava um ponto de restauração agora - é o mesmo ponto que o WinForge oferece na pergunta ao abrir, disponível a qualquer momento. Serve para marcar um estado bom antes de aplicar uma leva de ajustes, ou logo depois de uma leva que deu certo. A gravação leva de segundos a alguns minutos e consome parte da cota de disco reservada à Proteção do Sistema.",
     "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
@@ -499,7 +499,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolFiremin": {
     "Content": "Firemin (reduz RAM do Firefox)",
-    "Description": "Abre o instalador do Firemin da pasta 'Apps' ou, se ele não estiver ali, a página oficial da Rizonesoft. O programa devolve ao sistema, de tempos em tempos, a memória que o Firefox reservou e não está usando, o que ajuda em máquina com 4 ou 8 GB e muitas abas abertas. É um utilitário de terceiro: o WinForge só abre, não instala nem configura.",
+    "Description": "Abre o instalador do Firemin da pasta 'Apps' ou, se ele não estiver ali, a página oficial da Rizonesoft. O programa devolve ao sistema, de tempos em tempos, a memória que o Firefox reservou e não está usando, o que ajuda em máquina com 4 ou 8 GB e muitas abas abertas. O Firemin é programa de terceiro: este botão apenas o abre, sem instalar nada e sem ajustar por você o intervalo de limpeza.",
     "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
