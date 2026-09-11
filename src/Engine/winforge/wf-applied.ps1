@@ -15,12 +15,20 @@ function Test-WinForgeAppliedEligible {
         segundo guarda uma escolha entre vários valores.
         Chave que não existe em $sync.configs.tweaks também é $false: sem entrada não há como
         afirmar que está aplicada, e no caminho da aplicação isso significa "não pule".
+
+        Entrada com InvokeScript fica de fora pelo mesmo motivo, e é o caso mais perigoso dos três:
+        o detector da base olha SÓ registro e serviço. WPFTweaksHiber grava duas chaves de registro
+        E chama 'powercfg.exe /hibernate off'; com as chaves já gravadas e o comando nunca
+        executado - outro programa, uma imagem corporativa, uma aplicação interrompida no meio -,
+        o detector diria "aplicado" e nós pularíamos para sempre a metade que falta. Quem não
+        consegue provar o estado inteiro não tem direito de pular.
     #>
     param([Parameter(Mandatory)][string]$Key)
 
     if ($Key -like 'WPFToggle*') { return $false }
     $entry = $sync.configs.tweaks.$Key
     if ($null -eq $entry) { return $false }
+    if ($entry.InvokeScript) { return $false }
     return ([string]$entry.Type -notin @('Toggle', 'Button', 'Combobox'))
 }
 
@@ -190,6 +198,29 @@ function Update-WinForgeAppliedVisuals {
     if ($marcadas -ne $sync.LastAppliedCount) {
         Write-WinForgeLog -Component "Applied" -Message "Linhas marcadas como já aplicadas: $marcadas."
         $sync.LastAppliedCount = $marcadas
+    }
+    return $marcadas
+}
+
+function Update-WinForgeAppliedAfterApply {
+    <#
+    .SYNOPSIS
+        Repinta as linhas e o contador depois que o filtro de aplicação refez a detecção.
+    .DESCRIPTION
+        Select-WinForgeTweaksToApply REESCREVE $sync.AppliedTweaks com a detecção da hora do
+        clique. Sem esta passada, as marcas " · aplicado" e o contador do checklist continuariam
+        mostrando o resultado do diagnóstico da abertura - duas verdades diferentes na mesma tela,
+        e a mais visível delas sendo a velha.
+        Roda na thread da janela (quem chama de dentro do runspace usa Invoke-WPFUIThread com um
+        scriptblock nascido na runspace principal).
+        O contador vem depois e num try próprio: ele depende dos controles da aba Diagnóstico, que
+        podem não existir ainda, e a marca nas linhas não pode se perder por causa disso.
+    .OUTPUTS
+        Quantidade de linhas marcadas.
+    #>
+    $marcadas = Update-WinForgeAppliedVisuals
+    try { Update-WinForgeDiagRecommendationCount } catch {
+        Write-WinForgeLog -Component "Applied" -Level "WARN" -Message "Contador do checklist não pôde ser refeito: $($_.Exception.Message)"
     }
     return $marcadas
 }

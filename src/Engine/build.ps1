@@ -959,41 +959,50 @@ $src = Replace-Once $src @'
 
 # ---------------------------------------------------------------- não reaplicar o que já está aplicado
 # A queixa era direta: marcar de novo uma chave que já está ativa fazia o WinForge reaplicá-la.
-# A detecção é REFEITA aqui, e não lida do diagnóstico da abertura: entre abrir a janela e clicar
-# em Aplicar o usuário pode ter desfeito alguma coisa, e pular um tweak que deixou de estar
+# A detecção é REFEITA na hora, e não lida do diagnóstico da abertura: entre abrir a janela e
+# clicar em Aplicar o usuário pode ter desfeito alguma coisa, e pular um tweak que deixou de estar
 # aplicado seria pior que reaplicar um que ainda está.
-# O filtro entra ANTES de $tweaksToRun/$totalSteps para que a barra conte os passos que vão
-# acontecer de verdade - com ele depois, a barra pararia em "8/12" e pareceria travada.
+#
+# Ela roda DENTRO do corpo do runspace, e não no clique. São ~80 entradas lidas do registro e dos
+# serviços: na thread da janela isso é a interface parada, e nem o rótulo da barra aparece, porque
+# quem pinta é o Dispatcher e o Dispatcher está parado dentro do próprio handler do clique (o mesmo
+# laço descrito em Invoke-WinForgeDriverAction). Aqui o clique só despacha, e a primeira coisa que
+# o corpo faz é dizer na barra o que está fazendo.
+#
+# O filtro entra ANTES do laço que aplica, e desconta os pulados do total: com o total original a
+# barra pararia em "8/12" e pareceria travada.
+$src = Insert-After $src @'
+  Invoke-WPFRunspace -ParameterList @(("tweaks", $tweaksToRun), ("dnsProvider", $dnsProvider), ("completedSteps", $completedSteps), ("totalSteps", $totalSteps)) -ScriptBlock {
+    param($tweaks, $dnsProvider, $completedSteps, $totalSteps)
+
+    $sync.ProcessRunning = $true
+'@ @'
+
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Conferindo o que já está aplicado..." -Percent 0
+    $wfSel = Select-WinForgeTweaksToApply -Keys @($tweaks)
+    $wfPulados = @($wfSel.Skipped)
+    $tweaks = @($wfSel.Apply)
+    $sync.WinForgeTweaksSkipped = $wfPulados.Count
+    $totalSteps = [Math]::Max($totalSteps - $wfPulados.Count, 1)
+    if ($wfPulados.Count -gt 0) {
+      foreach ($wfPulado in $wfPulados) { Write-WinUtilLog -Component "Tweaks" -Message "Ajuste '$wfPulado' pulado: já está aplicado neste sistema." }
+      Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Pulado(s) por já estarem aplicados: $($wfPulados.Count)" -Percent 0
+    }
+    # A detecção acabou de reescrever $sync.AppliedTweaks: quem repinta as marcas das linhas e o
+    # contador do checklist é a thread da janela, com o bloco nascido na runspace principal.
+    if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeAppliedResyncCallback }
+'@.TrimEnd() "tweaks: pular aplicados"
+
+# O bloco que o Dispatcher vai executar NASCE aqui, na runspace principal (esta função roda no
+# clique): feito dentro do corpo do runspace, ele pertenceria à runspace do pool e travaria no
+# primeiro pipeline - o mesmo laço descrito em Start-WinForgeProfileJob.
 $src = Insert-After $src @'
   $Tweaks = $sync.selectedTweaks
 '@ @'
 
-  $wfSel = Select-WinForgeTweaksToApply -Keys @($Tweaks)
-  $wfPulados = @($wfSel.Skipped)
-  $Tweaks = @($wfSel.Apply)
-  $sync.WinForgeTweaksSkipped = $wfPulados.Count
-  if ($wfPulados.Count -gt 0) {
-    foreach ($wfPulado in $wfPulados) { Write-WinUtilLog -Component "Tweaks" -Message "Ajuste '$wfPulado' pulado: já está aplicado neste sistema." }
-    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Pulado(s) por já estarem aplicados: $($wfPulados.Count)" -Percent 0
-  }
-'@.TrimEnd() "tweaks: pular aplicados"
-
-# Tudo que estava marcado já estava aplicado: a base cairia na caixa "Marque os ajustes que você
-# quer aplicar", que é mentira - o usuário marcou, e não havia o que fazer. Aqui a resposta é o
-# resumo na barra, sem caixa nenhuma.
-$src = Replace-Once $src @'
-  if ($tweaks.count -eq 0 -and $dnsProvider -eq "Default") {
-    $msg = "Please check the tweaks you wish to perform."
-'@ @'
-  if ($tweaks.count -eq 0 -and $dnsProvider -eq "Default" -and $wfPulados.Count -gt 0) {
-    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Aplicados: 0 · já estavam aplicados: $($wfPulados.Count)" -Percent 100
-    Write-WinUtilLog -Component "Tweaks" -Message "Nada a aplicar: as $($wfPulados.Count) seleção(ões) já estavam aplicadas."
-    return
-  }
-
-  if ($tweaks.count -eq 0 -and $dnsProvider -eq "Default") {
-    $msg = "Please check the tweaks you wish to perform."
-'@ "tweaks: nada a aplicar"
+  $sync.WinForgeTweaksSkipped = 0
+  $sync.WinForgeAppliedResyncCallback = { Update-WinForgeAppliedAfterApply | Out-Null }
+'@.TrimEnd() "tweaks: callback de repintura"
 
 # Linha final da barra: com alguma coisa pulada, o "Ajustes concluídos" sozinho esconderia
 # justamente o que mudou. A linha da base fica inteira (é ela que a tradução reconhece) e o resumo
@@ -5457,16 +5466,49 @@ if ($SelfTest) {
             Update-WinForgeDiagRecommendationCount
             if ($sync.WPFDiagRecCount.Text -notmatch '\d+ de \d+ recomendados marcados · \d+ já aplicados') { Write-Host "  [ERRO] contador: '$($sync.WPFDiagRecCount.Text)' sem a conta de já aplicados" -ForegroundColor Red; $wbErrors++ }
 
-            # Trava de texto: o filtro tem de estar DENTRO de Invoke-WPFtweaksbutton e ANTES do laço
+            # Chave com InvokeScript NUNCA é pulada. O detector da base só compara registro e
+            # serviço: um tweak cujo registro já bate mas cuja METADE de script nunca rodou
+            # (WPFTweaksHiber grava duas chaves e chama 'powercfg /hibernate off') apareceria como
+            # aplicado, e pular seria deixar o sistema pela metade para sempre.
+            $wfAplScript = @(@($sync.configs.tweaks.PSObject.Properties.Name) | Where-Object { $sync.configs.tweaks.$_.InvokeScript -and ($sync.configs.tweaks.$_.registry -or $sync.configs.tweaks.$_.service) })
+            if ($wfAplScript -notcontains 'WPFTweaksHiber') { Write-Host "  [ERRO] aplicados: WPFTweaksHiber deixou de ser registro+script - o teste não prova mais nada" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfAplSc in $wfAplScript) {
+                if (Test-WinForgeAppliedEligible -Key $wfAplSc) { Write-Host "  [ERRO] aplicados: '$wfAplSc' tem InvokeScript e mesmo assim pode ser pulado" -ForegroundColor Red; $wbErrors++ }
+            }
+            $wfAplScSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $null = $wfAplScSet.Add('WPFTweaksHiber')
+            if (@((Select-WinForgeTweaksToApply -Keys @('WPFTweaksHiber') -Applied $wfAplScSet).Skipped).Count -ne 0) { Write-Host "  [ERRO] seletor: 'WPFTweaksHiber' (registro + script) foi pulado" -ForegroundColor Red; $wbErrors++ }
+
+            # Depois que o filtro reescreve $sync.AppliedTweaks, quem repinta as linhas e o contador
+            # é este ajudante - chamado pela thread da janela. Sem ele, as linhas ficariam com a
+            # verdade do diagnóstico da abertura e o contador com outra.
+            $sync.AppliedTweaks = $wfAplFake
+            $sync.WPFDiagRecCount.Text = 'nada'
+            $wfAplResync = Update-WinForgeAppliedAfterApply
+            if ($wfAplResync -ne 2) { Write-Host "  [ERRO] repintura pós-aplicação: $wfAplResync linha(s) marcada(s), esperado 2" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WPFDiagRecCount.Text -notmatch '\d+ já aplicados') { Write-Host "  [ERRO] repintura pós-aplicação: o contador não foi refeito ('$($sync.WPFDiagRecCount.Text)')" -ForegroundColor Red; $wbErrors++ }
+
+            # Trava de texto: a detecção roda DENTRO do corpo do runspace (ela lê registro e serviço
+            # de ~80 entradas; no clique isso é a janela congelada sem nem pintar o rótulo, porque
+            # quem pinta é o Dispatcher e o Dispatcher está parado dentro do handler) e ANTES do laço
             # que aplica - depois dele, o motor reaplicaria tudo antes de descobrir o que pular.
             $wfAplCorpo = [string](Get-Command Invoke-WPFtweaksbutton).ScriptBlock
-            $wfAplPos = $wfAplCorpo.IndexOf('$wfSel = Select-WinForgeTweaksToApply -Keys @($Tweaks)', [System.StringComparison]::Ordinal)
+            $wfAplDespacho = $wfAplCorpo.IndexOf('Invoke-WPFRunspace -ParameterList', [System.StringComparison]::Ordinal)
+            $wfAplPos = $wfAplCorpo.IndexOf('$wfSel = Select-WinForgeTweaksToApply -Keys @($tweaks)', [System.StringComparison]::Ordinal)
             $wfAplLaco = $wfAplCorpo.IndexOf('Invoke-WinForgeTweaks $tweaks[$i]', [System.StringComparison]::Ordinal)
             if ($wfAplPos -lt 0) { Write-Host "  [ERRO] trava de texto: Invoke-WPFtweaksbutton não chama Select-WinForgeTweaksToApply" -ForegroundColor Red; $wbErrors++ }
             elseif ($wfAplLaco -lt 0) { Write-Host "  [ERRO] trava de texto: Invoke-WPFtweaksbutton não tem o laço de aplicação da base" -ForegroundColor Red; $wbErrors++ }
             elseif ($wfAplPos -gt $wfAplLaco) { Write-Host "  [ERRO] trava de texto: o filtro de aplicados vem DEPOIS do laço que aplica" -ForegroundColor Red; $wbErrors++ }
-            if ($wfAplCorpo.IndexOf('$totalSteps = [Math]::Max($Tweaks.Count, 1)', [System.StringComparison]::Ordinal) -lt $wfAplPos) { Write-Host "  [ERRO] trava de texto: `$totalSteps é calculado antes do filtro e contaria passos que não vão acontecer" -ForegroundColor Red; $wbErrors++ }
-            Write-Host "  Estado já aplicado: $(@($wfAplDetectado).Count) chave(s) detectada(s) nesta máquina; marca, seletor e contador conferidos com conjunto sintético"
+            elseif ($wfAplPos -lt $wfAplDespacho) { Write-Host "  [ERRO] trava de texto: a detecção do que já está aplicado ficou no caminho do clique - ela tem de rodar dentro do corpo do runspace" -ForegroundColor Red; $wbErrors++ }
+            if ($wfAplCorpo.IndexOf('Conferindo o que já está aplicado', [System.StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] trava de texto: a barra não diz que está conferindo o que já está aplicado" -ForegroundColor Red; $wbErrors++ }
+            $wfAplRepintura = $wfAplCorpo.IndexOf('Invoke-WPFUIThread $sync.WinForgeAppliedResyncCallback', [System.StringComparison]::Ordinal)
+            if ($wfAplRepintura -lt 0) { Write-Host "  [ERRO] trava de texto: o corpo do runspace não repinta as linhas pela thread da janela depois da detecção" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAplRepintura -lt $wfAplPos) { Write-Host "  [ERRO] trava de texto: a repintura é agendada ANTES da detecção, e mostraria a verdade velha" -ForegroundColor Red; $wbErrors++ }
+            if ($wfAplCorpo.IndexOf('$sync.WinForgeAppliedResyncCallback = {', [System.StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] trava de texto: o bloco da repintura não nasce na runspace principal (no caminho do clique)" -ForegroundColor Red; $wbErrors++ }
+            # A barra conta os passos que vão acontecer de verdade: sem descontar os pulados ela
+            # pararia em "8/12" e pareceria travada.
+            if ($wfAplCorpo.IndexOf('$totalSteps = [Math]::Max($totalSteps - $wfPulados.Count, 1)', [System.StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] trava de texto: o total de passos não desconta os ajustes pulados" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Estado já aplicado: $(@($wfAplDetectado).Count) chave(s) detectada(s) nesta máquina; marca, seletor e contador conferidos com conjunto sintético | chave com script nunca é pulada | detecção fora do clique"
         } catch {
             Write-Host "  [ERRO] estado já aplicado: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         } finally {
