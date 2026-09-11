@@ -908,6 +908,10 @@ if ($SelfTest) {
     # A execução normal do WinForge nunca define esta chave, e chave ausente em hashtable é $null.
     $sync.SelfTest = $true
     Write-Host "== WinForge SelfTest =="
+    # Pasta temporária com o nome LONGO: no runner do CI $env:TEMP vem na forma 8.3
+    # (C:\Users\RUNNER~1\...), e as funções devolvem caminhos longos (GetFullPath/Get-Item).
+    # Comparar os dois como texto falhava só lá. Get-Item resolve o nome curto para o longo.
+    $wbSelfTestTemp = try { (Get-Item -LiteralPath ([System.IO.Path]::GetTempPath().TrimEnd('\'))).FullName } catch { $env:TEMP }
     $wbErrors = 0
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
         foreach ($k in @($p.Value)) {
@@ -1402,7 +1406,7 @@ if ($SelfTest) {
     # voltar. Numa máquina sem IIS dá para provar duas coisas, e são as duas cobradas aqui: o
     # round-trip do arquivo (numa raiz temporária, nunca em %ProgramData%) e a recusa limpa de
     # Invoke-WinForgeIisTweak quando o módulo WebAdministration não existe.
-    $wbIisRoot = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup'
+    $wbIisRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup'
     try {
         if (Test-Path $wbIisRoot) { Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbIisFile = New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'pool:A:startMode' = 'OnDemand'; 'pool:A:autoStart' = 'False' } -Root $wbIisRoot
@@ -1418,7 +1422,7 @@ if ($SelfTest) {
         $wbIisTrust = Test-WinForgeSnapshotRootTrusted -Root $wbIisRoot -ExplicitRoot
         if (-not $wbIisTrust.Trusted) { Write-Host "  [ERRO] IIS: a pasta recém-criada não passou na checagem de confiança ('$($wbIisTrust.Reason)')" -ForegroundColor Red; $wbErrors++ }
         # Pasta com escrita para 'Todos' (Everyone, S-1-1-0) é o cenário do ataque: tem de ser recusada.
-        $wbIisRootMau = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup-aberto'
+        $wbIisRootMau = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup-aberto'
         New-Item -ItemType Directory -Path $wbIisRootMau -Force | Out-Null
         $wbIisAclMau = Get-Acl -LiteralPath $wbIisRootMau
         $wbIisAclMau.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -1514,7 +1518,7 @@ if ($SelfTest) {
     $wbSecOc = Get-WinForgeIisAllowedKey -Name OutputCache
     if (Test-WinForgeSnapshotKey -Key 'server:system.webServer/directoryBrowse:enabled' -AllowedKey $wbSecOc) { Write-Host "  [ERRO] Backup (crivo): OutputCache aceitou 'server:system.webServer/directoryBrowse:enabled' (forma curta)" -ForegroundColor Red; $wbErrors++ }
     if (-not (Test-WinForgeSnapshotKey -Key 'server:system.webServer/caching:enabled' -AllowedKey $wbSecOc)) { Write-Host "  [ERRO] Backup (crivo): OutputCache recusou a própria chave 'server:system.webServer/caching:enabled'" -ForegroundColor Red; $wbErrors++ }
-    $wbSecRoot = Join-Path $env:TEMP 'WinForge-SelfTest\seguranca'
+    $wbSecRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seguranca'
     try {
         if (Test-Path $wbSecRoot) { Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue }
         # Backup plantado com um GUID que não é GUID: a chave sai da leitura (vai para Ignored) e o
@@ -1635,7 +1639,7 @@ if ($SelfTest) {
     #   2. o ponto de reanálise era conferido só na ÚLTIMA pasta. Uma junção em %ProgramData%\WinForge
     #      fazia a pasta de backup nascer fora de %ProgramData%, com a DACL de onde a junção aponta.
     #      Agora o caminho é normalizado uma vez e TODA a cadeia de ancestrais é conferida.
-    $wb3Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada3'
+    $wb3Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada3'
     $wb3Root = Join-Path $wb3Base 'backup'
     try {
         if (Test-Path $wb3Base) { Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1685,7 +1689,7 @@ if ($SelfTest) {
     #      implícito entre a gravação e o Protect - a janela que a ACE existe para fechar.
     #   2. a checagem do ARQUIVO olhava só o dono: um backup com ACE de escrita para 'Todos' passava
     #      mesmo com o dono certo.
-    $wb4Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada4'
+    $wb4Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada4'
     try {
         if (Test-Path $wb4Base) { Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue }
         $wb4Root = Join-Path $wb4Base 'backup'
@@ -1773,7 +1777,7 @@ if ($SelfTest) {
     # build - é um cliente, e mexer no SMB ou no plano de energia de quem compila seria estrago. As
     # duas coisas cobradas são exatamente essas: numa máquina que não é servidor, aplicar recusa
     # limpo; e a captura (-CaptureOnly, que nunca escreve) traz valor de verdade onde o cmdlet existe.
-    $wbSrvRoot = Join-Path $env:TEMP 'WinForge-SelfTest\server-backup'
+    $wbSrvRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\server-backup'
     try {
         if (Test-Path $wbSrvRoot) { Remove-Item -Path $wbSrvRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbSrvItens = @(
@@ -2584,7 +2588,7 @@ if ($SelfTest) {
         # anterior. O que se prova aqui é a ESCOLHA - só 'nvidia-*.exe', nunca o recém-aberto,
         # nunca um arquivo que o WinForge não pôs ali - primeiro em simulação e depois apagando de
         # verdade, numa pasta de teste com arquivos criados aqui mesmo.
-        $wfLimpDir = Join-Path $env:TEMP 'WinForge-SelfTest\limpeza'
+        $wfLimpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza'
         New-Item -ItemType Directory -Path $wfLimpDir -Force | Out-Null
         $wfLimpNovo = Join-Path $wfLimpDir 'nvidia-616.92.exe'
         $wfLimpVelho = Join-Path $wfLimpDir 'nvidia-566.36.exe'
@@ -2627,7 +2631,7 @@ if ($SelfTest) {
         }
         # Assinatura: arquivo sem assinatura nenhuma é recusado, e o nome da organização é comparado
         # por igualdade EXATA - 'NVIDIA Corporation Ltd' não é 'NVIDIA Corporation'.
-        $wfAcTmpDir = Join-Path $env:TEMP 'WinForge-SelfTest\assinatura'
+        $wfAcTmpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura'
         New-Item -ItemType Directory -Path $wfAcTmpDir -Force | Out-Null
         $wfAcTmpExe = Join-Path $wfAcTmpDir 'sem-assinatura.exe'
         Set-Content -LiteralPath $wfAcTmpExe -Value 'MZ este arquivo nao e um executavel assinado' -Encoding Ascii
@@ -2669,7 +2673,7 @@ if ($SelfTest) {
         # Pasta de downloads: as MESMAS regras da pasta de backup padrão, e sem o afrouxamento de
         # -ExplicitRoot. O instalador baixado é aberto com a elevação do WinForge - uma pasta que um
         # processo de integridade média escreve trocaria o arquivo entre a conferência e a abertura.
-        $wfAcRaizAberta = Join-Path $env:TEMP 'WinForge-SelfTest\downloads-aberto'
+        $wfAcRaizAberta = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto'
         New-Item -ItemType Directory -Path $wfAcRaizAberta -Force | Out-Null
         $wfAcAclAberta = Get-Acl -LiteralPath $wfAcRaizAberta
         $wfAcAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -2687,7 +2691,7 @@ if ($SelfTest) {
         if ($wfAcEu.Value -eq $wfAcSystemSid.Value -or $wfAcEu.Value -eq $wfAcAdminSid.Value) {
             Write-Host "  Pasta de downloads (dono): teste pulado - este build roda como SYSTEM ou como o próprio grupo Administradores"
         } else {
-            $wfAcRaizDono = Join-Path $env:TEMP 'WinForge-SelfTest\downloads-dono'
+            $wfAcRaizDono = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono'
             New-Item -ItemType Directory -Path $wfAcRaizDono -Force | Out-Null
             $wfAcAclDono = New-Object System.Security.AccessControl.DirectorySecurity
             $wfAcAclDono.SetAccessRuleProtection($true, $false)
@@ -2710,10 +2714,10 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] ações de driver: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\assinatura') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\limpeza') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $env:TEMP 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
@@ -2757,7 +2761,7 @@ if ($SelfTest) {
             }
         }
     }
-    $wfCatRaiz = Join-Path $env:TEMP 'WinForge-SelfTest\catalogo'
+    $wfCatRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\catalogo'
     try {
         $wfCatVeneno = 'https://us.download.nvidia.com/Windows/999.99/veneno.exe'
         $wfCatVersaoViva = '616.92'
@@ -2895,7 +2899,7 @@ if ($SelfTest) {
     # Então: a cadeia inteira nasce protegida (New-WinForgeSnapshotRoot) e a cadeia inteira é
     # conferida (Test-WinForgeSnapshotRootTrusted), de %ProgramData%/%TEMP% (exclusive) até a última
     # pasta (inclusive).
-    $wfCadBase = Join-Path $env:TEMP 'WinForge-SelfTest\seg'
+    $wfCadBase = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seg'
     try {
         Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
         $wfCadMeio = Join-Path $wfCadBase 'WinForge'
@@ -3056,7 +3060,7 @@ if ($SelfTest) {
         if ($wfPinRenomeou) { try { [System.IO.File]::Move($wfPinOutro, $Path) } catch { } }
         return (-not $wfPinRenomeou)
     }
-    $wfPinDir = Join-Path $env:TEMP 'WinForge-SelfTest\pino'
+    $wfPinDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\pino'
     try {
         New-Item -ItemType Directory -Path $wfPinDir -Force | Out-Null
         $wfPinArq = Join-Path $wfPinDir 'instalador.exe'
