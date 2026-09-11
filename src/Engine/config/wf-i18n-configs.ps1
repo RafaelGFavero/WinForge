@@ -293,16 +293,20 @@ $sync.WinForgeI18n = @{
         Description = 'Liga LongPathsEnabled, que tira o limite histórico de 260 caracteres no caminho de arquivo para os programas preparados para isso. Resolve o erro de "caminho muito longo" em pastas profundas como node_modules e em projetos com nomes grandes. Programa antigo que não declara suporte continua preso ao limite antigo.'
     }
     'WPFOOSUbutton' = @{
-        Content = 'O&O ShutUp10++ - Executar'
+        Content     = 'O&O ShutUp10++ - Executar'
+        Description = 'Baixa o O&O ShutUp10++ do site do fabricante e o abre. É um programa de terceiro, com dezenas de opções de privacidade próprias, que não passa pela classificação de risco do WinForge nem entra no Desfazer dele. Precisa de internet, e o que for mudado ali se desfaz dentro do próprio programa.'
     }
     'WPFchangedns' = @{
-        Content = 'DNS - Definir como:'
+        Content     = 'DNS - Definir como:'
+        Description = 'Escolhe o servidor de nomes que será gravado em todas as placas de rede ativas quando você clicar em aplicar os ajustes - com DNS sobre HTTPS onde o Windows aceita. Trocar por Cloudflare ou Google costuma resolver página que demora a abrir porque o resolvedor do provedor está lento. A opção DHCP devolve o servidor que o roteador informa.'
     }
     'WPFAddUltPerf' = @{
-        Content = 'Plano Desempenho Máximo - Ativar'
+        Content     = 'Plano Desempenho Máximo - Ativar'
+        Description = 'Duplica e ativa o plano de energia Desempenho Máximo, que o Windows traz escondido (powercfg /duplicatescheme). Ele corta as micropausas de gerenciamento de energia: o processador não desce de frequência em ocioso e o disco não é desligado, o que ajuda em áudio profissional e em servidor caseiro. Em notebook, a bateria dura bem menos e a máquina esquenta mais.'
     }
     'WPFRemoveUltPerf' = @{
-        Content = 'Plano Desempenho Máximo - Desativar'
+        Content     = 'Plano Desempenho Máximo - Desativar'
+        Description = 'Roda "powercfg /restoredefaultschemes" e devolve os planos de energia de fábrica. Serve para voltar atrás depois de ativar o Desempenho Máximo. Repare no alcance do comando: qualquer plano personalizado que você tenha criado some junto.'
     }
 
     # ---------------------------------------------------------------- aba Configurações: recursos
@@ -351,10 +355,12 @@ $sync.WinForgeI18n = @{
         Description = 'Habilita o recurso Containers-DisposableClientVM, uma máquina virtual leve com área de trabalho descartável. Serve para abrir um instalador ou um anexo suspeito isolado do sistema: ao fechar a janela, tudo que aconteceu lá dentro some. Exige edição Pro ou superior, virtualização na BIOS e reinício.'
     }
     'WPFFeatureInstall' = @{
-        Content = 'Instalar recursos'
+        Content     = 'Instalar recursos'
+        Description = 'Habilita pelo DISM os recursos do Windows marcados acima, um a um, com o progresso na barra da janela e no ícone da barra de tarefas. O que já estava ligado é pulado. Vários desses recursos só passam a valer depois de reiniciar o computador.'
     }
     'WPFPanelAutologin' = @{
-        Content = 'Logon automático - Executar'
+        Content     = 'Logon automático - Executar'
+        Description = 'Baixa o Autologon da Sysinternals e o abre para você preencher usuário, domínio e senha. A partir daí o Windows entra na área de trabalho sozinho ao ligar, o que faz sentido em quiosque, painel de parede e servidor de mídia. A senha fica guardada no registro da máquina: quem tiver acesso físico entra na sua conta.'
     }
     'WPFFixesUpdate' = @{
         Content     = 'Windows Update - Redefinir'
@@ -373,7 +379,8 @@ $sync.WinForgeI18n = @{
         Description = 'Reinstala o WinGet (Gerenciador de Pacotes do Windows) baixando o App Installer da Microsoft e registrando o pacote de novo. É o conserto de "winget não é reconhecido" e de erro de fonte de pacotes depois de uma atualização do Windows. Precisa de internet e pode demorar; os programas já instalados por ele continuam onde estão.'
     }
     'WPFWinForgeSSHServer' = @{
-        Content = 'Servidor OpenSSH - Ativar'
+        Content     = 'Servidor OpenSSH - Ativar'
+        Description = 'Instala o recurso OpenSSH.Server, põe os serviços sshd e ssh-agent em automático, abre a porta 22 no firewall e prepara o arquivo de chaves autorizadas do administrador. Depois disso dá para entrar nesta máquina por SSH e usar scp de qualquer computador da rede. É um serviço de entrada exposto: ligue só em rede que você controla, e prefira chave a senha.'
     }
 
     # ---------------------------------------------------------------- aba Configurações: painéis clássicos

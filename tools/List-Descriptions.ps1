@@ -76,8 +76,11 @@ $wbgames   = @($sync.configs.wbgames)
 # O gabarito da descrição das entradas de jogo mora no código, não numa config: é lido do fonte
 # para não ficarem duas cópias do mesmo texto (uma delas envelhecendo em silêncio).
 $funcText = [System.IO.File]::ReadAllText((Join-Path $engineDir "winforge\wb-functions.ps1"), [System.Text.Encoding]::UTF8)
-$mGame = [regex]::Match($funcText, 'Description\s*=\s*"(Prioridade de CPU[^"]*)"')
-$gabaritoJogo = if ($mGame.Success) { $mGame.Groups[1].Value } else { '(gabarito não encontrado em winforge\wb-functions.ps1)' }
+# A âncora é o laço que gera as entradas, não o texto da descrição: ancorar no texto fazia o
+# inventário dizer "gabarito não encontrado" no exato momento em que a descrição era reescrita.
+$iGame = $funcText.IndexOf('foreach ($g in $sync.configs.wbgames)', [StringComparison]::Ordinal)
+$mGame = if ($iGame -ge 0) { [regex]::Match($funcText.Substring($iGame), 'Description\s*=\s*"([^"]*)"') } else { $null }
+$gabaritoJogo = if ($mGame -and $mGame.Success) { $mGame.Groups[1].Value } else { '(gabarito não encontrado em winforge\wb-functions.ps1)' }
 
 $linhas = New-Object System.Collections.Generic.List[object]
 function Add-Linha([string]$grupo, [string]$fonte, [string]$chave, [string]$titulo, [string]$desc) {
