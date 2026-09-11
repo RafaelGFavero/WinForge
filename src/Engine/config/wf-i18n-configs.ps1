@@ -364,7 +364,7 @@ $sync.WinForgeI18n = @{
     }
     'WPFFixesUpdate' = @{
         Content     = 'Windows Update - Redefinir'
-        Description = 'Redefine o Windows Update: para os serviços BITS, wuauserv, appidsvc e cryptsvc, apaga a fila de trabalhos do BITS e o log, renomeia a pasta de downloads, registra de novo as DLLs, remove as configurações de WSUS, redefine o Winsock e religa os serviços. É o que se tenta quando a busca por atualizações trava ou volta sempre com o mesmo código de erro. O histórico de atualizações é zerado e é preciso reiniciar o computador depois.'
+        Description = 'Para os serviços BITS, wuauserv, appidsvc e cryptsvc, apaga a fila de trabalhos do BITS e o log, renomeia a pasta de downloads, registra de novo as DLLs e remove as configurações de WSUS. Vai bem além do Windows Update: apaga as chaves de diretiva local em HKLM\Software\Policies e HKCU\Software\Policies, exclui as pastas GroupPolicy e GroupPolicyUsers do System32, roda "secedit /configure" com o defltbase.inf e um "gpupdate /force", e usa o netsh para redefinir o Winsock, a pilha IP e o proxy do winhttp. É o que se tenta quando a busca por atualizações trava ou volta sempre com o mesmo código de erro, mas leva junto toda diretiva de grupo local da máquina, inclusive as que não têm nada a ver com atualização. O histórico é zerado e é preciso reiniciar o computador depois.'
     }
     'WPFFixesNetwork' = @{
         Content     = 'Rede - Redefinir'
@@ -376,7 +376,7 @@ $sync.WinForgeI18n = @{
     }
     'WPFFixesWinget' = @{
         Content     = 'WinGet - Reinstalar'
-        Description = 'Reinstala o WinGet (Gerenciador de Pacotes do Windows) baixando o App Installer da Microsoft e registrando o pacote de novo. É o conserto de "winget não é reconhecido" e de erro de fonte de pacotes depois de uma atualização do Windows. Precisa de internet e pode demorar; os programas já instalados por ele continuam onde estão.'
+        Description = 'Se o winget já responder, não faz nada. Se não responder, instala o provedor NuGet, baixa da Galeria do PowerShell o módulo Microsoft.WinGet.Client e chama o Repair-WinGetPackageManager, que repõe o Gerenciador de Pacotes do Windows para todos os usuários. É o conserto de "winget não é reconhecido" e de erro de fonte de pacotes depois de uma atualização do Windows. Precisa de internet, pode demorar e confia na Galeria do PowerShell como fonte do módulo; os programas já instalados por ele continuam onde estão.'
     }
     'WPFWinForgeSSHServer' = @{
         Content     = 'Servidor OpenSSH - Ativar'

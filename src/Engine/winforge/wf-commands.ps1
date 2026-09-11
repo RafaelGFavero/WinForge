@@ -318,10 +318,14 @@ function Invoke-WinForgeStreamedProcess {
     $codigo = $null
     $escritor = $null
     try {
-        [void]$processo.Start()
-        $tarefaErro = $processo.StandardError.ReadToEndAsync()
+        # O escritor nasce ANTES do Start(), e não depois: se o arquivo não puder ser aberto (a pasta
+        # sumiu, o disco encheu, um antivírus segurou o identificador), a falha acontece com o
+        # processo ainda parado, em vez de deixar um sfc de meia hora rodando sem ninguém para ler a
+        # saída dele - e sem ninguém para pará-lo, porque quem chama já terá recebido a exceção.
         $escritor = New-Object System.IO.StreamWriter($StreamTo, $true, (New-Object System.Text.UTF8Encoding $true))
         $escritor.AutoFlush = $true
+        [void]$processo.Start()
+        $tarefaErro = $processo.StandardError.ReadToEndAsync()
         while ($null -ne ($linha = $processo.StandardOutput.ReadLine())) {
             $escritor.WriteLine($linha)
             [void]$acumulado.AppendLine($linha)
@@ -878,6 +882,12 @@ $sync.WinForgeStreamExit = [System.Collections.Hashtable]::Synchronized(@{})
 # Dispatcher - na base elas rodavam na thread da janela e isso bastava. O build desvia a chamada
 # para cá quando ela vem de outra thread; o pacote de argumentos viaja por $sync porque
 # Invoke-WPFUIThread chama o bloco SEM argumento.
+#
+# Com a janela FECHANDO o desvio não acontece: Set-WinUtilTaskbaritem devolve na hora (o build põe
+# a guarda de $sync.WinForgeClosing na primeira linha dela). Enquanto o Add_Closing roda, a thread
+# da janela está desligando o Dispatcher; um salto para lá de dentro da runspace ficaria esperando
+# uma fila que ninguém mais vai processar, e o ícone da barra de tarefas está indo embora de
+# qualquer jeito.
 $sync.WinForgeTaskbarArgs = [System.Collections.Hashtable]::Synchronized(@{})
 $sync.WinForgeTaskbarCallback = {
     try {
@@ -1005,6 +1015,134 @@ function Invoke-WinForgeCommandButton {
     }
 }
 
+function Invoke-WinForgeStreamStep {
+    <#
+    .SYNOPSIS
+        Roda UM passo de um comando com fluxo ao vivo e devolve o código dele.
+    .DESCRIPTION
+        Um passo é @{ FilePath; Arguments; Unicode } (executável) ou @{ Function } (função do motor
+        ou da base). O que os dois têm em comum, e por isso moram aqui, é a promessa do fluxo ao
+        vivo: cada linha chega ao arquivo ASSIM QUE SAI, e o passo devolve um código que diz se
+        deu certo.
+
+        No passo de FUNÇÃO o código não existe - não há processo, não há ExitCode. Antes disso ser
+        admitido, o passo sempre valia 0: um 'Write-Error' ou um 'Stop-Service' que falha dentro de
+        Invoke-WPFFixesUpdate são erros NÃO TERMINANTES, o pipeline continua, a função "termina
+        bem" e a janela dizia "Concluído (código 0)" depois de vinte linhas de erro. Agora o
+        ErrorRecord é reconhecido no meio do fluxo: vira uma linha '[erro] <mensagem>' e derruba o
+        código do passo para 1. Derruba, e SEGUE - a redefinição do Windows Update falha em partes,
+        e parar no primeiro serviço que não para deixaria o sistema pior do que estava.
+
+        '*>&1' porque as funções da base falam por Write-Host, Write-Warning e Write-Error em
+        partes iguais, e sem isso a janela ficaria vazia num passo que está falando o tempo todo.
+
+        Linha a linha, e NÃO 'Out-File -Append': o Out-File segura a saída no buffer do próprio
+        escritor e só a solta quando o pipeline acaba - ou seja, quando o passo TERMINA. Numa
+        redefinição do Windows Update isso é a janela em branco por vários minutos, que é
+        exatamente o problema que este botão tinha antes. Abrir e fechar o arquivo por linha é o
+        preço de a linha aparecer na hora, e são dezenas de linhas, não milhares.
+    .OUTPUTS
+        O código do passo: 0 quando deu certo, o ExitCode do processo, ou 1 quando uma função
+        escreveu no fluxo de erro.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][hashtable]$Step
+    )
+
+    if ($Step.Function) {
+        Write-WinForgeStreamLine -Path $Path -Text ""
+        Write-WinForgeStreamLine -Path $Path -Text "> $($Step.Function)"
+        $codigo = 0
+        & ([string]$Step.Function) *>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $codigo = 1
+                Write-WinForgeStreamLine -Path $Path -Text "[erro] $($_.Exception.Message)"
+            } else {
+                Write-WinForgeStreamLine -Path $Path -Text ([string]$_)
+            }
+        }
+        return $codigo
+    }
+
+    Write-WinForgeStreamLine -Path $Path -Text ""
+    Write-WinForgeStreamLine -Path $Path -Text "> $($Step.FilePath) $(@($Step.Arguments) -join ' ')"
+    $res = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Unicode:([bool]$Step.Unicode)
+    if ($null -eq $res.ExitCode) { return 0 }
+    return [int]$res.ExitCode
+}
+
+function Invoke-WinForgeStreamedSteps {
+    <#
+    .SYNOPSIS
+        Roda os passos de um comando com fluxo ao vivo, EM SEQUÊNCIA, e devolve o código final.
+    .DESCRIPTION
+        Separado do corpo da runspace por um motivo só: assim dá para provar a máquina inteira -
+        passo que falha, código por passo, cabeçalho final - com passos inofensivos, sem abrir
+        janela, sem pool de runspaces e sem rodar nenhum dos cinco comandos de verdade.
+
+        Cada passo fecha com uma linha '== Passo N: <título> — código X =='. Sem ela, a janela
+        mostrava a saída de três comandos emendada e um único código no fim: num chkdsk + sfc +
+        DISM não dava para saber qual dos três falhou sem saber ler a saída de cada um.
+
+        O código que fica é o do PRIMEIRO passo que falhou, e o cabeçalho final diz QUAL foi: um
+        DISM bem-sucedido depois de um chkdsk com erro não pode apagar o erro do chkdsk.
+    .OUTPUTS
+        O código final: 0 se todos os passos deram certo, senão o código do primeiro que falhou.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][array]$Steps,
+        [string]$Final = ''
+    )
+
+    $codigo = 0
+    $falhou = ''
+    $n = 0
+    foreach ($passo in @($Steps)) {
+        $n++
+        $titulo = if ($passo.Function) { [string]$passo.Function } else { [string](Split-Path -Leaf ([string]$passo.FilePath)) }
+        $passoCodigo = [int](Invoke-WinForgeStreamStep -Path $Path -Step $passo)
+        Write-WinForgeStreamLine -Path $Path -Text ("== Passo {0}: {1} — código {2} ==" -f $n, $titulo, $passoCodigo)
+        if ($codigo -eq 0 -and $passoCodigo -ne 0) { $codigo = $passoCodigo; $falhou = "$n ($titulo)" }
+    }
+    Write-WinForgeStreamLine -Path $Path -Text ""
+    if ($codigo -eq 0) { Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $n) }
+    else { Write-WinForgeStreamLine -Path $Path -Text ("== Falhou no passo {0}: código {1} ==" -f $falhou, $codigo) }
+    if (-not [string]::IsNullOrWhiteSpace($Final)) {
+        Write-WinForgeStreamLine -Path $Path -Text ""
+        Write-WinForgeStreamLine -Path $Path -Text ([string]$Final)
+    }
+    return $codigo
+}
+
+# Corpo da runspace de um comando com fluxo ao vivo. Mora aqui, no mesmo lugar e pelo mesmo motivo
+# que $sync.WinForgeCommandOutputCallback: scriptblock que vai para o pool nasce na runspace
+# PRINCIPAL, nunca dentro de outra. De quebra, sendo um valor com nome, o -SelfTest o roda de
+# verdade com passos inofensivos - é como as travas, o código por passo e o cabeçalho final são
+# provados sem abrir janela nenhuma e sem rodar nenhum dos cinco comandos.
+#
+# O 'finally' é a única saída: sem ele, um passo que lançasse deixaria a janela dizendo "em
+# andamento" para sempre e as duas travas presas até fechar o programa.
+$sync.WinForgeStreamBody = {
+    param($wfArgs)
+    $wfCaminho = [string]$wfArgs.Path
+    $wfCodigo = 0
+    try {
+        $wfCodigo = [int](Invoke-WinForgeStreamedSteps -Path $wfCaminho -Steps @($wfArgs.Steps) -Final ([string]$wfArgs.Final))
+    } catch {
+        $wfCodigo = -1
+        Write-WinForgeStreamLine -Path $wfCaminho -Text "[erro] $($_.Exception.Message)"
+        Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$($wfArgs.Name) falhou: $($_.Exception.Message)"
+    } finally {
+        $sync.WinForgeStreamExit[$wfCaminho] = $wfCodigo
+        $sync.WinForgeStreamDone[$wfCaminho] = $true
+        $sync.CommandRunning = $false
+        $sync.ProcessRunning = $false
+        Write-WinForgeLog -Component "Repair" -Message "$($wfArgs.Name) concluído (código $wfCodigo): $wfCaminho"
+    }
+}
+
 function Start-WinForgeStreamedCommand {
     <#
     .SYNOPSIS
@@ -1024,12 +1162,11 @@ function Start-WinForgeStreamedCommand {
         2. A janela abre AQUI, na thread da interface (este é o handler do botão, que já roda nela) e
            ANTES de a runspace começar. Abrir depois seria abrir de dentro da runspace, e a regra
            desta base de código é que interface nasce na thread da interface.
-        3. Só então a runspace começa. O corpo dela é criado AQUI também, e recebe tudo num
+        3. Só então a runspace começa, com o corpo de $sync.WinForgeStreamBody, que recebe tudo num
            hashtable: Invoke-WPFRunspace passa um argumento posicional só.
-        4. O fim é marcado em $sync.WinForgeStreamDone/$sync.WinForgeStreamExit, no 'finally'. É o
-           que troca o cabeçalho da janela de "Em andamento" para "Concluído" e para o relógio. Sem
-           o 'finally', um passo que lançasse deixaria a janela dizendo "em andamento" para sempre e
-           a trava de comando presa até fechar o programa.
+        4. O fim é marcado em $sync.WinForgeStreamDone/$sync.WinForgeStreamExit, no 'finally' do
+           corpo. É o que troca o cabeçalho da janela de "Em andamento" para "Concluído" e para o
+           relógio, e é onde as duas travas são soltas.
 
         Cada passo é @{ FilePath; Arguments; Unicode } (executável, com a saída indo linha a linha
         para o arquivo) ou @{ Function } (função do próprio motor ou da base, com todos os fluxos
@@ -1068,7 +1205,13 @@ function Start-WinForgeStreamedCommand {
         return
     }
 
+    # As DUAS travas, e não só a de comando: $sync.ProcessRunning é a que os botões da base olham
+    # (instalar, desinstalar, aplicar ajustes, instalar recursos). Sem ela, uma redefinição do
+    # Windows Update de vinte minutos convivia com um "Aplicar ajustes" clicado no meio - dois
+    # escritores no mesmo ícone da barra de tarefas, no mesmo log e, no caso do WinGet, no mesmo
+    # gerenciador de pacotes. Os dois são soltos no 'finally' do corpo da runspace.
     $sync.CommandRunning = $true
+    $sync.ProcessRunning = $true
     $caminho = $null
     try {
         $caminho = Get-WinForgeCommandOutputPath -Name $Name -Prefix 'repair'
@@ -1079,57 +1222,13 @@ function Start-WinForgeStreamedCommand {
 
         Show-WinForgeOutputWindow -Title $Spec.Title -FollowPath $caminho -Component 'Repair' | Out-Null
 
-        $corpo = {
-            param($wfArgs)
-            $wfCaminho = [string]$wfArgs.Path
-            $wfCodigo = 0
-            try {
-                foreach ($wfPasso in @($wfArgs.Steps)) {
-                    if ($wfPasso.Function) {
-                        Write-WinForgeStreamLine -Path $wfCaminho -Text ""
-                        Write-WinForgeStreamLine -Path $wfCaminho -Text "> $($wfPasso.Function)"
-                        # '*>&1' porque as funções da base falam por Write-Host, Write-Warning e
-                        # Write-Error em partes iguais, e sem isso a janela ficaria vazia num passo
-                        # que está falando o tempo todo.
-                        #
-                        # Linha a linha, e NÃO 'Out-File -Append': o Out-File segura a saída no
-                        # buffer do próprio escritor e só a solta quando o pipeline acaba - ou seja,
-                        # quando o passo TERMINA. Numa redefinição do Windows Update isso é a janela
-                        # em branco por vários minutos, que é exatamente o problema que este botão
-                        # tinha antes. Abrir e fechar o arquivo por linha é o preço de a linha
-                        # aparecer na hora, e são dezenas de linhas, não milhares.
-                        & ([string]$wfPasso.Function) *>&1 | ForEach-Object { Write-WinForgeStreamLine -Path $wfCaminho -Text ([string]$_) }
-                        continue
-                    }
-                    Write-WinForgeStreamLine -Path $wfCaminho -Text ""
-                    Write-WinForgeStreamLine -Path $wfCaminho -Text "> $($wfPasso.FilePath) $(@($wfPasso.Arguments) -join ' ')"
-                    $wfRes = Invoke-WinForgeNativeCommand -FilePath ([string]$wfPasso.FilePath) -Arguments @($wfPasso.Arguments) -StreamTo $wfCaminho -Unicode:([bool]$wfPasso.Unicode)
-                    # O código que fica é o do PRIMEIRO passo que falhou: um DISM bem-sucedido depois
-                    # de um chkdsk com erro não pode apagar o erro do chkdsk do cabeçalho.
-                    if ($wfCodigo -eq 0 -and $null -ne $wfRes.ExitCode) { $wfCodigo = [int]$wfRes.ExitCode }
-                }
-                if (-not [string]::IsNullOrWhiteSpace([string]$wfArgs.Final)) {
-                    Write-WinForgeStreamLine -Path $wfCaminho -Text ""
-                    Write-WinForgeStreamLine -Path $wfCaminho -Text ([string]$wfArgs.Final)
-                }
-            } catch {
-                $wfCodigo = -1
-                Write-WinForgeStreamLine -Path $wfCaminho -Text "[erro] $($_.Exception.Message)"
-                Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$($wfArgs.Name) falhou: $($_.Exception.Message)"
-            } finally {
-                $sync.WinForgeStreamExit[$wfCaminho] = $wfCodigo
-                $sync.WinForgeStreamDone[$wfCaminho] = $true
-                $sync.CommandRunning = $false
-                Write-WinForgeLog -Component "Repair" -Message "$($wfArgs.Name) concluído (código $wfCodigo): $wfCaminho"
-            }
-        }
-
         Write-WinForgeLog -Component "Repair" -Message "$Name iniciado: $($passos.Count) passo(s), saída ao vivo em $caminho"
-        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Name = $Name; Path = $caminho; Steps = $passos; Final = $Spec.Final } | Out-Null
+        Invoke-WPFRunspace -ScriptBlock $sync.WinForgeStreamBody -ArgumentList @{ Name = $Name; Path = $caminho; Steps = $passos; Final = $Spec.Final } | Out-Null
     } catch {
-        # O corpo pode nem ter começado (pool fechado, arquivo não gravável): sem isto a trava
-        # ficaria presa e todos os botões de comando morreriam até fechar o programa.
+        # O corpo pode nem ter começado (pool fechado, arquivo não gravável): sem isto as travas
+        # ficariam presas e todos os botões de comando morreriam até fechar o programa.
         $sync.CommandRunning = $false
+        $sync.ProcessRunning = $false
         if ($caminho) { $sync.WinForgeStreamDone[$caminho] = $true }
         Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$Name não pôde começar: $($_.Exception.Message)"
         [System.Windows.MessageBox]::Show("O comando não pôde começar: $($_.Exception.Message)", "WinForge", "OK", "Error") | Out-Null

@@ -851,6 +851,13 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
 # O desvio fica na PRÓPRIA função, e não em quem chama: assim vale para qualquer caminho novo, da
 # base ou do WinForge, sem depender de quem o escreveu ter lembrado do Dispatcher. Chamada que já
 # vem da thread da janela (o caso de sempre, inclusive o do próprio callback) passa direto.
+#
+# E antes de tudo isso, a guarda de fechamento. Com a janela fechando o ícone da barra de tarefas
+# está indo embora junto com ela, então escrever nele não vale nada - e da runspace vale menos que
+# nada: o salto para o Dispatcher entraria numa fila que a thread da janela, já dentro do
+# Add_Closing, não vai mais processar. Fica na PRIMEIRA linha, antes até do teste de thread, porque
+# durante o fechamento nenhuma das duas pontas tem o que fazer aqui. A mesma recusa que
+# Set-WinForgeDiagProgress já faz, pelo mesmo motivo.
 $src = Replace-Once $src @'
         [string]$description
     )
@@ -861,6 +868,12 @@ $src = Replace-Once $src @'
 '@ @'
         [string]$description
     )
+
+    # WinForge: janela fechando - ninguém escreve mais no ícone (ver wf-commands.ps1).
+    if ($sync.WinForgeClosing) {
+        $sync.WinForgeTaskbarSkipped = $true
+        return
+    }
 
     # WinForge: de outra thread, o trabalho é remarcado para a thread da janela (ver wf-commands.ps1).
     if ($null -ne $sync.Form -and $null -ne $sync.Form.Dispatcher -and -not $sync.Form.Dispatcher.CheckAccess()) {
@@ -2621,6 +2634,13 @@ if ($SelfTest) {
             Write-Host "  Correções (fluxo): cmd /c echo a & echo b -> $(@($wfStrTexto -split "`r?`n" | Where-Object { $_ -ne '' }).Count) linha(s) no arquivo e no texto"
             Remove-Item -LiteralPath $wfStrArq -Force -ErrorAction SilentlyContinue
         }
+        # E o escritor nasce ANTES do Start(): arquivo que não abre tem de estourar com o processo
+        # ainda parado, e não deixar um sfc de meia hora rodando sem ninguém para ler a saída dele.
+        $wfStrProc = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        $wfStrProcEsc = $wfStrProc.IndexOf('$escritor = New-Object System.IO.StreamWriter', [StringComparison]::Ordinal)
+        $wfStrProcIni = $wfStrProc.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
+        if ($wfStrProcEsc -lt 0 -or $wfStrProcIni -lt 0) { Write-Host "  [ERRO] Correções (fluxo): não achei o escritor ou o Start() em Invoke-WinForgeStreamedProcess" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfStrProcEsc -gt $wfStrProcIni) { Write-Host "  [ERRO] Correções (fluxo): o arquivo de saída é aberto DEPOIS de o processo começar" -ForegroundColor Red; $wbErrors++ }
     } catch {
         Write-Host "  [ERRO] Correções (fluxo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
@@ -2638,7 +2658,7 @@ if ($SelfTest) {
         if ($wfStrParcial -notmatch '> primeiro') { Write-Host "  [ERRO] Correções (passo): a primeira linha não estava no arquivo antes da segunda" -ForegroundColor Red; $wbErrors++ }
         if ($wfStrFnTexto -notmatch 'configuração') { Write-Host "  [ERRO] Correções (passo): o acréscimo perdeu o acento ou não aconteceu" -ForegroundColor Red; $wbErrors++ }
         if (([regex]::Matches($wfStrFnTexto, '> primeiro')).Count -ne 1) { Write-Host "  [ERRO] Correções (passo): o acréscimo reescreveu o arquivo em vez de acrescentar" -ForegroundColor Red; $wbErrors++ }
-        $wfStrCorpo = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        $wfStrCorpo = [string](Get-Command Invoke-WinForgeStreamStep).ScriptBlock
         # '\| Out-File' e não só 'Out-File': o comentário que explica por que ele não está ali cita o
         # nome, e uma trava que casasse com o comentário nunca ficaria verde.
         if ($wfStrCorpo -match '\|\s*Out-File') { Write-Host "  [ERRO] Correções (passo): o passo de função voltou a usar Out-File, que segura a saída até o fim" -ForegroundColor Red; $wbErrors++ }
@@ -2771,6 +2791,23 @@ if ($SelfTest) {
         foreach ($wfStrNome in @('NetworkReset', 'WindowsUpdateReset')) {
             if ([string](Get-WinForgeRepairConfirmText -Name $wfStrNome) -notmatch 'einici') { Write-Host "  [ERRO] Correções (confirmação) $wfStrNome`: a pergunta não avisa que pode ser preciso reiniciar" -ForegroundColor Red; $wbErrors++ }
         }
+        # Duas descrições prometiam menos do que a função da base FAZ, e a pessoa dizia "Sim" a algo
+        # que não leu. A redefinição do Windows Update apaga a diretiva de grupo local inteira
+        # (HKLM/HKCU\Software\Policies, as pastas GroupPolicy, secedit com o defltbase.inf e um
+        # gpupdate /force) e mexe em IP e proxy do winhttp, não só no Winsock. A do WinGet não baixa
+        # App Installer nenhum: instala um módulo da Galeria do PowerShell e chama Repair-WinGetPackageManager.
+        foreach ($wfStrHonesta in @(
+            @{ Chave = 'WPFFixesUpdate';  Exige = @('Policies', 'GroupPolicy', 'secedit', 'gpupdate', 'netsh', 'winhttp'); Proibe = @() }
+            @{ Chave = 'WPFFixesWinget'; Exige = @('Microsoft.WinGet.Client', 'Repair-WinGetPackageManager', 'Galeria do PowerShell'); Proibe = @('App Installer') }
+        )) {
+            $wfStrHonTexto = [string]$sync.configs.feature."$($wfStrHonesta.Chave)".Description
+            foreach ($wfStrHonTermo in $wfStrHonesta.Exige) {
+                if ($wfStrHonTexto.IndexOf($wfStrHonTermo, [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Correções (confirmação) $($wfStrHonesta.Chave): a descrição não diz que a base mexe em '$wfStrHonTermo'" -ForegroundColor Red; $wbErrors++ }
+            }
+            foreach ($wfStrHonTermo in $wfStrHonesta.Proibe) {
+                if ($wfStrHonTexto.IndexOf($wfStrHonTermo, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Write-Host "  [ERRO] Correções (confirmação) $($wfStrHonesta.Chave): a descrição voltou a prometer '$wfStrHonTermo', que a base não faz" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
         Write-Host "  Correções (confirmação): $wfStrConfOk texto(s) vindos da descrição da aba Config, com aviso de reinicialização onde cabe"
     } catch {
         Write-Host "  [ERRO] Correções (confirmação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -2809,6 +2846,103 @@ if ($SelfTest) {
         Write-Host "  Correções (clique): $($wfStrNomes.Count) chave(s) fora do caminho da config e despachadas pelo switch com -Name"
     } catch {
         Write-Host "  [ERRO] Correções (clique): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 7. O CORPO da runspace, rodado de verdade, com passos inofensivos. Os cinco comandos continuam
+    # sem rodar: os passos daqui são duas funções que só existem dentro do -SelfTest e um
+    # 'cmd /c echo'. É o que transforma em comportamento o que antes era só texto - código POR PASSO,
+    # cabeçalho final dizendo qual passo falhou, e as duas travas soltas no 'finally'.
+    #
+    # O passo que falha é o defeito que este bloco existe para pegar: Write-Error e Stop-Service que
+    # não para são erros NÃO TERMINANTES. A função "termina bem", e a janela dizia
+    # "Concluído (código 0)" depois de vinte linhas de erro. Agora o ErrorRecord vira '[erro] ...' e
+    # o passo vale 1 - e o passo seguinte continua rodando, porque uma redefinição de Windows Update
+    # que para no primeiro serviço teimoso deixa o sistema pior do que estava.
+    function Test-WinForgeStreamProbeStep {
+        $sync.WinForgeSelfTestLocks = "$($sync.CommandRunning)/$($sync.ProcessRunning)"
+        Write-Host 'sonda das travas'
+    }
+    function Test-WinForgeStreamFailingStep {
+        Write-Host 'linha normal antes do erro'
+        Write-Error 'falha de propósito'
+        Write-Host 'linha normal depois do erro'
+    }
+    try {
+        $wfStrCorpoArq = Join-Path $wfStrDir ("selftest-corpo-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+        $wfStrCmdExe = Get-WinForgeSystemExe -Name 'cmd.exe'
+        $wfStrCorpoPassos = @(
+            @{ Function = 'Test-WinForgeStreamProbeStep' }
+            @{ FilePath = $wfStrCmdExe; Arguments = @('/c', 'echo ok') }
+            @{ Function = 'Test-WinForgeStreamFailingStep' }
+        )
+        $sync.WinForgeSelfTestLocks = ''
+        # As duas travas ligadas, como Start-WinForgeStreamedCommand as liga antes de despachar.
+        $sync.CommandRunning = $true
+        $sync.ProcessRunning = $true
+        & $sync.WinForgeStreamBody @{ Name = 'SelfTest'; Path = $wfStrCorpoArq; Steps = $wfStrCorpoPassos; Final = 'fim da simulação' }
+        $wfStrCorpoTexto = if (Test-Path -LiteralPath $wfStrCorpoArq) { [System.IO.File]::ReadAllText($wfStrCorpoArq, [System.Text.Encoding]::UTF8) } else { '' }
+        # (a) as travas: ligadas DURANTE o passo (a sonda leu as duas) e soltas depois dele.
+        if ($sync.WinForgeSelfTestLocks -ne 'True/True') { Write-Host "  [ERRO] Correções (corpo): durante o passo as travas estavam '$($sync.WinForgeSelfTestLocks)', esperado 'True/True'" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.CommandRunning) { Write-Host "  [ERRO] Correções (corpo): `$sync.CommandRunning ficou presa depois do corpo" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.ProcessRunning) { Write-Host "  [ERRO] Correções (corpo): `$sync.ProcessRunning ficou presa depois do corpo" -ForegroundColor Red; $wbErrors++ }
+        # (b) o passo que falha: linha '[erro]', código 1, e a saída DEPOIS do erro continua chegando.
+        if ($wfStrCorpoTexto -notmatch '(?m)^\[erro\] falha de propósito') { Write-Host "  [ERRO] Correções (corpo): o Write-Error do passo não virou linha '[erro]'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfStrCorpoTexto -notmatch '(?m)^linha normal depois do erro') { Write-Host "  [ERRO] Correções (corpo): o passo parou no primeiro erro em vez de seguir" -ForegroundColor Red; $wbErrors++ }
+        # (c) o código por passo, um por um, com o título de cada um.
+        foreach ($wfStrEsp in @(
+            '== Passo 1: Test-WinForgeStreamProbeStep — código 0 =='
+            '== Passo 2: cmd.exe — código 0 =='
+            '== Passo 3: Test-WinForgeStreamFailingStep — código 1 =='
+        )) {
+            if ($wfStrCorpoTexto.IndexOf($wfStrEsp, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (corpo): falta a linha '$wfStrEsp' no arquivo" -ForegroundColor Red; $wbErrors++ }
+        }
+        # (d) o cabeçalho final diz QUAL passo falhou - num chkdsk + sfc + DISM, saber só o código
+        # final não diz em qual dos três olhar.
+        if ($wfStrCorpoTexto.IndexOf('== Falhou no passo 3 (Test-WinForgeStreamFailingStep): código 1 ==', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (corpo): o cabeçalho final não diz qual passo falhou" -ForegroundColor Red; $wbErrors++ }
+        if ($wfStrCorpoTexto -notmatch '(?m)^fim da simulação') { Write-Host "  [ERRO] Correções (corpo): a frase final do comando não foi para o arquivo" -ForegroundColor Red; $wbErrors++ }
+        # (e) e o fim marcado para a janela: é o que troca 'Em andamento' por 'Concluído'.
+        if ($sync.WinForgeStreamDone[$wfStrCorpoArq] -ne $true) { Write-Host "  [ERRO] Correções (corpo): o fim não foi marcado em `$sync.WinForgeStreamDone" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$sync.WinForgeStreamExit[$wfStrCorpoArq] -ne 1) { Write-Host "  [ERRO] Correções (corpo): o código final foi '$($sync.WinForgeStreamExit[$wfStrCorpoArq])', esperado 1" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Correções (corpo): 3 passo(s) com código próprio, erro não terminante vira '[erro]' e derruba o passo, travas soltas no fim"
+        Remove-Item -LiteralPath $wfStrCorpoArq -Force -ErrorAction SilentlyContinue
+        [void]$sync.WinForgeStreamDone.Remove($wfStrCorpoArq)
+        [void]$sync.WinForgeStreamExit.Remove($wfStrCorpoArq)
+    } catch {
+        Write-Host "  [ERRO] Correções (corpo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        $sync.CommandRunning = $false
+        $sync.ProcessRunning = $false
+    }
+    # 8. Fechar a janela no meio de um comando com fluxo ao vivo. Eram duas pontas do mesmo abraço:
+    # Close-WinUtilRunspacePool é SÍNCRONO e espera a thread do pool terminar, enquanto a thread do
+    # pool, dentro de Invoke-WPFFixesUpdate, chama Set-WinUtilTaskbaritem, que salta para o
+    # Dispatcher da thread que está esperando por ela. Nenhuma das duas terminava: o programa só
+    # saía pelo Gerenciador de Tarefas. A correção cortou as duas pontas, e as duas são conferidas.
+    try {
+        $wfStrFonte = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfStrFonte = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfStrFonte = '' }
+        if ([string]::IsNullOrWhiteSpace($wfStrFonte)) {
+            Write-Host "  [ERRO] Correções (fechamento): o próprio arquivo do WinForge não pôde ser lido para conferir o Add_Closing" -ForegroundColor Red; $wbErrors++
+        } elseif ($wfStrFonte -notmatch '\$sync\.ProfileJobRunning -or \$sync\.DiagWUSearchRunning -or \$sync\.CommandRunning') {
+            Write-Host "  [ERRO] Correções (fechamento): o Add_Closing não desgruda do pool com um comando em andamento" -ForegroundColor Red; $wbErrors++
+        }
+        # A outra ponta, esta por comportamento: com a janela fechando, Set-WinUtilTaskbaritem
+        # devolve na PRIMEIRA linha, sem saltar para o Dispatcher. A sonda é o que separa "recusou"
+        # de "deu certo por acaso"; e a chamada nem poderia dar certo aqui, porque neste ponto do
+        # SelfTest ainda não existe janela nenhuma para ter ícone.
+        $wfStrFechAntes = $sync.WinForgeClosing
+        $sync.WinForgeTaskbarSkipped = $false
+        $sync.WinForgeClosing = $true
+        $wfStrFechErro = $null
+        try { Set-WinUtilTaskbaritem -state 'Indeterminate' -overlay 'logo' -description 'sonda de fechamento' } catch { $wfStrFechErro = [string]$_.Exception.Message }
+        $sync.WinForgeClosing = $wfStrFechAntes
+        if ($null -ne $wfStrFechErro) { Write-Host "  [ERRO] Correções (fechamento): Set-WinUtilTaskbaritem estourou com a janela fechando: $wfStrFechErro" -ForegroundColor Red; $wbErrors++ }
+        if (-not $sync.WinForgeTaskbarSkipped) { Write-Host "  [ERRO] Correções (fechamento): Set-WinUtilTaskbaritem não recusou com `$sync.WinForgeClosing ligado" -ForegroundColor Red; $wbErrors++ }
+        # E a trava de comando é ligada JUNTO com a de processo: é ela que o Add_Closing consulta.
+        $wfStrStart = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        if ($wfStrStart -notmatch '\$sync\.ProcessRunning = \$true') { Write-Host "  [ERRO] Correções (fechamento): Start-WinForgeStreamedCommand não liga `$sync.ProcessRunning" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Correções (fechamento): o Add_Closing desgruda do pool com comando em andamento e o ícone da barra não é tocado"
+    } catch {
+        Write-Host "  [ERRO] Correções (fechamento): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # A janela de saída é montada em código, sem XAML: o -NoShow existe para o SelfTest provar que o
     # TextBox nasce com o texto certo sem abrir nada na tela (ShowDialog aqui travaria o build).
@@ -4235,6 +4369,15 @@ $src = Replace-Once $src '$sync["Form"].title = $sync["Form"].title + " " + $syn
 # o diagnóstico agora roda a cada abertura (e a busca no Windows Update é uma chamada COM que não se
 # interrompe), fechar a janela no meio de um deles congelava a janela por até um minuto - ou travava
 # de vez, se a thread do pool estivesse dentro de um Dispatcher.Invoke esperando esta mesma thread.
+#
+# $sync.CommandRunning entra na mesma lista, e não é teoria: um comando com fluxo ao vivo (a
+# redefinição do Windows Update, a reinstalação do WinGet) roda Invoke-WPFFixesUpdate dentro da
+# runspace, e essa função chama Set-WinUtilTaskbaritem, que de outra thread salta para o Dispatcher.
+# Fechar a janela no meio disso era o abraço perfeito: a thread da janela parada dentro do
+# Close-WinUtilRunspacePool esperando a runspace, e a runspace parada dentro do Dispatcher.Invoke
+# esperando a thread da janela. Nem uma nem outra terminava, e o programa só saía pelo Gerenciador
+# de Tarefas. A guarda de $sync.WinForgeClosing em Set-WinUtilTaskbaritem tira a segunda ponta; esta
+# linha tira a primeira.
 $src = Replace-Once $src @'
 $sync["Form"].Add_Closing({
     Close-WinUtilRunspacePool
@@ -4244,7 +4387,7 @@ $sync["Form"].Add_Closing({
 $sync["Form"].Add_Closing({
     # avisa o diagnóstico e a busca de drivers: daqui em diante ninguém mais toca na interface
     $sync.WinForgeClosing = $true
-    if ($sync.ProfileJobRunning -or $sync.DiagWUSearchRunning) {
+    if ($sync.ProfileJobRunning -or $sync.DiagWUSearchRunning -or $sync.CommandRunning) {
         # Fecha sem esperar: as threads do pool são de segundo plano e morrem com o processo.
         try { $sync.runspace.BeginClose($null, $null) | Out-Null } catch { }
         $sync.Remove("runspace")
