@@ -29,6 +29,26 @@ function Replace-Once([string]$text, [string]$old, [string]$new, [string]$what) 
     return $text.Substring(0, $idx) + $new + $text.Substring($idx + $old.Length)
 }
 
+function Replace-All([string]$text, [string]$old, [string]$new, [string]$what) {
+    # Irmã do Replace-Once para texto que se repete de propósito (a mesma categoria em cada entrada
+    # do JSON, a mesma mensagem em dois caminhos de código). Falha alto quando NÃO acha nada - é
+    # esse o caso que denuncia uma âncora que sumiu do arquivo base.
+    $old = $old -replace "`r`n", "`n"
+    $new = $new -replace "`r`n", "`n"
+    $count = 0
+    $idx = 0
+    while (($idx = $text.IndexOf($old, $idx, [StringComparison]::Ordinal)) -ge 0) {
+        $text = $text.Substring(0, $idx) + $new + $text.Substring($idx + $old.Length)
+        # avança pelo tamanho do NOVO texto: sem isso, uma tradução que contenha o original
+        # (ou parte dele) faria o laço achar a si mesmo para sempre.
+        $idx += $new.Length
+        $count++
+    }
+    if ($count -eq 0) { throw "Âncora não encontrada: $what" }
+    $script:wfI18nHits += $count
+    return $text
+}
+
 function Insert-Before([string]$text, [string]$anchor, [string]$block, [string]$what) {
     return Replace-Once $text $anchor ($block + $anchor) $what
 }
@@ -49,6 +69,73 @@ function Replace-Between([string]$text, [string]$startAnchor, [string]$endAnchor
     return $text.Substring(0, $s) + $new + $text.Substring($e)
 }
 
+function Get-WinForgeStyleSection([string]$styles, [string]$name) {
+    # Recorta um pedaço de xaml\wf-xaml-styles.xml. O arquivo é uma coleção de <Style>, não um XML
+    # com raiz única: cada pedaço começa numa linha "@secao: <nome>" e vai até a próxima (ou até o
+    # fim). Pedaço que não existe ESTOURA - é o que denuncia um nome trocado no build.
+    $ini = "@secao: $name`n"
+    $i = $styles.IndexOf($ini, [StringComparison]::Ordinal)
+    if ($i -lt 0) { throw "estilos: seção '$name' não existe em wf-xaml-styles.xml" }
+    if ($styles.IndexOf($ini, $i + 1, [StringComparison]::Ordinal) -ge 0) { throw "estilos: seção '$name' aparece mais de uma vez" }
+    $i += $ini.Length
+    $j = $styles.IndexOf("`n@secao: ", $i, [StringComparison]::Ordinal)
+    if ($j -lt 0) { $j = $styles.Length }
+    return $styles.Substring($i, $j - $i).Trim("`n")
+}
+
+function Set-WinForgeThemeTokens([string]$text, $tokens, $novos) {
+    # Reescreve os VALORES do bloco de temas da base ($sync.configs.themes) token a token.
+    #
+    # Substituição por linha, e não por bloco inteiro: o bloco da base tem dezenas de tokens que o
+    # WinForge não muda, e trocar o JSON inteiro faria o build engolir calado qualquer token novo
+    # que a base passasse a usar. Aqui, token que sumiu ESTOURA (a base mudou de nome) e token novo
+    # que já existe também ESTOURA (a base passou a ter o que o WinForge estava acrescentando).
+    $blocoIni = "`$sync.configs.themes = @'`n"
+    $s = $text.IndexOf($blocoIni, [StringComparison]::Ordinal)
+    if ($s -lt 0) { throw "tema: bloco `$sync.configs.themes não encontrado" }
+    if ($text.IndexOf($blocoIni, $s + 1, [StringComparison]::Ordinal) -ge 0) { throw "tema: bloco `$sync.configs.themes ambíguo" }
+    $s += $blocoIni.Length
+    $e = $text.IndexOf("`n'@ | ConvertFrom-Json", $s, [StringComparison]::Ordinal)
+    if ($e -lt 0) { throw "tema: fim do bloco `$sync.configs.themes não encontrado" }
+
+    $json = $text.Substring($s, $e - $s)
+    $contagem = 0
+    foreach ($secao in @('shared', 'Light', 'Dark')) {
+        $secIni = "  `"$secao`": {`n"
+        $i = $json.IndexOf($secIni, [StringComparison]::Ordinal)
+        if ($i -lt 0) { throw "tema: seção '$secao' não encontrada no bloco de temas" }
+        if ($json.IndexOf($secIni, $i + 1, [StringComparison]::Ordinal) -ge 0) { throw "tema: seção '$secao' ambígua" }
+        $corpoIni = $i + $secIni.Length
+        $j = $json.IndexOf("`n  }", $corpoIni, [StringComparison]::Ordinal)
+        if ($j -lt 0) { throw "tema: fim da seção '$secao' não encontrado" }
+        $corpo = $json.Substring($corpoIni, $j - $corpoIni)
+
+        foreach ($nome in @($tokens[$secao].Keys)) {
+            $marca = "    `"$nome`": `""
+            $k = $corpo.IndexOf($marca, [StringComparison]::Ordinal)
+            if ($k -lt 0) { throw "tema: token '$nome' não existe na seção '$secao' da base" }
+            if ($corpo.IndexOf($marca, $k + 1, [StringComparison]::Ordinal) -ge 0) { throw "tema: token '$nome' aparece mais de uma vez na seção '$secao'" }
+            $vIni = $k + $marca.Length
+            $vFim = $corpo.IndexOf('"', $vIni)
+            if ($vFim -lt 0) { throw "tema: valor de '$nome' na seção '$secao' sem aspas de fechamento" }
+            $corpo = $corpo.Substring(0, $vIni) + $tokens[$secao][$nome] + $corpo.Substring($vFim)
+            $contagem++
+        }
+
+        if ($novos -and $novos[$secao]) {
+            foreach ($nome in @($novos[$secao].Keys)) {
+                if ($corpo.IndexOf("    `"$nome`": ", [StringComparison]::Ordinal) -ge 0) { throw "tema: token novo '$nome' já existe na seção '$secao' da base" }
+                $corpo = $corpo.TrimEnd() + ",`n    `"$nome`": `"$($novos[$secao][$nome])`""
+                $contagem++
+            }
+        }
+
+        $json = $json.Substring(0, $corpoIni) + $corpo + $json.Substring($j)
+    }
+    Write-Host "Tema: $contagem token(s) aplicado(s) em shared/Light/Dark"
+    return $text.Substring(0, $s) + $json + $text.Substring($e)
+}
+
 $src            = Read-Lf $Source
 $functionsBlock = Read-Lf (Join-Path $PSScriptRoot "winforge\wb-functions.ps1")
 $assetsBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-assets.ps1")
@@ -61,18 +148,29 @@ $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
+$themeFuncs     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-theme-functions.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
 $commandsBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-commands.ps1")
 $repairBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-repair.ps1")
 $serverBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-server.ps1")
 $auditData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-audit.ps1")
 $rulesData      = Read-Lf (Join-Path $PSScriptRoot "config\wf-rules.ps1")
-$xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-nav.xml")
+$xamlNav        = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-nav.xml")
 $xamlTab        = Read-Lf (Join-Path $PSScriptRoot "xaml\wb-xaml-tab.xml")
-$xamlDiagNav    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-nav.xml")
 $xamlDiagTab    = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-diag-tab.xml")
-$xamlServerNav  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-nav.xml")
 $xamlServerTab  = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-server-tab.xml")
+$xamlStyles     = Read-Lf (Join-Path $PSScriptRoot "xaml\wf-xaml-styles.xml")
+$appsData       = Read-Lf (Join-Path $PSScriptRoot "config\wf-apps.ps1")
+$i18nConfigs    = Read-Lf (Join-Path $PSScriptRoot "config\wf-i18n-configs.ps1")
+
+# Dicionário de tradução: é código, não bloco injetado, então tem de ser EXECUTADO. Dot-source do
+# arquivo não serve (o PowerShell 5.1 lê .ps1 pela code page ANSI quando não há BOM); ler o texto em
+# UTF-8 e rodar um scriptblock mantém os acentos independentemente do BOM.
+. ([scriptblock]::Create([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "config\wf-i18n-strings.ps1"), [System.Text.Encoding]::UTF8)))
+
+# Tabela de tokens do sistema visual: também é código, e pelo mesmo motivo (BOM/code page) entra
+# por scriptblock em vez de dot-source do arquivo.
+. ([scriptblock]::Create([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "config\wf-theme.ps1"), [System.Text.Encoding]::UTF8)))
 
 # ---------------------------------------------------------------- cabeçalho / parâmetros
 $src = Replace-Once $src @'
@@ -260,6 +358,8 @@ $src = Insert-Before $src "`$inputXML = @'" ($serverConfig.TrimEnd() + "`n`n") "
 $src = Insert-Before $src "`$inputXML = @'" ($repairConfig.TrimEnd() + "`n`n") "insert repair config"
 $src = Insert-Before $src "`$inputXML = @'" ($auditData.TrimEnd() + "`n`n") "insert audit data"
 $src = Insert-Before $src "`$inputXML = @'" ($rulesData.TrimEnd() + "`n`n") "insert rules data"
+$src = Insert-Before $src "`$inputXML = @'" ($appsData.TrimEnd() + "`n`n") "insert apps data"
+$src = Insert-Before $src "`$inputXML = @'" ($i18nConfigs.TrimEnd() + "`n`n") "insert i18n configs"
 
 # ---------------------------------------------------------------- logo
 $src = Insert-Before $src "`$sync.configs.applications = @'" ($assetsBlock.TrimEnd() + "`n`n") "insert assets"
@@ -281,6 +381,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.Tri
 
 # ---------------------------------------------------------------- recomendações na interface (contornos, dicas, job)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.TrimEnd() + "`n`n") "insert reco ui"
+
+# ---------------------------------------------------------------- sistema visual (contraste dos tokens)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($themeFuncs.TrimEnd() + "`n`n") "insert theme functions"
 
 # ---------------------------------------------------------------- aba Diagnóstico (cartões, drivers, relatório)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($diagBlock.TrimEnd() + "`n`n") "insert diag"
@@ -545,10 +648,25 @@ $src = Replace-Once $src @'
 
 # ---------------------------------------------------------------- aba Jogos: inicialização, navegação, busca
 $src = Replace-Once $src @'
+        "Install" {
+            Initialize-WPFUI -targetGridName "appscategory"
+
+            Initialize-WPFUI -targetGridName "appspanel"
+        }
         "Tweaks" {
             Invoke-WPFUIElements -configVariable $sync.configs.tweaks -targetGridName "tweakspanel" -columncount 2
         }
 '@ @'
+        "Install" {
+            Initialize-WPFUI -targetGridName "appscategory"
+
+            Initialize-WPFUI -targetGridName "appspanel"
+
+            # WinForge: a lista tem centenas de aplicativos em dez grupos. Aberta, ela obriga a
+            # rolar muito antes de achar qualquer coisa - então nasce fechada, com os títulos dos
+            # grupos à mostra.
+            Set-WinForgeInstallCollapsed
+        }
         "Tweaks" {
             Invoke-WPFUIElements -configVariable (Get-WinUtilBoostConfigSubset -Config $sync.configs.tweaks -Tab @("Jogos","Servidor") -Exclude) -targetGridName "tweakspanel" -columncount 2
         }
@@ -695,10 +813,10 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
             $wfRelatorio = Export-WinForgeDiagnosticsReport
             if (-not $wfRelatorio) { [System.Windows.MessageBox]::Show("O diagnóstico ainda não terminou. Tente de novo em alguns segundos.", "WinForge", "OK", "Warning") | Out-Null }
         }
-        "WPFDiagSelectRecommended" {
-            $wfMarcados = Select-WinForgeRecommended -Tab "All"
-            [System.Windows.MessageBox]::Show("$wfMarcados item(ns) recomendado(s) marcado(s) nas abas de ajustes.", "WinForge", "OK", "Information") | Out-Null
-        }
+        # Marcar/desmarcar tudo pela lista do Diagnóstico. Sem caixa de mensagem: quem conta o
+        # resultado é o contador ao lado dos botões, e ele fica na tela depois do clique.
+        "WPFDiagSelectRecommended" {Set-WinForgeDiagRecommendationSelection -Checked $true | Out-Null}
+        "WPFDiagClearRecommended" {Set-WinForgeDiagRecommendationSelection -Checked $false | Out-Null}
 '@.TrimEnd() "button switch"
 
 # ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
@@ -755,19 +873,31 @@ __        __ _         _____
 
 # ---------------------------------------------------------------- mescla das configs + SelfTest
 $src = Replace-Once $src @'
+$sync.configs.applicationsHashtable = @{}
+$sync.configs.applications.PSObject.Properties | ForEach-Object {
+    $sync.configs.applicationsHashtable[$_.Name] = $_.Value
+}
+
 $sync.configs.appxHashtable = @{}
 $sync.configs.appx.PSObject.Properties | ForEach-Object {
     $sync.configs.appxHashtable[$_.Name] = $_.Value
 }
 $sync.preferences.theme = "Auto"
 '@ @'
+# WinForge: mescla tweaks/botões/presets/jogos, marca recursos só do Windows 11 e faz a curadoria
+# da lista de aplicativos. Vem ANTES dos hashtables derivados: applicationsHashtable é a fonte da
+# aba Instalar, então um aplicativo removido depois dele continuaria virando controle na tela.
+Initialize-WinUtilBoostConfigs
+
+$sync.configs.applicationsHashtable = @{}
+$sync.configs.applications.PSObject.Properties | ForEach-Object {
+    $sync.configs.applicationsHashtable[$_.Name] = $_.Value
+}
+
 $sync.configs.appxHashtable = @{}
 $sync.configs.appx.PSObject.Properties | ForEach-Object {
     $sync.configs.appxHashtable[$_.Name] = $_.Value
 }
-
-# WinForge: mescla tweaks/botões/presets/jogos e marca recursos só do Windows 11
-Initialize-WinUtilBoostConfigs
 
 # WinForge: aplica a classificação de risco (Seguro/Cuidado/Removido) em tweaks e presets
 Initialize-WinForgeAudit
@@ -778,6 +908,10 @@ if ($SelfTest) {
     # A execução normal do WinForge nunca define esta chave, e chave ausente em hashtable é $null.
     $sync.SelfTest = $true
     Write-Host "== WinForge SelfTest =="
+    # Pasta temporária com o nome LONGO: no runner do CI $env:TEMP vem na forma 8.3
+    # (C:\Users\RUNNER~1\...), e as funções devolvem caminhos longos (GetFullPath/Get-Item).
+    # Comparar os dois como texto falhava só lá. Get-Item resolve o nome curto para o longo.
+    $wbSelfTestTemp = try { (Get-Item -LiteralPath ([System.IO.Path]::GetTempPath().TrimEnd('\'))).FullName } catch { $env:TEMP }
     $wbErrors = 0
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
         foreach ($k in @($p.Value)) {
@@ -822,6 +956,160 @@ if ($SelfTest) {
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
+    # Aba Instalar: a curadoria de wf-apps.ps1 tem de ter rodado ANTES de applicationsHashtable -
+    # é dele que a aba nasce, então uma chave removida tarde demais volta como controle na tela.
+    $wfApps = @($sync.configs.applications.PSObject.Properties)
+    $wfAppsCategorias = @($wfApps | ForEach-Object { [string]$_.Value.Category } | Sort-Object -Unique)
+    Write-Host "  Aba Instalar: $($wfApps.Count) aplicativo(s) em $($wfAppsCategorias.Count) grupo(s) -> $($wfAppsCategorias -join ', ')"
+    if ($wfApps.Count -ne 137) { Write-Host "  [ERRO] aba Instalar: esperado 137 aplicativos, veio $($wfApps.Count)" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.WinForgeRemovedApps).Count -ne 95) { Write-Host "  [ERRO] aba Instalar: esperado 95 chaves em WinForgeRemovedApps, veio $(@($sync.WinForgeRemovedApps).Count)" -ForegroundColor Red; $wbErrors++ }
+    $wfSobrando = @($sync.WinForgeRemovedApps | Where-Object { $sync.configs.applications.PSObject.Properties[$_] -or $sync.configs.applicationsHashtable.ContainsKey($_) })
+    if ($wfSobrando.Count) { Write-Host "  [ERRO] aba Instalar: aplicativo(s) que deveriam ter saído continuam na lista: $($wfSobrando -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    # Todo grupo na tela tem de sair do mapa (ou de um override) de wf-apps.ps1: uma categoria nova
+    # na base, ou uma linha que sumiu do mapa, apareceria em inglês no meio dos outros.
+    $wfGruposPermitidos = @(@($sync.WinForgeAppCategoryMap.Values) + @($sync.WinForgeAppCategoryOverride.Values) | Sort-Object -Unique)
+    $wfIngles = @($wfAppsCategorias | Where-Object { $_ -notin $wfGruposPermitidos })
+    if ($wfIngles.Count) { Write-Host "  [ERRO] aba Instalar: grupo(s) fora do mapa pt-BR: $($wfIngles -join ', ')" -ForegroundColor Red; $wbErrors++ }
+    if ([string]$sync.configs.applications.WPFInstallplexdesktop.Category -ne 'Multimídia') { Write-Host "  [ERRO] aba Instalar: WPFInstallplexdesktop deveria estar em Multimídia, está em '$($sync.configs.applications.WPFInstallplexdesktop.Category)'" -ForegroundColor Red; $wbErrors++ }
+    if ([string]$sync.configs.applications.WPFInstalllocalsend.Category -ne 'Utilitários') { Write-Host "  [ERRO] aba Instalar: WPFInstalllocalsend deveria estar em Utilitários, está em '$($sync.configs.applications.WPFInstalllocalsend.Category)'" -ForegroundColor Red; $wbErrors++ }
+    if ($sync.currentTab -ne "Diagnostico") { Write-Host "  [ERRO] aba de abertura: `$sync.currentTab = '$($sync.currentTab)', esperado 'Diagnostico'" -ForegroundColor Red; $wbErrors++ }
+    # ---- Sistema visual: tokens, tipografia e contraste
+    # A fonte é o MESMO bloco que a janela lê ($sync.configs.themes), e não uma cópia da tabela:
+    # assim a trava cobre o que a interface vai pintar de verdade. Trocar um hexadecimal é a
+    # mudança mais fácil de fazer no projeto e a mais difícil de enxergar sem abrir o programa.
+    # Toda cor de TEXTO contra toda superfície onde esse texto pode cair: fundo da janela, cartão
+    # e dica. É produto cartesiano de propósito - a lista escrita à mão sempre esquece a
+    # combinação que aparece numa aba só, e foi assim que o verde de "recomendado" ficou em 3,6:1
+    # sobre o fundo escuro sem ninguém notar.
+    $wfTemaFundos = @('MainBackgroundColor', 'CardBackgroundColor', 'ToolTipBackgroundColor')
+    $wfTemaTextos = @('MainForegroundColor', 'LabelboxForegroundColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor')
+    $wfTemaPares = @()
+    foreach ($wfBgNome in $wfTemaFundos) {
+        foreach ($wfFgNome in $wfTemaTextos) { $wfTemaPares += @{ Fg = $wfFgNome; Bg = $wfBgNome; Nome = "$wfFgNome sobre $wfBgNome" } }
+    }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundColor';         Bg = 'ButtonBackgroundColor';          Nome = 'texto do botão' }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundColor';         Bg = 'ButtonBackgroundMouseoverColor'; Nome = 'texto do botão sob o mouse' }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundColor';         Bg = 'ButtonBackgroundPressedColor';   Nome = 'texto do botão pressionado' }
+    $wfTemaPares += @{ Fg = 'ButtonForegroundSelectedColor'; Bg = 'ButtonBackgroundSelectedColor';  Nome = 'texto do botão selecionado' }
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'AppInstallUnselectedColor';      Nome = 'nome do aplicativo' }
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'AppInstallSelectedColor';        Nome = 'nome do aplicativo marcado' }
+    foreach ($wfTemaNome in @('Dark', 'Light')) {
+        $wfTemaSec = $sync.configs.themes.$wfTemaNome
+        if ($null -eq $wfTemaSec) { Write-Host "  [ERRO] tema: seção '$wfTemaNome' não existe no bloco de temas" -ForegroundColor Red; $wbErrors++; continue }
+        $wfPiorNome = ''; $wfPiorRazao = 99
+        foreach ($wfPar in $wfTemaPares) {
+            $wfFg = [string]$wfTemaSec.($wfPar.Fg)
+            $wfBg = [string]$wfTemaSec.($wfPar.Bg)
+            if (-not $wfFg -or -not $wfBg) {
+                Write-Host "  [ERRO] tema $wfTemaNome ($($wfPar.Nome)): token ausente ($($wfPar.Fg)='$wfFg', $($wfPar.Bg)='$wfBg')" -ForegroundColor Red; $wbErrors++; continue
+            }
+            $wfRazao = Get-WinForgeContrastRatio -Fg $wfFg -Bg $wfBg
+            if ($wfRazao -lt $wfPiorRazao) { $wfPiorRazao = $wfRazao; $wfPiorNome = $wfPar.Nome }
+            if ($wfRazao -lt 4.5) {
+                Write-Host "  [ERRO] contraste $wfTemaNome ($($wfPar.Nome)): $wfFg sobre $wfBg dá ${wfRazao}:1, mínimo 4,5:1" -ForegroundColor Red; $wbErrors++
+            }
+        }
+        Write-Host "  Contraste $wfTemaNome : $($wfTemaPares.Count) par(es) conferido(s), pior caso ${wfPiorRazao}:1 ($wfPiorNome), mínimo 4,5:1"
+    }
+    # Tipografia: Segoe UI no corpo, Segoe UI Semibold nos títulos. O Consolas da base era a fonte
+    # dos títulos de categoria; a única monoespaçada que sobra é a da janela de saída de comandos.
+    $wfTipografia = [ordered]@{
+        FontFamily                 = 'Segoe UI'
+        ButtonFontFamily           = 'Segoe UI'
+        HeaderFontFamily           = 'Segoe UI Semibold'
+        FontSize                   = '13'
+        HeaderFontSize             = '15'
+        ButtonHeight               = '32'
+        TabButtonWidth             = '118'
+        TabButtonHeight            = '32'
+        CheckBoxBulletDecoratorSize = '16'
+        ButtonCornerRadius         = '4'
+    }
+    foreach ($wfTipoChave in @($wfTipografia.Keys)) {
+        $wfTipoValor = [string]$sync.configs.themes.shared.$wfTipoChave
+        if ($wfTipoValor -ne $wfTipografia[$wfTipoChave]) {
+            Write-Host "  [ERRO] token compartilhado '$wfTipoChave': esperado '$($wfTipografia[$wfTipoChave])', veio '$wfTipoValor'" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    if ($inputXML -match 'Consolas') { Write-Host "  [ERRO] tipografia: sobrou 'Consolas' no XAML - a única monoespaçada do WinForge é a da janela de saída" -ForegroundColor Red; $wbErrors++ }
+    if ($inputXML -match 'Arial')    { Write-Host "  [ERRO] tipografia: sobrou 'Arial' no XAML" -ForegroundColor Red; $wbErrors++ }
+    $wfMonoDef = [string](Get-Command Show-WinForgeOutputWindow).Definition
+    if ($wfMonoDef -notmatch "FontFamily 'Consolas'") { Write-Host "  [ERRO] tipografia: a janela de saída de comandos perdeu a fonte monoespaçada (Consolas)" -ForegroundColor Red; $wbErrors++ }
+    # Estilos: um dicionário de recursos não aceita duas entradas com a mesma chave (nem dois
+    # estilos implícitos para o mesmo TargetType). Um estilo do WinForge ADICIONADO em vez de
+    # SUBSTITUIR o da base estouraria só na hora de carregar o XAML - aqui a contagem denuncia.
+    $wfEstilosUnicos = [ordered]@{
+        'x:Key="TabToggleButton"'    = 1
+        '<Style TargetType="Button">' = 1
+        '<Style TargetType="CheckBox">' = 1
+        'x:Key="BorderStyle"'        = 1
+        'TargetType="DataGridRow"'   = 1
+    }
+    foreach ($wfEstiloChave in @($wfEstilosUnicos.Keys)) {
+        $wfEstiloQtd = ([regex]::Matches($inputXML, [regex]::Escape($wfEstiloChave))).Count
+        if ($wfEstiloQtd -ne $wfEstilosUnicos[$wfEstiloChave]) {
+            Write-Host "  [ERRO] estilos: '$wfEstiloChave' aparece $wfEstiloQtd vez(es) no XAML, esperado $($wfEstilosUnicos[$wfEstiloChave])" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    foreach ($wfEstiloMarca in @('Name="WFHoverOverlay"', 'Name="WFSelectedAccent"', 'Name="WFFocusRing"')) {
+        if ($inputXML.IndexOf($wfEstiloMarca, [StringComparison]::Ordinal) -lt 0) {
+            Write-Host "  [ERRO] estilos: falta '$wfEstiloMarca' nos gabaritos de botão/aba" -ForegroundColor Red; $wbErrors++
+        }
+    }
+    Write-Host "  Estilos: gabaritos únicos de Button/CheckBox/TabToggleButton/BorderStyle/DataGridRow, com realce, foco e faixa de aba"
+    # Trava de idioma. A lista de termos é injetada pelo build logo acima ($sync.WinForgeEnglishSweep),
+    # DEPOIS do dicionário de tradução - se ela viesse antes, o próprio dicionário a traduziria e a
+    # trava passaria por não ter mais o que procurar. Aqui a varredura é sobre o XAML gerado; a
+    # Tarefa 3 usa a mesma função no Content/Description das configurações.
+    $wfIdiomaXaml = Test-WinForgeEnglishLeftovers -Text $inputXML -Where 'XAML' -Xaml
+    if ($wfIdiomaXaml) { $wbErrors += $wfIdiomaXaml }
+    else { Write-Host "  Idioma: $(@($sync.WinForgeEnglishSweep).Count) termo(s) em inglês procurados no XAML, nenhum encontrado" }
+    # Cobertura do dicionário por chave (config\wf-i18n-configs.ps1). O texto dos três blocos JSON
+    # não dá para traduzir por substituição literal como o resto - são centenas de frases parecidas -
+    # então a tradução é por chave, e a prova de que nenhuma ficou de fora é esta.
+    # As entradas do próprio WinForge já nascem em português: ficam fora POR PREFIXO, e não por
+    # "parece português", que daria falso verde em qualquer texto curto.
+    $wfI18nPrefixos = @('WPFTweaksWB', 'WPFTweaksWF', 'WPFToggleWB', 'WPFPanelWB', 'WPFWFRep', 'WPFWFSrv', 'WPFWFAd')
+    $wfI18nAlvos = @(
+        @{ Nome = 'tweaks';      Config = $sync.configs.tweaks;       Campos = @('Content', 'Description') }
+        @{ Nome = 'Config';      Config = $sync.configs.feature;      Campos = @('Content', 'Description') }
+        @{ Nome = 'aplicativos'; Config = $sync.configs.applications; Campos = @('description') }
+    )
+    $wfI18nDic = $sync.WinForgeI18n
+    if ($null -eq $wfI18nDic) { $wfI18nDic = @{} }
+    $wfI18nSemTraducao = @()
+    $wfI18nExistentes = @{}
+    $wfI18nTexto = New-Object System.Text.StringBuilder
+    foreach ($wfAlvo in $wfI18nAlvos) {
+        foreach ($p in $wfAlvo.Config.PSObject.Properties) {
+            $wfI18nExistentes[$p.Name] = $true
+            foreach ($wfCampo in $wfAlvo.Campos) {
+                $wfProp = $p.Value.PSObject.Properties[$wfCampo]
+                if ($wfProp) { [void]$wfI18nTexto.AppendLine([string]$wfProp.Value) }
+            }
+            $wfProprio = $false
+            foreach ($wfPre in $wfI18nPrefixos) { if ($p.Name.StartsWith($wfPre, [StringComparison]::Ordinal)) { $wfProprio = $true; break } }
+            if ($wfProprio) { continue }
+            if (-not $wfI18nDic.ContainsKey($p.Name)) { $wfI18nSemTraducao += "$($wfAlvo.Nome):$($p.Name)" }
+        }
+    }
+    if ($wfI18nSemTraducao.Count) {
+        Write-Host "  [ERRO] dicionário: $($wfI18nSemTraducao.Count) entrada(s) da base sem tradução -> $($wfI18nSemTraducao -join ', ')" -ForegroundColor Red; $wbErrors++
+    }
+    # Sentido inverso: chave no dicionário que não existe em configuração nenhuma é tradução morta -
+    # some da tela sem ninguém notar quando o arquivo base muda o nome de uma entrada.
+    $wfI18nOrfas = @($wfI18nDic.Keys | Where-Object { -not $wfI18nExistentes.ContainsKey($_) } | Sort-Object)
+    if ($wfI18nOrfas.Count) {
+        Write-Host "  [ERRO] dicionário: $($wfI18nOrfas.Count) chave(s) sem entrada correspondente -> $($wfI18nOrfas -join ', ')" -ForegroundColor Red; $wbErrors++
+    }
+    if (-not $wfI18nSemTraducao.Count -and -not $wfI18nOrfas.Count) {
+        Write-Host "  Dicionário por chave: $(@($wfI18nDic.Keys).Count) entrada(s), cobrindo tudo que veio da base"
+    }
+    # Mesma trava de idioma do XAML, agora sobre o texto que os três blocos mostram na tela. Sem
+    # -Xaml: aqui o texto já é o visível (Content/Description), não tem marcação para extrair.
+    $wfIdiomaConfigs = Test-WinForgeEnglishLeftovers -Text $wfI18nTexto.ToString() -Where 'configurações'
+    if ($wfIdiomaConfigs) { $wbErrors += $wfIdiomaConfigs }
+    else { Write-Host "  Idioma: nenhum termo em inglês no Content/Description de tweaks, Config e aplicativos" }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
@@ -1118,7 +1406,7 @@ if ($SelfTest) {
     # voltar. Numa máquina sem IIS dá para provar duas coisas, e são as duas cobradas aqui: o
     # round-trip do arquivo (numa raiz temporária, nunca em %ProgramData%) e a recusa limpa de
     # Invoke-WinForgeIisTweak quando o módulo WebAdministration não existe.
-    $wbIisRoot = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup'
+    $wbIisRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup'
     try {
         if (Test-Path $wbIisRoot) { Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbIisFile = New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'pool:A:startMode' = 'OnDemand'; 'pool:A:autoStart' = 'False' } -Root $wbIisRoot
@@ -1134,7 +1422,7 @@ if ($SelfTest) {
         $wbIisTrust = Test-WinForgeSnapshotRootTrusted -Root $wbIisRoot -ExplicitRoot
         if (-not $wbIisTrust.Trusted) { Write-Host "  [ERRO] IIS: a pasta recém-criada não passou na checagem de confiança ('$($wbIisTrust.Reason)')" -ForegroundColor Red; $wbErrors++ }
         # Pasta com escrita para 'Todos' (Everyone, S-1-1-0) é o cenário do ataque: tem de ser recusada.
-        $wbIisRootMau = Join-Path $env:TEMP 'WinForge-SelfTest\iis-backup-aberto'
+        $wbIisRootMau = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup-aberto'
         New-Item -ItemType Directory -Path $wbIisRootMau -Force | Out-Null
         $wbIisAclMau = Get-Acl -LiteralPath $wbIisRootMau
         $wbIisAclMau.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -1230,7 +1518,7 @@ if ($SelfTest) {
     $wbSecOc = Get-WinForgeIisAllowedKey -Name OutputCache
     if (Test-WinForgeSnapshotKey -Key 'server:system.webServer/directoryBrowse:enabled' -AllowedKey $wbSecOc) { Write-Host "  [ERRO] Backup (crivo): OutputCache aceitou 'server:system.webServer/directoryBrowse:enabled' (forma curta)" -ForegroundColor Red; $wbErrors++ }
     if (-not (Test-WinForgeSnapshotKey -Key 'server:system.webServer/caching:enabled' -AllowedKey $wbSecOc)) { Write-Host "  [ERRO] Backup (crivo): OutputCache recusou a própria chave 'server:system.webServer/caching:enabled'" -ForegroundColor Red; $wbErrors++ }
-    $wbSecRoot = Join-Path $env:TEMP 'WinForge-SelfTest\seguranca'
+    $wbSecRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seguranca'
     try {
         if (Test-Path $wbSecRoot) { Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue }
         # Backup plantado com um GUID que não é GUID: a chave sai da leitura (vai para Ignored) e o
@@ -1271,7 +1559,16 @@ if ($SelfTest) {
             if (-not $wbSecComRoot.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta de teste com -Root explícito deveria passar ('$($wbSecComRoot.Reason)')" -ForegroundColor Red; $wbErrors++ }
             $wbSecPadrao = Test-WinForgeSnapshotRootTrusted -Root $wbSecDono
             if ($wbSecPadrao.Trusted) { Write-Host "  [ERRO] Backup (dono): pasta com dono fora de SYSTEM/Administradores passou nas regras da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
-            elseif ($wbSecPadrao.Reason -notmatch 'SYSTEM') { Write-Host "  [ERRO] Backup (dono): o motivo da recusa não fala do dono ('$($wbSecPadrao.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]::IsNullOrWhiteSpace([string]$wbSecPadrao.Reason)) { Write-Host "  [ERRO] Backup (dono): recusou sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+            # A recusa acima cai no PERFIL do usuário, antes de chegar na pasta de teste: com as
+            # regras da pasta padrão a cadeia não para mais em %TEMP% (a parada é só da base da
+            # máquina, ver Get-WinForgeSnapshotChainStop), e no caminho até %TEMP% tem elo que o
+            # usuário escreve. Por isso a regra de DONO é cobrada onde ela mora, e não pelo texto
+            # de uma recusa que depende de onde a pasta de teste foi parar.
+            $wbSecDonoPadrao = Get-WinForgeSnapshotTrustedSid -Owner
+            $wbSecDonoTeste = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot
+            if ($wbSecDonoPadrao.ContainsKey($wbSecEu.Value)) { Write-Host "  [ERRO] Backup (dono): a identidade atual é dona aceitável da pasta PADRÃO" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wbSecDonoTeste.ContainsKey($wbSecEu.Value)) { Write-Host "  [ERRO] Backup (dono): com -ExplicitRoot a identidade atual deveria poder ser dona" -ForegroundColor Red; $wbErrors++ }
         }
         # Aplicar numa pasta que qualquer um escreve: recusa antes de tudo, sem arquivo e sem
         # alteração. -CaptureOnly porque é o único caminho de aplicação que roda num cliente, e ele
@@ -1286,6 +1583,46 @@ if ($SelfTest) {
         if ([string]$wbSecCap.Skipped -notmatch 'não confiável') { Write-Host "  [ERRO] Backup (pasta aberta): o motivo não diz que a pasta não é confiável ('$($wbSecCap.Skipped)')" -ForegroundColor Red; $wbErrors++ }
         if ($null -ne $wbSecCap.Snapshot) { Write-Host "  [ERRO] Backup (pasta aberta): gravou backup numa pasta não confiável ('$($wbSecCap.Snapshot)')" -ForegroundColor Red; $wbErrors++ }
         if (@(Get-ChildItem -LiteralPath $wbSecAberto -Filter '*.json' -ErrorAction SilentlyContinue).Count -ne 0) { Write-Host "  [ERRO] Backup (pasta aberta): sobrou arquivo JSON na pasta não confiável" -ForegroundColor Red; $wbErrors++ }
+        # A máscara de ACE perigosa, direito a direito. A versão anterior somava FullControl
+        # (0x1F01FF) e Modify (0x301BF) à máscara, e os dois carregam os bits de LEITURA: qualquer
+        # ACE de 'Ler e executar' casava, e uma pasta com o 'Todos: Ler e executar' que metade do
+        # %ProgramData% tem era recusada como se fosse escrita para todo mundo. O teste é o par:
+        # leitura NÃO acusa, escrita acusa - e vale também para os nomes compostos, que continuam
+        # sendo pegos pelos bits de escrita que carregam.
+        $wbAceTodos = New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'
+        $wbAceCasos = @(
+            @{ Direito = 'ReadAndExecute';              Acusa = $false }
+            @{ Direito = 'Read';                        Acusa = $false }
+            @{ Direito = 'ListDirectory';               Acusa = $false }
+            @{ Direito = 'ReadPermissions';             Acusa = $false }
+            @{ Direito = 'Synchronize';                 Acusa = $false }
+            @{ Direito = 'Write';                       Acusa = $true  }
+            @{ Direito = 'WriteData';                   Acusa = $true  }
+            @{ Direito = 'AppendData';                  Acusa = $true  }
+            @{ Direito = 'Delete';                      Acusa = $true  }
+            @{ Direito = 'DeleteSubdirectoriesAndFiles'; Acusa = $true }
+            @{ Direito = 'ChangePermissions';           Acusa = $true  }
+            @{ Direito = 'TakeOwnership';               Acusa = $true  }
+            @{ Direito = 'Modify';                      Acusa = $true  }
+            @{ Direito = 'FullControl';                 Acusa = $true  }
+        )
+        $wbAceOk = 0
+        foreach ($wbAceCaso in $wbAceCasos) {
+            $wbAceRegra = New-Object System.Security.AccessControl.FileSystemAccessRule ($wbAceTodos, [System.Security.AccessControl.FileSystemRights]$wbAceCaso.Direito, 'Allow')
+            $wbAceQuem = Find-WinForgeSnapshotUnsafeAce -Access @($wbAceRegra) -Trusted @{}
+            if ($wbAceCaso.Acusa -and -not $wbAceQuem) { Write-Host "  [ERRO] máscara de ACE: '$($wbAceCaso.Direito)' para 'Todos' deveria ser recusado" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wbAceCaso.Acusa -and $wbAceQuem) { Write-Host "  [ERRO] máscara de ACE: '$($wbAceCaso.Direito)' para 'Todos' é só leitura e foi acusado como escrita" -ForegroundColor Red; $wbErrors++ }
+            else { $wbAceOk++ }
+        }
+        # E o SID confiável continua passando mesmo com escrita, senão a máscara recusaria a
+        # própria pasta padrão (SYSTEM e Administradores têm FullControl nela).
+        $wbAceSystem = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
+        $wbAceRegraS = New-Object System.Security.AccessControl.FileSystemAccessRule ($wbAceSystem, [System.Security.AccessControl.FileSystemRights]'FullControl', 'Allow')
+        if (Find-WinForgeSnapshotUnsafeAce -Access @($wbAceRegraS) -Trusted @{ 'S-1-5-18' = $true }) { Write-Host "  [ERRO] máscara de ACE: SID da lista de confiança foi recusado" -ForegroundColor Red; $wbErrors++ }
+        # Uma ACE de NEGAÇÃO de escrita não é permissão e não pode acusar ninguém.
+        $wbAceNega = New-Object System.Security.AccessControl.FileSystemAccessRule ($wbAceTodos, [System.Security.AccessControl.FileSystemRights]'FullControl', 'Deny')
+        if (Find-WinForgeSnapshotUnsafeAce -Access @($wbAceNega) -Trusted @{}) { Write-Host "  [ERRO] máscara de ACE: uma ACE de negação foi lida como permissão de escrita" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Máscara de ACE: $wbAceOk de $($wbAceCasos.Count) direito(s) classificado(s), leitura não acusa e escrita acusa"
         Write-Host "  Backup (segurança): forma do valor cobrada na leitura e na escrita, crivo 'server:' inteiro, pasta padrão só de SYSTEM/Administradores, aplicação recusada em pasta aberta"
     } catch {
         Write-Host "  [ERRO] Backup (segurança): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -1302,7 +1639,7 @@ if ($SelfTest) {
     #   2. o ponto de reanálise era conferido só na ÚLTIMA pasta. Uma junção em %ProgramData%\WinForge
     #      fazia a pasta de backup nascer fora de %ProgramData%, com a DACL de onde a junção aponta.
     #      Agora o caminho é normalizado uma vez e TODA a cadeia de ancestrais é conferida.
-    $wb3Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada3'
+    $wb3Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada3'
     $wb3Root = Join-Path $wb3Base 'backup'
     try {
         if (Test-Path $wb3Base) { Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1352,7 +1689,7 @@ if ($SelfTest) {
     #      implícito entre a gravação e o Protect - a janela que a ACE existe para fechar.
     #   2. a checagem do ARQUIVO olhava só o dono: um backup com ACE de escrita para 'Todos' passava
     #      mesmo com o dono certo.
-    $wb4Base = Join-Path $env:TEMP 'WinForge-SelfTest\rodada4'
+    $wb4Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada4'
     try {
         if (Test-Path $wb4Base) { Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue }
         $wb4Root = Join-Path $wb4Base 'backup'
@@ -1440,7 +1777,7 @@ if ($SelfTest) {
     # build - é um cliente, e mexer no SMB ou no plano de energia de quem compila seria estrago. As
     # duas coisas cobradas são exatamente essas: numa máquina que não é servidor, aplicar recusa
     # limpo; e a captura (-CaptureOnly, que nunca escreve) traz valor de verdade onde o cmdlet existe.
-    $wbSrvRoot = Join-Path $env:TEMP 'WinForge-SelfTest\server-backup'
+    $wbSrvRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\server-backup'
     try {
         if (Test-Path $wbSrvRoot) { Remove-Item -Path $wbSrvRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbSrvItens = @(
@@ -1763,9 +2100,15 @@ if ($SelfTest) {
         if ([string]$wfRepDx.Kind -ne 'read') { Write-Host "  [ERRO] Reparo (DirectX): abrir uma página é leitura, veio Kind '$($wfRepDx.Kind)'" -ForegroundColor Red; $wbErrors++ }
         if (-not $wfRepDx.OpensExternal) { Write-Host "  [ERRO] Reparo (DirectX): a linha deveria estar marcada com OpensExternal" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfRepDx.Command -notmatch "^Start-Process 'https://www\.microsoft\.com/download/details\.aspx\?id=35'$") { Write-Host "  [ERRO] Reparo (DirectX): o comando deveria ser um Start-Process da página oficial, veio '$($wfRepDx.Command)'" -ForegroundColor Red; $wbErrors++ }
-        # Nenhuma função de download sobrou no programa: se alguma voltar, este teste cai.
-        foreach ($wfRepDxMorta in @('Install-WinForgeDirectX', 'Test-WinForgeMicrosoftSignature', 'Test-WinForgeMicrosoftSigner', 'Split-WinForgeCertificateSubject')) {
-            if (Get-Command $wfRepDxMorta -ErrorAction SilentlyContinue) { Write-Host "  [ERRO] Reparo (DirectX): '$wfRepDxMorta' voltou ao programa - o WinForge não baixa executável" -ForegroundColor Red; $wbErrors++ }
+        # O caminho de download do DirectX continua morto: se alguma dessas funções voltar, este
+        # teste cai. 'Split-WinForgeCertificateSubject' saiu desta lista na Tarefa 5 do Plano 6 - o
+        # download do driver NVIDIA precisa ler o assunto do certificado -, mas ela sozinha não
+        # baixa nada: é um analisador de texto. O que continua proibido é o DirectX baixar e abrir
+        # um instalador de %TEMP%, que é gravável por integridade média. O download da NVIDIA vai
+        # para %ProgramData%\WinForge\downloads, com a DACL de SYSTEM/Administradores e a mesma
+        # conferência de dono e de reanálise da pasta de backup (Confirm-WinForgeDownloadRoot).
+        foreach ($wfRepDxMorta in @('Install-WinForgeDirectX', 'Test-WinForgeMicrosoftSignature', 'Test-WinForgeMicrosoftSigner')) {
+            if (Get-Command $wfRepDxMorta -ErrorAction SilentlyContinue) { Write-Host "  [ERRO] Reparo (DirectX): '$wfRepDxMorta' voltou ao programa - o WinForge não baixa executável para o DirectX" -ForegroundColor Red; $wbErrors++ }
         }
         # E o marcador tem de valer de verdade: nenhuma linha com OpensExternal pode estar na lista
         # que o SelfTest roda de ponta a ponta.
@@ -2144,6 +2487,628 @@ if ($SelfTest) {
         Write-Host "  NVIDIA (rede): status=$($wbNv.Status) versão=$($wbNv.Version) lançamento=$($wbNv.ReleaseDate)"
         if ($wbNv.Status -ne 'ok' -or $wbNv.Version -notmatch '^\d{3}\.\d{2}$') { Write-Host "  [ERRO] Get-WinForgeNvidiaLatestDriver: esperado status 'ok' e versão no formato 000.00" -ForegroundColor Red; $wbErrors++ }
     }
+    # ---------------------------------------------------------------- ações por linha de driver
+    # A coluna "Ação" da tabela de drivers e o botão "Instalar" da tabela do Windows Update. Nada
+    # aqui baixa nem instala nada: o SelfTest exercita a DECISÃO (que ação cada linha oferece) e as
+    # três travas do caminho que escreve - domínio da URL, assinatura do arquivo e modo SelfTest.
+    try {
+        # Que ação cada linha oferece. A linha da NVIDIA atrasada COM link oficial é a única que
+        # ganha o botão de download; com o link fora do domínio da NVIDIA ela cai na página do
+        # fabricante, que é o comportamento seguro.
+        $wfAcCasos = @(
+            @('NVIDIA atrasada com link oficial',      @{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'atualizar'; Latest = '616.92'; LatestUrl = 'https://us.download.nvidia.com/Windows/616.92/616.92-desktop-win10-win11-64bit-international-dch-whql.exe'; Url = 'https://www.nvidia.com/pt-br/drivers/' }, 'nvidia-download', 'Baixar 616.92'),
+            @('NVIDIA em dia',                         @{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'ok'; Url = 'https://www.nvidia.com/pt-br/drivers/' }, 'vendor-page', 'Página do fabricante'),
+            @('NVIDIA atrasada com link fora do domínio', @{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'atualizar'; Latest = '616.92'; LatestUrl = 'https://nvidia.com.evil.com/616.92.exe'; Url = 'https://www.nvidia.com/pt-br/drivers/' }, 'vendor-page', 'Página do fabricante'),
+            @('AMD com página do fabricante',          @{ Device = 'AMD Radeon'; Vendor = 'amd'; Class = 'DISPLAY'; Status = 'verificar'; Url = 'https://www.amd.com/pt/support/download/drivers.html' }, 'vendor-page', 'Página do fabricante'),
+            @('sem link nenhum',                       @{ Device = 'Dispositivo genérico'; Vendor = 'outro'; Class = 'SYSTEM'; Status = 'ok' }, 'none', '')
+        )
+        $wfAcOk = 0
+        foreach ($wfAcCaso in $wfAcCasos) {
+            $wfAcVeio = Get-WinForgeDriverAction -Driver ([pscustomobject]$wfAcCaso[1])
+            if ([string]$wfAcVeio.Kind -ne [string]$wfAcCaso[2]) { Write-Host "  [ERRO] Ação de driver ($($wfAcCaso[0])): veio '$($wfAcVeio.Kind)', esperado '$($wfAcCaso[2])'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfAcVeio.Label -ne [string]$wfAcCaso[3]) { Write-Host "  [ERRO] Ação de driver ($($wfAcCaso[0])): rótulo '$($wfAcVeio.Label)', esperado '$($wfAcCaso[3])'" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcOk++ }
+        }
+        # As linhas da tabela têm de CARREGAR a decisão: é delas que o botão do XAML tira o texto e
+        # a visibilidade, e é a própria linha que viaja na Tag do botão até o handler.
+        # O ',' de Get-WinForgeDiagDriverRows protege a coleção do desmembramento: '@(...)' em volta
+        # da chamada daria UM item (a própria coleção). O pipe é o que a enumera.
+        $wfAcLinhas = @((Get-WinForgeDiagDriverRows -Profile @{ Drivers = @($wfAcCasos | ForEach-Object { [pscustomobject]$_[1] }) }) | ForEach-Object { $_ })
+        if ($wfAcLinhas.Count -ne $wfAcCasos.Count) { Write-Host "  [ERRO] Ação de driver: $($wfAcLinhas.Count) linha(s), esperado $($wfAcCasos.Count)" -ForegroundColor Red; $wbErrors++ }
+        else {
+            for ($wfAcI = 0; $wfAcI -lt $wfAcCasos.Count; $wfAcI++) {
+                $wfAcLinha = $wfAcLinhas[$wfAcI]
+                if ([string]$wfAcLinha.ActionKind -ne [string]$wfAcCasos[$wfAcI][2]) { Write-Host "  [ERRO] Ação de driver (linha '$($wfAcCasos[$wfAcI][0])'): ActionKind '$($wfAcLinha.ActionKind)', esperado '$($wfAcCasos[$wfAcI][2])'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfAcLinha.ActionLabel -ne [string]$wfAcCasos[$wfAcI][3]) { Write-Host "  [ERRO] Ação de driver (linha '$($wfAcCasos[$wfAcI][0])'): ActionLabel '$($wfAcLinha.ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
+                $wfAcVisEsperada = $(if ([string]$wfAcCasos[$wfAcI][2] -eq 'none') { 'Collapsed' } else { 'Visible' })
+                if ([string]$wfAcLinha.ActionVisible -ne $wfAcVisEsperada) { Write-Host "  [ERRO] Ação de driver (linha '$($wfAcCasos[$wfAcI][0])'): ActionVisible '$($wfAcLinha.ActionVisible)', esperado '$wfAcVisEsperada'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # Domínio da URL de download. 'https://nvidia.com.evil.com' é o caso que um -like '*nvidia.com*'
+        # deixaria passar: o host TERMINA em nvidia.com só na leitura da esquerda para a direita.
+        $wfAcUrls = @(
+            @('https://us.download.nvidia.com/Windows/616.92/x.exe', $true),
+            @('https://international.download.nvidia.com/x.exe', $true),
+            @('https://nvidia.com/x.exe', $true),
+            @('http://us.download.nvidia.com/x.exe', $false),
+            @('http://evil/x.exe', $false),
+            @('https://nvidia.com.evil.com/x.exe', $false),
+            @('https://www.nvidia.com.br/x.exe', $false),
+            @('file:///C:/Windows/System32/calc.exe', $false),
+            @('', $false)
+        )
+        $wfAcUrlOk = 0
+        foreach ($wfAcUrl in $wfAcUrls) {
+            $wfAcUrlVeio = [bool](Test-WinForgeNvidiaDownloadUrl -Url ([string]$wfAcUrl[0]))
+            if ($wfAcUrlVeio -ne [bool]$wfAcUrl[1]) { Write-Host "  [ERRO] URL de download NVIDIA: '$($wfAcUrl[0])' deveria dar $($wfAcUrl[1]), deu $wfAcUrlVeio" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcUrlOk++ }
+        }
+        # Recusa de redirecionamento: o download roda com -MaximumRedirection 0, mas no PowerShell
+        # 5.1 quem diz que foi redirecionamento NÃO é a mensagem (que vem genérica) - é o
+        # FullyQualifiedErrorId, que começa com 'MaximumRedirectExceeded'. Procurar 'redirec' na
+        # mensagem deixava o usuário com um erro de rede qualquer no lugar da recusa. O mapeamento é
+        # provado com ErrorRecord SINTÉTICO: nenhum byte de rede sai daqui.
+        # Caso: @(nome, FQID, mensagem, ErrorDetails, esperado dizer 'redirecionar')
+        $wfAcRedCasos = @(
+            @('FQID (5.1)', 'MaximumRedirectExceeded,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'A operação não pôde ser concluída.', $null, $true),
+            @('ErrorDetails', 'WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'Erro no servidor remoto.', 'O servidor respondeu com um redirecionamento.', $true),
+            @('mensagem', 'WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'The maximum redirection count has been exceeded.', $null, $true),
+            @('falha comum', 'WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', 'O tempo limite da operação foi atingido.', $null, $false)
+        )
+        $wfAcRedOk = 0
+        foreach ($wfAcRedCaso in $wfAcRedCasos) {
+            $wfAcRedErro = New-Object System.Management.Automation.ErrorRecord (
+                (New-Object System.Net.WebException ([string]$wfAcRedCaso[2])),
+                [string]$wfAcRedCaso[1],
+                ([System.Management.Automation.ErrorCategory]::InvalidOperation),
+                $null)
+            if ($null -ne $wfAcRedCaso[3]) { $wfAcRedErro.ErrorDetails = New-Object System.Management.Automation.ErrorDetails ([string]$wfAcRedCaso[3]) }
+            $wfAcRedTxt = [string](Get-WinForgeDownloadFailureText -ErrorRecord $wfAcRedErro)
+            $wfAcRedViu = [bool]($wfAcRedTxt -like '*o servidor tentou redirecionar o download; recusado*')
+            if ($wfAcRedViu -ne [bool]$wfAcRedCaso[4]) { Write-Host "  [ERRO] Recusa de redirecionamento ($($wfAcRedCaso[0])): esperado dizer redirecionamento = $($wfAcRedCaso[4]), veio '$wfAcRedTxt'" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAcRedTxt -notlike "*$($wfAcRedCaso[2])*") { Write-Host "  [ERRO] Recusa de redirecionamento ($($wfAcRedCaso[0])): a causa original sumiu do texto ('$wfAcRedTxt')" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcRedOk++ }
+        }
+        # E o catch do download usa ESTE mapeamento, e não uma cópia dele.
+        $wfAcRedDef = [string]${function:Install-WinForgeNvidiaDriver}
+        if ($wfAcRedDef -notmatch 'Get-WinForgeDownloadFailureText -ErrorRecord \$_') { Write-Host "  [ERRO] Recusa de redirecionamento: Install-WinForgeNvidiaDriver não usa Get-WinForgeDownloadFailureText" -ForegroundColor Red; $wbErrors++ }
+        # Simulação do download: devolve o caminho de destino dentro da pasta de downloads e NÃO
+        # começa nada. Nenhum byte sai da rede e nenhum arquivo nasce no disco.
+        $wfAcRaiz = Get-WinForgeDownloadRoot
+        # A base esperada sai da API de pastas, e não de $env:ProgramData - se o teste cobrasse a
+        # variável, ele passaria justamente no cenário que o conserto existe para impedir.
+        if ($wfAcRaiz -ne (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'WinForge\downloads')) { Write-Host "  [ERRO] Get-WinForgeDownloadRoot: veio '$wfAcRaiz'" -ForegroundColor Red; $wbErrors++ }
+        $wfAcSeco = Install-WinForgeNvidiaDriver -Url 'https://us.download.nvidia.com/Windows/616.92/616.92-desktop-win10-win11-64bit-international-dch-whql.exe' -Version '616.92' -DryRun
+        if (-not ([string]$wfAcSeco.Path).StartsWith($wfAcRaiz, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: '$($wfAcSeco.Path)' fora da pasta de downloads '$wfAcRaiz'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAcSeco.Started -ne $false) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: Started deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAcSeco.Verified -ne $false) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: Verified deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfAcSeco.Text -notmatch '616\.92') { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: o texto não fala da versão ('$($wfAcSeco.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath ([string]$wfAcSeco.Path)) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver -DryRun: a simulação criou '$($wfAcSeco.Path)'" -ForegroundColor Red; $wbErrors++ }
+        # Limpeza dos instaladores antigos: cada versão são uns 700 MB, e antes nada apagava o
+        # anterior. O que se prova aqui é a ESCOLHA - só 'nvidia-*.exe', nunca o recém-aberto,
+        # nunca um arquivo que o WinForge não pôs ali - primeiro em simulação e depois apagando de
+        # verdade, numa pasta de teste com arquivos criados aqui mesmo.
+        $wfLimpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza'
+        New-Item -ItemType Directory -Path $wfLimpDir -Force | Out-Null
+        $wfLimpNovo = Join-Path $wfLimpDir 'nvidia-616.92.exe'
+        $wfLimpVelho = Join-Path $wfLimpDir 'nvidia-566.36.exe'
+        $wfLimpAlheio = Join-Path $wfLimpDir 'outro-programa.exe'
+        foreach ($wfLimpArq in @($wfLimpNovo, $wfLimpVelho, $wfLimpAlheio)) { Set-Content -LiteralPath $wfLimpArq -Value 'MZ' -Encoding Ascii }
+        $wfLimpSeco = Remove-WinForgeOldNvidiaInstallers -Folder $wfLimpDir -Keep $wfLimpNovo -DryRun
+        if (@($wfLimpSeco.Candidates).Count -ne 1 -or [string]@($wfLimpSeco.Candidates)[0] -ne $wfLimpVelho) {
+            Write-Host "  [ERRO] limpeza de instaladores: a escolha deveria ser só '$wfLimpVelho', veio '$(@($wfLimpSeco.Candidates) -join ' | ')'" -ForegroundColor Red; $wbErrors++
+        }
+        if (@($wfLimpSeco.Removed).Count) { Write-Host "  [ERRO] limpeza de instaladores: a simulação apagou $(@($wfLimpSeco.Removed).Count) arquivo(s)" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpReal = Remove-WinForgeOldNvidiaInstallers -Folder $wfLimpDir -Keep $wfLimpNovo
+        if (@($wfLimpReal.Removed).Count -ne 1 -or [string]@($wfLimpReal.Removed)[0] -ne $wfLimpVelho) {
+            Write-Host "  [ERRO] limpeza de instaladores: apagou '$(@($wfLimpReal.Removed) -join ' | ')', esperado só '$wfLimpVelho'" -ForegroundColor Red; $wbErrors++
+        }
+        if (Test-Path -LiteralPath $wfLimpVelho) { Write-Host "  [ERRO] limpeza de instaladores: o instalador antigo continua no disco" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLimpArq in @($wfLimpNovo, $wfLimpAlheio)) {
+            if (-not (Test-Path -LiteralPath $wfLimpArq)) { Write-Host "  [ERRO] limpeza de instaladores: '$wfLimpArq' foi apagado e não devia" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A cadeia de pastas é reconferida antes de apagar: sem isso, uma junção plantada no lugar
+        # de 'downloads' faria desta função um apagador de arquivos escolhidos por outra pessoa.
+        $wfLimpDefL = [string]${function:Remove-WinForgeOldNvidiaInstallers}
+        if ($wfLimpDefL.IndexOf('Test-WinForgeSnapshotRootPath', [StringComparison]::Ordinal) -lt 0 -or
+            $wfLimpDefL.IndexOf('Test-WinForgeSnapshotRootPath', [StringComparison]::Ordinal) -gt $wfLimpDefL.IndexOf('Remove-Item -LiteralPath $velho', [StringComparison]::Ordinal)) {
+            Write-Host "  [ERRO] limpeza de instaladores: a cadeia não é conferida antes de apagar" -ForegroundColor Red; $wbErrors++
+        }
+        # E é o Install que chama a limpeza, DEPOIS do Start-Process e com o pino já solto - apagar
+        # exige DELETE, que é justamente o que o pino nega.
+        $wfLimpDef = [string]${function:Install-WinForgeNvidiaDriver}
+        if ($wfLimpDef -notmatch 'Remove-WinForgeOldNvidiaInstallers -Folder') { Write-Host "  [ERRO] limpeza de instaladores: Install-WinForgeNvidiaDriver não chama Remove-WinForgeOldNvidiaInstallers" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpDef.IndexOf('Start-Process -FilePath $destino', [StringComparison]::Ordinal) -gt $wfLimpDef.IndexOf('Remove-WinForgeOldNvidiaInstallers -Folder', [StringComparison]::Ordinal)) {
+            Write-Host "  [ERRO] limpeza de instaladores: a limpeza acontece antes do Start-Process" -ForegroundColor Red; $wbErrors++
+        }
+        # URL fora do domínio é recusada ANTES do -DryRun: uma simulação com URL de terceiro não é
+        # simulação de nada, e o dia em que o -DryRun se perder de novo a recusa já terá acontecido.
+        foreach ($wfAcRuim in @('http://evil/x.exe', 'https://nvidia.com.evil.com/x.exe')) {
+            $wfAcErroUrl = $null
+            try { Install-WinForgeNvidiaDriver -Url $wfAcRuim -Version '616.92' -DryRun | Out-Null } catch { $wfAcErroUrl = [string]$_.Exception.Message }
+            if ($null -eq $wfAcErroUrl) { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver: '$wfAcRuim' deveria ser recusada" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAcErroUrl -notmatch 'nvidia\.com') { Write-Host "  [ERRO] Install-WinForgeNvidiaDriver: a recusa de '$wfAcRuim' não fala do domínio ('$wfAcErroUrl')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Assinatura: arquivo sem assinatura nenhuma é recusado, e o nome da organização é comparado
+        # por igualdade EXATA - 'NVIDIA Corporation Ltd' não é 'NVIDIA Corporation'.
+        $wfAcTmpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura'
+        New-Item -ItemType Directory -Path $wfAcTmpDir -Force | Out-Null
+        $wfAcTmpExe = Join-Path $wfAcTmpDir 'sem-assinatura.exe'
+        Set-Content -LiteralPath $wfAcTmpExe -Value 'MZ este arquivo nao e um executavel assinado' -Encoding Ascii
+        if (Test-WinForgeNvidiaSigner -Path $wfAcTmpExe) { Write-Host "  [ERRO] Test-WinForgeNvidiaSigner: arquivo sem assinatura foi aceito" -ForegroundColor Red; $wbErrors++ }
+        if (Test-WinForgeNvidiaSigner -Path (Join-Path $wfAcTmpDir 'nao-existe.exe')) { Write-Host "  [ERRO] Test-WinForgeNvidiaSigner: arquivo inexistente foi aceito" -ForegroundColor Red; $wbErrors++ }
+        $wfAcRdnCasos = @(
+            @('CN=NVIDIA Corporation, OU=Digital ID, O=NVIDIA Corporation Ltd, L=Santa Clara, S=California, C=US', 'NVIDIA Corporation Ltd', $false),
+            @('CN=NVIDIA Corporation, O=NVIDIA Corporation, L=Santa Clara, S=California, C=US', 'NVIDIA Corporation', $true),
+            @('CN=Fulano, O="NVIDIA Corporation, Inc.", C=US', 'NVIDIA Corporation, Inc.', $false)
+        )
+        $wfAcRdnOk = 0
+        foreach ($wfAcRdnCaso in $wfAcRdnCasos) {
+            $wfAcRdn = Split-WinForgeCertificateSubject -Subject ([string]$wfAcRdnCaso[0])
+            $wfAcOrgs = @($wfAcRdn['O'])
+            if ($wfAcOrgs.Count -ne 1) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: '$($wfAcRdnCaso[0])' deu $($wfAcOrgs.Count) valor(es) de O" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfAcOrgs[0] -ne [string]$wfAcRdnCaso[1]) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: O veio '$($wfAcOrgs[0])', esperado '$($wfAcRdnCaso[1])'" -ForegroundColor Red; $wbErrors++ }
+            elseif (([string]$wfAcOrgs[0] -eq 'NVIDIA Corporation') -ne [bool]$wfAcRdnCaso[2]) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: '$($wfAcRdnCaso[0])' bateu com 'NVIDIA Corporation' quando não devia (ou o contrário)" -ForegroundColor Red; $wbErrors++ }
+            else { $wfAcRdnOk++ }
+        }
+        # Dois O no mesmo assunto: 'O=Evil, O=NVIDIA Corporation' não pode virar um O só.
+        if (@((Split-WinForgeCertificateSubject -Subject 'CN=x, O=Evil, O=NVIDIA Corporation, C=US')['O']).Count -ne 2) { Write-Host "  [ERRO] Split-WinForgeCertificateSubject: dois O no assunto deveriam virar dois valores" -ForegroundColor Red; $wbErrors++ }
+        # Windows Update: a simulação diz o que faria e não toca no COM. Fora dela, a lista de
+        # objetos IUpdate é a de $sync.DiagWUUpdates, que no SelfTest está vazia.
+        $wfAcWuSeco = Install-WinForgeWindowsUpdateDriver -UpdateId 'x' -DryRun
+        if ([string]$wfAcWuSeco.Text -notlike '*(id x)*') { Write-Host "  [ERRO] Install-WinForgeWindowsUpdateDriver -DryRun: o texto não traz o id ('$($wfAcWuSeco.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wfAcWuSeco.ResultCode) { Write-Host "  [ERRO] Install-WinForgeWindowsUpdateDriver -DryRun: ResultCode deveria ser nulo, veio '$($wfAcWuSeco.ResultCode)'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAcWuSeco.RebootRequired -ne $false) { Write-Host "  [ERRO] Install-WinForgeWindowsUpdateDriver -DryRun: RebootRequired deveria ser `$false" -ForegroundColor Red; $wbErrors++ }
+        # As duas funções que escrevem recusam sem -DryRun enquanto o WinForge está em SelfTest.
+        $wfAcTravas = @(
+            @('Install-WinForgeNvidiaDriver', { Install-WinForgeNvidiaDriver -Url 'https://us.download.nvidia.com/Windows/616.92/x.exe' -Version '616.92' }),
+            @('Install-WinForgeWindowsUpdateDriver', { Install-WinForgeWindowsUpdateDriver -UpdateId 'x' })
+        )
+        foreach ($wfAcTrava in $wfAcTravas) {
+            $wfAcTravaMsg = $null
+            try { & $wfAcTrava[1] | Out-Null } catch { $wfAcTravaMsg = [string]$_.Exception.Message }
+            if ($null -eq $wfAcTravaMsg) { Write-Host "  [ERRO] Ação de driver (trava): $($wfAcTrava[0]) sem -DryRun deveria recusar em SelfTest" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAcTravaMsg -notmatch 'SelfTest') { Write-Host "  [ERRO] Ação de driver (trava): a recusa de $($wfAcTrava[0]) não fala em SelfTest ('$wfAcTravaMsg')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Pasta de downloads: as MESMAS regras da pasta de backup padrão, e sem o afrouxamento de
+        # -ExplicitRoot. O instalador baixado é aberto com a elevação do WinForge - uma pasta que um
+        # processo de integridade média escreve trocaria o arquivo entre a conferência e a abertura.
+        $wfAcRaizAberta = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto'
+        New-Item -ItemType Directory -Path $wfAcRaizAberta -Force | Out-Null
+        $wfAcAclAberta = Get-Acl -LiteralPath $wfAcRaizAberta
+        $wfAcAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $wfAcRaizAberta -AclObject $wfAcAclAberta
+        $wfAcConfAberta = Confirm-WinForgeDownloadRoot -Root $wfAcRaizAberta
+        # O motivo exato varia com a elevação de quem compila (sem elevação a pasta é recusada já
+        # pelo dono, antes de a DACL ser olhada); o que se cobra aqui é a recusa COM motivo.
+        if ($wfAcConfAberta.Ok) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: pasta com escrita para 'Todos' foi aceita" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfAcConfAberta.Reason)) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: recusou a pasta aberta sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        # A pasta do próprio usuário passa com as regras de -Root explícito e é RECUSADA aqui: é a
+        # prova de que a pasta de downloads não pegou o atalho que a pasta de teste usa.
+        $wfAcEu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wfAcSystemSid = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::LocalSystemSid), $null
+        $wfAcAdminSid = New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null
+        if ($wfAcEu.Value -eq $wfAcSystemSid.Value -or $wfAcEu.Value -eq $wfAcAdminSid.Value) {
+            Write-Host "  Pasta de downloads (dono): teste pulado - este build roda como SYSTEM ou como o próprio grupo Administradores"
+        } else {
+            $wfAcRaizDono = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono'
+            New-Item -ItemType Directory -Path $wfAcRaizDono -Force | Out-Null
+            $wfAcAclDono = New-Object System.Security.AccessControl.DirectorySecurity
+            $wfAcAclDono.SetAccessRuleProtection($true, $false)
+            foreach ($wfAcSid in @($wfAcSystemSid, $wfAcAdminSid, $wfAcEu)) {
+                $wfAcAclDono.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $wfAcSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            }
+            $wfAcAclDono.SetOwner($wfAcEu)
+            Set-Acl -LiteralPath $wfAcRaizDono -AclObject $wfAcAclDono
+            $wfAcComRoot = Test-WinForgeSnapshotRootTrusted -Root $wfAcRaizDono -ExplicitRoot
+            if (-not $wfAcComRoot.Trusted) { Write-Host "  [ERRO] Pasta de downloads (dono): a pasta de teste deveria passar com -ExplicitRoot ('$($wfAcComRoot.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            $wfAcConfDono = Confirm-WinForgeDownloadRoot -Root $wfAcRaizDono
+            if ($wfAcConfDono.Ok) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: pasta com dono fora de SYSTEM/Administradores foi aceita" -ForegroundColor Red; $wbErrors++ }
+            # O motivo exato depende de onde a cadeia quebra primeiro - sem a parada de %TEMP% (que
+            # só existe com -ExplicitRoot) ela sobe pelo perfil do usuário, e lá o elo aberto
+            # aparece antes da pasta de teste. O que se cobra é a recusa COM motivo; a regra de dono
+            # em si é cobrada em 'Backup (dono)', sobre as listas de SID.
+            elseif ([string]::IsNullOrWhiteSpace([string]$wfAcConfDono.Reason)) { Write-Host "  [ERRO] Confirm-WinForgeDownloadRoot: recusou a pasta de usuário sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Ações de driver: $wfAcOk de $($wfAcCasos.Count) linha(s) com a ação certa, $wfAcUrlOk de $($wfAcUrls.Count) URL(s) julgada(s), $wfAcRdnOk de $($wfAcRdnCasos.Count) assunto(s) de certificado, $wfAcRedOk de $($wfAcRedCasos.Count) erro(s) de download traduzido(s), download e instalação recusados em SelfTest"
+    } catch {
+        Write-Host "  [ERRO] ações de driver: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- o cache do catálogo é de TELA
+    # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
+    # qualquer processo de integridade média da mesma conta. Enquanto ele só pintava o rótulo
+    # "Baixar <versão>" na tabela, tudo bem. O problema era que a LINHA - e portanto o cache -
+    # também dizia ao motor ELEVADO que endereço baixar e abrir, e um
+    # '{ "Version": "999.99", "DownloadURL": "https://us.download.nvidia.com/<outro pacote>" }'
+    # plantado ali passava por TODAS as travas seguintes por construção: o host é da nvidia.com, a
+    # assinatura é da NVIDIA, a pasta é a protegida. O usuário via "⬆ atualizar" e clicava.
+    #
+    # O conserto é o clique refazer as três consultas sem ler cache nenhum. O que se prova aqui, sem
+    # um byte de rede (a costura -Resolver responde no lugar do catálogo):
+    #   1. com cache, o veneno É lido - sem isto o teste não estaria provando nada;
+    #   2. com -NoCache, as três respostas vêm do catálogo e nada do arquivo aparece;
+    #   3. o clique (-DryRun) usa a consulta ao vivo, e não o que a linha carrega;
+    #   4. o clique RECUSA quando a resposta ao vivo não serve - versão que não é mais nova que a
+    #      instalada (o instalador antigo continua assinado e continua vindo do host certo),
+    #      endereço fora do domínio, ou catálogo que não respondeu.
+    function New-WinForgeSelfTestCachePoison {
+        <#
+        .SYNOPSIS
+            Planta um cache de catálogo INTEIRO (as duas listas e a busca do driver) escolhendo
+            psid, pfid, versão e endereço.
+        #>
+        param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Url)
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        (@([pscustomobject]@{ Name = 'GeForce RTX 30 Series'; Value = '999' }) | ConvertTo-Json -Depth 6) |
+            Set-Content -LiteralPath (Join-Path $Dir 'nvidia-lookup-2-1.json') -Encoding UTF8
+        (@([pscustomobject]@{ Name = 'GeForce RTX 3070'; Value = '888' }) | ConvertTo-Json -Depth 6) |
+            Set-Content -LiteralPath (Join-Path $Dir 'nvidia-lookup-3-999.json') -Encoding UTF8
+        # A busca do driver é plantada para os DOIS pares psid/pfid: o do próprio veneno (999/888,
+        # que é onde as listas envenenadas levam) e o que a consulta ao vivo encontra (101/202).
+        # Sem o segundo, um -NoCache que esquecesse justamente esta terceira leitura passaria batido
+        # - o arquivo com o nome do par ao vivo é o único jeito de flagrar isso.
+        # E os dois osID (135 = Windows 11, 57 = Windows 10), porque o clique lê o do perfil desta
+        # máquina e o teste não pode depender de em qual Windows o build está rodando.
+        foreach ($wfCatPar in @('999-888', '101-202')) {
+            foreach ($wfCatOs in @(135, 57)) {
+                ([pscustomobject]@{ Version = '999.99'; DownloadURL = $Url; ReleaseDateTime = 'Thu Sep 03, 2026' } | ConvertTo-Json -Depth 6) |
+                    Set-Content -LiteralPath (Join-Path $Dir "nvidia-$wfCatPar-$wfCatOs.json") -Encoding UTF8
+            }
+        }
+    }
+    $wfCatRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\catalogo'
+    try {
+        $wfCatVeneno = 'https://us.download.nvidia.com/Windows/999.99/veneno.exe'
+        $wfCatVersaoViva = '616.92'
+        $wfCatUrlViva = 'https://us.download.nvidia.com/Windows/616.92/616.92-desktop-win10-win11-64bit-international-dch-whql.exe'
+        $wfCatFalha = $false
+        # A costura: responde as três consultas do catálogo. psid/pfid diferentes dos do veneno de
+        # propósito - é assim que se vê de qual das duas fontes cada número veio.
+        $wfCatResolver = {
+            param($wfCatUri)
+            if ($wfCatFalha) { throw "catálogo fora do ar (simulado)" }
+            if ($wfCatUri -match 'TypeID=2') {
+                return [pscustomobject]@{ LookupValueSearch = [pscustomobject]@{ LookupValues = [pscustomobject]@{ LookupValue = @([pscustomobject]@{ Name = 'GeForce RTX 30 Series'; Value = '101' }) } } }
+            }
+            if ($wfCatUri -match 'TypeID=3') {
+                if ($wfCatUri -notmatch 'ParentID=101') { throw "psid inesperado na consulta: '$wfCatUri'" }
+                return [pscustomobject]@{ LookupValueSearch = [pscustomobject]@{ LookupValues = [pscustomobject]@{ LookupValue = @([pscustomobject]@{ Name = 'GeForce RTX 3070'; Value = '202' }) } } }
+            }
+            if ($wfCatUri -match 'DriverManualLookup') {
+                if ($wfCatUri -notmatch 'psid=101&pfid=202&') { throw "produto inesperado na consulta: '$wfCatUri'" }
+                return [pscustomobject]@{ IDS = @([pscustomobject]@{ downloadInfo = [pscustomobject]@{ Version = $wfCatVersaoViva; DownloadURL = $wfCatUrlViva; ReleaseDateTime = 'Thu Sep 03, 2026' } }) }
+            }
+            throw "consulta inesperada: '$wfCatUri'"
+        }
+        # 1. O cenário. Sem esta primeira metade, o teste seguinte passaria mesmo com o cache morto.
+        $wfCatDirCache = Join-Path $wfCatRaiz 'com-cache'
+        New-WinForgeSelfTestCachePoison -Dir $wfCatDirCache -Url $wfCatVeneno
+        $wfCatComCache = Get-WinForgeNvidiaLatestDriver -GpuName 'NVIDIA GeForce RTX 3070' -Root $wfCatDirCache -Resolver $wfCatResolver
+        if ([string]$wfCatComCache.Version -ne '999.99' -or [string]$wfCatComCache.Url -ne $wfCatVeneno) {
+            Write-Host "  [ERRO] cache do catálogo: o cenário não vale - o cache plantado deveria ser lido sem -NoCache (veio '$($wfCatComCache.Version)' / '$($wfCatComCache.Url)')" -ForegroundColor Red; $wbErrors++
+        }
+        # 2. Com -NoCache o arquivo não é lido em NENHUMA das três consultas: nem a série (999), nem
+        #    o produto (888), nem a versão/endereço.
+        $wfCatDirVivo = Join-Path $wfCatRaiz 'ao-vivo'
+        New-WinForgeSelfTestCachePoison -Dir $wfCatDirVivo -Url $wfCatVeneno
+        $wfCatVivo = Get-WinForgeNvidiaLatestDriver -GpuName 'NVIDIA GeForce RTX 3070' -NoCache -Root $wfCatDirVivo -Resolver $wfCatResolver
+        if ([string]$wfCatVivo.Status -ne 'ok') { Write-Host "  [ERRO] cache do catálogo: a consulta ao vivo deveria responder 'ok', veio '$($wfCatVivo.Status)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCatVivo.Version -ne $wfCatVersaoViva -or [string]$wfCatVivo.Url -ne $wfCatUrlViva) {
+            Write-Host "  [ERRO] cache do catálogo: a consulta ao vivo devolveu '$($wfCatVivo.Version)' / '$($wfCatVivo.Url)'" -ForegroundColor Red; $wbErrors++
+        }
+        if ([string]$wfCatVivo.Version -eq '999.99' -or [string]$wfCatVivo.Url -eq $wfCatVeneno) {
+            Write-Host "  [ERRO] cache do catálogo: o arquivo plantado chegou à consulta ao vivo" -ForegroundColor Red; $wbErrors++
+        }
+        # 3 e 4. O clique. A linha carrega o veneno (é o que a tabela desenhou a partir do cache) e
+        #        uma versão instalada de 616.56; o que sai é sempre o da consulta ao vivo.
+        #        Caso: @(nome, versão ao vivo, endereço ao vivo, catálogo fora do ar, trecho esperado)
+        $wfCatLinha = [pscustomobject]@{
+            Device = 'NVIDIA GeForce RTX 3070'; Version = '32.0.16.1656'; Latest = '999.99'
+            ActionKind = 'nvidia-download'; ActionLabel = 'Baixar 999.99'; ActionUrl = $wfCatVeneno
+        }
+        $wfCatCasos = @(
+            @('versão nova',            '616.92', $wfCatUrlViva,                          $false, 'baixaria o driver NVIDIA 616.92'),
+            @('mesma versão instalada', '616.56', $wfCatUrlViva,                          $false, 'não é mais nova que a instalada'),
+            @('versão mais antiga',     '566.36', $wfCatUrlViva,                          $false, 'não é mais nova que a instalada'),
+            @('endereço fora do domínio', '616.92', 'https://nvidia.com.evil.com/x.exe',  $false, 'não é um https de um host da nvidia.com'),
+            @('catálogo fora do ar',    '616.92', $wfCatUrlViva,                          $true,  "respondeu 'indisponível'")
+        )
+        $wfCatCliqueOk = 0
+        foreach ($wfCatCaso in $wfCatCasos) {
+            $wfCatVersaoViva = [string]$wfCatCaso[1]
+            $wfCatUrlViva = [string]$wfCatCaso[2]
+            $wfCatFalha = [bool]$wfCatCaso[3]
+            $wfCatDirCaso = Join-Path $wfCatRaiz ('clique-' + $wfCatCliqueOk)
+            New-WinForgeSelfTestCachePoison -Dir $wfCatDirCaso -Url $wfCatVeneno
+            $wfCatTexto = [string](Invoke-WinForgeDriverAction -Row $wfCatLinha -DryRun -Root $wfCatDirCaso -Resolver $wfCatResolver)
+            if ($wfCatTexto -notmatch 'consulta ao vivo') { Write-Host "  [ERRO] clique de download ($($wfCatCaso[0])): o texto não diz que houve consulta ao vivo ('$wfCatTexto')" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfCatTexto -notlike "*$($wfCatCaso[4])*") { Write-Host "  [ERRO] clique de download ($($wfCatCaso[0])): esperado '$($wfCatCaso[4])' no texto, veio '$wfCatTexto'" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfCatTexto -match '999\.99' -or $wfCatTexto -match 'veneno') { Write-Host "  [ERRO] clique de download ($($wfCatCaso[0])): o que a linha carregava vazou para o texto ('$wfCatTexto')" -ForegroundColor Red; $wbErrors++ }
+            else { $wfCatCliqueOk++ }
+        }
+        $wfCatFalha = $false
+        # O tamanho da caixa de confirmação é informação, não trava: endereço que não passa na
+        # conferência de domínio nem chega a virar requisição e volta com o texto genérico.
+        if ((Get-WinForgeNvidiaDownloadSizeText -Url 'https://nvidia.com.evil.com/x.exe') -ne 'várias centenas de MB') {
+            Write-Host "  [ERRO] tamanho do download: endereço fora do domínio deveria voltar o texto genérico" -ForegroundColor Red; $wbErrors++
+        }
+        Write-Host "  Cache do catálogo: é de tela - com cache o arquivo plantado é lido, com -NoCache não aparece em nenhuma das 3 consultas; clique julgado em $wfCatCliqueOk de $($wfCatCasos.Count) cenário(s) pela consulta ao vivo"
+    } catch {
+        Write-Host "  [ERRO] cache do catálogo: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wfCatRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- consulta ao vivo fora da thread da janela
+    # A consulta ao vivo são três requisições de 5 s mais a do tamanho (10 s): rodando no clique,
+    # a janela ficava até ~25 s sem responder e o rótulo "Consultando o catálogo..." nem chegava a
+    # ser pintado - o Dispatcher estava parado dentro do próprio handler. Então o clique só liga a
+    # trava, escreve na barra e despacha; quem pergunta ao catálogo é o runspace, e a caixa de
+    # confirmação volta para a thread da janela pelo callback.
+    try {
+        # 1. O callback nasce no ESCOPO DO ARQUIVO, na runspace principal. Criado dentro do corpo do
+        #    job ele pertenceria à runspace do pool e travaria no primeiro pipeline que o Dispatcher
+        #    rodasse - o laço do Plano 3.
+        if ($sync.WinForgeDriverConfirmCallback -isnot [scriptblock]) {
+            Write-Host "  [ERRO] consulta ao vivo: `$sync.WinForgeDriverConfirmCallback não é um scriptblock de escopo de arquivo" -ForegroundColor Red; $wbErrors++
+        }
+        # 2. Trava de origem: no caminho do CLIQUE (depois da trava de SelfTest) nenhuma chamada a
+        #    Resolve-WinForgeNvidiaDownloadTarget pode aparecer ANTES do corpo do runspace. O
+        #    -DryRun continua chamando direto, e por isso o trecho começa na trava de SelfTest.
+        $wfVivoDef = [string]${function:Invoke-WinForgeDriverAction}
+        $wfVivoMarca = "Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeDriverAction (nvidia-download)'"
+        $wfVivoIni = $wfVivoDef.IndexOf($wfVivoMarca)
+        if ($wfVivoIni -lt 0) {
+            Write-Host "  [ERRO] consulta ao vivo: não achei a trava de SelfTest do download no corpo de Invoke-WinForgeDriverAction" -ForegroundColor Red; $wbErrors++
+        } else {
+            $wfVivoClique = $wfVivoDef.Substring($wfVivoIni)
+            $wfVivoCorpo = $wfVivoClique.IndexOf('$corpo = {')
+            $wfVivoResolve = $wfVivoClique.IndexOf('Resolve-WinForgeNvidiaDownloadTarget')
+            if ($wfVivoClique -notmatch 'Invoke-WPFRunspace') { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não despacha nada para um runspace" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfVivoCorpo -lt 0) { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não tem o corpo `$corpo do runspace" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfVivoResolve -lt 0) { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não consulta o catálogo" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfVivoResolve -lt $wfVivoCorpo) { Write-Host "  [ERRO] consulta ao vivo: Resolve-WinForgeNvidiaDownloadTarget roda na thread do clique, antes do corpo do runspace" -ForegroundColor Red; $wbErrors++ }
+            if ($wfVivoClique -notmatch 'WinForgeDriverConfirmCallback') { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não volta à thread da janela pelo callback" -ForegroundColor Red; $wbErrors++ }
+        }
+        # 3. Recusa da consulta ao vivo solta a trava: sem isso a interface ficava "ocupada" para
+        #    sempre depois de um clique sem rede, e nenhum outro comando começaria.
+        $wfVivoAntes = $sync.CommandRunning
+        $sync.CommandRunning = $true
+        $sync.WinForgeDriverConfirm = @{ Ok = $false; Url = $null; Version = $null; SizeText = $null; Reason = 'recusa sintética do SelfTest' }
+        try { & $sync.WinForgeDriverConfirmCallback } catch {
+            Write-Host "  [ERRO] consulta ao vivo: o callback lançou '$($_.Exception.Message)' na recusa" -ForegroundColor Red; $wbErrors++
+        }
+        if ($sync.CommandRunning) { Write-Host "  [ERRO] consulta ao vivo: a trava `$sync.CommandRunning ficou ligada depois da recusa" -ForegroundColor Red; $wbErrors++ }
+        $sync.CommandRunning = $wfVivoAntes
+        $sync.WinForgeDriverConfirm = $null
+        Write-Host "  Consulta ao vivo: fora da thread da janela, confirmação pelo callback de escopo de arquivo, trava solta na recusa"
+    } catch {
+        Write-Host "  [ERRO] consulta ao vivo: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- cadeia inteira da pasta protegida
+    # Conferir só a ÚLTIMA pasta deixava um caminho aberto: '%ProgramData%\WinForge' criado com a ACL
+    # herdada de %ProgramData% dá FILE_DELETE_CHILD a um processo de integridade média da mesma conta.
+    # Com ele, durante os minutos do download, dá para renomear 'downloads', plantar uma junção no
+    # lugar e trocar o instalador entre a conferência da assinatura e o Start-Process - sem que a
+    # última pasta jamais apareça como ponto de reanálise nem mude de dono.
+    #
+    # Então: a cadeia inteira nasce protegida (New-WinForgeSnapshotRoot) e a cadeia inteira é
+    # conferida (Test-WinForgeSnapshotRootTrusted), de %ProgramData%/%TEMP% (exclusive) até a última
+    # pasta (inclusive).
+    $wfCadBase = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seg'
+    try {
+        Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
+        $wfCadMeio = Join-Path $wfCadBase 'WinForge'
+        $wfCadFolha = Join-Path $wfCadMeio 'downloads'
+        New-WinForgeSnapshotRoot -Root $wfCadFolha | Out-Null
+        if (-not (Test-Path -LiteralPath $wfCadFolha)) {
+            Write-Host "  [ERRO] cadeia protegida: '$wfCadFolha' não foi criada" -ForegroundColor Red; $wbErrors++
+        } else {
+            # 1. Nenhuma pasta da cadeia herda a ACL do pai - nem as do meio, que antes nasciam de um
+            #    New-Item -Force com a herança de %ProgramData% inteira.
+            foreach ($wfCadDir in @($wfCadBase, $wfCadMeio, $wfCadFolha)) {
+                if (-not (Get-Acl -LiteralPath $wfCadDir).AreAccessRulesProtected) {
+                    Write-Host "  [ERRO] cadeia protegida: '$wfCadDir' nasceu herdando a ACL do pai" -ForegroundColor Red; $wbErrors++
+                }
+            }
+            # 2. Com as regras da pasta de teste (-ExplicitRoot, a identidade atual pode ser dona) a
+            #    cadeia recém-criada PASSA: a conferência dos ancestrais não pode estourar para fora
+            #    de %TEMP% e reprovar C:\ (que dá 'criar pasta/acrescentar dados' ao grupo Usuários).
+            $wfCadLimpa = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha -ExplicitRoot
+            if (-not $wfCadLimpa.Trusted) { Write-Host "  [ERRO] cadeia protegida: a cadeia de teste recém-criada deveria passar com -ExplicitRoot ('$($wfCadLimpa.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            # 3. Com as regras da pasta PADRÃO a mesma cadeia é recusada, e por MAIS motivos do que
+            #    antes: sem elevação nada aqui pertence a SYSTEM nem ao grupo Administradores, e
+            #    sem a parada de %TEMP% (que só vale com -ExplicitRoot) a conferência ainda sobe
+            #    pelo perfil do usuário, onde o próprio usuário escreve.
+            $wfCadPadrao = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha
+            if ($wfCadPadrao.Trusted) { Write-Host "  [ERRO] cadeia protegida: a cadeia de teste passou com as regras da pasta padrão" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]::IsNullOrWhiteSpace([string]$wfCadPadrao.Reason)) { Write-Host "  [ERRO] cadeia protegida: a recusa com as regras da pasta padrão veio sem motivo" -ForegroundColor Red; $wbErrors++ }
+            # 4. A PROVA de que os ancestrais são conferidos: só a pasta do MEIO ganha escrita para
+            #    'Todos'. A última pasta continua limpa (a ACL dela é protegida, a ACE nova não
+            #    desce até lá), então uma conferência que olhasse só a folha diria que está tudo bem.
+            # Só a seção DACL, por DirectoryInfo: Get-Acl/Set-Acl carregam a seção de AUDITORIA
+            # junto, e gravá-la exige SeSecurityPrivilege - o mesmo motivo de
+            # Repair-WinForgeSnapshotRootOwnerRight fazer assim.
+            $wfCadSecao = [System.Security.AccessControl.AccessControlSections]::Access
+            $wfCadPastaMeio = New-Object System.IO.DirectoryInfo $wfCadMeio
+            $wfCadAclMeio = $wfCadPastaMeio.GetAccessControl($wfCadSecao)
+            $wfCadAclMeio.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            $wfCadPastaMeio.SetAccessControl($wfCadAclMeio)
+            $wfCadFolhaSo = Test-WinForgeSnapshotRootTrusted -Root $wfCadFolha -ExplicitRoot
+            if ((Get-Acl -LiteralPath $wfCadFolha).Access | Where-Object { [string]$_.IdentityReference -match 'Todos|Everyone' }) {
+                Write-Host "  [ERRO] cadeia protegida: a ACE de 'Todos' desceu até a última pasta - o teste não prova mais nada sobre os ancestrais" -ForegroundColor Red; $wbErrors++
+            } elseif ($wfCadFolhaSo.Trusted) {
+                Write-Host "  [ERRO] cadeia protegida: escrita para 'Todos' na pasta do MEIO passou batida - os ancestrais não estão sendo conferidos" -ForegroundColor Red; $wbErrors++
+            } elseif ([string]$wfCadFolhaSo.Reason -notlike "*$wfCadMeio*") {
+                Write-Host "  [ERRO] cadeia protegida: a recusa não nomeia a pasta do meio ('$($wfCadFolhaSo.Reason)')" -ForegroundColor Red; $wbErrors++
+            }
+            # 5. E a pasta de downloads recusa pelo mesmo motivo, com um texto para a barra de status.
+            $wfCadConf = Confirm-WinForgeDownloadRoot -Root $wfCadFolha
+            if ($wfCadConf.Ok) { Write-Host "  [ERRO] cadeia protegida: Confirm-WinForgeDownloadRoot aceitou uma cadeia com ancestral aberto" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Cadeia da pasta protegida: 3 pasta(s) criadas sem herança; ancestral com escrita para 'Todos' recusado e nomeado"
+        }
+    } catch {
+        Write-Host "  [ERRO] cadeia protegida: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- raiz de confiança: API de pastas, não ambiente
+    # %ProgramData% e %TEMP% são variáveis de USUÁRIO: moram em HKCU\Environment, qualquer processo
+    # de integridade média da conta as reescreve, e o motor ELEVADO herda o ambiente de quem o abriu
+    # (o launcher repassa o ambiente). Enquanto a raiz de confiança saía delas, era o atacante quem
+    # escolhia onde o WinForge confia - e as duas metades do ataque são diferentes:
+    #   1. 'ProgramData=C:\Users\Public\...' movia a pasta de backup E a de downloads para uma pasta
+    #      dele, onde ele é dono e passa em toda conferência de dono e DACL;
+    #   2. 'TEMP=%ProgramData%\WinForge' fazia a pasta do MEIO virar parada da cadeia e sair da
+    #      conferência - justamente a pasta cuja ACL herdada dá FILE_DELETE_CHILD ao usuário, que é
+    #      o que permite renomear 'downloads' e plantar uma junção no lugar.
+    # As duas variáveis são apontadas para esses valores DE PROPÓSITO aqui, e nada pode mudar. Nada
+    # é criado nem escrito: só se pergunta que caminho as funções montam e que cadeia elas conferem.
+    #
+    # %LOCALAPPDATA% entra na mesma lista. O que mora lá é do usuário e continua gravável por ele -
+    # por isso o cache do catálogo é de TELA e o clique consulta ao vivo -, mas a PASTA não pode ser
+    # escolhida pela variável: o relatório HTML é gravado pelo motor elevado e aberto em seguida com
+    # Start-Process, e um 'LOCALAPPDATA=<pasta do atacante>' escolheria onde.
+    $wfAmbPdAntes = $env:ProgramData
+    $wfAmbTmpAntes = $env:TEMP
+    $wfAmbLadAntes = $env:LOCALAPPDATA
+    try {
+        $wfAmbBase = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+        $wfAmbMeio = Join-Path $wfAmbBase 'WinForge'
+        $env:ProgramData = 'C:\Users\Public\WinForge-Ambiente-Falso'
+        $env:TEMP = $wfAmbMeio
+        $env:LOCALAPPDATA = 'C:\Users\Public\WinForge-Ambiente-Falso'
+        $wfAmbLadReal = ([string][Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)).TrimEnd('\')
+        if ((Get-WinForgeUserDataRoot) -ne $wfAmbLadReal) { Write-Host "  [ERRO] raiz de confiança: com `$env:LOCALAPPDATA sequestrado, Get-WinForgeUserDataRoot veio '$(Get-WinForgeUserDataRoot)'" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeCacheRoot) -ne (Join-Path $wfAmbLadReal 'WinForge\cache')) { Write-Host "  [ERRO] raiz de confiança: com `$env:LOCALAPPDATA sequestrado, Get-WinForgeCacheRoot veio '$(Get-WinForgeCacheRoot)'" -ForegroundColor Red; $wbErrors++ }
+        $wfAmbBk = Get-WinForgeSnapshotRoot
+        $wfAmbDl = Get-WinForgeDownloadRoot
+        if ($wfAmbBk -ne (Join-Path $wfAmbBase 'WinForge\iis-backup')) { Write-Host "  [ERRO] raiz de confiança: com `$env:ProgramData sequestrado, Get-WinForgeSnapshotRoot veio '$wfAmbBk'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAmbDl -ne (Join-Path $wfAmbBase 'WinForge\downloads')) { Write-Host "  [ERRO] raiz de confiança: com `$env:ProgramData sequestrado, Get-WinForgeDownloadRoot veio '$wfAmbDl'" -ForegroundColor Red; $wbErrors++ }
+        # A cadeia da pasta PADRÃO tem de continuar com as duas pastas - a do meio inclusive, que é
+        # a que o %TEMP% sequestrado tentava transformar em parada.
+        $wfAmbCad = @((Test-WinForgeSnapshotRootPath -Root $wfAmbDl).Chain)
+        if ($wfAmbCad.Count -ne 2) { Write-Host "  [ERRO] raiz de confiança: a cadeia da pasta padrão deveria ter 2 pastas, veio $($wfAmbCad.Count) ($($wfAmbCad -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfAmbCad[0] -ne $wfAmbMeio) { Write-Host "  [ERRO] raiz de confiança: `$env:TEMP tirou a pasta do meio da cadeia (veio '$($wfAmbCad[0])', esperado '$wfAmbMeio')" -ForegroundColor Red; $wbErrors++ }
+        # A parada de %TEMP% também não existe SEM -ExplicitRoot: uma pasta de teste conferida com as
+        # regras da pasta padrão sobe até a raiz do volume, como qualquer outra.
+        $wfAmbParadas = Get-WinForgeSnapshotChainStop
+        if ($wfAmbParadas.Count -ne 1) { Write-Host "  [ERRO] raiz de confiança: sem -ExplicitRoot deveria haver 1 parada, veio $($wfAmbParadas.Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not $wfAmbParadas.ContainsKey($wfAmbBase.TrimEnd('\'))) { Write-Host "  [ERRO] raiz de confiança: a única parada deveria ser '$wfAmbBase' ($(@($wfAmbParadas.Keys) -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+    } catch {
+        Write-Host "  [ERRO] raiz de confiança: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        $env:ProgramData = $wfAmbPdAntes
+        $env:TEMP = $wfAmbTmpAntes
+        $env:LOCALAPPDATA = $wfAmbLadAntes
+    }
+    # O teste não pode deixar o ambiente estragado para os blocos seguintes.
+    if ($env:ProgramData -ne $wfAmbPdAntes -or $env:TEMP -ne $wfAmbTmpAntes -or $env:LOCALAPPDATA -ne $wfAmbLadAntes) { Write-Host "  [ERRO] raiz de confiança: o ambiente não voltou ao que era" -ForegroundColor Red; $wbErrors++ }
+    # Com -ExplicitRoot (o caminho do -SelfTest) a parada de %TEMP% volta, e é o %TEMP% DE VERDADE:
+    # a cadeia de uma pasta de teste começa logo abaixo dele. Sem a chave, a mesma pasta é conferida
+    # até a raiz do volume - é essa diferença que faz a pasta padrão não ganhar parada de graça.
+    try {
+        $wfAmbTmpReal = ([System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())).TrimEnd('\')
+        $wfAmbAlvo = Join-Path $wfAmbTmpReal 'WinForge-SelfTest\parada\folha'
+        $wfAmbExp = @((Test-WinForgeSnapshotRootPath -Root $wfAmbAlvo -ExplicitRoot).Chain)
+        if ($wfAmbExp.Count -ne 3) { Write-Host "  [ERRO] raiz de confiança (-ExplicitRoot): a cadeia deveria parar em '$wfAmbTmpReal' e ter 3 pastas, veio $($wfAmbExp.Count) ($($wfAmbExp -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfAmbExp[0] -ne (Join-Path $wfAmbTmpReal 'WinForge-SelfTest')) { Write-Host "  [ERRO] raiz de confiança (-ExplicitRoot): a cadeia começa em '$($wfAmbExp[0])'" -ForegroundColor Red; $wbErrors++ }
+        $wfAmbSem = @((Test-WinForgeSnapshotRootPath -Root $wfAmbAlvo).Chain)
+        if ($wfAmbSem.Count -le 3) { Write-Host "  [ERRO] raiz de confiança: sem -ExplicitRoot a cadeia parou em %TEMP% assim mesmo ($($wfAmbSem -join ' | '))" -ForegroundColor Red; $wbErrors++ }
+        # Ancestral que não pôde ser LIDO virou recusa (antes era pulado junto com o inexistente,
+        # porque Test-Path devolve $false para os dois). O lado que dá para provar sem elevação é o
+        # outro: pasta que simplesmente NÃO EXISTE continua confiável. É o caso da primeira
+        # execução - se ele virasse recusa, nada mais gravaria backup nenhum.
+        $wfAmbNova = Join-Path $wfAmbTmpReal ('WinForge-SelfTest\ainda-nao-existe-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $wfAmbNovaT = Test-WinForgeSnapshotRootTrusted -Root $wfAmbNova -ExplicitRoot
+        if (-not $wfAmbNovaT.Trusted) { Write-Host "  [ERRO] raiz de confiança: pasta inexistente deveria ser confiável ('$($wfAmbNovaT.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Raiz de confiança: base e paradas vêm da API de pastas; `$env:ProgramData, `$env:TEMP e `$env:LOCALAPPDATA sequestrados não movem nada e o ambiente volta ao que era"
+    } catch {
+        Write-Host "  [ERRO] raiz de confiança (-ExplicitRoot): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- pino do arquivo baixado
+    # Entre a conferência da assinatura e o Start-Process havia uma janela: o caminho era conferido,
+    # e depois RESOLVIDO de novo. O conserto é manter um handle aberto no arquivo final, com
+    # FileShare.Read, desde a renomeação até o instalador subir - quem tenta renomear ou apagar o
+    # arquivo nesse intervalo leva violação de compartilhamento.
+    #
+    # Este helper prova o mecanismo num arquivo de teste: com o pino aberto o rename FALHA, e mesmo
+    # assim as três leituras de que o caminho depende continuam funcionando.
+    function Test-WinForgeFilePinned {
+        <#
+        .SYNOPSIS
+            $true se um handle com FileShare.Read impede a renomeação do arquivo.
+        .DESCRIPTION
+            Renomear exige DELETE no arquivo, e DELETE só é concedido a um segundo open se o handle
+            já aberto tiver compartilhado FILE_SHARE_DELETE. FileShare.Read não compartilha, então a
+            renomeação tem de falhar - é essa a garantia em que Install-WinForgeNvidiaDriver se apoia.
+        #>
+        param([Parameter(Mandatory)][string]$Path)
+        $wfPinH = $null
+        $wfPinRenomeou = $false
+        $wfPinOutro = "$Path.trocado"
+        try {
+            $wfPinH = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            try { [System.IO.File]::Move($Path, $wfPinOutro); $wfPinRenomeou = $true } catch { }
+        } finally {
+            if ($wfPinH) { $wfPinH.Dispose() }
+        }
+        if ($wfPinRenomeou) { try { [System.IO.File]::Move($wfPinOutro, $Path) } catch { } }
+        return (-not $wfPinRenomeou)
+    }
+    $wfPinDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\pino'
+    try {
+        New-Item -ItemType Directory -Path $wfPinDir -Force | Out-Null
+        $wfPinArq = Join-Path $wfPinDir 'instalador.exe'
+        Set-Content -LiteralPath $wfPinArq -Value 'MZ arquivo de teste do pino' -Encoding Ascii
+        if (-not (Test-WinForgeFilePinned -Path $wfPinArq)) {
+            Write-Host "  [ERRO] pino do arquivo: com o handle aberto a renomeação deveria falhar" -ForegroundColor Red; $wbErrors++
+        }
+        # Sem o pino a renomeação passa - senão o teste acima estaria provando o nada.
+        $wfPinSolto = Join-Path $wfPinDir 'solto.exe'
+        Set-Content -LiteralPath $wfPinSolto -Value 'MZ arquivo solto' -Encoding Ascii
+        $wfPinSoltoOk = $false
+        try { [System.IO.File]::Move($wfPinSolto, "$wfPinSolto.trocado"); $wfPinSoltoOk = $true } catch { }
+        if (-not $wfPinSoltoOk) { Write-Host "  [ERRO] pino do arquivo: sem pino a renomeação deveria passar - o teste do pino não prova nada" -ForegroundColor Red; $wbErrors++ }
+        # As três operações que acontecem COM o pino aberto em Install-WinForgeNvidiaDriver.
+        $wfPinH2 = $null
+        try {
+            $wfPinH2 = [System.IO.File]::Open($wfPinArq, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            # 1. Get-AuthenticodeSignature abre o arquivo por conta própria: com FileShare.Read ele lê.
+            try { Get-AuthenticodeSignature -LiteralPath $wfPinArq -ErrorAction Stop | Out-Null }
+            catch { Write-Host "  [ERRO] pino do arquivo: Get-AuthenticodeSignature não leu o arquivo com o pino aberto ($($_.Exception.Message))" -ForegroundColor Red; $wbErrors++ }
+            # 2. Get-Acl (a conferência de dono e permissões).
+            try { Get-Acl -LiteralPath $wfPinArq -ErrorAction Stop | Out-Null }
+            catch { Write-Host "  [ERRO] pino do arquivo: Get-Acl falhou com o pino aberto ($($_.Exception.Message))" -ForegroundColor Red; $wbErrors++ }
+            # 3. A gravação da DACL fechada (Protect-WinForgeSnapshotFile): WRITE_DAC não passa pelo
+            #    modo de compartilhamento, que só governa leitura, escrita de DADOS e exclusão.
+            try {
+                $wfPinDacl = New-Object System.Security.AccessControl.FileSecurity
+                $wfPinDacl.SetAccessRuleProtection($true, $false)
+                $wfPinDacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule ([System.Security.Principal.WindowsIdentity]::GetCurrent().User), 'FullControl', 'Allow'))
+                (New-Object System.IO.FileInfo $wfPinArq).SetAccessControl($wfPinDacl)
+            } catch { Write-Host "  [ERRO] pino do arquivo: a DACL não pôde ser fechada com o pino aberto ($($_.Exception.Message))" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            if ($wfPinH2) { $wfPinH2.Dispose() }
+        }
+        # O download em si não roda em SelfTest, então as duas travas que dependem dele são cobradas
+        # no corpo da função: o pino e a recusa de redirecionamento.
+        # Os padrões são o FORMATO DA CHAMADA, e não o nome solto: o bloco de ajuda da função
+        # explica as três travas com essas mesmas palavras, e procurar o nome acharia o comentário.
+        $wfPinDef = [string](Get-Command Install-WinForgeNvidiaDriver).Definition
+        if ($wfPinDef -notmatch 'Invoke-WebRequest[^\r\n]*-MaximumRedirection 0') { Write-Host "  [ERRO] pino do arquivo: o download não recusa redirecionamento (-MaximumRedirection 0)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPinDef -notmatch '\[System\.IO\.File\]::Open\(\$destino') { Write-Host "  [ERRO] pino do arquivo: Install-WinForgeNvidiaDriver não fixa o arquivo antes de conferir e abrir" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPinDef -notmatch 'Test-WinForgeSnapshotRootPath -Root \(Split-Path -Parent \$destino\)') { Write-Host "  [ERRO] pino do arquivo: a cadeia de pastas não é reconferida antes do Start-Process" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Pino do arquivo: renomeação bloqueada com o handle aberto, assinatura/ACL/DACL ainda acessíveis, redirecionamento recusado"
+    } catch {
+        Write-Host "  [ERRO] pino do arquivo: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -Path $wfPinDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     try {
         [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
         [xml]$wbXaml = $inputXML
@@ -2151,13 +3116,43 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','WPFDiagClearRecommended','WPFDiagRecCount','WPFDiagScroll','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
+        # Ordem da barra de navegação: é a ordem de leitura da ferramenta (diagnosticar, ajustar,
+        # depois instalar), não a da base. Vale nos dois modos - quem esconde botão em servidor é
+        # Update-WinForgeTabVisibility, que mexe em Visibility e não na ordem.
+        $wfNavEsperada = @('WPFTab8BT','WPFTab2BT','WPFTab7BT','WPFTab3BT','WPFTab9BT','WPFTab4BT','WPFTab1BT','WPFTab5BT')
+        $wfNavOrdem = Get-WinForgeNavOrder -Window $wbWindow
+        if (($wfNavOrdem -join ',') -ne ($wfNavEsperada -join ',')) { Write-Host "  [ERRO] barra de navegação: ordem '$($wfNavOrdem -join ',')', esperada '$($wfNavEsperada -join ',')'" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Barra de navegação: $($wfNavOrdem.Count) botão(ões) na ordem $($wfNavOrdem -join ' > ')" }
+        # Chips de filtro da aba Instalar: o filtro compara o texto do chip com a categoria do
+        # aplicativo, então o conjunto de chips (fora "Todos") tem de ser exatamente o conjunto de
+        # grupos da lista. Um grupo novo sem chip fica sem filtro; um chip sem grupo não filtra nada.
+        # (A Tag, que é o que filtra de verdade, é conferida no BUILD: $sync.AppCategoryChips só é
+        # atribuído lá no fim do arquivo, depois deste bloco, então aqui ela ainda é $null.)
+        $wfChips = @($wbWindow.FindName('WPFSearchChips').Children | Where-Object { $_ -is [System.Windows.Controls.Primitives.ToggleButton] } | ForEach-Object { [string]$_.Content })
+        $wfChipsGrupos = @($wfChips | Where-Object { $_ -ne 'Todos' } | Sort-Object)
+        if (($wfChipsGrupos -join '|') -ne (($wfAppsCategorias | Sort-Object) -join '|')) { Write-Host "  [ERRO] chips da aba Instalar: '$($wfChipsGrupos -join ', ')' não bate com os grupos '$($wfAppsCategorias -join ', ')'" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Chips da aba Instalar: $($wfChips.Count) (Todos + $($wfChipsGrupos.Count) grupos)" }
         # monta cada aba sem mostrar a janela (exercita Invoke-WPFUIElements, filtros, toggles e botões)
         $sync["Form"] = $wbWindow
         $wbXaml.SelectNodes("//*[@Name]") | ForEach-Object { $sync["$($_.Name)"] = $sync["Form"].FindName($_.Name) }
         $sync.InitializedTabs = @{}
+        # Aplica o tema de verdade nesta janela, como a inicialização faz. Sem isto o -SelfTest
+        # montaria as abas com o dicionário de recursos VAZIO: toda referência dinâmica cairia no
+        # nada e o teste ficaria cego justamente para o que a Tarefa 6 mudou. De quebra, é aqui
+        # que um token com valor que o aplicador não converte (um Thickness torto, por exemplo)
+        # aparece, porque Set-ThemeResourceProperty avisa e segue.
+        foreach ($wfTemaAplicar in @('Light', 'Dark')) {
+            $wfTemaAviso = @(Invoke-WinForgeThemeChange -theme $wfTemaAplicar 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+            if ($wfTemaAviso.Count) { Write-Host "  [ERRO] tema $wfTemaAplicar : $($wfTemaAviso.Count) token(s) recusado(s) pelo aplicador -> $(@($wfTemaAviso | ForEach-Object { $_.Message }) -join '; ')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Fica no Escuro: é o tema em que as fotos de QA são tiradas e o padrão da máquina de teste.
+        $wfTemaFaltando = @('MainBackgroundColor', 'CardBackgroundColor', 'ButtonForegroundSelectedColor', 'TabAccentColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor', 'FontFamily', 'HeaderFontFamily') |
+            Where-Object { $null -eq $sync.Form.TryFindResource($_) }
+        if ($wfTemaFaltando.Count) { Write-Host "  [ERRO] tema: recurso(s) que o XAML pede e o tema não define -> $($wfTemaFaltando -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Tema aplicado na janela: Claro e Escuro sem recusa, tokens novos resolvidos" }
         # Antes do diagnóstico terminar, $sync.Recommended/$sync.Discouraged são nulos - é o estado
         # real da janela recém-aberta. Enumerar .Keys de $null dava uma chave nula e uma exceção por
         # montagem de aba ("não é possível indexar em uma matriz nula"), com zero contornos.
@@ -2192,6 +3187,44 @@ if ($SelfTest) {
         # A aba Instalar é montada primeiro porque a janela real faz isso antes de aparecer, e
         # Reset-WPFCheckBoxes (chamada no fim de toda montagem) escreve em controles que nascem lá.
         Initialize-WinForgeTabContent -TabName 'Install'
+        # Grupos fechados na montagem: a trava é sobre os controles, não sobre a chamada. Cada
+        # grupo é um StackPanel com o rótulo em Children[0] e o WrapPanel dos aplicativos em
+        # Children[1] - fechado quer dizer WrapPanel Collapsed e rótulo começando com "+ ".
+        try {
+            $wfGrupos = @($sync.ItemsControl.Items | Where-Object { $_ -is [System.Windows.Controls.StackPanel] -and $_.Children.Count -ge 2 })
+            $wfAbertos = @($wfGrupos | Where-Object { $_.Children[1].Visibility -ne [Windows.Visibility]::Collapsed -or [string]$_.Children[0].Content -notlike '+ *' })
+            if ($wfGrupos.Count -lt 5) { Write-Host "  [ERRO] aba Instalar: esperado ao menos 5 grupos montados, veio $($wfGrupos.Count)" -ForegroundColor Red; $wbErrors++ }
+            if ($wfAbertos.Count) { Write-Host "  [ERRO] aba Instalar: $($wfAbertos.Count) grupo(s) abertos na montagem: $(@($wfAbertos | ForEach-Object { $_.Children[0].Content }) -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Aba Instalar: $($wfGrupos.Count) grupo(s) fechados na montagem" }
+        } catch {
+            Write-Host "  [ERRO] aba Instalar (grupos fechados): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Espelho da lista de recomendações do Diagnóstico: marcar a linha da lista tem de marcar a
+        # caixa de verdade na aba de destino, e desmarcar a caixa de verdade tem de desmarcar a linha.
+        # Roda ANTES do teste de "marcar recomendados" e de propósito com uma chave da aba Ajustes:
+        # a aba Jogos continua desmontada aqui, então a trava seguinte ("as abas não foram montadas
+        # sob demanda") não perde o dente.
+        try {
+            $wfEspelhos = $sync.WinForgeDiagMirrors
+            if ($null -eq $wfEspelhos -or @($wfEspelhos.Keys).Count -eq 0) { throw "a lista do Diagnóstico não tem nenhuma caixa de espelho" }
+            $wfEspChave = @(@($wfEspelhos.Keys) | Where-Object { (Get-WinForgeRecommendationTab -Key $_) -eq 'Tweaks' })[0]
+            if (-not $wfEspChave) { throw "nenhuma recomendação da aba Ajustes para exercitar o espelho" }
+            if ($sync.InitializedTabs['Tweaks']) { throw "a aba Ajustes já estava montada - o teste de montagem sob demanda não provaria nada" }
+            $wfEspCaixa = $wfEspelhos[$wfEspChave]
+            $wfEspCaixa.IsChecked = $true
+            if (-not $sync.InitializedTabs['Tweaks']) { Write-Host "  [ERRO] espelho: a aba Ajustes não foi montada sob demanda" -ForegroundColor Red; $wbErrors++ }
+            if ($sync[$wfEspChave] -isnot [System.Windows.Controls.CheckBox]) { Write-Host "  [ERRO] espelho: '$wfEspChave' não virou CheckBox depois da montagem" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $sync[$wfEspChave].IsChecked) { Write-Host "  [ERRO] espelho: marcar na lista do Diagnóstico não marcou '$wfEspChave' na aba Ajustes" -ForegroundColor Red; $wbErrors++ }
+            # volta: quem desmarca na aba de destino tem de apagar a marca da lista do Diagnóstico
+            if ($sync[$wfEspChave] -is [System.Windows.Controls.CheckBox]) {
+                $sync[$wfEspChave].IsChecked = $false
+                if ($wfEspCaixa.IsChecked) { Write-Host "  [ERRO] espelho: desmarcar '$wfEspChave' na aba Ajustes não desmarcou a linha da lista" -ForegroundColor Red; $wbErrors++ }
+            }
+            if ($sync.WinForgeMirrorBusy) { Write-Host "  [ERRO] espelho: `$sync.WinForgeMirrorBusy ficou ligado depois do vaivém" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Espelho das recomendações: OK ('$wfEspChave' nos dois sentidos, aba Ajustes montada sob demanda)"
+        } catch {
+            Write-Host "  [ERRO] espelho das recomendações: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
         try {
             $wfMarcadosCedo = Select-WinForgeRecommended -Tab All
             if ($wfMarcadosCedo -le 0) { Write-Host "  [ERRO] marcar recomendados antes das abas: nenhuma caixa marcada" -ForegroundColor Red; $wbErrors++ }
@@ -2266,7 +3299,13 @@ if ($SelfTest) {
             try {
                 $null = Invoke-WinForgeRules -Profile $wbSims['server-iis']
                 Update-WinForgeRecommendationVisuals | Out-Null
-                $wfSrvVerdes = @($wfSrvKeys | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush -and [string]$_.Border.BorderBrush.Color -eq '#FF2E7D32' }).Count
+                # A cor vem do tema (RecommendedColor), não de um hexadecimal fixo: o verde do tema
+                # Claro é outro. Comparar com o pincel que o tema aplicado nesta janela devolve é o
+                # que mantém a trava válida nos dois temas - e ela quebra se a linha voltar a ser
+                # pintada com cor fixa.
+                $wfVerdeTema = [string]([System.Windows.Media.SolidColorBrush]$sync.Form.TryFindResource('RecommendedColor')).Color
+                if (-not $wfVerdeTema) { Write-Host "  [ERRO] aba Servidor (contornos): o tema não define RecommendedColor" -ForegroundColor Red; $wbErrors++ }
+                $wfSrvVerdes = @($wfSrvKeys | ForEach-Object { Get-WinForgeRecoRow -Key $_ } | Where-Object { $_ -and $_.Border.BorderBrush -and [string]$_.Border.BorderBrush.Color -eq $wfVerdeTema }).Count
                 if ($wfSrvVerdes -lt 5) { Write-Host "  [ERRO] aba Servidor: esperado ao menos 5 contornos verdes em serverpanel, veio $wfSrvVerdes" -ForegroundColor Red; $wbErrors++ }
                 else { Write-Host "  Aba Servidor (contornos): $wfSrvVerdes linha(s) verde(s) com as regras de server-iis" }
             } catch {
@@ -2326,11 +3365,262 @@ if ($SelfTest) {
                 if ($wfRelTam -lt 5KB) { Write-Host "  [ERRO] Diagnóstico: relatório com $wfRelTam byte(s), esperado mais de 5 KB" -ForegroundColor Red; $wbErrors++ }
                 $wfCpuHtml = [System.Net.WebUtility]::HtmlEncode([string]$sync.Profile.CPU.Name)
                 if (-not $wfRelHtml.Contains($wfCpuHtml)) { Write-Host "  [ERRO] Diagnóstico: relatório sem o nome da CPU ('$wfCpuHtml')" -ForegroundColor Red; $wbErrors++ }
+                # O relatório é escrito num nome temporário e renomeado: o arquivo final nunca
+                # existe pela metade, e o '.parcial' não pode ficar para trás.
+                if (Test-Path -LiteralPath "$wfRelPath.parcial") { Write-Host "  [ERRO] Diagnóstico: o arquivo temporário '$wfRelPath.parcial' ficou no disco" -ForegroundColor Red; $wbErrors++ }
+                # E o caminho padrão sai da API de pastas, não de $env:LocalAppData: o relatório é
+                # gravado pelo motor elevado e aberto em seguida com Start-Process.
+                $wfRelDef = [string]${function:Export-WinForgeDiagnosticsReport}
+                if ($wfRelDef -match '\$env:LocalAppData') { Write-Host "  [ERRO] Diagnóstico: o caminho do relatório ainda vem de `$env:LocalAppData" -ForegroundColor Red; $wbErrors++ }
+                if ($wfRelDef -notmatch 'Join-Path \(Get-WinForgeUserDataRoot\)') { Write-Host "  [ERRO] Diagnóstico: o caminho do relatório não vem de Get-WinForgeUserDataRoot" -ForegroundColor Red; $wbErrors++ }
                 Write-Host "  Aba Diagnóstico: $wfCards cartões, $wfDrvUI drivers, $($sync.WPFDiagRecs.Items.Count) recomendações | relatório $([math]::Round($wfRelTam / 1KB)) KB"
                 if (-not $env:WINFORGE_KEEP_REPORT) { Remove-Item -Path $wfRel -Force -ErrorAction SilentlyContinue }
             }
         } catch {
             Write-Host "  [ERRO] aba Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Coluna "Ação" da tabela de drivers e coluna "Instalar" da tabela do Windows Update: as duas
+        # são DataGridTemplateColumn com um Button que tira o texto da LINHA e leva a linha inteira na
+        # Tag. É pela Tag que o handler sabe em que linha o usuário clicou - a tabela é redesenhada a
+        # cada diagnóstico, e um índice guardado no clique apontaria para a linha da rodada anterior.
+        try {
+            $wfBtnColunas = @(
+                @('WPFDiagDrivers', 'Ação',     'ActionLabel', 'ActionVisible'),
+                @('WPFDiagWU',      'Instalar', $null,         $null)
+            )
+            # As duas ligações que fazem o botão dizer que precisa de elevação: 'IsEnabled' e a
+            # dica. ToolTipService.ShowOnDisabled é o que falta em quase toda tela do Windows -
+            # sem ele o WPF esconde a dica justamente quando o botão está desabilitado, que é o
+            # único momento em que ela tem algo a explicar.
+            foreach ($wfBtnCol in $wfBtnColunas) {
+                $wfBtnGrade = $sync[$wfBtnCol[0]]
+                $wfBtnColuna = @($wfBtnGrade.Columns | Where-Object { $_ -is [System.Windows.Controls.DataGridTemplateColumn] -and [string]$_.Header -eq [string]$wfBtnCol[1] })[0]
+                if ($null -eq $wfBtnColuna) { Write-Host "  [ERRO] coluna de ação: $($wfBtnCol[0]) sem DataGridTemplateColumn '$($wfBtnCol[1])'" -ForegroundColor Red; $wbErrors++; continue }
+                $wfBtnConteudo = $wfBtnColuna.CellTemplate.LoadContent()
+                if ($wfBtnConteudo -isnot [System.Windows.Controls.Button]) { Write-Host "  [ERRO] coluna de ação: o modelo de '$($wfBtnCol[1])' não é um Button, é '$($wfBtnConteudo.GetType().Name)'" -ForegroundColor Red; $wbErrors++; continue }
+                $wfBtnTag = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.FrameworkElement]::TagProperty)
+                if ($null -eq $wfBtnTag -or [string]$wfBtnTag.Path.Path -ne '') { Write-Host "  [ERRO] coluna de ação: a Tag do botão de '$($wfBtnCol[1])' não está ligada à linha inteira" -ForegroundColor Red; $wbErrors++ }
+                if ($wfBtnCol[2]) {
+                    $wfBtnTexto = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.Controls.ContentControl]::ContentProperty)
+                    if ($null -eq $wfBtnTexto -or [string]$wfBtnTexto.Path.Path -ne [string]$wfBtnCol[2]) { Write-Host "  [ERRO] coluna de ação: o texto do botão de '$($wfBtnCol[1])' não vem de $($wfBtnCol[2])" -ForegroundColor Red; $wbErrors++ }
+                }
+                if ($wfBtnCol[3]) {
+                    $wfBtnVis = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.UIElement]::VisibilityProperty)
+                    if ($null -eq $wfBtnVis -or [string]$wfBtnVis.Path.Path -ne [string]$wfBtnCol[3]) { Write-Host "  [ERRO] coluna de ação: a visibilidade do botão de '$($wfBtnCol[1])' não vem de $($wfBtnCol[3])" -ForegroundColor Red; $wbErrors++ }
+                }
+                $wfBtnHab = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.UIElement]::IsEnabledProperty)
+                if ($null -eq $wfBtnHab -or [string]$wfBtnHab.Path.Path -ne 'ActionEnabled') { Write-Host "  [ERRO] coluna de ação: o botão de '$($wfBtnCol[1])' não liga IsEnabled em ActionEnabled" -ForegroundColor Red; $wbErrors++ }
+                $wfBtnDica = [System.Windows.Data.BindingOperations]::GetBinding($wfBtnConteudo, [System.Windows.FrameworkElement]::ToolTipProperty)
+                if ($null -eq $wfBtnDica -or [string]$wfBtnDica.Path.Path -ne 'ActionTip') { Write-Host "  [ERRO] coluna de ação: a dica do botão de '$($wfBtnCol[1])' não vem de ActionTip" -ForegroundColor Red; $wbErrors++ }
+                if (-not [System.Windows.Controls.ToolTipService]::GetShowOnDisabled($wfBtnConteudo)) { Write-Host "  [ERRO] coluna de ação: a dica do botão de '$($wfBtnCol[1])' não aparece com o botão desabilitado (ToolTipService.ShowOnDisabled)" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A tabela do Windows Update tem de carregar o id: é ele, e não o título, que identifica
+            # a atualização na hora de instalar.
+            $wfBtnWuAntes = $sync.DiagWUResults
+            try {
+                $sync.DiagWUResults = @([pscustomobject]@{ Title = 'Driver de teste - 1.2.3.4'; Driver = 'Teste'; Provider = 'WinForge'; Version = '1.2.3.4'; Date = '2026-09-10'; UpdateId = 'id-de-teste' })
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+                $wfBtnWuLinha = @($sync.WPFDiagWU.ItemsSource)[0]
+                if ([string]$wfBtnWuLinha.UpdateId -ne 'id-de-teste') { Write-Host "  [ERRO] tabela do Windows Update: a linha não carrega o UpdateId (veio '$($wfBtnWuLinha.UpdateId)')" -ForegroundColor Red; $wbErrors++ }
+            } finally {
+                $sync.DiagWUResults = $wfBtnWuAntes
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+            }
+            # O clique: um handler por tabela, registrado UMA vez em Initialize-WinForgeDiagnosticsTab.
+            # A linha 'none' não faz nada e prova o caminho; a linha 'vendor-page' prova a trava - em
+            # SelfTest nada abre, nem navegador nem caixa de mensagem.
+            if (-not $sync.WinForgeDiagActionHandlerWired) { Write-Host "  [ERRO] clique de ação: `$sync.WinForgeDiagActionHandlerWired não foi ligado por Initialize-WinForgeDiagnosticsTab" -ForegroundColor Red; $wbErrors++ }
+            $wfBtnCliques = @(
+                @('none',        ([pscustomobject]@{ Device = 'x'; ActionKind = 'none'; ActionLabel = ''; ActionUrl = $null }),                                              'none'),
+                @('vendor-page', ([pscustomobject]@{ Device = 'x'; ActionKind = 'vendor-page'; ActionLabel = 'Página do fabricante'; ActionUrl = 'https://www.amd.com/' }), 'erro')
+            )
+            foreach ($wfBtnClique in $wfBtnCliques) {
+                $sync.LastDriverAction = $null
+                $wfBtnFalso = New-Object System.Windows.Controls.Button
+                $wfBtnFalso.Tag = $wfBtnClique[1]
+                $wfBtnArgs = New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent), $wfBtnFalso
+                $sync.WPFDiagDrivers.RaiseEvent($wfBtnArgs)
+                if ([string]$wfBtnClique[2] -eq 'none') {
+                    if ([string]$sync.LastDriverAction -ne 'none') { Write-Host "  [ERRO] clique de ação: linha sem ação deveria dar 'none', deu '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+                } else {
+                    if ([string]$sync.LastDriverAction -notmatch 'SelfTest') { Write-Host "  [ERRO] clique de ação: a linha 'vendor-page' deveria ser recusada em SelfTest, deu '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+            # Botão sem Tag (o clique em qualquer outro botão que porventura caia na tabela) não pode
+            # virar ação nenhuma.
+            $sync.LastDriverAction = 'nao-mexer'
+            $wfBtnSemTag = New-Object System.Windows.Controls.Button
+            $sync.WPFDiagDrivers.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent), $wfBtnSemTag))
+            if ([string]$sync.LastDriverAction -ne 'nao-mexer') { Write-Host "  [ERRO] clique de ação: botão sem Tag disparou a ação '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+            # A tabela do Windows Update tem handler próprio, e ele também recusa em SelfTest.
+            $sync.LastDriverAction = $null
+            $wfBtnWu = New-Object System.Windows.Controls.Button
+            $wfBtnWu.Tag = [pscustomobject]@{ Title = 'Driver de teste'; UpdateId = 'id-de-teste' }
+            $sync.WPFDiagWU.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent), $wfBtnWu))
+            if ([string]$sync.LastDriverAction -notmatch 'SelfTest') { Write-Host "  [ERRO] clique de ação: o botão Instalar do Windows Update deveria ser recusado em SelfTest, deu '$($sync.LastDriverAction)'" -ForegroundColor Red; $wbErrors++ }
+            # Nenhuma das duas tabelas pode escrever RowBackground: o valor é coagido para
+            # DataGridRow.Background com precedência Local, que vence o Setter e o gatilho de
+            # IsMouseOver do estilo. Com ele, o realce do mouse existia no XAML e nunca aparecia.
+            foreach ($wfGradeNome in @('WPFDiagDrivers', 'WPFDiagWU')) {
+                $wfGradeFonte = [System.Windows.DependencyPropertyHelper]::GetValueSource($sync[$wfGradeNome], [System.Windows.Controls.DataGrid]::RowBackgroundProperty).BaseValueSource
+                if ([string]$wfGradeFonte -eq 'Local') { Write-Host "  [ERRO] realce da linha: $wfGradeNome tem RowBackground local, que mata o gatilho de IsMouseOver do estilo" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Colunas de ação: 'Ação' e 'Instalar' com Button ligado à linha; clique roteado pelas duas tabelas e recusado em SelfTest | sem RowBackground local nas duas tabelas"
+        } catch {
+            Write-Host "  [ERRO] colunas de ação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # ---------------------------------------------------------------- botões que exigem elevação
+        # Sem elevação a pasta de downloads é recusada (ela é de SYSTEM/Administradores) e o Windows
+        # Update não instala nada. Um botão que só descobre isso DEPOIS do clique é uma promessa
+        # quebrada: ele nasce desabilitado, com a dica dizendo o que falta.
+        try {
+            $wfElevado = [bool](Test-WinForgeRepairElevated)
+            $wfElevDica = 'Precisa de elevação (execute o WinForge como administrador)'
+            $wfElevLinhas = @((Get-WinForgeDiagDriverRows -Profile @{ Drivers = @(
+                [pscustomobject]@{ Device = 'NVIDIA GeForce RTX 3070'; Vendor = 'nvidia'; Class = 'DISPLAY'; Status = 'atualizar'; Latest = '616.92'; LatestUrl = 'https://us.download.nvidia.com/Windows/616.92/x.exe'; Url = 'https://www.nvidia.com/pt-br/drivers/' },
+                [pscustomobject]@{ Device = 'AMD Radeon'; Vendor = 'amd'; Class = 'DISPLAY'; Status = 'verificar'; Url = 'https://www.amd.com/pt/support/download/drivers.html' }
+            ) }) | ForEach-Object { $_ })
+            $wfElevNv = $wfElevLinhas[0]
+            $wfElevAmd = $wfElevLinhas[1]
+            if ([bool]$wfElevNv.ActionEnabled -ne $wfElevado) { Write-Host "  [ERRO] botão sem elevação: 'Baixar' deveria estar $(if ($wfElevado) { 'habilitado' } else { 'desabilitado' }), veio ActionEnabled '$($wfElevNv.ActionEnabled)'" -ForegroundColor Red; $wbErrors++ }
+            if (-not $wfElevado -and [string]$wfElevNv.ActionTip -ne $wfElevDica) { Write-Host "  [ERRO] botão sem elevação: a dica do 'Baixar' deveria ser '$wfElevDica', veio '$($wfElevNv.ActionTip)'" -ForegroundColor Red; $wbErrors++ }
+            if ($wfElevado -and [string]$wfElevNv.ActionTip -eq $wfElevDica) { Write-Host "  [ERRO] botão sem elevação: com elevação a dica não pode ser a de elevação" -ForegroundColor Red; $wbErrors++ }
+            # Abrir a página do fabricante é o navegador do usuário: não precisa de elevação nenhuma.
+            if (-not $wfElevAmd.ActionEnabled) { Write-Host "  [ERRO] botão sem elevação: 'Página do fabricante' não depende de elevação e não pode nascer desabilitado" -ForegroundColor Red; $wbErrors++ }
+            # E o 'Instalar' do Windows Update segue a mesma regra.
+            $wfElevWuAntes = $sync.DiagWUResults
+            try {
+                $sync.DiagWUResults = @([pscustomobject]@{ Title = 'Driver de teste - 1.2.3.4'; Driver = 'Teste'; Provider = 'WinForge'; Version = '1.2.3.4'; Date = '2026-09-10'; UpdateId = 'id-de-teste' })
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+                $wfElevWu = @($sync.WPFDiagWU.ItemsSource)[0]
+                if ([bool]$wfElevWu.ActionEnabled -ne $wfElevado) { Write-Host "  [ERRO] botão sem elevação: 'Instalar' do Windows Update veio ActionEnabled '$($wfElevWu.ActionEnabled)'" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wfElevado -and [string]$wfElevWu.ActionTip -ne $wfElevDica) { Write-Host "  [ERRO] botão sem elevação: a dica do 'Instalar' deveria ser '$wfElevDica', veio '$($wfElevWu.ActionTip)'" -ForegroundColor Red; $wbErrors++ }
+            } finally {
+                $sync.DiagWUResults = $wfElevWuAntes
+                Update-WinForgeDiagnosticsWindowsUpdateGrid
+            }
+            Write-Host "  Botões que exigem elevação: este build roda $(if ($wfElevado) { 'ELEVADO' } else { 'SEM elevação' }) - 'Baixar' e 'Instalar' $(if ($wfElevado) { 'habilitados' } else { 'desabilitados, com a dica de elevação' })"
+        } catch {
+            Write-Host "  [ERRO] botões que exigem elevação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Checklist das recomendações + contador na tela. Uma linha por recomendação, e caixa de
+        # marcar só nas que a aba de destino aceita marcar: Toggle aplica o tweak no clique, e
+        # recomendação não muda o sistema (mesma regra de Select-WinForgeRecommended).
+        try {
+            # A conta esperada NÃO passa por Test-WinForgeRecommendationToggle: usar a mesma função
+            # que o checklist usa faria a trava concordar consigo mesma. A regra é escrita aqui do
+            # mesmo jeito que Select-WinForgeRecommended a escreve.
+            $wfChkEsperado = @(@($sync.Recommended.Keys) | Where-Object { $_ -and $sync.configs.tweaks.PSObject.Properties[$_] -and $_ -notlike 'WPFToggle*' -and [string]$sync.configs.tweaks.$_.Type -ne 'Toggle' }).Count
+            $wfChkCaixas = 0
+            foreach ($wfLinha in @($sync.WPFDiagRecs.Items)) {
+                foreach ($wfFilho in @($wfLinha.Children)) { if ($wfFilho -is [System.Windows.Controls.CheckBox]) { $wfChkCaixas++ } }
+            }
+            if ($wfChkCaixas -ne $wfChkEsperado) { Write-Host "  [ERRO] checklist: $wfChkCaixas caixa(s) na lista do Diagnóstico, esperado $wfChkEsperado" -ForegroundColor Red; $wbErrors++ }
+            if (@($sync.WinForgeDiagMirrors.Keys).Count -ne $wfChkEsperado) { Write-Host "  [ERRO] checklist: $(@($sync.WinForgeDiagMirrors.Keys).Count) espelho(s) registrado(s), esperado $wfChkEsperado" -ForegroundColor Red; $wbErrors++ }
+            # "Marcar todos" / "Desmarcar todos": sem caixa de mensagem, com o contador na tela
+            $wfChkTodos = Set-WinForgeDiagRecommendationSelection -Checked $true
+            if ($sync.WPFDiagRecCount.Text -notmatch '^\d+ de \d+ recomendados marcados$') { Write-Host "  [ERRO] contador: texto '$($sync.WPFDiagRecCount.Text)' fora do formato 'N de M recomendados marcados'" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WPFDiagRecCount.Text -ne "$wfChkTodos de $wfChkEsperado recomendados marcados") { Write-Host "  [ERRO] contador depois de Marcar todos: '$($sync.WPFDiagRecCount.Text)', esperado '$wfChkTodos de $wfChkEsperado recomendados marcados'" -ForegroundColor Red; $wbErrors++ }
+            $wfChkMarcadosReais = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] -and $sync[$_].IsChecked }).Count
+            if ($wfChkMarcadosReais -ne $wfChkTodos) { Write-Host "  [ERRO] Marcar todos: $wfChkMarcadosReais caixa(s) real(is) marcada(s), esperado $wfChkTodos" -ForegroundColor Red; $wbErrors++ }
+            $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+            if ($sync.WPFDiagRecCount.Text -ne "0 de $wfChkEsperado recomendados marcados") { Write-Host "  [ERRO] contador depois de Desmarcar todos: '$($sync.WPFDiagRecCount.Text)'" -ForegroundColor Red; $wbErrors++ }
+            $wfChkSobraram = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] -and $sync[$_].IsChecked })
+            if ($wfChkSobraram.Count) { Write-Host "  [ERRO] Desmarcar todos: continuam marcadas: $($wfChkSobraram -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WinForgeMirrorBusy) { Write-Host "  [ERRO] checklist: `$sync.WinForgeMirrorBusy ficou ligado" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Checklist do Diagnóstico: $wfChkCaixas caixa(s), Marcar todos = $wfChkTodos, contador '$($sync.WPFDiagRecCount.Text)'"
+        } catch {
+            Write-Host "  [ERRO] checklist do Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Recomendação que NÃO se aplica a esta máquina. A linha existia habilitada e só descobria o
+        # problema no clique: montava a aba de destino, não achava a caixa e aí se desabilitava - com
+        # o total do contador já contando com ela. Agora a linha nasce desabilitada, com a dica na
+        # frente, e fica de fora do M do contador. A entrada de teste é sintética e tem um papel de
+        # servidor que não existe, então ela é escondida no cliente E no servidor simulado.
+        try {
+            $wfIndispChave = 'WPFTweaksWFSelfTestIndisponivel'
+            $wfIndispRecAntes = $sync.Recommended
+            try {
+                $sync.configs.tweaks | Add-Member -NotePropertyName $wfIndispChave -NotePropertyValue ([pscustomobject]@{ Content = 'Item de teste indisponível'; Description = 'Só existe durante o SelfTest.'; Type = 'CheckBox'; role = 'papel-que-nao-existe'; risk = 'seguro'; category = 'z__Teste' }) -Force
+                $wfIndispRec = @{}
+                foreach ($wfIndispK in @($sync.Recommended.Keys)) { $wfIndispRec[$wfIndispK] = $sync.Recommended[$wfIndispK] }
+                $wfIndispRec[$wfIndispChave] = 'linha sintética do SelfTest'
+                $sync.Recommended = $wfIndispRec
+                Update-WinForgeDiagnosticsTab
+                $wfIndispLinha = $sync.WinForgeDiagMirrors[$wfIndispChave]
+                if ($null -eq $wfIndispLinha) { throw "a linha da recomendação indisponível não foi criada" }
+                if ($wfIndispLinha.IsEnabled) { Write-Host "  [ERRO] recomendação indisponível: a linha nasceu habilitada" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfIndispLinha.ToolTip -notmatch 'não se aplica') { Write-Host "  [ERRO] recomendação indisponível: a dica não diz que o item não se aplica ('$($wfIndispLinha.ToolTip)')" -ForegroundColor Red; $wbErrors++ }
+                $wfIndispHab = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync.WinForgeDiagMirrors[$_].IsEnabled }).Count
+                if (@($sync.WinForgeDiagMirrors.Keys).Count -ne ($wfIndispHab + 1)) { Write-Host "  [ERRO] recomendação indisponível: esperado exatamente 1 linha desabilitada, veio $(@($sync.WinForgeDiagMirrors.Keys).Count - $wfIndispHab)" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFDiagRecCount.Text -ne "0 de $wfIndispHab recomendados marcados") { Write-Host "  [ERRO] recomendação indisponível: contador '$($sync.WPFDiagRecCount.Text)', esperado '0 de $wfIndispHab recomendados marcados' (a linha desabilitada não entra no total)" -ForegroundColor Red; $wbErrors++ }
+                $wfIndispTodos = Set-WinForgeDiagRecommendationSelection -Checked $true
+                if ($wfIndispLinha.IsChecked) { Write-Host "  [ERRO] recomendação indisponível: 'Marcar todos' marcou a linha desabilitada" -ForegroundColor Red; $wbErrors++ }
+                if ($wfIndispTodos -ne $wfIndispHab) { Write-Host "  [ERRO] recomendação indisponível: 'Marcar todos' marcou $wfIndispTodos linha(s), esperado $wfIndispHab" -ForegroundColor Red; $wbErrors++ }
+                $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+                Write-Host "  Recomendação indisponível: linha desabilitada com dica, fora do total do contador ($wfIndispHab disponível(is))"
+            } finally {
+                $sync.Recommended = $wfIndispRecAntes
+                $sync.configs.tweaks.PSObject.Properties.Remove($wfIndispChave)
+                Update-WinForgeDiagnosticsTab
+                $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+            }
+        } catch {
+            Write-Host "  [ERRO] recomendação indisponível: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # Roda do mouse sobre as tabelas: o DataGrid tem rolagem própria e engolia a roda, deixando a
+        # aba inteira parada. O conserto repassa o evento ao ScrollViewer da aba - e é isso que se
+        # prova aqui, sem depender de a janela estar na tela.
+        try {
+            if (-not $sync.WinForgeDiagWheelHooked) { Write-Host "  [ERRO] roda do mouse: `$sync.WinForgeDiagWheelHooked não foi ligado por Initialize-WinForgeDiagnosticsTab" -ForegroundColor Red; $wbErrors++ }
+            $sync.WinForgeTesteRoda = 0
+            $wfRodaHandler = [System.Windows.Input.MouseWheelEventHandler] { param($eventSender, $eventArgs) $sync.WinForgeTesteRoda = $sync.WinForgeTesteRoda + 1 }
+            # handledEventsToo: o próprio ScrollViewer trata MouseWheelEvent num class handler (é ele
+            # que rola a aba, que é o que se quer) e marca o evento como tratado ANTES de qualquer
+            # handler de instância. Sem o terceiro argumento esta sonda nunca seria chamada.
+            $sync.WPFDiagScroll.AddHandler([System.Windows.UIElement]::MouseWheelEvent, $wfRodaHandler, $true)
+            try {
+                foreach ($wfGradeRoda in @($sync.WPFDiagDrivers, $sync.WPFDiagWU)) {
+                    $wfRodaArgs = New-Object System.Windows.Input.MouseWheelEventArgs([System.Windows.Input.Mouse]::PrimaryDevice, 0, -120)
+                    $wfRodaArgs.RoutedEvent = [System.Windows.UIElement]::PreviewMouseWheelEvent
+                    $wfGradeRoda.RaiseEvent($wfRodaArgs)
+                }
+            } finally {
+                $sync.WPFDiagScroll.RemoveHandler([System.Windows.UIElement]::MouseWheelEvent, $wfRodaHandler)
+            }
+            if ($sync.WinForgeTesteRoda -ne 2) { Write-Host "  [ERRO] roda do mouse: o ScrollViewer da aba recebeu $($sync.WinForgeTesteRoda) evento(s), esperado 2 (tabela de drivers e tabela do Windows Update)" -ForegroundColor Red; $wbErrors++ }
+            # Rolagem de verdade: a janela nunca foi mostrada, então o layout é forçado na mão. Onde
+            # o WPF sem tela não produz conteúdo mais alto que a viewport, a conferência acima (o
+            # evento chegou ao ScrollViewer) é o que resta - e é ela que pega a regressão.
+            $wfRodaOffset = 'sem layout (o WPF sem janela na tela não gerou conteúdo maior que a viewport)'
+            try {
+                $sync.WPFTabNav.SelectedItem = $sync.WPFTab8
+                $sync.Form.Width = 1200
+                $sync.Form.Height = 400
+                # Layout na mão: a janela do SelfTest nunca é mostrada, então nada dispara Measure/
+                # Arrange sozinho. Medir o ScrollViewer direto é o que dá extensão ao conteúdo e faz
+                # ScrollableHeight deixar de ser zero.
+                $sync.Form.Measure((New-Object System.Windows.Size(1200, 400)))
+                $sync.Form.Arrange((New-Object System.Windows.Rect(0, 0, 1200, 400)))
+                $sync.WPFDiagScroll.Measure((New-Object System.Windows.Size(1160, 300)))
+                $sync.WPFDiagScroll.Arrange((New-Object System.Windows.Rect(0, 0, 1160, 300)))
+                $sync.WPFDiagScroll.UpdateLayout()
+                if ($sync.WPFDiagScroll.ScrollableHeight -gt 0) {
+                    $sync.WPFDiagScroll.ScrollToVerticalOffset(0)
+                    $sync.WPFDiagScroll.UpdateLayout()
+                    $wfRodaArgs2 = New-Object System.Windows.Input.MouseWheelEventArgs([System.Windows.Input.Mouse]::PrimaryDevice, 0, -120)
+                    $wfRodaArgs2.RoutedEvent = [System.Windows.UIElement]::PreviewMouseWheelEvent
+                    $sync.WPFDiagDrivers.RaiseEvent($wfRodaArgs2)
+                    $sync.WPFDiagScroll.UpdateLayout()
+                    $wfRodaOffset = [string]$sync.WPFDiagScroll.VerticalOffset
+                    if ($sync.WPFDiagScroll.VerticalOffset -le 0) { Write-Host "  [ERRO] roda do mouse: a roda sobre a tabela não rolou a aba (VerticalOffset = $($sync.WPFDiagScroll.VerticalOffset))" -ForegroundColor Red; $wbErrors++ }
+                }
+            } catch {
+                $wfRodaOffset = "layout sem tela indisponível ($($_.Exception.Message))"
+            }
+            Write-Host "  Roda do mouse sobre as tabelas: repassada ao ScrollViewer da aba ($($sync.WinForgeTesteRoda) evento(s)) | rolagem: $wfRodaOffset"
+        } catch {
+            Write-Host "  [ERRO] roda do mouse: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         }
         $wbLogo = Invoke-WinForgeAssets -Type "logo" -Size 25
         if ($null -eq $wbLogo -or @($wbLogo.Child.Children).Count -ne 4) { Write-Host "  [ERRO] logo: esperado 4 paths no canvas" -ForegroundColor Red; $wbErrors++ } else { Write-Host "  Logo: OK" }
@@ -2424,7 +3714,29 @@ if ($SelfTest) {
             $wbLabelAntes = $sync.ProfileJobLabel
             if ((Set-WinForgeProfileProgress -Label "não deveria aparecer" -Percent 50) -ne $false) { Write-Host "  [ERRO] job: escreveu na barra com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
             if ($sync.ProfileJobLabel -ne $wbLabelAntes) { Write-Host "  [ERRO] job: rótulo da barra mudou com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            # Uma AÇÃO de botão é o contrário do diagnóstico automático: o usuário clicou e está
+            # esperando resposta, então ela escreve mesmo com outro trabalho em andamento - senão o
+            # resultado do download ia só para o log. Janela fechando continua sendo recusa, porque
+            # escrever é um Dispatcher.Invoke e o Dispatcher já está desligando.
+            if ((Set-WinForgeDiagProgress -Label "ação do usuário com trabalho em andamento" -Percent 50) -ne $true) { Write-Host "  [ERRO] barra: Set-WinForgeDiagProgress cedeu a vez com ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
             $sync.ProcessRunning = $false
+            $sync.WinForgeClosing = $true
+            if ((Set-WinForgeDiagProgress -Label "não deveria aparecer" -Percent 50) -ne $false) { Write-Host "  [ERRO] barra: Set-WinForgeDiagProgress escreveu com a janela fechando" -ForegroundColor Red; $wbErrors++ }
+            $sync.WinForgeClosing = $false
+            # E as duas ações da aba usam ESTA função, não a que cede a vez.
+            foreach ($wfBarraFn in @('Invoke-WinForgeDriverAction', 'Invoke-WinForgeWindowsUpdateAction')) {
+                $wfBarraDef = [string](Get-Command $wfBarraFn).ScriptBlock
+                if ($wfBarraDef -match 'Set-WinForgeProfileProgress') { Write-Host "  [ERRO] barra: $wfBarraFn ainda escreve pela função que cede a vez" -ForegroundColor Red; $wbErrors++ }
+                if ($wfBarraDef -notmatch 'Set-WinForgeDiagProgress') { Write-Host "  [ERRO] barra: $wfBarraFn não escreve na barra" -ForegroundColor Red; $wbErrors++ }
+                # Um trabalho por vez vale para os dois tipos de trava: comando e processo.
+                if ($wfBarraDef -notmatch '\$sync\.CommandRunning -or \$sync\.ProcessRunning') { Write-Host "  [ERRO] barra: $wfBarraFn não recusa com `$sync.ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E o corpo do download cala o medidor de progresso do Invoke-WebRequest: no PowerShell
+            # 5.1 ele emite um registro por bloco lido e fica uma ordem de grandeza mais lento num
+            # arquivo de 700 MB. O corpo do download mora no callback da confirmação; o da consulta
+            # ao vivo, na própria função - os dois chamam a rede, os dois calam o medidor.
+            if ([string]${function:Invoke-WinForgeDriverAction} -notmatch "ProgressPreference = 'SilentlyContinue'") { Write-Host "  [ERRO] barra: o corpo da consulta ao vivo não desliga `$ProgressPreference" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.WinForgeDriverConfirmCallback -notmatch "ProgressPreference = 'SilentlyContinue'") { Write-Host "  [ERRO] barra: o corpo do download não desliga `$ProgressPreference" -ForegroundColor Red; $wbErrors++ }
             Write-Host "  Job de diagnóstico: OK | barra: $($sync.ProfileJobLabel)"
         } catch {
             Write-Host "  [ERRO] job de diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -2604,29 +3916,289 @@ $src = Replace-Once $src '    $winutilTextBlock.Text = "WinUtil"' '    $winutilT
 # links file:// nos diálogos (NOTICE.txt dos Créditos): abre pelo caminho local, sem %20 na URL
 $src = Replace-Once $src 'Start-Process $eventSender.NavigateUri.AbsoluteUri' 'if ($eventSender.NavigateUri.IsFile) { Start-Process $eventSender.NavigateUri.LocalPath } else { Start-Process $eventSender.NavigateUri.AbsoluteUri }' "dialog file link"
 
+# ---------------------------------------------------------------- sistema visual: tokens de tema
+# Antes dos estilos e do XAML: os gabaritos abaixo só referenciam nomes de token, e é aqui que os
+# valores por trás desses nomes deixam de ser os da base.
+$src = Set-WinForgeThemeTokens $src $WinForgeTheme $WinForgeThemeNovos
+
+# ---------------------------------------------------------------- sistema visual: estilos
+# Cada gabarito reescrito entra NO LUGAR do original. Acrescentar no fim do dicionário não serve:
+# duas entradas com a mesma chave (ou dois estilos implícitos para o mesmo TargetType) estouram ao
+# carregar o XAML, e mover o Button implícito para o fim quebraria o FilterChipStyle, que o
+# referencia por StaticResource algumas linhas acima.
+$src = Replace-Between $src @'
+        <Style TargetType="Label">
+'@ @'
+        <Style x:Key="TabToggleButton"
+'@ ((Get-WinForgeStyleSection $xamlStyles 'texto') + "`n`n") "estilos: rótulo e texto"
+
+$src = Replace-Between $src @'
+        <Style x:Key="TabToggleButton" TargetType="{x:Type ToggleButton}">
+'@ @'
+        <Style x:Key="ToggleButtonStyle" TargetType="ToggleButton">
+'@ ((Get-WinForgeStyleSection $xamlStyles 'abas-e-botoes') + "`n`n") "estilos: abas e botões"
+
+$src = Replace-Between $src @'
+        <Style TargetType="CheckBox">
+'@ @'
+        <Style TargetType="RadioButton">
+'@ ((Get-WinForgeStyleSection $xamlStyles 'caixas') + "`n") "estilos: caixas de seleção"
+
+$src = Replace-Between $src @'
+        <Style x:Key="BorderStyle" TargetType="Border">
+'@ @'
+        <Style TargetType="TextBox">
+'@ ((Get-WinForgeStyleSection $xamlStyles 'cartoes') + "`n`n") "estilos: cartões"
+
+# Estilos que a base não tem entram no fim do dicionário - não há chave para colidir.
+$src = Insert-Before $src "    </Window.Resources>" ((Get-WinForgeStyleSection $xamlStyles 'novos') + "`n") "estilos: tabelas"
+
+# Botões declarados nas configs (barra lateral da aba Instalar, painéis de Config e Atualizações)
+# nasciam alinhados à esquerda e, sem a largura fixa de 200 px que o estilo da base impunha,
+# cada um passou a ter a largura do próprio rótulo - uma coluna com a borda direita serrilhada.
+# Esticados, a coluna volta a ter uma borda só.
+$src = Replace-Once $src '                        $button.HorizontalAlignment = "Left"' '                        $button.HorizontalAlignment = "Stretch"' "alinhamento dos botões das configs"
+# A largura declarada na config (ButtonWidth) sai de cena: com Width fixa e HorizontalAlignment
+# "Stretch" o WPF trata o botão como "Center", e a aba Configurações ficava com uma fileira de
+# botões de 350 px boiando no meio de uma coluna de 700 (foto light/04 da Tarefa 6). A Tarefa 6
+# contornou devolvendo "Left" a esses botões, o que só trocou o defeito de lugar: a coluna voltava
+# a ter a borda direita serrilhada. Sem largura nenhuma, todo botão de config estica na coluna e a
+# coluna tem uma borda só. O campo continua no JSON da base - passa a ser ignorado.
+$src = Replace-Once $src @'
+                        if ($entryInfo.ButtonWidth) {
+                            $baseWidth = [int]$entryInfo.ButtonWidth
+                            $button.Width = [math]::Max($baseWidth, 350)
+                        }
+'@ @'
+                        # WinForge: ButtonWidth da config é ignorado - o botão estica na coluna.
+'@ "botão da config estica na coluna"
+
+# A ordem dos botões da barra lateral da aba Instalar. A base ordena por tipo e depois pelo TEXTO,
+# e o campo "Order" do JSON (que existe só em appnavigation, nas 11 entradas daquela barra) não é
+# lido em lugar nenhum: em inglês a ordem alfabética ainda entregava "Install/Upgrade" primeiro por
+# acaso; em português virou "Atualizar todos, Desinstalar, Instalar/atualizar" - a ação principal
+# no fim. Aqui o Order passa a valer, e o texto continua desempatando quem não o declara.
+$src = Replace-Once $src @'
+            ButtonWidth = $entryInfo.ButtonWidth
+            GroupName   = $entryInfo.GroupName  # Added for RadioButton groupings
+'@ @'
+            ButtonWidth = $entryInfo.ButtonWidth
+            Order       = $entryInfo.Order
+            GroupName   = $entryInfo.GroupName  # Added for RadioButton groupings
+'@ "campo Order no objeto de entrada"
+$src = Replace-Once $src @'
+            }}, Content
+'@ @'
+            }}, @{Expression = { if ($_.Order) { [int]$_.Order } else { [int]::MaxValue } }}, Content
+'@ "ordem declarada antes da alfabética"
+
+# O hover do rótulo de categoria pintava a letra de branco fixo: no tema Claro é branco sobre
+# fundo claro, ou seja, some. A cor de título serve nos dois temas.
+$src = Replace-Once $src @'
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="White" />
+                </Trigger>
+'@ @'
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource LabelboxForegroundColor}" />
+                </Trigger>
+'@ "hover do rótulo de categoria"
+
+# ---------------------------------------------------------------- varredura visual (Tarefa 7)
+# Estado desabilitado dos gabaritos que a base não deixou o WinForge reescrever (HoverButtonStyle,
+# ToggleButtonStyle, FilterChipStyle e o botão de janela): a base pintava o fundo com
+# ButtonBackgroundSelectedColor - que no WinForge é o AZUL DE SELEÇÃO -, ou seja, um controle
+# desabilitado ficava com a mesma cor de um selecionado. Aqui vale a mesma regra dos gabaritos
+# novos: fundo normal e 50 % de opacidade. Some junto o 'DimGray' fixo, que não é de tema nenhum.
+$src = Replace-All $src @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="BackgroundBorder" Property="Background" Value="{DynamicResource ButtonBackgroundSelectedColor}"/>
+                                <Setter Property="Foreground" Value="DimGray"/>
+                            </Trigger>
+'@ @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="BackgroundBorder" Property="Background" Value="{DynamicResource ButtonBackgroundColor}"/>
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+'@ "desabilitado sem a cor de seleção (BackgroundBorder)"
+$src = Replace-Once $src @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ChipBorder" Property="Background" Value="{DynamicResource ButtonBackgroundSelectedColor}"/>
+                                <Setter Property="Foreground" Value="DimGray"/>
+                            </Trigger>
+'@ @'
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ChipBorder" Property="Background" Value="{DynamicResource ButtonBackgroundColor}"/>
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+'@ "desabilitado sem a cor de seleção (ChipBorder)"
+
+# Faixa de progresso/situação do rodapé: fundo de cartão e um fio de 1 px em cima, como pede o
+# design (§7, "barra de status com fundo do cartão"). Com o fundo da janela ela não se separava
+# do conteúdo - a barra aparecia como se fosse mais uma linha da aba.
+$src = Replace-Once $src `
+    '<Border Name="WPFTweaksProgressBar" Grid.Row="3" Background="{DynamicResource MainBackgroundColor}" Visibility="Collapsed" Padding="10,6">' `
+    '<Border Name="WPFTweaksProgressBar" Grid.Row="3" Background="{DynamicResource CardBackgroundColor}" BorderBrush="{DynamicResource BorderColor}" BorderThickness="0,1,0,0" Visibility="Collapsed" Padding="10,6">' `
+    "fundo da barra de status"
+$src = Replace-Once $src `
+    '<TextBlock Name="WPFTweaksProgressLabel" Text="" Foreground="{DynamicResource MainForegroundColor}" FontSize="13" Background="Transparent" Margin="0,0,0,4"/>' `
+    '<TextBlock Name="WPFTweaksProgressLabel" Text="" Foreground="{DynamicResource MainForegroundColor}" FontSize="{DynamicResource FontSize}" Background="Transparent" Margin="0,0,0,4"/>' `
+    "fonte da barra de status"
+
+# Painel da direita da aba ISO: era o único cartão da interface desenhado na mão (fundo da JANELA,
+# raio 5) em vez de usar BorderStyle. Ficava com a cor do fundo, sem se destacar de nada.
+$src = Replace-Once $src @'
+                                <Border Grid.Column="1"
+                                        Background="{DynamicResource MainBackgroundColor}"
+                                        BorderBrush="{DynamicResource BorderColor}"
+                                        BorderThickness="1" CornerRadius="5"
+                                        Margin="5" Padding="15">
+'@ @'
+                                <Border Grid.Column="1"
+                                        Style="{StaticResource BorderStyle}"
+                                        Margin="5" Padding="15">
+'@ "cartão do painel da ISO"
+
+# Cores fixas da aba ISO. O aviso "use uma ISO oficial" vira DiscouragedColor (é um alerta, e o
+# token existe justamente para isso). Já os TRÊS BOTÕES destrutivos perdem a cor: 'OrangeRed' num
+# botão não passa em contraste nos dois temas, e nenhum token passa - DiscouragedColor sobre o
+# fundo de botão do tema Claro dá 4,23:1 e DangerColor sobre o do Escuro dá 3,82:1. O aviso fica
+# no texto acima do botão, que está sobre cartão e passa folgado; o rótulo do botão já diz o que
+# ele faz ("APAGA O PENDRIVE").
+$src = Replace-Once $src `
+    '                                                   Foreground="OrangeRed" Margin="0,0,0,10">' `
+    '                                                   Foreground="{DynamicResource DiscouragedColor}" Margin="0,0,0,10">' `
+    "aviso da ISO oficial"
+$src = Replace-All $src "`n                                            Foreground=`"OrangeRed`"`n" "`n" "botões destrutivos da ISO sem cor fixa"
+$src = Replace-Once $src "`n                                                Foreground=`"OrangeRed`"`n" "`n" "botão de gravar no pendrive sem cor fixa"
+
+# Aba Atualizações. Os três cartões traziam título de 20 px em negrito e letra miúda de 11 - fora
+# da escala do design (títulos 15 semibold, corpo 13). O cartão "Desativar atualizações" ainda
+# pintava quatro textos de 'Red' fixo, inclusive o botão.
+$src = Replace-All $src @'
+                                                   FontSize="20"
+                                                   FontWeight="Bold"
+'@ @'
+                                                   FontSize="{DynamicResource HeaderFontSize}"
+                                                   FontWeight="SemiBold"
+'@ "títulos dos cartões de Atualizações"
+$src = Replace-All $src @'
+                                                   FontSize="11"
+'@ @'
+                                                   FontSize="12"
+'@ "letra miúda dos cartões de Atualizações"
+$src = Replace-All $src @'
+                                                   Foreground="Red"/>
+'@ @'
+                                                   Foreground="{DynamicResource DangerColor}"/>
+'@ "vermelho fixo do cartão Desativar atualizações"
+# O botão perde o vermelho pelo mesmo motivo dos botões da ISO (3,82:1 no tema Escuro). Quem passa
+# a carregar o aviso é o CONTORNO do cartão, do jeito que o cartão "Recomendado" já fazia com o
+# verde do progresso.
+$src = Replace-Once $src "`n                                            Foreground=`"Red`"`n" "`n" "botão Desativar atualizações sem cor fixa"
+$src = Replace-Once $src @'
+                            <Border Style="{StaticResource BorderStyle}" Padding="16" MinHeight="300">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Grid.Row="0" Margin="0,0,0,14">
+                                        <TextBlock Text="Disable Updates"
+'@ @'
+                            <Border Style="{StaticResource BorderStyle}"
+                                    BorderBrush="{DynamicResource DangerColor}"
+                                    BorderThickness="2"
+                                    Padding="16" MinHeight="300">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Grid.Row="0" Margin="0,0,0,14">
+                                        <TextBlock Text="Disable Updates"
+'@ "contorno do cartão Desativar atualizações"
+
 # ---------------------------------------------------------------- XAML
 $src = Replace-Once $src '        Title="WinUtil">' '        Title="WinForge">' "xaml title"
 $src = Replace-Once $src 'Header="Sponsors" Name="SponsorMenuItem"' 'Header="Créditos" Name="SponsorMenuItem"' "xaml sponsors"
 $src = Replace-Once $src 'Header="Documentation" Name="DocumentationMenuItem"' 'Header="Documentação" Name="DocumentationMenuItem"' "xaml docs"
 $src = Replace-Once $src 'Header="About" Name="AboutMenuItem"' 'Header="Sobre" Name="AboutMenuItem"' "xaml about"
 
-$src = Insert-Before $src @'
-                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
-                    Background="{DynamicResource ButtonConfigBackgroundColor}"
-'@ $xamlNav "xaml nav button"
+# A barra de navegação inteira vem do WinForge: são oito botões em ordem própria (Diagnóstico
+# primeiro, Instalar perto do fim) com rótulos em pt-BR, e emendar isso com inserções pontuais na
+# barra da base só produziria a ordem original com remendos. O NavLogoPanel continua dentro do
+# StackPanel, no mesmo lugar - é ali que o logo é desenhado em tempo de execução.
+$src = Replace-Between $src '            <!-- Navigation Buttons Panel -->' '            <!-- Search Bar and Action Buttons -->' ($xamlNav.TrimEnd() + "`n`n") "nav panel"
 
-# Depois do de Jogos e na mesma âncora: o bloco inserido por último fica mais perto dela, então o
-# botão do Diagnóstico aparece à direita do de Jogos na barra de navegação.
-$src = Insert-Before $src @'
-                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
-                    Background="{DynamicResource ButtonConfigBackgroundColor}"
-'@ $xamlDiagNav "xaml diag nav button"
+# ---------------------------------------------------------------- aba de abertura: Diagnóstico
+# A primeira tela do WinForge é o diagnóstico da máquina, não a lista de aplicativos: é ele que diz
+# o que este PC precisa, e as recomendações das outras abas saem daí.
+$src = Replace-Once $src '$sync.currentTab = "Install"' '$sync.currentTab = "Diagnostico"' "default tab variable"
+$src = Replace-Once $src '        Invoke-WPFTab "WPFTab1BT"  # Default to install tab' '        Invoke-WPFTab "WPFTab8BT"  # WinForge: abre no Diagnóstico' "default tab online"
+# Sem internet a base desviava para Ajustes "em vez da aba Instalar". Agora a aba de abertura é o
+# Diagnóstico, que funciona offline: o desvio perdeu o motivo e viraria uma aba diferente só porque
+# a máquina está sem rede.
+$src = Replace-Once $src '        Invoke-WPFTab "WPFTab2BT"  # Switch to Tweaks tab instead' '        Invoke-WPFTab "WPFTab8BT"  # WinForge: abre no Diagnóstico (funciona offline)' "default tab offline"
 
-# Por último na mesma âncora: o botão da aba Servidor fica à direita do de Diagnóstico.
-$src = Insert-Before $src @'
-                <ToggleButton Style="{StaticResource TabToggleButton}" Margin="0,0,5,0" Height="{DynamicResource TabButtonHeight}" Width="{DynamicResource TabButtonWidth}"
-                    Background="{DynamicResource ButtonConfigBackgroundColor}"
-'@ $xamlServerNav "xaml server nav button"
+# ---------------------------------------------------------------- filtros da aba Instalar
+# Os chips filtram comparando o texto da Tag com a categoria do aplicativo. Como a curadoria
+# (wf-apps.ps1) reescreve as categorias em pt-BR, um chip com Tag em inglês passa a não casar com
+# nada - por isso rótulo e Tag mudam juntos. O chip "Selfhosted Tools" some: aquele grupo foi
+# absorvido por Utilitários e o filtro ficaria vazio para sempre.
+$src = Replace-Once $src @'
+                        <ToggleButton Name="WPFSearchChipAll"             Content="All"               Style="{StaticResource FilterChipToggleStyle}" IsChecked="True"/>
+                        <ToggleButton Name="WPFSearchChipBrowsers"        Content="Browsers"          Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipCommunications"  Content="Communications"    Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDevelopment"     Content="Development"       Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDocument"        Content="Document"          Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipGames"           Content="Games"             Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMicrosoftTools"  Content="Microsoft Tools"   Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMultimediaTools" Content="Multimedia Tools"  Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipProTools"        Content="Pro Tools"         Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipSelfhostedTools" Content="Selfhosted Tools"  Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipUtilities"       Content="Utilities"         Style="{StaticResource FilterChipToggleStyle}"/>
+'@ @'
+                        <ToggleButton Name="WPFSearchChipAll"             Content="Todos"                     Style="{StaticResource FilterChipToggleStyle}" IsChecked="True"/>
+                        <ToggleButton Name="WPFSearchChipBrowsers"        Content="Navegadores"               Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipCommunications"  Content="Comunicação"               Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDevelopment"     Content="Desenvolvimento"           Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipDocument"        Content="Documentos"                Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipGames"           Content="Jogos"                     Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMicrosoftTools"  Content="Ferramentas Microsoft"     Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipMultimediaTools" Content="Multimídia"                Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipProTools"        Content="Ferramentas profissionais" Style="{StaticResource FilterChipToggleStyle}"/>
+                        <ToggleButton Name="WPFSearchChipUtilities"       Content="Utilitários"               Style="{StaticResource FilterChipToggleStyle}"/>
+'@ "xaml chips pt-BR"
+
+$src = Replace-Once $src 'ToolTip="Filter by category. Ctrl click to select more than one."' 'ToolTip="Filtra por grupo. Ctrl+clique para escolher mais de um."' "xaml chips tooltip"
+
+$src = Replace-Once $src @'
+    @{ Name = "WPFSearchChipBrowsers";        Category = "Browsers" }
+    @{ Name = "WPFSearchChipCommunications";  Category = "Communications" }
+    @{ Name = "WPFSearchChipDevelopment";     Category = "Development" }
+    @{ Name = "WPFSearchChipDocument";        Category = "Document" }
+    @{ Name = "WPFSearchChipGames";           Category = "Games" }
+    @{ Name = "WPFSearchChipMicrosoftTools";  Category = "Microsoft Tools" }
+    @{ Name = "WPFSearchChipMultimediaTools"; Category = "Multimedia Tools" }
+    @{ Name = "WPFSearchChipProTools";        Category = "Pro Tools" }
+    @{ Name = "WPFSearchChipSelfhostedTools"; Category = "Selfhosted Tools" }
+    @{ Name = "WPFSearchChipUtilities";       Category = "Utilities" }
+'@ @'
+    @{ Name = "WPFSearchChipBrowsers";        Category = "Navegadores" }
+    @{ Name = "WPFSearchChipCommunications";  Category = "Comunicação" }
+    @{ Name = "WPFSearchChipDevelopment";     Category = "Desenvolvimento" }
+    @{ Name = "WPFSearchChipDocument";        Category = "Documentos" }
+    @{ Name = "WPFSearchChipGames";           Category = "Jogos" }
+    @{ Name = "WPFSearchChipMicrosoftTools";  Category = "Ferramentas Microsoft" }
+    @{ Name = "WPFSearchChipMultimediaTools"; Category = "Multimídia" }
+    @{ Name = "WPFSearchChipProTools";        Category = "Ferramentas profissionais" }
+    @{ Name = "WPFSearchChipUtilities";       Category = "Utilitários" }
+'@ "chips pt-BR"
+
+$src = Replace-Once $src "`$sync[`"WPFSearchChipSelfhostedTools`"].Add_Click({ Invoke-WinUtilAppCategoryChip -Chip `$this })`n" '' "chip selfhosted click"
 
 $src = Insert-Before $src "        </TabControl>`n" $xamlTab "xaml games tab"
 
@@ -2642,7 +4214,7 @@ $src = Insert-Before $src "        </TabControl>`n" $xamlServerTab "xaml server 
 
 $src = Insert-After $src '                                    <Button Name="WPFAdvanced" Content=" Advanced " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}"/>' @'
 
-                                    <Button Name="WPFPresetWinForge" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Standard + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (WinForge)."/>
+                                    <Button Name="WPFPresetWinForge" Content=" WinForge " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Preset Padrão + serviços seguros, anúncios, Cortana, pesquisa, NTFS, energia e hibernação (WinForge)."/>
                                     <Button Name="WPFSelectRecommended" Content=" Marcar recomendados " Margin="2" Width="{DynamicResource ButtonWidth}" Height="{DynamicResource ButtonHeight}" ToolTip="Marca os itens que o diagnóstico recomenda para este PC (contorno verde)."/>
 '@.TrimEnd() "xaml preset button"
 
@@ -2680,6 +4252,55 @@ $src = $src -creplace 'Winutil',    'WinForge'
 $src = $src -creplace 'winutil',    'winforge'
 $src = $src -replace  'winutil',    'winforge'   # rede de segurança para qualquer outra grafia
 
+# ---------------------------------------------------------------- tradução da interface (pt-BR)
+# ÚLTIMA transformação, depois das injeções, da limpeza de marca e do rename global. O plano pedia
+# esta etapa antes da limpeza/rename; ficou depois por dois motivos concretos:
+#   1. o rename troca WinUtil por WinForge dentro de textos que estão nesta lista ("Change the
+#      WinUtil UI Theme", "settings managed by WinUtil"). Antes dele, cada par teria de usar a
+#      grafia antiga - divergindo do que o arquivo gerado mostra e do que o inventário imprime.
+#   2. a limpeza de marca reescreve um Write-Host inteiro ("Successfully uninstalled CTT PowerShell
+#      Profile."). Traduzir primeiro apagaria aquela âncora e o build quebraria ali.
+# Rodando por último, o lado esquerdo de cada par é exatamente o texto do arquivo gerado - o mesmo
+# que tools\List-EnglishStrings.ps1 lista - e nenhuma âncora anterior corre risco. A proteção contra
+# mudança do arquivo base continua igual: Replace-Once falha se o texto sumir ou ficar ambíguo, e
+# Replace-All falha se não achar nada.
+$wfI18nOnce = 0
+foreach ($pair in $WinForgeI18nStrings) {
+    $src = Replace-Once $src $pair[0] $pair[1] "i18n: $($pair[0])"
+    $wfI18nOnce++
+}
+$wfI18nHits = 0
+foreach ($pair in $WinForgeI18nRepeated) {
+    $src = Replace-All $src $pair[0] $pair[1] "i18n (repetido): $($pair[0])"
+}
+Write-Host "Tradução: $wfI18nOnce texto(s) único(s) + $($WinForgeI18nRepeated.Count) repetido(s) em $wfI18nHits ocorrência(s)"
+
+# ---------------------------------------------------------------- largura das faixas do console
+# As faixas do tipo "--   AppX Install Finished   ---" ficam entre duas linhas de "=" de largura fixa.
+# Se a tradução mudar o comprimento, o "---" da direita sai do lugar e a moldura fica torta. Aqui o
+# build reprova o par inteiro em vez de esperar alguém olhar o console.
+$wfFaixaRuim = @()
+foreach ($pair in @($WinForgeI18nStrings) + @($WinForgeI18nRepeated)) {
+    if ($pair[0] -match '^"-{2,}.*-"$' -and $pair[0].Length -ne $pair[1].Length) {
+        $wfFaixaRuim += "  |$($pair[0])| ($($pair[0].Length)) -> |$($pair[1])| ($($pair[1].Length))"
+    }
+}
+if ($wfFaixaRuim.Count) { throw "Faixa(s) do console com largura diferente do original:`n$($wfFaixaRuim -join "`n")" }
+Write-Host "Faixas do console: largura igual à do original em todas"
+
+# Trava de idioma do -SelfTest: a lista de termos é injetada AQUI, depois do laço, senão o próprio
+# laço traduziria a lista (e a trava passaria por não ter mais o que procurar).
+$wfEnglishSweep = @(
+    'Recommended Selections', 'Run Tweaks', 'Undo Selected', 'Install/Upgrade', 'Uninstall Applications',
+    'Upgrade all', 'Clear Selection', 'Collapse All', 'Expand All', 'Selected Apps', 'Show Installed',
+    'Get Installed', 'Windows Update Profiles', 'Apply Recommended', 'Restore Defaults', 'Disable Updates',
+    'Status Log', 'Browse', 'Open Microsoft Download', 'Legacy Windows Panels', 'Essential Tweaks',
+    'Customize Preferences', 'Advanced Tweaks', 'Performance Plans', 'Remote Access', 'Install Features',
+    'Package Manager', 'Free and Open Source', 'No ISO selected', 'Select Windows 11 ISO'
+) + @(' - Disable', ' - Enable', ' - Remove', ' - Run', ' - Reset', ' - Create', ' - Reinstall')
+$wfSweepLiteral = "    `$sync.WinForgeEnglishSweep = @(" + (($wfEnglishSweep | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', ') + ")`n"
+$src = Insert-After $src "    `$sync.SelfTest = `$true`n" $wfSweepLiteral "lista da trava de idioma"
+
 # ---------------------------------------------------------------- saída
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $outFile = Join-Path $OutDir "WinForge.ps1"
@@ -2696,6 +4317,107 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
 }
 Write-Host "Sintaxe PowerShell: OK"
 
+# ---------------------------------------------------------------- travas de texto no motor gerado
+# A aba de abertura é decidida em duas linhas soltas do arquivo, longe uma da outra. Replace-Once
+# já falha se a âncora sumir, mas nada impediria uma substituição posterior de desfazer o resultado
+# - por isso a conferência é sobre o texto final.
+# As DUAS linhas são cobradas separadamente e com o fim de linha junto. A conferência antiga
+# procurava só o prefixo comum aos dois comentários, e a linha OFFLINE ("... (funciona offline)")
+# o contém: bastava ela existir para o teste passar, mesmo que o caminho ONLINE tivesse voltado a
+# abrir na aba Instalar - que é o caminho normal de quem tem internet.
+foreach ($wfEsperado in @(
+    "`$sync.currentTab = `"Diagnostico`"",
+    "Invoke-WPFTab `"WPFTab8BT`"  # WinForge: abre no Diagnóstico`r`n",
+    "Invoke-WPFTab `"WPFTab8BT`"  # WinForge: abre no Diagnóstico (funciona offline)`r`n"
+)) {
+    if ($final.IndexOf($wfEsperado, [StringComparison]::Ordinal) -lt 0) { throw "Motor gerado sem a aba de abertura no Diagnóstico: falta $($wfEsperado.TrimEnd("`r","`n"))" }
+}
+if ($final.IndexOf('Invoke-WPFTab "WPFTab1BT"', [StringComparison]::Ordinal) -ge 0) { throw "Motor gerado ainda abre na aba Instalar (Invoke-WPFTab `"WPFTab1BT`")" }
+Write-Host "Aba de abertura: Diagnóstico"
+
+# Tipografia. A única fonte monoespaçada do WinForge é a da janela de saída de comandos, montada
+# em código - o XAML e a tabela de temas não podem ter nenhuma. A conferência é sobre os DOIS
+# blocos de texto que viram interface, e não sobre o arquivo inteiro: as mensagens do -SelfTest
+# falam de 'Consolas' de propósito e não são fonte de coisa nenhuma.
+function Get-WinForgeGeneratedBlock([string]$text, [string]$startAnchor, [string]$endAnchor, [string]$what) {
+    $s = $text.IndexOf($startAnchor, [StringComparison]::Ordinal)
+    if ($s -lt 0) { throw "Motor gerado: bloco '$what' não encontrado" }
+    if ($text.IndexOf($startAnchor, $s + 1, [StringComparison]::Ordinal) -ge 0) { throw "Motor gerado: bloco '$what' ambíguo" }
+    $s += $startAnchor.Length
+    $e = $text.IndexOf($endAnchor, $s, [StringComparison]::Ordinal)
+    if ($e -lt 0) { throw "Motor gerado: fim do bloco '$what' não encontrado" }
+    return $text.Substring($s, $e - $s)
+}
+$wfXamlFinal  = Get-WinForgeGeneratedBlock $final "`$inputXML = @'`r`n" "`r`n'@" 'XAML'
+$wfTemaFinal  = Get-WinForgeGeneratedBlock $final "`$sync.configs.themes = @'`r`n" "`r`n'@" 'temas'
+foreach ($wfFonteRuim in @('Consolas', 'Arial')) {
+    foreach ($wfBloco in @(@{ Nome = 'XAML'; Texto = $wfXamlFinal }, @{ Nome = 'tabela de temas'; Texto = $wfTemaFinal })) {
+        $wfQtd = ([regex]::Matches($wfBloco.Texto, $wfFonteRuim)).Count
+        if ($wfQtd -ne 0) { throw "Motor gerado: '$wfFonteRuim' aparece $wfQtd vez(es) no bloco $($wfBloco.Nome)" }
+    }
+}
+$wfMono = ([regex]::Matches($final, [regex]::Escape("New-Object System.Windows.Media.FontFamily 'Consolas'"))).Count
+if ($wfMono -ne 1) { throw "Motor gerado: esperado exatamente 1 fonte monoespaçada (a janela de saída), achei $wfMono" }
+if ($wfTemaFinal -notmatch '"HeaderFontFamily": "Segoe UI Semibold"') { throw "Motor gerado: HeaderFontFamily não é 'Segoe UI Semibold'" }
+if ($wfTemaFinal -notmatch '"FontFamily": "Segoe UI"') { throw "Motor gerado: FontFamily não é 'Segoe UI'" }
+Write-Host "Tipografia: Segoe UI no XAML e nos temas, Consolas só na janela de saída de comandos"
+
+# Cor fixa no XAML. Todo pincel da interface tem de vir do tema: cor escrita à mão só funciona num
+# dos dois temas (foi assim que 'Foreground="Red"' do cartão de Atualizações e 'OrangeRed' da aba
+# ISO atravessaram o Plano 6 inteiro). A varredura é sobre os atributos que pintam alguma coisa e
+# aceita só o que está na lista abaixo, com motivo. Cor nova = build vermelho.
+$wfCorPermitida = @{
+    'Background="Transparent"'  = 'sem pintura: o controle mostra o que está atrás'
+    'BorderBrush="Transparent"' = 'sem contorno'
+    'Fill="Transparent"'        = 'área clicável invisível'
+    'Background="#8B0000"'      = 'faixa de modo offline: par fechado com o texto branco (10:1), não segue tema'
+    'Foreground="White"'        = 'texto da faixa de modo offline, sobre o #8B0000 acima'
+    'Background="#555555"'      = 'ToggleSwitchStyle: gabarito MORTO na base (nada o referencia)'
+    'Background="Black"'        = 'ToggleSwitchStyle: gabarito MORTO na base (nada o referencia)'
+}
+$wfCorRegex = [regex]'(?<attr>Foreground|Background|BorderBrush|Fill|Stroke)="(?<val>[^"{}]+)"'
+$wfCorNovas = @{}
+foreach ($wfCorM in $wfCorRegex.Matches($wfXamlFinal)) {
+    $wfCorTexto = '{0}="{1}"' -f $wfCorM.Groups['attr'].Value, $wfCorM.Groups['val'].Value
+    if ($wfCorPermitida.ContainsKey($wfCorTexto)) { continue }
+    if (-not $wfCorNovas.ContainsKey($wfCorTexto)) { $wfCorNovas[$wfCorTexto] = 0 }
+    $wfCorNovas[$wfCorTexto]++
+}
+if ($wfCorNovas.Count) {
+    $wfCorLista = @($wfCorNovas.GetEnumerator() | Sort-Object Name | ForEach-Object { "  $($_.Name) x$($_.Value)" })
+    throw "Motor gerado: cor fixa no XAML fora da lista permitida:`n$($wfCorLista -join "`n")"
+}
+Write-Host "Cores: nenhuma cor fixa no XAML fora das $($wfCorPermitida.Count) exceções conhecidas"
+
+# Chips de grupo da aba Instalar: rótulo x Tag. São DOIS literais independentes no motor - os
+# <ToggleButton> do XAML e a tabela $sync.AppCategoryChips, que a inicialização copia para a Tag
+# de cada chip. Quem filtra é a Tag; o rótulo é só o que se lê. Traduzir um e esquecer o outro dá
+# um chip com nome certo que não casa com aplicativo nenhum, e isso não aparece em teste de tela.
+# A conferência é aqui, e não no -SelfTest, porque a tabela só é atribuída depois do bloco dele.
+$wfChipXaml = @()
+foreach ($wfChipM in [regex]::Matches($wfXamlFinal, '<ToggleButton Name="(?<n>WPFSearchChip\w+)"\s+Content="(?<c>[^"]*)"')) {
+    $wfChipXaml += [pscustomobject]@{ Name = $wfChipM.Groups['n'].Value; Content = $wfChipM.Groups['c'].Value }
+}
+if ($wfChipXaml.Count -lt 2) { throw "Motor gerado: não achei os chips de grupo no XAML" }
+$wfChipTabelaTexto = Get-WinForgeGeneratedBlock $final "`$sync.AppCategoryChips = @(`r`n" "`r`n)`r`n" 'tabela de chips'
+$wfChipTabela = @()
+foreach ($wfChipM in [regex]::Matches($wfChipTabelaTexto, '@\{\s*Name\s*=\s*"(?<n>[^"]*)";\s*Category\s*=\s*"(?<c>[^"]*)"\s*\}')) {
+    $wfChipTabela += [pscustomobject]@{ Name = $wfChipM.Groups['n'].Value; Category = $wfChipM.Groups['c'].Value }
+}
+$wfChipRuins = @()
+if (($wfChipXaml.Name -join ',') -ne ($wfChipTabela.Name -join ',')) {
+    $wfChipRuins += "os chips do XAML ($($wfChipXaml.Name -join ', ')) não são os da tabela ($($wfChipTabela.Name -join ', '))"
+} else {
+    for ($i = 0; $i -lt $wfChipXaml.Count; $i++) {
+        $wfChipEsperada = if ($wfChipXaml[$i].Name -eq 'WPFSearchChipAll') { '' } else { $wfChipXaml[$i].Content }
+        if ($wfChipTabela[$i].Category -ne $wfChipEsperada) {
+            $wfChipRuins += "$($wfChipXaml[$i].Name) mostra '$($wfChipXaml[$i].Content)' e filtra por '$($wfChipTabela[$i].Category)'"
+        }
+    }
+}
+if ($wfChipRuins.Count) { throw "Motor gerado: chips de grupo inconsistentes:`n  $($wfChipRuins -join "`n  ")" }
+Write-Host "Chips de grupo: $($wfChipXaml.Count) com rótulo e Tag iguais (o 'Todos' com Tag vazia)"
+
 # ---------------------------------------------------------------- teste de marca no motor gerado
 # Antes de gerar o doc: uma falha de marca no motor e sobre o produto e tem de aparecer primeiro.
 $brandTest = Join-Path $RepoRoot "tests\engine\Test-Brand.ps1"
@@ -2709,7 +4431,7 @@ if (-not $SkipBrandTest) {
 # (tweaks da base + wbtweaks do WinForge) e da lista de jogos de config\wb-config.ps1.
 
 # Dot-source de arquivo NAO serve aqui: o PowerShell 5.1 decodifica um .ps1 sem BOM pela code page
-# ANSI, e config\wb-config.ps1 e UTF-8 sem BOM - "Ragnarök" chegaria como "RagnarÃ¶k" no doc.
+# ANSI, e bastaria um arquivo de config perder o BOM para "Ragnarök" virar "RagnarÃ¶k" no doc.
 # Ler o texto em UTF-8 e executar um scriptblock mantem o encoding independente do BOM.
 function Get-ConfigScriptBlock([string]$relativePath) {
     $full = Join-Path $PSScriptRoot $relativePath
@@ -2756,10 +4478,70 @@ function Sort-RowsByKeyOrdinal([object[]]$rows) {
     return ,$items
 }
 
+function Get-WinForgeI18nData {
+    $sync = @{}
+    . (Get-ConfigScriptBlock "config\wf-i18n-configs.ps1")
+    return $sync
+}
+
 $auditSync  = Get-WinForgeAuditData
 $audit      = $auditSync.WinForgeAudit
 $configSync = Get-WinForgeConfigData
 $jsonTweaks = @((Get-JsonConfigBlock $src 'tweaks'), (Get-JsonConfigBlock $src 'wbtweaks'), (Get-JsonConfigBlock $src 'wfserver'))
+
+# O doc mostra o nome que o usuário vê na tela, e na tela o nome já está traduzido: sem aplicar o
+# dicionário aqui, docs\auditoria.md sairia com o Content em inglês para tudo que veio da base.
+# É a mesma tradução que Initialize-WinUtilBoostConfigs faz em tempo de execução - só que o doc lê
+# os blocos JSON direto, sem passar por lá.
+$i18nDict = (Get-WinForgeI18nData).WinForgeI18n
+
+# ------------------------------------------------- travas do dicionário por chave
+# As duas conferências que faltavam à cobertura do -SelfTest. Elas ficam AQUI e não lá porque
+# dependem do texto ORIGINAL da base, e em tempo de execução ele já não existe: a tradução é
+# aplicada em cima da própria entrada, então o -SelfTest só vê o resultado.
+#
+#   1. Content traduzido igual ao Content da base. A cobertura só perguntava "existe chave?".
+#      Uma entrada copiada e colada do inglês (ou uma tradução esquecida no meio de um lote)
+#      passava com nota máxima e ia para a tela em inglês.
+#   2. Aplicativo com 'Content' no dicionário. O bloco de aplicativos guarda o NOME DO PRODUTO em
+#      'content' e a busca de propriedade do PowerShell não diferencia maiúsculas: um 'Content' no
+#      dicionário de um aplicativo renomearia o produto (o "Firefox" viraria a tradução) e a lista
+#      de instalação deixaria de casar com o que o winget conhece.
+# Os blocos vêm de $src, e não do arquivo base: as chaves da base passam pelo rename global
+# (WPFWinUtilSSHServer -> WPFWinForgeSSHServer) e é a forma RENOMEADA que o dicionário usa. O
+# Content ainda está em inglês aqui - a tradução por chave só acontece em tempo de execução, e
+# nenhum par literal de config\wf-i18n-strings.ps1 mexe no Content de tweaks ou de feature (os
+# que mexem em "Content" são todos da barra da aba Instalar, o bloco appnavigation).
+$wfBaseTweaks = Get-JsonConfigBlock $src 'tweaks'
+$wfBaseFeature = Get-JsonConfigBlock $src 'feature'
+$wfBaseApps = Get-JsonConfigBlock $src 'applications'
+$wfDicIguais = @(); $wfDicAppContent = @(); $wfDicSemBase = @()
+foreach ($wfDicChave in @($i18nDict.Keys | Sort-Object)) {
+    $wfDicEntrada = $i18nDict[$wfDicChave]
+    $wfDicApp = $wfBaseApps.PSObject.Properties[$wfDicChave]
+    if ($wfDicApp) {
+        if ($wfDicEntrada.ContainsKey('Content')) { $wfDicAppContent += $wfDicChave }
+        continue
+    }
+    if (-not $wfDicEntrada.ContainsKey('Content')) { continue }
+    $wfDicBase = $wfBaseTweaks.PSObject.Properties[$wfDicChave]
+    if (-not $wfDicBase) { $wfDicBase = $wfBaseFeature.PSObject.Properties[$wfDicChave] }
+    if (-not $wfDicBase) { $wfDicSemBase += $wfDicChave; continue }
+    if ([string]$wfDicBase.Value.Content -eq [string]$wfDicEntrada['Content']) { $wfDicIguais += "$wfDicChave ('$($wfDicEntrada['Content'])')" }
+}
+if ($wfDicAppContent.Count) { throw "Dicionário por chave: aplicativo com 'Content' (o nome do produto não se traduz): $($wfDicAppContent -join ', ')" }
+if ($wfDicSemBase.Count) { throw "Dicionário por chave: 'Content' para chave que não existe em tweaks nem em feature da base: $($wfDicSemBase -join ', ')" }
+if ($wfDicIguais.Count) { throw "Dicionário por chave: $($wfDicIguais.Count) Content igual ao original da base (tradução esquecida): $($wfDicIguais -join ', ')" }
+Write-Host "Dicionário por chave: $(@($i18nDict.Keys).Count) entrada(s), nenhum Content igual ao original e nenhum aplicativo renomeado"
+
+foreach ($o in $jsonTweaks) {
+    foreach ($p in $o.PSObject.Properties) {
+        $t = $i18nDict[$p.Name]
+        if (-not $t -or -not $t.ContainsKey('Content')) { continue }
+        $prop = $p.Value.PSObject.Properties['Content']
+        if ($prop) { $prop.Value = $t['Content'] }
+    }
+}
 
 function Get-TweakEntry([string]$key) {
     foreach ($o in $jsonTweaks) {

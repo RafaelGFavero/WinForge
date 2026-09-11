@@ -278,19 +278,84 @@ function Test-WinForgeIisAvailable {
     }
 }
 
+function Get-WinForgeMachineDataRoot {
+    <#
+    .SYNOPSIS
+        A base pública da máquina (%ProgramData%), lida da API de pastas do Windows e NUNCA da
+        variável de ambiente.
+    .DESCRIPTION
+        %ProgramData% e %TEMP% são variáveis de USUÁRIO: moram em HKCU\Environment, qualquer
+        processo de integridade média da conta as reescreve, e o motor elevado HERDA o ambiente de
+        quem o abriu (o launcher repassa o ambiente). Com 'ProgramData=C:\Users\Public\evil' toda a
+        raiz de confiança do WinForge - a pasta de backup, a pasta de downloads e a parada da cadeia
+        de ancestrais - mudava para uma pasta do atacante, e a conferência de dono e DACL passava
+        alegremente, porque lá ele é dono de tudo.
+
+        [Environment]::GetFolderPath(CommonApplicationData) não olha o ambiente: vem de
+        SHGetFolderPath, que lê HKLM (Shell Folders da máquina). É a MESMA fonte para os dois
+        padrões (iis-backup e downloads) e para Get-WinForgeSnapshotChainStop - se um deles usasse
+        outra fonte, a cadeia conferida não seria a cadeia usada.
+
+        A reserva não volta para o ambiente: sai da pasta do sistema ([Environment]::SystemDirectory,
+        que vem de GetSystemDirectory), da qual só se aproveita a letra do volume.
+    .OUTPUTS
+        O caminho normalizado, sem barra final.
+    #>
+    $base = ''
+    try { $base = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData) } catch { $base = '' }
+    if ([string]::IsNullOrWhiteSpace($base)) {
+        try { $base = Join-Path ([System.IO.Path]::GetPathRoot([Environment]::SystemDirectory)) 'ProgramData' } catch { $base = '' }
+    }
+    if ([string]::IsNullOrWhiteSpace($base)) { return '' }
+    try { return ([System.IO.Path]::GetFullPath($base)).TrimEnd('\') } catch { return $base.TrimEnd('\') }
+}
+
+function Get-WinForgeUserDataRoot {
+    <#
+    .SYNOPSIS
+        A base do perfil do usuário (%LocalAppData%), lida da API de pastas do Windows e NUNCA da
+        variável de ambiente.
+    .DESCRIPTION
+        A mesma regra de Get-WinForgeMachineDataRoot, e pelo mesmo motivo: LOCALAPPDATA mora em
+        HKCU\Environment, qualquer processo da conta a reescreve e o motor elevado HERDA o ambiente
+        de quem o abriu. Com 'LOCALAPPDATA=C:\Users\Public\evil' o cache do catálogo, os logs e o
+        relatório HTML mudavam de pasta sem ninguém perceber - e o relatório é aberto com
+        Start-Process depois de gravado.
+
+        O que fica aqui continua sendo do usuário e gravável por ele: ler a pasta pela API tira do
+        caminho o DESVIO da variável, não transforma a pasta em raiz de confiança. É por isso que o
+        cache do catálogo da NVIDIA é de TELA e o clique em "Baixar" consulta o catálogo ao vivo
+        (Get-WinForgeNvidiaLatestDriver -NoCache); o que precisa de pasta confiável de verdade
+        (o instalador baixado) mora em Get-WinForgeMachineDataRoot, atrás de
+        Confirm-WinForgeDownloadRoot.
+
+        A reserva não volta para o ambiente: sai do perfil do usuário, também pela API de pastas.
+    .OUTPUTS
+        O caminho normalizado, sem barra final.
+    #>
+    $base = ''
+    try { $base = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData) } catch { $base = '' }
+    if ([string]::IsNullOrWhiteSpace($base)) {
+        try { $base = Join-Path ([string][Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) 'AppData\Local' } catch { $base = '' }
+    }
+    if ([string]::IsNullOrWhiteSpace($base)) { return '' }
+    try { return ([System.IO.Path]::GetFullPath($base)).TrimEnd('\') } catch { return $base.TrimEnd('\') }
+}
+
 function Get-WinForgeSnapshotRoot {
     <#
     .SYNOPSIS
         Pasta dos backups (IIS e ajustes de servidor). -Root existe para o -SelfTest não escrever em
         %ProgramData%.
     .DESCRIPTION
-        O caminho é normalizado UMA vez ([System.IO.Path]::GetFullPath): daqui para baixo todo mundo
-        conta com a mesma forma - sem '..', sem barra dupla, sem caminho relativo -, e é essa forma
-        que a checagem da cadeia de pastas confere.
+        A base vem de Get-WinForgeMachineDataRoot (API de pastas), e não de $env:ProgramData - ver
+        lá por quê. O caminho é normalizado UMA vez ([System.IO.Path]::GetFullPath): daqui para
+        baixo todo mundo conta com a mesma forma - sem '..', sem barra dupla, sem caminho relativo
+        -, e é essa forma que a checagem da cadeia de pastas confere.
     #>
     param([string]$Root)
 
-    $alvo = if ($Root) { $Root } else { (Join-Path $env:ProgramData 'WinForge\iis-backup') }
+    $alvo = if ($Root) { $Root } else { (Join-Path (Get-WinForgeMachineDataRoot) 'WinForge\iis-backup') }
     try { return [System.IO.Path]::GetFullPath($alvo) } catch { return $alvo }
 }
 
@@ -344,10 +409,55 @@ function Get-WinForgeSnapshotTrustedSid {
     return $sids
 }
 
+function Get-WinForgeSnapshotChainStop {
+    <#
+    .SYNOPSIS
+        As pastas em que a conferência de dono e DACL PARA de subir.
+    .DESCRIPTION
+        A cadeia que o WinForge controla começa na base pública em que ele se enraíza: %ProgramData%
+        na execução normal, %TEMP% nas pastas de teste. Dessas bases para cima o dono e a DACL são
+        do Windows, e cobrá-los daria falso vermelho - C:\ dá "criar pasta / acrescentar dados" ao
+        grupo Usuários, e %ProgramData% faz o mesmo. É justamente por isso que a cadeia ABAIXO delas
+        precisa ser conferida: qualquer usuário cria subpasta ali, e quem cria é dono.
+
+        Cada parada A MAIS aqui é uma pasta a MENOS conferida, então quem entra na lista importa:
+
+        - A base da máquina vem de Get-WinForgeMachineDataRoot (API de pastas), nunca de
+          $env:ProgramData. É a mesma fonte da pasta padrão, e tem de ser.
+        - O %TEMP% só entra com -ExplicitRoot, isto é, quando quem chamou passou um -Root próprio -
+          na prática o -SelfTest. Ele estava aqui SEMPRE, e como %TEMP% é variável de usuário
+          bastava apontá-la para '%ProgramData%\WinForge' para que a pasta do MEIO virasse parada e
+          saísse da conferência: é exatamente a pasta cuja ACL herdada dá FILE_DELETE_CHILD ao
+          usuário. Com -ExplicitRoot o valor sai de [System.IO.Path]::GetTempPath() - que também é
+          ambiente, e por isso mesmo só vale no caminho de teste, onde a pasta é escolhida por quem
+          chamou.
+
+        A raiz do volume também para a subida, para o caso de uma pasta fora das duas bases - essa
+        parada mora em Test-WinForgeSnapshotRootPath, que é quem sabe de que volume o caminho é.
+    .PARAMETER ExplicitRoot
+        Quem chamou passou um -Root próprio: %TEMP% entra na lista de paradas.
+    .OUTPUTS
+        Hashtable com os caminhos normalizados (sem barra final) como chaves.
+    #>
+    param([switch]$ExplicitRoot)
+
+    $bases = @((Get-WinForgeMachineDataRoot))
+    if ($ExplicitRoot) {
+        try { $bases += [System.IO.Path]::GetTempPath() } catch { }
+    }
+    $paradas = @{}
+    foreach ($base in $bases) {
+        if ([string]::IsNullOrWhiteSpace($base)) { continue }
+        try { $paradas[([System.IO.Path]::GetFullPath($base)).TrimEnd('\')] = $true } catch { }
+    }
+    return $paradas
+}
+
 function Test-WinForgeSnapshotRootPath {
     <#
     .SYNOPSIS
         Confere a CADEIA de pastas até a raiz de backup: nenhuma delas pode ser ponto de reanálise.
+        Devolve também a lista de pastas cujo dono e DACL precisam ser conferidos.
     .DESCRIPTION
         Conferir só a última pasta deixava passar o desvio mais barato de todos. %ProgramData% deixa
         qualquer usuário criar subpasta, e criar subpasta inclui criar JUNÇÃO: com
@@ -358,28 +468,51 @@ function Test-WinForgeSnapshotRootPath {
         Então o caminho é normalizado uma vez e cada ancestral EXISTENTE é conferido, da pasta final
         até a raiz do volume. Ancestral que não existe não é problema: quem o criar será o WinForge,
         com a DACL de New-WinForgeSnapshotRoot.
+
+        'Chain' é a segunda metade da resposta, e existe porque reanálise não é o único desvio: uma
+        pasta do meio criada com a ACL HERDADA de %ProgramData% dá FILE_DELETE_CHILD a um processo
+        de integridade média da mesma conta, e com isso ele RENOMEIA a última pasta e planta uma
+        junção no lugar - sem nunca deixar um ponto de reanálise onde a checagem antiga olhava. A
+        lista vem da base pública (exclusive) até a última pasta (inclusive) e na ordem de FORA para
+        DENTRO: quem recusa quer nomear o elo mais alto que quebrou, não o último.
+    .PARAMETER ExplicitRoot
+        Quem chamou passou um -Root próprio (o -SelfTest): %TEMP% também para a subida. Sem esta
+        chave a única base é a da máquina - ver Get-WinForgeSnapshotChainStop.
     .OUTPUTS
-        @{ Trusted = <bool>; Reason = <string>; Path = <caminho normalizado> }.
+        @{ Trusted = <bool>; Reason = <string>; Path = <caminho normalizado>; Chain = <string[]> }.
     #>
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$ExplicitRoot
+    )
 
     $full = $Root
     try { $full = [System.IO.Path]::GetFullPath($Root) }
-    catch { return @{ Trusted = $false; Reason = "'$Root' não é um caminho válido: $($_.Exception.Message)"; Path = $Root } }
+    catch { return @{ Trusted = $false; Reason = "'$Root' não é um caminho válido: $($_.Exception.Message)"; Path = $Root; Chain = @() } }
+
+    $paradas = Get-WinForgeSnapshotChainStop -ExplicitRoot:$ExplicitRoot
+    $raizVolume = ''
+    try { $raizVolume = [System.IO.Path]::GetPathRoot($full) } catch { $raizVolume = '' }
+    $cadeia = New-Object System.Collections.Generic.List[string]
+    $coletando = $true
 
     $atual = $full
     while ($atual) {
         $item = $null
         try { $item = Get-Item -LiteralPath $atual -Force -ErrorAction Stop } catch { $item = $null }
         if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-            return @{ Trusted = $false; Reason = "'$atual' é um ponto de reanálise (junção ou link)"; Path = $full }
+            return @{ Trusted = $false; Reason = "'$atual' é um ponto de reanálise (junção ou link)"; Path = $full; Chain = @() }
+        }
+        if ($coletando) {
+            if ($paradas.ContainsKey($atual.TrimEnd('\')) -or ($raizVolume -and $atual -eq $raizVolume)) { $coletando = $false }
+            else { $cadeia.Insert(0, $atual) }
         }
         $pai = $null
         try { $pai = Split-Path -Parent $atual } catch { $pai = $null }
         if ([string]::IsNullOrWhiteSpace($pai) -or $pai -eq $atual) { break }
         $atual = $pai
     }
-    return @{ Trusted = $true; Reason = ''; Path = $full }
+    return @{ Trusted = $true; Reason = ''; Path = $full; Chain = @($cadeia) }
 }
 
 function Find-WinForgeSnapshotUnsafeAce {
@@ -397,6 +530,13 @@ function Find-WinForgeSnapshotUnsafeAce {
         0x40000000 (GENERIC_WRITE) e 0x10000000 (GENERIC_ALL) não têm nome em FileSystemRights e
         aparecem crus numa ACE gravada por uma API antiga: sem eles, uma ACE de escrita genérica
         passaria batida.
+
+        A máscara só junta direitos ATÔMICOS de escrita. Os nomes compostos (FullControl, Modify)
+        não entram: FullControl é 0x1F01FF e Modify é 0x301BF, e os dois contêm os bits de LEITURA
+        (ReadData, ReadAttributes, Synchronize...). Somados à máscara, qualquer ACE de leitura
+        casava - uma pasta com 'Todos: Ler e executar', que é o padrão de meio %ProgramData%, era
+        recusada como se tivesse permissão de escrita. Tirá-los não afrouxa nada: uma ACE de
+        FullControl ou de Modify tem os bits de Write ligados e continua sendo pega por eles.
     .OUTPUTS
         O nome (ou o SID) de quem tem escrita indevida, ou $null se a DACL está limpa.
     #>
@@ -405,13 +545,14 @@ function Find-WinForgeSnapshotUnsafeAce {
         [Parameter(Mandatory)][hashtable]$Trusted
     )
 
-    $perigo = [int][System.Security.AccessControl.FileSystemRights]::Write -bor
-              [int][System.Security.AccessControl.FileSystemRights]::Modify -bor
-              [int][System.Security.AccessControl.FileSystemRights]::FullControl -bor
-              [int][System.Security.AccessControl.FileSystemRights]::Delete -bor
-              [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-              [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-              [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+    $perigo = [int][System.Security.AccessControl.FileSystemRights]::WriteData -bor              # 0x2
+              [int][System.Security.AccessControl.FileSystemRights]::AppendData -bor             # 0x4
+              [int][System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor # 0x10
+              [int][System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor        # 0x100
+              [int][System.Security.AccessControl.FileSystemRights]::Delete -bor                 # 0x10000
+              [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor # 0x40
+              [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor      # 0x40000
+              [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor          # 0x80000
               0x40000000 -bor 0x10000000
     foreach ($ace in $Access) {
         if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
@@ -441,8 +582,18 @@ function Test-WinForgeSnapshotRootTrusted {
         3. Ter uma ACE de permissão que dê escrita, modificação ou controle total a um SID fora da
            lista de permissão.
 
+        Os itens 2 e 3 valem para a CADEIA INTEIRA, da base da máquina exclusive (e, só com
+        -ExplicitRoot, também de %TEMP%) até a última pasta inclusive - não só para a última. Um '%ProgramData%\WinForge' criado por
+        New-Item com a herança de %ProgramData% dá FILE_DELETE_CHILD ao usuário: durante os minutos
+        de um download ele RENOMEIA 'downloads', planta uma junção no lugar e troca o arquivo entre
+        a conferência da assinatura e o Start-Process. A última pasta continuaria com dono e DACL
+        impecáveis o tempo todo. Na execução normal quem cria '%ProgramData%\WinForge' é o launcher,
+        já protegido (EngineHost.ProtectDirectory); se mesmo assim ele não passar, a recusa NOMEIA a
+        pasta - consertá-la é trabalho de administrador, não de adivinhação.
+
         Pasta inexistente é confiável: não há nada para ler, e quem a criar será o próprio WinForge,
-        com a DACL de New-WinForgeSnapshotRoot.
+        com a DACL de New-WinForgeSnapshotRoot. Qualquer OUTRA falha de leitura é recusa - conferir
+        é a única defesa que existe aqui, e uma conferência que não pôde ser feita não é um "sim".
     .PARAMETER ExplicitRoot
         Quem chamou passou um -Root próprio (na prática, o -SelfTest com uma pasta em %TEMP%): a
         identidade atual pode ser dona. SEM esta chave valem as regras da pasta padrão
@@ -459,28 +610,45 @@ function Test-WinForgeSnapshotRootTrusted {
 
     # A cadeia de pastas é conferida ANTES de a pasta existir: a junção que desvia o backup mora num
     # ancestral, e ela pode estar lá antes da primeira execução.
-    $caminho = Test-WinForgeSnapshotRootPath -Root $Root
+    $caminho = Test-WinForgeSnapshotRootPath -Root $Root -ExplicitRoot:$ExplicitRoot
     if (-not $caminho.Trusted) { return @{ Trusted = $false; Reason = $caminho.Reason } }
     $Root = $caminho.Path
-    if (-not (Test-Path -LiteralPath $Root)) { return @{ Trusted = $true; Reason = '' } }
-    try {
-        $acl = Get-Acl -LiteralPath $Root -ErrorAction Stop
-        $confiaveis = Get-WinForgeSnapshotTrustedSid -ExplicitRoot:$ExplicitRoot
-        $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot:$ExplicitRoot
-        $dono = $null
-        try { $dono = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { }
-        if ($null -eq $dono) { return @{ Trusted = $false; Reason = "não foi possível ler o dono de '$Root'" } }
-        if (-not $donos.ContainsKey($dono.Value)) {
-            $nome = $dono.Value
-            try { $nome = $dono.Translate([System.Security.Principal.NTAccount]).Value } catch { }
-            return @{ Trusted = $false; Reason = "'$Root' pertence a '$nome', fora de SYSTEM/Administradores" }
+    $confiaveis = Get-WinForgeSnapshotTrustedSid -ExplicitRoot:$ExplicitRoot
+    $donos = Get-WinForgeSnapshotTrustedSid -Owner -ExplicitRoot:$ExplicitRoot
+    # De fora para dentro: a recusa nomeia o elo mais alto que quebrou, que é o que o administrador
+    # precisa consertar - uma pasta do meio aberta explica sozinha por que a última não vale nada.
+    foreach ($dir in @($caminho.Chain)) {
+        # Pasta que NÃO EXISTE é pulada; pasta que existe e não deixa nem dizer se existe é RECUSA.
+        # Test-Path devolve $false para as duas, e com isso um ancestral inacessível saía da
+        # conferência sem deixar rastro - a única defesa que existe aqui é conferir, e o que não pôde
+        # ser conferido não é um "sim". A diferença entre "não existe" e "não posso olhar" está no
+        # tipo da exceção de GetAttributes, e não no valor de retorno.
+        $existe = $true
+        try { [void][System.IO.File]::GetAttributes($dir) }
+        catch {
+            $erro = $_.Exception
+            while ($erro.InnerException) { $erro = $erro.InnerException }
+            if ($erro -is [System.IO.DirectoryNotFoundException] -or $erro -is [System.IO.FileNotFoundException]) { $existe = $false }
+            else { return @{ Trusted = $false; Reason = "não foi possível conferir '$dir': $($erro.Message)" } }
         }
-        $mau = Find-WinForgeSnapshotUnsafeAce -Access @($acl.Access) -Trusted $confiaveis
-        if ($mau) { return @{ Trusted = $false; Reason = "'$mau' tem permissão de escrita em '$Root'" } }
-        return @{ Trusted = $true; Reason = '' }
-    } catch {
-        return @{ Trusted = $false; Reason = "não foi possível conferir '$Root': $($_.Exception.Message)" }
+        if (-not $existe) { continue }
+        try {
+            $acl = Get-Acl -LiteralPath $dir -ErrorAction Stop
+            $dono = $null
+            try { $dono = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]) } catch { }
+            if ($null -eq $dono) { return @{ Trusted = $false; Reason = "não foi possível ler o dono de '$dir'" } }
+            if (-not $donos.ContainsKey($dono.Value)) {
+                $nome = $dono.Value
+                try { $nome = $dono.Translate([System.Security.Principal.NTAccount]).Value } catch { }
+                return @{ Trusted = $false; Reason = "'$dir' pertence a '$nome', fora de SYSTEM/Administradores" }
+            }
+            $mau = Find-WinForgeSnapshotUnsafeAce -Access @($acl.Access) -Trusted $confiaveis
+            if ($mau) { return @{ Trusted = $false; Reason = "'$mau' tem permissão de escrita em '$dir'" } }
+        } catch {
+            return @{ Trusted = $false; Reason = "não foi possível conferir '$dir': $($_.Exception.Message)" }
+        }
     }
+    return @{ Trusted = $true; Reason = '' }
 }
 
 function Test-WinForgeSnapshotFileTrusted {
@@ -550,6 +718,11 @@ function New-WinForgeSnapshotRoot {
         arquivos dele - ou seja, um JSON plantado que o Desfazer aplicaria como administrador. Por
         isso a pasta nasce com a DACL escrita à mão, sem herdar nada.
 
+        E não é só a última: TODA pasta que falta na cadeia nasce com a MESMA DACL. Criar o pai com
+        um New-Item -Force (que herda) e proteger só o filho não protege nada - o pai herdado dá
+        FILE_DELETE_CHILD ao usuário, e com ele a última pasta é renomeada e trocada por uma junção
+        durante o download, sem nunca perder o dono nem ganhar atributo de reanálise.
+
         Sem elevação não dá para atribuir o grupo Administradores como dono (o Windows recusa). Nesse
         caminho - que na prática é só o -SelfTest, que usa uma pasta em %TEMP% - a pasta nasce com a
         mesma DACL protegida mais uma ACE para a identidade atual, e fica registrado no log.
@@ -559,8 +732,6 @@ function New-WinForgeSnapshotRoot {
     param([Parameter(Mandatory)][string]$Root)
 
     if (Test-Path -LiteralPath $Root) { return $true }
-    $pai = Split-Path -Parent $Root
-    if ($pai -and -not (Test-Path -LiteralPath $pai)) { New-Item -ItemType Directory -Path $pai -Force | Out-Null }
 
     $novaDacl = {
         $s = New-Object System.Security.AccessControl.DirectorySecurity
@@ -577,26 +748,44 @@ function New-WinForgeSnapshotRoot {
         return $s
     }
 
-    try {
-        $sec = & $novaDacl
-        $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null))
-        [System.IO.Directory]::CreateDirectory($Root, $sec) | Out-Null
-        Write-WinForgeLog -Component "IIS" -Message "Pasta de backup criada com DACL protegida (SYSTEM e Administradores): $Root"
-        return $true
-    } catch {
+    # As pastas que faltam, da mais alta para a mais baixa. Parar de subir no primeiro ancestral que
+    # já existe é o certo: uma pasta que já está lá não é para ser recriada nem ter a DACL reescrita
+    # - conferir se ela serve é trabalho de Test-WinForgeSnapshotRootTrusted, que recusa se não.
+    $faltando = New-Object System.Collections.Generic.List[string]
+    $atual = $Root
+    while ($atual -and -not (Test-Path -LiteralPath $atual)) {
+        $faltando.Insert(0, $atual)
+        $pai = $null
+        try { $pai = Split-Path -Parent $atual } catch { $pai = $null }
+        if ([string]::IsNullOrWhiteSpace($pai) -or $pai -eq $atual) { break }
+        $atual = $pai
+    }
+
+    foreach ($dir in $faltando) {
+        try {
+            $sec = & $novaDacl
+            $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid), $null))
+            [System.IO.Directory]::CreateDirectory($dir, $sec) | Out-Null
+            Write-WinForgeLog -Component "IIS" -Message "Pasta de backup criada com DACL protegida (SYSTEM e Administradores): $dir"
+            continue
+        } catch { }
         try {
             $sec = & $novaDacl
             $eu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
             $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $eu, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-            [System.IO.Directory]::CreateDirectory($Root, $sec) | Out-Null
-            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Pasta de backup criada sem elevação: $Root (dono é a identidade atual, DACL protegida)."
-            return $true
+            [System.IO.Directory]::CreateDirectory($dir, $sec) | Out-Null
+            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Pasta de backup criada sem elevação: $dir (dono é a identidade atual, DACL protegida)."
+            continue
+        } catch { }
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Pasta de backup criada com as permissões herdadas: $dir"
         } catch {
-            New-Item -ItemType Directory -Path $Root -Force | Out-Null
-            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Pasta de backup criada com as permissões herdadas: $Root -> $($_.Exception.Message)"
-            return (Test-Path -LiteralPath $Root)
+            Write-WinForgeLog -Component "IIS" -Level "WARN" -Message "Pasta de backup não pôde ser criada: $dir -> $($_.Exception.Message)"
+            break
         }
     }
+    return (Test-Path -LiteralPath $Root)
 }
 
 function Repair-WinForgeSnapshotRootOwnerRight {

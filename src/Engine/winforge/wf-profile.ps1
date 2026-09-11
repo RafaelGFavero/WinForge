@@ -82,6 +82,10 @@ function Get-WinForgeDriverInventory {
                 Status   = 'ok'
                 Latest   = $null
                 Url      = $null
+                # Link do INSTALADOR (só a GPU NVIDIA tem um), diferente de 'Url', que é a página do
+                # fabricante. Nasce declarado porque a linha é um pscustomobject: atribuir uma
+                # propriedade que não existe lança, e quem preenche é Update-WinForgeProfileDriverStatus.
+                LatestUrl = $null
             }
         }
 }
@@ -272,6 +276,7 @@ function Get-WinForgeSystemProfile {
                 MarketingVersion = $(if ($v -eq 'nvidia') { ConvertTo-WinForgeNvidiaVersion $_.DriverVersion } else { $null })
                 Latest           = $null
                 LatestDate       = $null
+                LatestUrl        = $null
                 LatestStatus     = 'não consultado'
             }
         })
@@ -475,7 +480,7 @@ function Get-WinForgeSimulatedProfile {
         }
         'vm' {
             if ($base.Machine) { $base.Machine.IsVirtual = $true }
-            $base.GPU = @([ordered]@{ Name = 'Microsoft Basic Display'; Vendor = 'other'; VRAMGB = $null; DriverVersion = '10.0'; DriverDate = ''; MarketingVersion = $null; Latest = $null; LatestDate = $null; LatestStatus = 'n/a' })
+            $base.GPU = @([ordered]@{ Name = 'Microsoft Basic Display'; Vendor = 'other'; VRAMGB = $null; DriverVersion = '10.0'; DriverDate = ''; MarketingVersion = $null; Latest = $null; LatestDate = $null; LatestUrl = $null; LatestStatus = 'n/a' })
         }
         'server-iis' {
             if ($base.OS) {

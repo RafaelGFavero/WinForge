@@ -1,0 +1,339 @@
+﻿<!--
+    Estilos do sistema visual do WinForge (Plano 6, seção 7 do design).
+
+    O arquivo é lido em pedaços pelo build (src\Engine\build.ps1). Cada pedaço começa numa linha
+    "@secao: <nome>" e vai até a próxima. Os pedaços que reescrevem estilo da BASE entram no lugar
+    do original, com Replace-Between - e não no fim do dicionário: dois <Style> com a mesma chave
+    (ou dois implícitos para o mesmo TargetType) no mesmo ResourceDictionary estouram ao carregar,
+    e um estilo movido para o fim quebraria quem o referencia por StaticResource mais acima
+    (FilterChipStyle usa BasedOn no Button implícito). Só o pedaço "novos" é acrescentado no fim.
+
+    As partes de gabarito levam prefixo WF no nome (WFHoverOverlay, WFSelectedAccent, WFFocusRing):
+    é por eles que o -SelfTest confere que o gabarito da base foi substituído, e não duplicado.
+
+    Movimento: 200 ms no realce, e só nele (densidade 7 / movimento 2 do design). O realce é uma
+    camada por cima com Opacity animada, em vez de ColorAnimation no pincel: os pincéis vêm do
+    dicionário de tema, são compartilhados por toda a janela e animar um deles pintaria todos os
+    controles de uma vez.
+-->
+
+@secao: texto
+
+        <!-- WinForge: rótulo e texto correm com a cor de TEXTO. Na base os dois nasciam em
+             LabelboxForegroundColor - a cor de TÍTULO, ciano no tema Escuro -, o que deixava a
+             interface inteira azul e sem hierarquia nenhuma. Título continua pedindo
+             LabelboxForegroundColor, só que na mão, onde é título de verdade. -->
+        <Style TargetType="Label">
+            <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="FontFamily" Value="{DynamicResource FontFamily}"/>
+            <Setter Property="FontSize" Value="{DynamicResource FontSize}"/>
+        </Style>
+
+        <Style TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{DynamicResource FontFamily}"/>
+            <Setter Property="FontSize" Value="{DynamicResource FontSize}"/>
+            <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+            <Setter Property="Background" Value="Transparent"/>
+        </Style>
+
+@secao: abas-e-botoes
+
+        <!-- WinForge: aba da barra de navegação. Todas com a mesma largura (TabButtonWidth), raio
+             4, realce de 200 ms e faixa de 2 px embaixo da selecionada - o azul de seleção sozinho
+             é discreto demais quando duas abas ficam lado a lado. -->
+        <Style x:Key="TabToggleButton" TargetType="{x:Type ToggleButton}">
+            <Setter Property="Content" Value=""/>
+            <Setter Property="Margin" Value="{DynamicResource ButtonMargin}"/>
+            <Setter Property="Height" Value="{DynamicResource TabButtonHeight}"/>
+            <Setter Property="FontFamily" Value="{DynamicResource FontFamily}"/>
+            <Setter Property="FontSize" Value="{DynamicResource TabButtonFontSize}"/>
+            <Setter Property="Foreground" Value="{DynamicResource ButtonForegroundColor}"/>
+            <Setter Property="Background" Value="{DynamicResource ButtonBackgroundColor}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Grid>
+                            <Border Name="WFTabBackground"
+                                    Background="{TemplateBinding Background}"
+                                    CornerRadius="{DynamicResource ButtonCornerRadius}"/>
+                            <Border Name="WFHoverOverlay"
+                                    Background="{DynamicResource ButtonBackgroundMouseoverColor}"
+                                    CornerRadius="{DynamicResource ButtonCornerRadius}"
+                                    Opacity="0"/>
+                            <Border Name="WFFocusRing"
+                                    BorderBrush="{DynamicResource LabelboxForegroundColor}"
+                                    BorderThickness="1"
+                                    CornerRadius="{DynamicResource ButtonCornerRadius}"
+                                    Visibility="Collapsed"/>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="10,0,10,0"/>
+                            <Border Name="WFSelectedAccent"
+                                    Height="2" Margin="8,0,8,0"
+                                    VerticalAlignment="Bottom"
+                                    Background="{DynamicResource TabAccentColor}"
+                                    Visibility="Collapsed"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <!-- Realce só na aba NÃO selecionada: a camada de realce é opaca, e
+                                 sobre a aba selecionada ela apagaria justamente o azul que diz
+                                 onde você está (o mouse fica parado sobre a aba que acabou de ser
+                                 clicada, então isso não é caso raro - é o caso comum). -->
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsMouseOver" Value="True"/>
+                                    <Condition Property="IsChecked" Value="False"/>
+                                </MultiTrigger.Conditions>
+                                <MultiTrigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="WFHoverOverlay" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </MultiTrigger.EnterActions>
+                                <MultiTrigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="WFHoverOverlay" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </MultiTrigger.ExitActions>
+                            </MultiTrigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="WFTabBackground" Property="Background" Value="{DynamicResource ButtonBackgroundSelectedColor}"/>
+                                <Setter TargetName="WFSelectedAccent" Property="Visibility" Value="Visible"/>
+                                <Setter Property="Foreground" Value="{DynamicResource ButtonForegroundSelectedColor}"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="WFFocusRing" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- WinForge: botão. Altura 32, raio 4, padding de 14 px e largura pelo conteúdo com
+             mínimo de 120. SEM Setter de Width: a base fixava 200 px em todo botão, e rótulo em
+             pt-BR (mais comprido que o inglês) saía cortado. Quem quiser largura fixa continua
+             pedindo Width no próprio controle. Desabilitado é 50 % de opacidade, e não cinza
+             chapado: a dica de "por que está desabilitado" continua legível por cima. -->
+        <Style TargetType="Button">
+            <Setter Property="Margin" Value="{DynamicResource ButtonMargin}"/>
+            <!-- MinHeight, e não Height: o gabarito usa o Padding do botão como margem do
+                 conteúdo, e há botão na base que pede Padding="10". Com altura TRAVADA em 32 px
+                 sobram 12 px para uma letra de 13 - o texto sai cortado em cima e embaixo. Com
+                 piso, o botão de padding maior cresce em vez de espremer. -->
+            <Setter Property="MinHeight" Value="{DynamicResource ButtonHeight}"/>
+            <Setter Property="MinWidth" Value="120"/>
+            <Setter Property="Padding" Value="14,0,14,0"/>
+            <Setter Property="FontFamily" Value="{DynamicResource ButtonFontFamily}"/>
+            <Setter Property="FontSize" Value="{DynamicResource ButtonFontSize}"/>
+            <Setter Property="Foreground" Value="{DynamicResource ButtonForegroundColor}"/>
+            <Setter Property="Background" Value="{DynamicResource ButtonBackgroundColor}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <!-- Borda de 1 px SEMPRE, nos dois temas. Sem ela o botão do tema Claro
+                                 é #E8ECF1 sobre #F8FAFC - 1,1:1 de diferença, ou seja, uma mancha
+                                 quase invisível: nas fotos da Tarefa 6 os botões de página não
+                                 pareciam controles. A borda é o que diz onde o botão começa. -->
+                            <Border Name="WFButtonBackground"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{DynamicResource BorderColor}"
+                                    BorderThickness="1"
+                                    CornerRadius="{DynamicResource ButtonCornerRadius}"/>
+                            <Border Name="WFHoverOverlay"
+                                    Background="{DynamicResource ButtonBackgroundMouseoverColor}"
+                                    CornerRadius="{DynamicResource ButtonCornerRadius}"
+                                    Opacity="0"/>
+                            <Border Name="WFFocusRing"
+                                    BorderBrush="{DynamicResource LabelboxForegroundColor}"
+                                    BorderThickness="1"
+                                    CornerRadius="{DynamicResource ButtonCornerRadius}"
+                                    Visibility="Collapsed"/>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="WFHoverOverlay" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="WFHoverOverlay" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="WFButtonBackground" Property="Background" Value="{DynamicResource ButtonBackgroundPressedColor}"/>
+                                <Setter TargetName="WFHoverOverlay" Property="Background" Value="{DynamicResource ButtonBackgroundPressedColor}"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="WFFocusRing" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+@secao: caixas
+
+        <!-- WinForge: caixa de seleção de 16 px com 3 px de folga em cima e embaixo (6 px entre
+             linhas, pelo token CheckBoxMargin). A base pintava o TEXTO com
+             ButtonBackgroundPressedColor ao passar o mouse - uma cor de FUNDO usada como cor de
+             letra, que no tema Claro virava texto quase preto sobre fundo claro por acidente.
+             Aqui quem muda no realce é a borda da caixa. -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="FontSize" Value="{DynamicResource FontSize}"/>
+            <Setter Property="FontFamily" Value="{DynamicResource FontFamily}"/>
+            <Setter Property="TextElement.FontFamily" Value="{DynamicResource FontFamily}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <Grid Background="{TemplateBinding Background}" Margin="{DynamicResource CheckBoxMargin}">
+                            <BulletDecorator Background="Transparent">
+                                <BulletDecorator.Bullet>
+                                    <Grid Width="{DynamicResource CheckBoxBulletDecoratorSize}" Height="{DynamicResource CheckBoxBulletDecoratorSize}">
+                                        <!-- Borda em ToggleButtonOffColor, e não na cor de borda
+                                             comum: a caixa VAZIA é o estado mais frequente da
+                                             tela e precisa ter contorno visível por si (a borda
+                                             de painel some contra o fundo claro do cartão). -->
+                                        <Border Name="WFCheckBox"
+                                                Background="{DynamicResource ButtonBackgroundColor}"
+                                                BorderBrush="{DynamicResource ToggleButtonOffColor}"
+                                                BorderThickness="1"
+                                                CornerRadius="3"
+                                                SnapsToDevicePixels="True"/>
+                                        <Border Name="WFFocusRing"
+                                                BorderBrush="{DynamicResource LabelboxForegroundColor}"
+                                                BorderThickness="1"
+                                                CornerRadius="3"
+                                                Visibility="Collapsed"/>
+                                        <Viewbox Name="WFCheckMark" Margin="3" Visibility="Collapsed">
+                                            <Path Stroke="{DynamicResource ToggleButtonOnColor}"
+                                                  StrokeThickness="1.6"
+                                                  Data="M 0 5 L 5 10 L 12 0"
+                                                  Stretch="Uniform"/>
+                                        </Viewbox>
+                                    </Grid>
+                                </BulletDecorator.Bullet>
+                                <ContentPresenter Margin="6,0,0,0"
+                                                  HorizontalAlignment="Left"
+                                                  VerticalAlignment="Center"
+                                                  RecognizesAccessKey="True"/>
+                            </BulletDecorator>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="WFCheckMark" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="WFCheckBox" Property="BorderBrush" Value="{DynamicResource ToggleButtonOnColor}"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="WFFocusRing" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                 </Setter.Value>
+            </Setter>
+        </Style>
+
+@secao: cartoes
+
+        <!-- WinForge: cartão/painel. Padding 12, raio 6, borda de 1 px e nenhuma sombra - a base
+             jogava um DropShadowEffect em cada painel, o que num fundo escuro só suja a borda.
+             É o estilo dos cartões do Diagnóstico e das colunas de todas as abas. -->
+        <Style x:Key="BorderStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource CardBackgroundColor}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderColor}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Margin" Value="6"/>
+        </Style>
+
+@secao: novos
+
+        <!-- WinForge: tabelas (aba Diagnóstico). Linha de 26 px, cabeçalho semibold e uma linha
+             de grade só embaixo do cabeçalho. Ficam no dicionário da janela, e não dentro de cada
+             DataGrid: eram dois blocos idênticos copiados no XAML da aba, e o terceiro sempre sai
+             diferente do segundo. -->
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="{DynamicResource CardBackgroundColor}"/>
+            <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+            <Setter Property="FontFamily" Value="{DynamicResource HeaderFontFamily}"/>
+            <Setter Property="FontSize" Value="{DynamicResource FontSize}"/>
+            <Setter Property="Padding" Value="8,6,8,6"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderColor}"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+        </Style>
+        <Style TargetType="DataGridRow">
+            <!-- 30, e não 26: a coluna "Ação" leva um botão de 22 px, e com linha de 26 sobram
+                 2 px de folga - o botão de uma linha encosta no da linha de baixo e a coluna vira
+                 uma barra contínua (apareceu em dark/11 da Tarefa 6). Com 30 a margem de 4 px do
+                 botão fecha a conta e sobram 8 px entre um botão e o seguinte. -->
+            <Setter Property="Height" Value="30"/>
+            <!-- O fundo da linha é DAQUI, e nenhum DataGrid pode escrever RowBackground: esse
+                 valor é coagido para DataGridRow.Background com precedência Local, que vence
+                 tanto este Setter quanto o gatilho de IsMouseOver abaixo. Com
+                 RowBackground="Transparent" nas duas tabelas da aba Diagnóstico o realce do
+                 mouse existia no papel e nunca aparecia na tela. O -SelfTest cobra a ausência. -->
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource AppInstallHighlightedColor}"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <!-- SEM Setter de Padding aqui: o gabarito padrão do WPF para DataGridCell é uma Border com
+             Background/BorderBrush/BorderThickness e um ContentPresenter, e NÃO amarra Padding em
+             lugar nenhum. O Setter que existia até a Tarefa 7 era escrito e ignorado - nas fotos do
+             tema Claro "SCSIADAPTER" encostava em "10.0.22029.3" e o fornecedor mais comprido
+             encostava na coluna Status, porque a largura Auto da coluna é exatamente o texto mais
+             largo, sem folga nenhuma.
+             Reescrever o gabarito da célula para amarrar o Padding FUNCIONA visualmente, mas quebra
+             a rolagem: com gabarito próprio, a roda repassada à aba deixa de mover o ScrollViewer
+             (VerticalOffset fica em 0, medido pelo -SelfTest da Tarefa 4). A folga vem então do
+             CONTEÚDO da célula - WFGridCellText abaixo -, que é o que as colunas das duas tabelas
+             do Diagnóstico usam. -->
+        <Style TargetType="DataGridCell">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        </Style>
+        <!-- Folga entre colunas: 8 px de cada lado do texto. É o ElementStyle de toda coluna de
+             texto das tabelas do Diagnóstico. -->
+        <Style x:Key="WFGridCellText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+            <Setter Property="Margin" Value="8,0,8,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>

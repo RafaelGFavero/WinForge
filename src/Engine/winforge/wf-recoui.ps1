@@ -54,6 +54,26 @@ function New-WinForgeRecoBrush {
     return $brush
 }
 
+function Set-WinForgeStatusBrush {
+    <#
+    .SYNOPSIS
+        Liga uma propriedade de pincel a um token de cor de situação do tema, com plano B.
+    .DESCRIPTION
+        Referência de recurso, e não pincel pronto: a cor de "recomendado" muda entre o tema Claro
+        e o Escuro, e quem troca de tema com a lista já desenhada não redesenha a lista - só os
+        recursos da janela mudam. Se o token não existir (janela sem tema aplicado), cai no
+        hexadecimal do plano B para nunca deixar o contorno invisível.
+    #>
+    param(
+        [Parameter(Mandatory)]$Element,
+        [Parameter(Mandatory)]$Property,
+        [Parameter(Mandatory)][string]$Resource,
+        [Parameter(Mandatory)][string]$Fallback
+    )
+    $Element.SetResourceReference($Property, $Resource)
+    if ($null -eq $Element.GetValue($Property)) { $Element.SetValue($Property, (New-WinForgeRecoBrush -Hex $Fallback)) }
+}
+
 function Update-WinForgeRecommendationVisuals {
     <#
     .SYNOPSIS
@@ -75,7 +95,9 @@ function Update-WinForgeRecommendationVisuals {
         $row = Get-WinForgeRecoRow -Key $key
         if ($null -eq $row) { continue }
         $row.Border.BorderThickness = New-Object System.Windows.Thickness(0)
-        $row.Border.BorderBrush = $null
+        # ClearValue, e não '= $null': a cor entrou como referência de recurso (Set-WinForgeStatusBrush)
+        # e um nulo local por cima deixaria a linha presa nesse nulo na próxima pintura.
+        $row.Border.ClearValue([System.Windows.Controls.Border]::BorderBrushProperty)
         $row.Tip.ToolTip = $orig[$key]
     }
 
@@ -88,25 +110,23 @@ function Update-WinForgeRecommendationVisuals {
     if ($sync.Recommended) {
         foreach ($key in @($sync.Recommended.Keys)) {
             if (-not $key) { continue }
-            $plan[$key] = @{ Hex = "#2E7D32"; Prefix = "✔ Recomendado: "; Reason = [string]$sync.Recommended[$key] }
+            $plan[$key] = @{ Resource = "RecommendedColor"; Hex = "#22C55E"; Prefix = "✔ Recomendado: "; Reason = [string]$sync.Recommended[$key] }
         }
     }
     if ($sync.Discouraged) {
         foreach ($key in @($sync.Discouraged.Keys)) {
             if (-not $key) { continue }
-            $plan[$key] = @{ Hex = "#EF6C00"; Prefix = "⚠ Não recomendado neste sistema: "; Reason = [string]$sync.Discouraged[$key] }
+            $plan[$key] = @{ Resource = "DiscouragedColor"; Hex = "#F59E0B"; Prefix = "⚠ Não recomendado neste sistema: "; Reason = [string]$sync.Discouraged[$key] }
         }
     }
 
-    $brushes = @{}
     $painted = 0
     foreach ($key in @($plan.Keys)) {
         $row = Get-WinForgeRecoRow -Key $key
         if ($null -eq $row) { continue }
 
         $item = $plan[$key]
-        if (-not $brushes.ContainsKey($item.Hex)) { $brushes[$item.Hex] = New-WinForgeRecoBrush -Hex $item.Hex }
-        $row.Border.BorderBrush = $brushes[$item.Hex]
+        Set-WinForgeStatusBrush -Element $row.Border -Property ([System.Windows.Controls.Border]::BorderBrushProperty) -Resource $item.Resource -Fallback $item.Hex
         $row.Border.BorderThickness = New-Object System.Windows.Thickness(1.5)
 
         if (-not $orig.ContainsKey($key)) { $orig[$key] = $row.Tip.ToolTip }
@@ -115,6 +135,30 @@ function Update-WinForgeRecommendationVisuals {
         $row.Tip.ToolTip = if ([string]::IsNullOrWhiteSpace($before)) { $head } else { "$head`n`n$before" }
 
         $painted++
+    }
+
+    # Caminho de volta do checklist do Diagnóstico: a caixa marcada aqui, na aba Ajustes/Jogos/
+    # Servidor, tem de acender a linha correspondente lá. É aqui porque esta função roda no fim de
+    # toda montagem de aba - é o primeiro momento em que os controles existem.
+    # Um handler por controle, e não por passada: esta função também roda a cada diagnóstico, e um
+    # handler novo por rodada escreveria N vezes na mesma linha.
+    if ($null -eq $sync.WinForgeMirrorHooked) { $sync.WinForgeMirrorHooked = @{} }
+    if ($sync.Recommended -and (Get-Command Sync-WinForgeRecommendationMirror -ErrorAction SilentlyContinue)) {
+        foreach ($key in @($sync.Recommended.Keys)) {
+            if (-not $key -or $sync.WinForgeMirrorHooked[$key]) { continue }
+            $control = $sync[$key]
+            if ($control -isnot [System.Windows.Controls.CheckBox]) { continue }
+            if (Test-WinForgeRecommendationToggle -Key $key) { continue }
+            $control.Add_Checked({
+                [System.Object]$Sender = $args[0]
+                Sync-WinForgeRecommendationMirror -Key ([string]$Sender.Name) -Checked $true
+            })
+            $control.Add_Unchecked({
+                [System.Object]$Sender = $args[0]
+                Sync-WinForgeRecommendationMirror -Key ([string]$Sender.Name) -Checked $false
+            })
+            $sync.WinForgeMirrorHooked[$key] = $true
+        }
     }
 
     # Só registra quando o número muda: esta função roda no fim de cada montagem de aba e a cada
@@ -145,6 +189,30 @@ function Set-WinForgeProfileProgress {
 
     if ($sync.WinForgeClosing -or $sync.ProcessRunning) { return $false }
     $sync.ProfileJobLabel = $Label
+    Set-WinForgeTweaksProgressIndicator -Visible $true -Label $Label -Percent $Percent
+    return $true
+}
+
+function Set-WinForgeDiagProgress {
+    <#
+    .SYNOPSIS
+        Escreve na barra de progresso em nome de uma AÇÃO pedida pelo usuário na aba Diagnóstico
+        (download de driver, instalação pelo Windows Update), mesmo com outro trabalho em andamento.
+    .DESCRIPTION
+        Set-WinForgeProfileProgress cede a vez enquanto $sync.ProcessRunning está ligado, e é o
+        certo para o diagnóstico automático: ninguém pediu por ele, e apagar o texto do trabalho que
+        o usuário está olhando seria pior que ficar calado. Uma ação de BOTÃO é o contrário disso -
+        o usuário clicou, está esperando resposta, e sem esta função o resultado do download ia só
+        para o log. Cedida a vez, escreve direto.
+        A janela fechando continua sendo recusa: escrever é um Dispatcher.Invoke, e a thread do pool
+        ficaria parada esperando um Dispatcher que já está desligando.
+    .OUTPUTS
+        $true se escreveu, $false se a janela está fechando.
+    #>
+    param([string]$Label, [int]$Percent)
+
+    if (Set-WinForgeProfileProgress -Label $Label -Percent $Percent) { return $true }
+    if ($sync.WinForgeClosing) { return $false }
     Set-WinForgeTweaksProgressIndicator -Visible $true -Label $Label -Percent $Percent
     return $true
 }

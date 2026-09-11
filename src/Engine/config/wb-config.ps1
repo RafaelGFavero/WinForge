@@ -1,4 +1,4 @@
-#region ===== WinForge - configurações adicionais =====
+﻿#region ===== WinForge - configurações adicionais =====
 
 # Entradas do WinUtil que só fazem sentido no Windows 11 (ficam ocultas no Windows 10)
 $sync.WinForgeWin11OnlyTweaks = @(
@@ -426,8 +426,8 @@ $sync.configs.wbfeatures = @'
     "function": "Invoke-WinUtilBoostCreateRestorePoint"
   },
   "WPFPanelWBRegistryBackup": {
-    "Content": "Backup do Registro - Exportar HKLM/HKCU/HKCR/HKU/HKCC",
-    "Description": "Exporta as 5 chaves raiz para arquivos .reg em %LocalAppData%\\WinForge\\Backup_Regedit\\<data>. Demora alguns minutos e ocupa centenas de MB. Origem: 'Fazer backup do Windows.bat'.",
+    "Content": "Backup do Registro - Exportar chaves raiz",
+    "Description": "Exporta as 5 chaves raiz (HKLM, HKCU, HKCR, HKU e HKCC) para arquivos .reg em %LocalAppData%\\WinForge\\Backup_Regedit\\<data>. Demora alguns minutos e ocupa centenas de MB. Origem: 'Fazer backup do Windows.bat'.",
     "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
@@ -490,7 +490,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolDnsJumper": {
     "Content": "DNS Jumper (teste e troca de DNS)",
-    "Description": "Abre o DnsJumper da pasta 'Apps' ou a página oficial da Sordum. A aba Tweaks também tem um seletor de DNS (Cloudflare, Google, etc.).",
+    "Description": "Abre o DnsJumper da pasta 'Apps' ou a página oficial da Sordum. A aba Ajustes também tem um seletor de DNS (Cloudflare, Google, etc.).",
     "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
