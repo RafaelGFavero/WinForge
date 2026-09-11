@@ -182,9 +182,12 @@ function Get-WinForgeRepairCommand {
                 Requires  = (Get-WinForgeSystemExe -Name 'netsh.exe')
                 Kind      = 'repair'
                 Stream    = $true
+                # 'utf8' no netsh: medido, ele escreve UTF-8 quando a saída é redirecionada (o 'ç'
+                # sai como 0xC3 0xA7, dois bytes). É a mesma medição que já estava anotada no
+                # levantamento do perfil e na aba Servidor; aqui a dica dizia OEM.
                 Steps     = @(
-                    @{ FilePath = (Get-WinForgeSystemExe -Name 'netsh.exe'); Arguments = @('winsock', 'reset') }
-                    @{ FilePath = (Get-WinForgeSystemExe -Name 'netsh.exe'); Arguments = @('int', 'ip', 'reset') }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'netsh.exe'); Arguments = @('winsock', 'reset'); Encoding = 'utf8' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'netsh.exe'); Arguments = @('int', 'ip', 'reset'); Encoding = 'utf8' }
                 )
                 Final     = 'Configuração de rede redefinida. Reinicie o computador.'
                 Confirm   = 'Redefine a pilha de rede com "netsh winsock reset" e "netsh int ip reset": as configurações de TCP/IP e do Winsock voltam ao padrão do Windows. É preciso reiniciar o computador para concluir.'
@@ -202,9 +205,9 @@ function Get-WinForgeRepairCommand {
                 Stream    = $true
                 Steps     = @(
                     @{ Function = 'Start-WinForgeTimeService' }
-                    @{ FilePath = (Get-WinForgeSystemExe -Name 'w32tm.exe'); Arguments = @('/config', '/update', '/manualpeerlist:pool.ntp.org,0x8', '/syncfromflags:MANUAL') }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'w32tm.exe'); Arguments = @('/config', '/update', '/manualpeerlist:pool.ntp.org,0x8', '/syncfromflags:MANUAL'); Encoding = 'oem' }
                     @{ Function = 'Restart-WinForgeTimeService' }
-                    @{ FilePath = (Get-WinForgeSystemExe -Name 'w32tm.exe'); Arguments = @('/resync') }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'w32tm.exe'); Arguments = @('/resync'); Encoding = 'oem' }
                 )
                 Final     = 'Servidor de horário configurado para pool.ntp.org.'
                 Confirm   = 'Troca o servidor NTP padrão do Windows (time.windows.com) pelo pool.ntp.org: inicia o serviço de Horário do Windows, grava a nova lista de servidores, reinicia o serviço e força uma sincronização.'
@@ -215,8 +218,17 @@ function Get-WinForgeRepairCommand {
             # que o sfc acabou de consertar), o sfc depois e o DISM por último, porque é ele que
             # repõe a imagem de onde o sfc copia os arquivos bons.
             #
-            # 'Unicode' no sfc: quando a saída dele é redirecionada, ele passa a escrever UTF-16LE.
-            # Lida como OEM, cada caractere vira uma letra seguida de um byte zero.
+            # A dica de 'Encoding' de cada passo é MEDIDA, byte a byte, com o mesmo
+            # ProcessStartInfo do fluxo ao vivo (a tabela está em Get-WinForgeOutputEncoding):
+            #
+            # - chkdsk: 'ansi'. O 'ó' dele sai como 0xF3, que é CP1252; em OEM 850 seria 0xA2.
+            #   Lido como OEM, "concluídos" chegava à janela como 'concluÝdos' e "Estágio" como
+            #   'EstÃgio' - foi assim que este desvio apareceu, numa execução elevada de verdade.
+            # - sfc: 'unicode'. Quando a saída dele é redirecionada, ele passa a escrever UTF-16LE.
+            #   Lida como OEM, cada caractere vira uma letra seguida de um byte zero.
+            # - DISM: 'oem'. Conferido com 'Dism.exe /Online /Get-Version' redirecionado: o 'õ' de
+            #   "Permissões" sai como 0xE4 e o 'ó' de "obrigatórias" como 0xA2, que são os bytes da
+            #   code page 850.
             return @{
                 Title     = 'Verificação de corrupção do sistema - Executar'
                 ConfigKey = 'WPFPanelDISM'
@@ -228,9 +240,9 @@ function Get-WinForgeRepairCommand {
                     # [Environment]::SystemDirectory), e não de $env:SystemDrive: variável de
                     # ambiente é herdada do processo pai e pode apontar para outro volume. É a mesma
                     # regra que as permissões do disco já seguem.
-                    @{ FilePath = (Get-WinForgeSystemExe -Name 'chkdsk.exe'); Arguments = @((Get-WinForgeSystemDriveRoot).TrimEnd('\'), '/scan', '/perf') }
-                    @{ FilePath = (Get-WinForgeSystemExe -Name 'sfc.exe'); Arguments = @('/scannow'); Unicode = $true }
-                    @{ FilePath = (Get-WinForgeSystemExe -Name 'Dism.exe'); Arguments = @('/Online', '/Cleanup-Image', '/RestoreHealth') }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'chkdsk.exe'); Arguments = @((Get-WinForgeSystemDriveRoot).TrimEnd('\'), '/scan', '/perf'); Encoding = 'ansi' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'sfc.exe'); Arguments = @('/scannow'); Encoding = 'unicode' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'Dism.exe'); Arguments = @('/Online', '/Cleanup-Image', '/RestoreHealth'); Encoding = 'oem' }
                 )
                 Final     = 'Verificação de corrupção concluída.'
                 Confirm   = 'Roda em sequência o chkdsk (verificação do disco do sistema, só leitura), o sfc /scannow (reparo dos arquivos protegidos do Windows) e o DISM /RestoreHealth (reparo da imagem do Windows, que baixa arquivos pela internet). Pode levar de vários minutos a mais de uma hora.'
@@ -1136,14 +1148,14 @@ function Install-WinForgeVcRedist {
         # lenta também sai com 0 e um texto de "nenhum pacote encontrado"). Quem lê a resposta é
         # Test-WinForgeWingetInstalled: a saída é uma tabela de largura fixa e o id sai CORTADO na
         # coluna, então a busca é pelo prefixo dele até o último ponto.
-        $lista = Invoke-WinForgeNativeCommand -FilePath $winget -Utf8 -Arguments @('list', '--id', $id, '-e', '--disable-interactivity', '--accept-source-agreements')
+        $lista = Invoke-WinForgeNativeCommand -FilePath $winget -Encoding 'utf8' -Arguments @('list', '--id', $id, '-e', '--disable-interactivity', '--accept-source-agreements')
         if (Test-WinForgeWingetInstalled -Id $id -ExitCode ([int]$lista.ExitCode) -Text ([string]$lista.Text)) {
             $linhas.Add("$id`: já instalado (nada a fazer)")
             $instalados++
             continue
         }
 
-        $r = Invoke-WinForgeNativeCommand -FilePath $winget -Utf8 -Arguments @(
+        $r = Invoke-WinForgeNativeCommand -FilePath $winget -Encoding 'utf8' -Arguments @(
             'install', '--id', $id, '-e', '--silent', '--disable-interactivity',
             '--accept-package-agreements', '--accept-source-agreements'
         )
@@ -1184,7 +1196,7 @@ function Install-WinForgePowerShell7 {
         return "winget não encontrado: use 'WinGet - Reinstalar' (aba Config) ou o botão 'Microsoft Store e App Installer: registrar de novo' e tente de novo."
     }
 
-    $r = Invoke-WinForgeNativeCommand -FilePath $winget -Utf8 -Arguments @(
+    $r = Invoke-WinForgeNativeCommand -FilePath $winget -Encoding 'utf8' -Arguments @(
         'install', '--id', 'Microsoft.PowerShell', '-e', '--silent', '--disable-interactivity',
         '--accept-package-agreements', '--accept-source-agreements'
     )
@@ -2159,24 +2171,41 @@ function Restore-WinForgeAclSddl {
     .SYNOPSIS
         Devolve a uma pasta a lista de permissões guardada como SDDL e, se der, o dono.
     .DESCRIPTION
-        Duas operações SEPARADAS, e a separação é o ponto: a DACL volta sempre que o chamador tiver
-        WRITE_DAC na pasta; o dono só volta com SeRestorePrivilege, e devolver a posse ao
-        TrustedInstaller costuma falhar mesmo elevado. Juntá-las faria a falha do dono derrubar a
-        volta da lista, que é a parte que o usuário está esperando.
+        Duas operações SEPARADAS, por ferramentas DIFERENTES, e a separação é o ponto: a DACL volta
+        sempre que o chamador tiver WRITE_DAC na pasta; o dono precisa de SeRestorePrivilege.
+        Juntá-las faria a falha do dono derrubar a volta da lista, que é a parte que o usuário está
+        esperando.
 
-        O descritor nasce VAZIO e recebe só a seção pedida ('Access' numa chamada, 'Owner' na
-        outra), e quem escreve é DirectoryInfo.SetAccessControl - NÃO o Set-Acl. A diferença foi
-        medida numa pasta de %TEMP%: com 'Set-Acl' um descritor que só teve SetOwner() chamado
-        REESCREVE TAMBÉM A DACL, apagando toda ACE explícita e deixando só as herdadas. Numa pasta
-        do sistema restaurada com '/inheritance:r' - onde TUDO é explícito - isso apagaria, no
-        passo do dono, exatamente a lista que o passo anterior acabou de devolver. O
-        SetAccessControl respeita as seções que o objeto marcou como modificadas: dono é dono,
-        lista é lista, e a SACL e o grupo primário ficam onde estão.
+        A LISTA volta por SDDL: o descritor nasce VAZIO, recebe só a seção 'Access' e quem escreve é
+        DirectoryInfo.SetAccessControl - NÃO o Set-Acl. A diferença foi medida numa pasta de %TEMP%:
+        com 'Set-Acl' um descritor que só teve SetOwner() chamado REESCREVE TAMBÉM A DACL, apagando
+        toda ACE explícita e deixando só as herdadas. Numa pasta do sistema restaurada com
+        '/inheritance:r' - onde TUDO é explícito - isso apagaria, no passo do dono, exatamente a
+        lista que o passo anterior acabou de devolver. O SetAccessControl respeita as seções que o
+        objeto marcou como modificadas: dono é dono, lista é lista, e a SACL e o grupo primário
+        ficam onde estão.
+
+        O DONO volta por 'icacls <pasta> /setowner *<SID> /L /Q', e não pelo .NET. O
+        SetAccessControl NUNCA habilita o SeRestorePrivilege do token: sem ele, atribuir a posse a
+        um SID que o chamador não possui - TrustedInstaller nas pastas do sistema, que é o caso que
+        importa - responde ERROR_INVALID_OWNER (1307, "o identificador de segurança não pode ser o
+        proprietário deste objeto") mesmo com o WinForge elevado, e o Desfazer devolvia a lista e
+        deixava a pasta do sistema com os Administradores como donos. O icacls habilita o
+        privilégio sozinho; é o que a fase 4 da restauração já faz no 'setowner-devolver', e agora
+        as duas pontas usam o mesmo caminho.
+
+        Três travas nesse vetor, e as três importam porque o SID vem do índice, que é um arquivo:
+        o executável é o caminho completo do System32 (Get-WinForgeSystemExe), o direito é SÓ POR
+        SID (o texto passa por SecurityIdentifier antes de virar argumento, então um
+        'Administradores' ou um '/grant:r ...' plantado no índice é recusado AQUI, sem chegar ao
+        icacls) e o '/L' é obrigatório: sem ele, uma pasta que já tenha virado ponto de reanálise
+        faria o '/setowner' trocar o dono do DESTINO do link em vez do da pasta que o backup
+        guardou.
 
         Esta é uma primitiva, e por isso NÃO tem a trava de -SelfTest: quem a chama é
         Invoke-WinForgeAclUndo, que tem. É também o que permite ao -SelfTest provar a ida e a volta
-        numa pasta descartável de %TEMP%, sem elevação (a DACL de uma pasta cujo dono é a própria
-        identidade não precisa dela).
+        numa pasta descartável de %TEMP%, sem elevação (nem a DACL nem a posse de uma pasta cuja
+        dona é a própria identidade precisam dela).
     .OUTPUTS
         @{ DaclOk; OwnerTried; OwnerOk; Reason; OwnerReason }.
     #>
@@ -2187,7 +2216,6 @@ function Restore-WinForgeAclSddl {
     )
 
     $r = @{ DaclOk = $false; OwnerTried = $false; OwnerOk = $false; Reason = ''; OwnerReason = '' }
-    $pasta = $null
     try {
         $pasta = New-Object System.IO.DirectoryInfo ([string]$Path)
         $sd = New-Object System.Security.AccessControl.DirectorySecurity
@@ -2200,14 +2228,15 @@ function Restore-WinForgeAclSddl {
     }
     if ([string]::IsNullOrWhiteSpace($OwnerSid)) { return $r }
     $r.OwnerTried = $true
-    try {
-        $so = New-Object System.Security.AccessControl.DirectorySecurity
-        $so.SetOwner((New-Object System.Security.Principal.SecurityIdentifier ([string]$OwnerSid)))
-        $pasta.SetAccessControl($so)
-        $r.OwnerOk = $true
-    } catch {
-        $r.OwnerReason = $_.Exception.Message
+    $sid = $null
+    try { $sid = [string](New-Object System.Security.Principal.SecurityIdentifier ([string]$OwnerSid)).Value } catch { $sid = '' }
+    if ([string]::IsNullOrWhiteSpace($sid)) {
+        $r.OwnerReason = "'$OwnerSid' não é um SID válido; a posse não foi tocada"
+        return $r
     }
+    $res = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'icacls.exe') -Arguments @([string]$Path, '/setowner', "*$sid", '/L', '/Q')
+    if ([int]$res.ExitCode -eq 0) { $r.OwnerOk = $true }
+    else { $r.OwnerReason = ("o icacls terminou com código {0}: {1}" -f [int]$res.ExitCode, ([string]$res.Text).Trim()) }
     return $r
 }
 
@@ -2992,25 +3021,42 @@ function Get-WinForgeAclBackupSet {
         'File'/'Target' (o arquivo de icacls do CONTEÚDO, hoje só o do perfil). Item sem 'Path' é
         ignorado; o nome de arquivo vira caminho dentro da pasta protegida e ainda passa, um a um,
         por Test-WinForgeAclBackupFile antes de virar argumento de coisa alguma.
+    .PARAMETER Trusted
+        Confere o índice por Test-WinForgeAclBackupFile ANTES de abri-lo, e devolve
+        'Refused = $true' com o motivo se ele não passar. É o caminho de verdade do Desfazer: um
+        índice recusado não chega a ser lido nem analisado, que é o que a própria descrição de
+        Test-WinForgeSnapshotFileTrusted promete ("antes de ele ser lido"). Antes a conferência
+        vinha DEPOIS do ConvertFrom-Json, e um arquivo adulterado já tinha passado pelo analisador
+        de JSON quando era recusado.
+
+        Sem o switch a leitura é crua: é o que o -DryRun usa (ele só LISTA, não roda nada) e o que
+        deixa o -SelfTest montar um conjunto numa pasta de %TEMP%, cujos arquivos pertencem à
+        identidade atual e por isso nunca passariam na regra de dono da pasta padrão.
     .OUTPUTS
-        @{ Stamp; Index; Items = @(@{ Path; Sddl; Owner; OwnerSid; File; Target }); Reason }.
+        @{ Stamp; Index; Items = @(@{ Path; Sddl; Owner; OwnerSid; File; Target }); Reason; Refused }.
     #>
-    param([string]$Root)
+    param([string]$Root, [switch]$Trusted)
 
     $dir = Get-WinForgeAclBackupRoot $Root
     if (-not (Test-Path -LiteralPath $dir)) {
-        return @{ Stamp = ''; Index = ''; Items = @(); Reason = "a pasta '$dir' não existe - nenhuma restauração foi feita nesta máquina" }
+        return @{ Stamp = ''; Index = ''; Items = @(); Refused = $false; Reason = "a pasta '$dir' não existe - nenhuma restauração foi feita nesta máquina" }
     }
     $indices = @(Get-ChildItem -LiteralPath $dir -Filter 'acl-index-*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name)
     if (-not $indices.Count) {
-        return @{ Stamp = ''; Index = ''; Items = @(); Reason = "nenhum índice de backup em '$dir'" }
+        return @{ Stamp = ''; Index = ''; Items = @(); Refused = $false; Reason = "nenhum índice de backup em '$dir'" }
     }
     $novo = $indices[$indices.Count - 1]
     $carimbo = [string]([System.IO.Path]::GetFileNameWithoutExtension($novo.Name)) -replace '^acl-index-', ''
+    if ($Trusted) {
+        $julg = Test-WinForgeAclBackupFile -Path ([string]$novo.FullName) -Root $dir
+        if (-not $julg.Trusted) {
+            return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @(); Refused = $true; Reason = $julg.Reason }
+        }
+    }
     $dados = $null
     try { $dados = Get-Content -LiteralPath $novo.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json } catch { $dados = $null }
     if ($null -eq $dados) {
-        return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @(); Reason = "o índice '$($novo.Name)' não pôde ser lido" }
+        return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @(); Refused = $false; Reason = "o índice '$($novo.Name)' não pôde ser lido" }
     }
     $itens = @()
     foreach ($it in @($dados.Items)) {
@@ -3027,7 +3073,7 @@ function Get-WinForgeAclBackupSet {
             Target   = ([string]$it.Target).Trim()
         }
     }
-    return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @($itens); Reason = '' }
+    return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @($itens); Refused = $false; Reason = '' }
 }
 
 function Invoke-WinForgeAclUndo {
@@ -3038,9 +3084,11 @@ function Invoke-WinForgeAclUndo {
         Duas formas de voltar, e a diferença é medida, não estilística:
 
         - A pasta EM SI volta pelo SDDL guardado no índice, aplicado com
-          Restore-WinForgeAclSddl (seção Access) e com uma tentativa separada de devolver o dono. O
-          'icacls /save' não serve aqui: ele grava a entrada da própria pasta com o nome VAZIO e o
-          '/restore' não a aplica - procura '<pasta>\<sddl>' e responde "arquivo não encontrado".
+          Restore-WinForgeAclSddl (seção Access) e com uma tentativa separada de devolver o dono
+          por 'icacls /setowner *<SID> /L /Q' - o .NET não habilita o SeRestorePrivilege e devolver
+          a posse ao TrustedInstaller falhava com 1307 mesmo elevado. O 'icacls /save' não serve
+          para a lista: ele grava a entrada da própria pasta com o nome VAZIO e o '/restore' não a
+          aplica - procura '<pasta>\<sddl>' e responde "arquivo não encontrado".
         - O CONTEÚDO do perfil volta por 'icacls <pasta acima> /restore <arquivo> /C /L', rodado a
           partir da pasta anotada no índice: o icacls grava nomes RELATIVOS à pasta em que foi
           invocado, e restaurar da pasta errada aplicaria a DACL de uma coisa em outra. O '/L' é
@@ -3050,11 +3098,13 @@ function Invoke-WinForgeAclUndo {
           Todos, cairia em AppData\Roaming, AppData\Local e InetCookies - trancando o usuário fora
           do próprio AppData, que é o sintoma que estes botões existem para curar.
 
-        Duas conferências antes de qualquer argumento ser montado: a PASTA
-        (Confirm-WinForgeAclBackupRoot, regras da pasta padrão) e cada ARQUIVO
-        (Test-WinForgeAclBackupFile: dentro da pasta, direto nela, dono e DACL de backup). Item
-        recusado é pulado com o motivo na tela; ele não derruba os outros, porque um backup adulterado
-        no meio do conjunto não é razão para deixar o disco pela metade.
+        Três conferências antes de qualquer argumento ser montado: a PASTA
+        (Confirm-WinForgeAclBackupRoot, regras da pasta padrão), o ÍNDICE - conferido ANTES de ser
+        aberto, pelo '-Trusted' de Get-WinForgeAclBackupSet, e não depois do ConvertFrom-Json como
+        era - e cada ARQUIVO (Test-WinForgeAclBackupFile: dentro da pasta, direto nela, dono e DACL
+        de backup). Índice recusado para tudo; arquivo recusado é pulado com o motivo na tela e não
+        derruba os outros, porque um backup adulterado no meio do conjunto não é razão para deixar
+        o disco pela metade.
 
         Sem conjunto nenhum a função apenas DIZ isso. É o caso de quem clica no Desfazer sem nunca
         ter restaurado nada, e ele não é erro.
@@ -3076,15 +3126,20 @@ function Invoke-WinForgeAclUndo {
     )
 
     $icacls = Get-WinForgeSystemExe -Name 'icacls.exe'
-    $conjunto = Get-WinForgeAclBackupSet -Root $BackupRoot
 
     if ($DryRun) {
+        $conjunto = Get-WinForgeAclBackupSet -Root $BackupRoot
         if (-not @($conjunto.Items).Count) { return @("[simulação] nada a desfazer: $($conjunto.Reason)") }
         return @($conjunto.Items | ForEach-Object {
-            if ([string]::IsNullOrWhiteSpace([string]$_.File)) {
-                "[simulação] devolver a lista (SDDL) e o dono de '$($_.Path)'"
-            } else {
+            if (-not [string]::IsNullOrWhiteSpace([string]$_.File)) {
                 "[simulação] $icacls $($_.Target) /restore $($_.File) /C /L"
+            } elseif ([string]::IsNullOrWhiteSpace([string]$_.OwnerSid)) {
+                "[simulação] devolver a lista (SDDL) de '$($_.Path)' (o índice não guardou dono)"
+            } else {
+                # O dono aparece como o COMANDO que vai rodar, e não como "e o dono": ele volta pelo
+                # icacls, que é a única forma de habilitar o SeRestorePrivilege, e quem lê a
+                # simulação precisa ver o vetor inteiro - inclusive o '/L'.
+                "[simulação] devolver a lista (SDDL) de '$($_.Path)' e o dono com $icacls $($_.Path) /setowner *$($_.OwnerSid) /L /Q"
             }
         })
     }
@@ -3104,14 +3159,15 @@ function Invoke-WinForgeAclUndo {
         Write-Error "A pasta de backup de permissões não é confiável ($($conf.Reason)). Nada foi restaurado."
         return
     }
-    $conjunto = Get-WinForgeAclBackupSet -Root $BackupRoot
-    if (-not @($conjunto.Items).Count) {
-        Write-Host "Nada a desfazer: $($conjunto.Reason)."
+    # '-Trusted': o índice é conferido ANTES de ser aberto. A ordem é a trava - um arquivo
+    # adulterado não passa nem pelo analisador de JSON.
+    $conjunto = Get-WinForgeAclBackupSet -Root $BackupRoot -Trusted
+    if ($conjunto.Refused) {
+        Write-Error "O índice do backup foi recusado ($($conjunto.Reason)). Nada foi restaurado."
         return
     }
-    $julgIndice = Test-WinForgeAclBackupFile -Path ([string]$conjunto.Index) -Root ([string]$conf.Path)
-    if (-not $julgIndice.Trusted) {
-        Write-Error "O índice do backup foi recusado ($($julgIndice.Reason)). Nada foi restaurado."
+    if (-not @($conjunto.Items).Count) {
+        Write-Host "Nada a desfazer: $($conjunto.Reason)."
         return
     }
     Write-Host "Conjunto de backup $($conjunto.Stamp): $(@($conjunto.Items).Count) item(ns) para restaurar."

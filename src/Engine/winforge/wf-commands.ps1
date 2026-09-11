@@ -201,24 +201,46 @@ function Invoke-WinForgeCommandText {
 function Get-WinForgeOutputEncoding {
     <#
     .SYNOPSIS
-        A decodificação da saída de um executável: OEM (padrão), UTF-8 ou UTF-16LE.
+        A decodificação da saída de um executável, escolhida pelo NOME: 'oem', 'ansi', 'utf8' ou
+        'unicode'.
     .DESCRIPTION
-        Os três destinos num lugar só, porque o mesmo par de switches serve aos dois caminhos de
+        Os quatro destinos num lugar só, porque o mesmo nome serve aos dois caminhos de
         Invoke-WinForgeNativeCommand (a troca de code page do processo e o StandardOutputEncoding do
         fluxo ao vivo) e escrever a escolha duas vezes é escrevê-la para envelhecer pela metade.
 
-        OEM é o padrão porque é o que netsh, w32tm, chkdsk e DISM escrevem no Brasil (850/437).
-        UTF-8 é o winget. UTF-16LE é o sfc, que muda de codificação quando a saída é redirecionada.
+        Não há regra geral: cada executável do Windows escolhe a sua, e a única forma de saber é
+        MEDIR os bytes que ele escreve quando a saída é redirecionada. Medido nesta base de código
+        numa máquina pt-BR (OEM 850, ANSI 1252), com o mesmo ProcessStartInfo do fluxo ao vivo:
+
+        - 'oem' (padrão): DISM ('õ' = 0xE4), icacls ('à' = 0x85), w32tm ('ç' = 0x87) e
+          takeown ('á' = 0xA0). São os bytes da code page 850.
+        - 'ansi': chkdsk ('ó' = 0xF3, que em 850 seria 0xA2). Era o desvio invisível: lido como
+          OEM, o "concluídos" dele chegava à janela como 'concluÝdos' e o "Estágio" como 'EstÃgio'.
+        - 'utf8': winget e netsh (o 'ç' deles sai como 0xC3 0xA7, dois bytes). O netsh já estava
+          medido assim no perfil e na aba Servidor; aqui ele estava marcado como OEM.
+        - 'unicode' (UTF-16LE): sfc, que TROCA de codificação quando a saída é redirecionada. Lido
+          como OEM, cada caractere vira uma letra seguida de um byte zero.
+
+        Nome desconhecido cai em OEM em vez de estourar: um passo com a dica errada tem de mostrar
+        acento embaralhado, não derrubar o reparo no meio. Quem cobra o nome certo é o -SelfTest,
+        que confere a dica de todo passo de executável das linhas com fluxo ao vivo.
 
         UTF8Encoding($false): sem BOM. Com BOM, os três bytes iniciais entrariam no texto da primeira
         linha da saída.
+    .PARAMETER Name
+        'oem', 'ansi', 'utf8' ou 'unicode'. Vazio ou desconhecido vale 'oem'.
     .OUTPUTS
         [System.Text.Encoding].
     #>
-    param([switch]$Utf8, [switch]$Unicode)
+    param([string]$Name = 'oem')
 
-    if ($Unicode) { return [System.Text.Encoding]::Unicode }
-    if ($Utf8) { return (New-Object System.Text.UTF8Encoding $false) }
+    switch (([string]$Name).Trim().ToLowerInvariant()) {
+        'unicode' { return [System.Text.Encoding]::Unicode }
+        'utf8' { return (New-Object System.Text.UTF8Encoding $false) }
+        'ansi' {
+            try { return [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage) } catch { return [System.Text.Encoding]::Default }
+        }
+    }
     try { return [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) } catch { return [System.Text.Encoding]::Default }
 }
 
@@ -348,14 +370,17 @@ function Invoke-WinForgeStreamedProcess {
 function Invoke-WinForgeNativeCommand {
     <#
     .SYNOPSIS
-        Roda um comando externo e devolve o texto (decodificado em OEM) junto com o código de saída.
+        Roda um comando externo e devolve o texto (decodificado como -Encoding pedir) junto com o
+        código de saída.
     .DESCRIPTION
         Duas armadilhas de executável no PowerShell moram aqui, e é por isso que existe um lugar só
         para elas - a aba Servidor e o perfil do sistema caíam nas duas em separado:
 
-        1. A code page. w32tm, netsh, dcdiag e repadmin escrevem em OEM (850/437 no Brasil); o
-           PowerShell decodifica pelo [Console]::OutputEncoding, que costuma estar em outra coisa - e
-           toda palavra acentuada chega embaralhada. A troca é PROCESSO INTEIRO, então a janela é a
+        1. A code page. w32tm, dcdiag e repadmin escrevem em OEM (850/437 no Brasil); o winget e o
+           netsh escrevem UTF-8, o chkdsk escreve ANSI e o sfc troca para UTF-16LE quando a saída é
+           redirecionada. O PowerShell decodifica pelo [Console]::OutputEncoding, que costuma estar
+           em outra coisa - e toda palavra acentuada chega embaralhada. Qual é qual está medido em
+           Get-WinForgeOutputEncoding. A troca é PROCESSO INTEIRO, então a janela é a
            menor possível: muda, roda o comando, devolve no finally. E como é do processo inteiro,
            duas runspaces do pool podem se atropelar (o levantamento do perfil e um botão da aba
            Servidor rodam em paralelo): um mutex nomeado por processo serializa trocar-rodar-devolver,
@@ -380,15 +405,11 @@ function Invoke-WinForgeNativeCommand {
         Executável a chamar. Os argumentos vão num VETOR, um a um, sem passar por interpretador:
         é o que impede um valor de backup ('x; algo-perigoso') de virar comando. Um GUID plantado
         no JSON chega ao powercfg como um argumento só - inválido, e ele reclama.
-    .PARAMETER Utf8
-        Decodifica a saída como UTF-8 em vez de OEM. É o caso do winget, que escreve UTF-8: com a
-        troca para OEM, todo acento do texto localizado dele ("Nenhum pacote instalado encontrado")
-        e dos nomes de pacote chega embaralhado ao relatório. A troca continua sendo do PROCESSO
-        INTEIRO e continua serializada pelo mesmo mutex - só o destino muda.
-    .PARAMETER Unicode
-        Decodifica a saída como UTF-16LE. É o caso do sfc: quando a saída dele é redirecionada, ele
-        escreve UTF-16, e lida como OEM cada caractere vira uma letra seguida de um byte zero
-        ("V e r i f i c a ç ã o"). O terceiro destino existe por causa dele.
+    .PARAMETER Encoding
+        Como decodificar a saída deste executável: 'oem' (padrão), 'ansi', 'utf8' ou 'unicode'. A
+        escolha é POR EXECUTÁVEL e medida, não suposta - ver Get-WinForgeOutputEncoding, que tem a
+        tabela dos bytes que cada um escreve. No caminho normal a troca é do PROCESSO INTEIRO e
+        continua serializada pelo mesmo mutex; só o destino muda.
     .PARAMETER StreamTo
         Caminho de um arquivo que recebe cada linha ASSIM QUE ELA SAI, em vez de tudo no fim. É o que
         deixa a janela de saída mostrar um sfc ou um DISM enquanto eles rodam, em vez de ficar vazia
@@ -413,8 +434,7 @@ function Invoke-WinForgeNativeCommand {
         [string]$FilePath,
         [string[]]$Arguments = @(),
         [string]$StreamTo,
-        [switch]$Utf8,
-        [switch]$Unicode
+        [string]$Encoding = 'oem'
     )
 
     if ([string]::IsNullOrWhiteSpace($Command) -and [string]::IsNullOrWhiteSpace($FilePath)) {
@@ -428,7 +448,7 @@ function Invoke-WinForgeNativeCommand {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($StreamTo)) {
-        return Invoke-WinForgeStreamedProcess -FilePath $FilePath -Arguments $Arguments -StreamTo $StreamTo -Encoding (Get-WinForgeOutputEncoding -Utf8:$Utf8 -Unicode:$Unicode)
+        return Invoke-WinForgeStreamedProcess -FilePath $FilePath -Arguments $Arguments -StreamTo $StreamTo -Encoding (Get-WinForgeOutputEncoding -Name $Encoding)
     }
 
     $encodingAnterior = $null
@@ -443,7 +463,7 @@ function Invoke-WinForgeNativeCommand {
         }
         try {
             $encodingAnterior = [Console]::OutputEncoding
-            [Console]::OutputEncoding = Get-WinForgeOutputEncoding -Utf8:$Utf8 -Unicode:$Unicode
+            [Console]::OutputEncoding = Get-WinForgeOutputEncoding -Name $Encoding
         } catch {
             $encodingAnterior = $null
         }
@@ -1056,10 +1076,12 @@ function Invoke-WinForgeStreamStep {
     .SYNOPSIS
         Roda UM passo de um comando com fluxo ao vivo e devolve o código dele.
     .DESCRIPTION
-        Um passo é @{ FilePath; Arguments; Unicode } (executável) ou @{ Function } (função do motor
-        ou da base). O que os dois têm em comum, e por isso moram aqui, é a promessa do fluxo ao
-        vivo: cada linha chega ao arquivo ASSIM QUE SAI, e o passo devolve um código que diz se
-        deu certo.
+        Um passo é @{ FilePath; Arguments; Encoding } (executável) ou @{ Function } (função do motor
+        ou da base). O 'Encoding' é a dica de decodificação DAQUELE executável ('oem', 'ansi',
+        'utf8' ou 'unicode'): não há regra geral, e a tabela medida está em
+        Get-WinForgeOutputEncoding. O que os dois têm em comum, e por isso moram aqui, é a promessa
+        do fluxo ao vivo: cada linha chega ao arquivo ASSIM QUE SAI, e o passo devolve um código que
+        diz se deu certo.
 
         No passo de FUNÇÃO o código não existe - não há processo, não há ExitCode. Antes disso ser
         admitido, o passo sempre valia 0: um 'Write-Error' ou um 'Stop-Service' que falha dentro de
@@ -1103,7 +1125,7 @@ function Invoke-WinForgeStreamStep {
 
     Write-WinForgeStreamLine -Path $Path -Text ""
     Write-WinForgeStreamLine -Path $Path -Text "> $($Step.FilePath) $(@($Step.Arguments) -join ' ')"
-    $res = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Unicode:([bool]$Step.Unicode)
+    $res = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Encoding ([string]$Step.Encoding)
     if ($null -eq $res.ExitCode) { return 0 }
     return [int]$res.ExitCode
 }
@@ -1227,7 +1249,7 @@ function Start-WinForgeStreamedCommand {
            corpo. É o que troca o cabeçalho da janela de "Em andamento" para "Concluído" e para o
            relógio, e é onde as duas travas são soltas.
 
-        Cada passo é @{ FilePath; Arguments; Unicode } (executável, com a saída indo linha a linha
+        Cada passo é @{ FilePath; Arguments; Encoding } (executável, com a saída indo linha a linha
         para o arquivo) ou @{ Function } (função do próprio motor ou da base, com todos os fluxos
         redirecionados para o mesmo arquivo). Os passos rodam em SEQUÊNCIA, na ordem da tabela: o
         chkdsk antes do sfc antes do DISM não é gosto, é dependência.

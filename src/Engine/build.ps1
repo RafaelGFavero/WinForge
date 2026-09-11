@@ -2786,6 +2786,12 @@ if ($SelfTest) {
                 if (-not [System.IO.Path]::IsPathRooted($wfStrExe)) { Write-Host "  [ERRO] Correções $wfStrNome`: '$wfStrExe' não é caminho completo" -ForegroundColor Red; $wbErrors++ }
                 elseif (-not $wfStrExe.StartsWith($wfStrSys, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Correções $wfStrNome`: '$wfStrExe' fora de '$wfStrSys'" -ForegroundColor Red; $wbErrors++ }
                 elseif (-not (Test-Path -LiteralPath $wfStrExe -PathType Leaf)) { Write-Host "  [ERRO] Correções $wfStrNome`: '$wfStrExe' não existe nesta máquina" -ForegroundColor Red; $wbErrors++ }
+                # A dica de decodificação é OBRIGATÓRIA e tem de ser um dos quatro nomes. Sem esta
+                # trava a dica some por omissão e o passo cai calado em OEM - que foi exatamente o
+                # que aconteceu com o chkdsk, cujo "concluídos" chegava à janela como 'concluÝdos'.
+                $wfStrDica = ([string]$wfStrPasso.Encoding).Trim().ToLowerInvariant()
+                if ([string]::IsNullOrWhiteSpace($wfStrDica)) { Write-Host "  [ERRO] Correções $wfStrNome`: o passo '$(Split-Path -Leaf $wfStrExe)' não diz como decodificar a saída (Encoding)" -ForegroundColor Red; $wbErrors++ }
+                elseif (@('oem', 'ansi', 'utf8', 'unicode') -notcontains $wfStrDica) { Write-Host "  [ERRO] Correções $wfStrNome`: Encoding '$wfStrDica' desconhecido (oem, ansi, utf8 ou unicode)" -ForegroundColor Red; $wbErrors++ }
             }
         }
         # A verificação de corrupção é chkdsk, sfc e DISM, NESTA ORDEM: o disco primeiro (um setor
@@ -2802,6 +2808,73 @@ if ($SelfTest) {
         Write-Host "  Correções (tabela): $($wfStrNomes.Count) linha(s) 'repair' com fluxo ao vivo, $wfStrPassos passo(s), executáveis por caminho completo"
     } catch {
         Write-Host "  [ERRO] Correções (tabela): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # 3b. A DECODIFICAÇÃO de cada passo, que não tem regra geral: cada executável do Windows escolhe
+    # a sua, e a única forma de saber é medir os bytes que ele escreve com a saída redirecionada.
+    # Este bloco tranca as três pontas: o nome vira a code page certa, cada executável da tabela tem
+    # o nome que foi MEDIDO nele, e a dica chega mesmo ao processo.
+    #
+    # Quem paga a conta desta trava é o chkdsk. Ele escreve ANSI (1252), e a tabela o dava como OEM:
+    # numa execução elevada de verdade a janela mostrou 'concluÝdos', 'EstÃgio' e 'anÃlises' - o
+    # 0xED do 'í' da 1252 lido na 850 é 'Ý'. O sfc, que já tinha dica própria, saiu correto.
+    try {
+        $wfEncEsperado = @{
+            'chkdsk.exe' = 'ansi'
+            'sfc.exe'    = 'unicode'
+            'dism.exe'   = 'oem'
+            'netsh.exe'  = 'utf8'
+            'w32tm.exe'  = 'oem'
+        }
+        $wfEncPares = @{
+            'oem'     = [int][System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
+            'ansi'    = [int][System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage
+            'utf8'    = 65001
+            'unicode' = 1200
+        }
+        foreach ($wfEncNome in @($wfEncPares.Keys)) {
+            $wfEncObj = Get-WinForgeOutputEncoding -Name $wfEncNome
+            if ([int]$wfEncObj.CodePage -ne [int]$wfEncPares[$wfEncNome]) { Write-Host "  [ERRO] Correções (codificação): '$wfEncNome' deu a code page $($wfEncObj.CodePage), esperado $($wfEncPares[$wfEncNome])" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Nome desconhecido cai em OEM, e não estoura: um passo com a dica errada tem de mostrar
+        # acento embaralhado, não derrubar o reparo no meio.
+        if ([int](Get-WinForgeOutputEncoding -Name 'nao-existe').CodePage -ne [int]$wfEncPares['oem']) { Write-Host "  [ERRO] Correções (codificação): um nome desconhecido deveria cair em OEM" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Get-WinForgeOutputEncoding).CodePage -ne [int]$wfEncPares['oem']) { Write-Host "  [ERRO] Correções (codificação): sem -Name o padrão deveria ser OEM" -ForegroundColor Red; $wbErrors++ }
+        # A tabela medida, executável por executável.
+        $wfEncVistos = 0
+        foreach ($wfEncCmd in $wfStrNomes) {
+            foreach ($wfEncPasso in @((Get-WinForgeRepairCommand -Name $wfEncCmd).Steps)) {
+                if ($wfEncPasso.Function) { continue }
+                $wfEncFolha = [string](Split-Path -Leaf ([string]$wfEncPasso.FilePath))
+                if (-not $wfEncEsperado.ContainsKey($wfEncFolha.ToLowerInvariant())) { Write-Host "  [ERRO] Correções (codificação): '$wfEncFolha' não está na tabela medida - meça a saída dele antes de pôr o passo na linha" -ForegroundColor Red; $wbErrors++; continue }
+                $wfEncQuer = [string]$wfEncEsperado[$wfEncFolha.ToLowerInvariant()]
+                $wfEncTem = ([string]$wfEncPasso.Encoding).Trim().ToLowerInvariant()
+                if ($wfEncTem -ne $wfEncQuer) { Write-Host "  [ERRO] Correções (codificação): '$wfEncFolha' está como '$wfEncTem', medido '$wfEncQuer'" -ForegroundColor Red; $wbErrors++ }
+                else { $wfEncVistos++ }
+            }
+        }
+        # A prova do chkdsk, com bytes sintéticos: "concluídos" escrito em ANSI (o 'í' é 0xED) tem
+        # de voltar acentuado pela codificação do PASSO do chkdsk, e tem de sair errado se lido em
+        # OEM - que é o que a janela mostrou na máquina do usuário.
+        $wfEncBytes = [byte[]]@(0x63, 0x6F, 0x6E, 0x63, 0x6C, 0x75, 0xED, 0x64, 0x6F, 0x73)
+        $wfEncPassoChk = @((Get-WinForgeRepairCommand -Name SystemRepair).Steps)[0]
+        $wfEncLido = [string](Get-WinForgeOutputEncoding -Name ([string]$wfEncPassoChk.Encoding)).GetString($wfEncBytes)
+        $wfEncComoOem = [string](Get-WinForgeOutputEncoding -Name 'oem').GetString($wfEncBytes)
+        if ($wfEncLido -ne 'concluídos') { Write-Host "  [ERRO] Correções (codificação): a saída do chkdsk decodificada pelo passo deu '$wfEncLido', esperado 'concluídos'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfEncComoOem -eq 'concluídos') { Write-Host "  [ERRO] Correções (codificação): o cenário não vale - em OEM estes bytes deveriam sair embaralhados" -ForegroundColor Red; $wbErrors++ }
+        # E a dica chega mesmo ao processo: o takeown escreve OEM ('á' = 0xA0), e o mesmo '/?'
+        # pedido como 'unicode' tem de voltar ilegível. É a única forma de provar que o
+        # StandardOutputEncoding do fluxo ao vivo recebe o que o passo pediu. '/?' só imprime ajuda.
+        if (([string](Get-Command Invoke-WinForgeStreamStep).ScriptBlock).IndexOf('-Encoding ([string]$Step.Encoding)', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (codificação): o passo não repassa a dica de decodificação ao comando" -ForegroundColor Red; $wbErrors++ }
+        $wfEncArq = Join-Path $wfStrDir ("selftest-encoding-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
+        $wfEncExe = Get-WinForgeSystemExe -Name 'takeown.exe'
+        $wfEncCerto = [string](Invoke-WinForgeNativeCommand -FilePath $wfEncExe -Arguments @('/?') -StreamTo $wfEncArq -Encoding 'oem').Text
+        $wfEncErrado = [string](Invoke-WinForgeNativeCommand -FilePath $wfEncExe -Arguments @('/?') -StreamTo $wfEncArq -Encoding 'unicode').Text
+        if ($wfEncCerto.IndexOf('usuário', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM não trouxe 'usuário' acentuado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfEncErrado.IndexOf('usuário', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Correções (codificação): a dica não chegou ao processo - lido como UTF-16 o texto saiu igual" -ForegroundColor Red; $wbErrors++ }
+        else { Write-Host "  Correções (codificação): 4 nome(s) viram code page, $wfEncVistos passo(s) com a dica medida (chkdsk ANSI, sfc UTF-16, DISM/w32tm OEM, netsh UTF-8), dica conferida no processo" }
+        Remove-Item -LiteralPath $wfEncArq -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "  [ERRO] Correções (codificação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # 4. Simulação e recusa. O -DryRun LISTA os passos e não roda nenhum; sem ele, em SelfTest, o
     # despacho é recusado - este build não redefine rede nem roda DISM na máquina de quem compila.
@@ -3549,6 +3622,31 @@ if ($SelfTest) {
             $wfAclRtRuim = Restore-WinForgeAclSddl -Path $wfAclRtRaiz -Sddl 'isto não é um descritor'
             if ($wfAclRtRuim.DaclOk) { Write-Host "  [ERRO] Permissões (SDDL): um descritor inválido foi dado como aplicado" -ForegroundColor Red; $wbErrors++ }
             elseif ([string]::IsNullOrWhiteSpace([string]$wfAclRtRuim.Reason)) { Write-Host "  [ERRO] Permissões (SDDL): recusou o descritor inválido sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+            # 3a4. O DONO volta pelo icacls, e não pelo .NET. O SetAccessControl nunca habilita o
+            # SeRestorePrivilege: atribuir a posse a um SID que o chamador não possui - o
+            # TrustedInstaller das pastas do sistema, que é o caso inteiro deste botão - responde
+            # 1307 (ERROR_INVALID_OWNER) mesmo com o WinForge elevado. Medido nesta máquina, numa
+            # pasta de %TEMP% e sem elevação: as DUAS vias falham em 1307 para o TrustedInstaller,
+            # e a diferença só aparece elevado - onde o icacls habilita o privilégio sozinho, que é
+            # o que a fase 4 já faz no 'setowner-devolver'. Aqui a prova é a que roda sem
+            # elevação: a via, o vetor e a recusa do que não é SID.
+            $wfAclRtFonte = [string](Get-Command Restore-WinForgeAclSddl).ScriptBlock
+            foreach ($wfAclRtEsp in @(
+                @("Get-WinForgeSystemExe -Name 'icacls.exe'", "o dono não volta pelo icacls do System32 (caminho completo)"),
+                @("'/setowner', `"*`$sid`"", "o '/setowner' não recebe o SID pela forma '*<SID>'"),
+                @("'/L', '/Q'", "o '/setowner' do dono não traz '/L' - numa pasta que virou ponto de reanálise ele trocaria o dono do DESTINO"),
+                @('New-Object System.Security.Principal.SecurityIdentifier ([string]$OwnerSid)', 'o texto do índice vira argumento sem passar por SecurityIdentifier')
+            )) {
+                if ($wfAclRtFonte.IndexOf($wfAclRtEsp[0], [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (dono): $($wfAclRtEsp[1])" -ForegroundColor Red; $wbErrors++ }
+            }
+            if ($wfAclRtFonte.IndexOf('$so.SetOwner(', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (dono): a posse ainda é escrita pelo .NET (SetOwner + SetAccessControl), que não habilita o SeRestorePrivilege" -ForegroundColor Red; $wbErrors++ }
+            # E o que NÃO é SID nem chega ao icacls: o índice é um arquivo, e um 'Administradores'
+            # (ou um '/grant:r ...') plantado nele viraria argumento de um comando elevado.
+            $wfAclRtNome = Restore-WinForgeAclSddl -Path $wfAclRtRaiz -Sddl ([string]$wfAclRtSeg.Sddl) -OwnerSid 'BUILTIN\Administradores'
+            if (-not $wfAclRtNome.OwnerTried) { Write-Host "  [ERRO] Permissões (dono): um dono por NOME nem foi avaliado" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAclRtNome.OwnerOk) { Write-Host "  [ERRO] Permissões (dono): um dono por NOME foi aceito - o direito tem de ser só por SID" -ForegroundColor Red; $wbErrors++ }
+            elseif (([string]$wfAclRtNome.OwnerReason).IndexOf('não é um SID válido', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (dono): o dono por NOME foi recusado pelo icacls, e não ANTES dele ('$($wfAclRtNome.OwnerReason)')" -ForegroundColor Red; $wbErrors++ }
+            else { Write-Host "  Permissões (dono): a posse volta por 'icacls /setowner *<SID> /L /Q' do System32; dono por nome recusado antes de virar argumento" }
         }
         # E a contagem de entradas de um arquivo de '/save': é ela que separa um backup com
         # conteúdo de um arquivo que o icacls criou e não conseguiu preencher.
@@ -3700,7 +3798,12 @@ if ($SelfTest) {
             $wfAclIdxSeco = @(Invoke-WinForgeAclUndo -DryRun -BackupRoot $wfAclIdxRaiz)
             if ($wfAclIdxSeco.Count -ne 2) { Write-Host "  [ERRO] Permissões (índice): a simulação do Desfazer deu $($wfAclIdxSeco.Count) linha(s), esperado 2" -ForegroundColor Red; $wbErrors++ }
             else {
-                if (([string]$wfAclIdxSeco[0]).IndexOf("devolver a lista (SDDL) e o dono de 'C:\'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (índice): a linha da raiz não é a devolução por SDDL ('$($wfAclIdxSeco[0])')" -ForegroundColor Red; $wbErrors++ }
+                if (([string]$wfAclIdxSeco[0]).IndexOf("devolver a lista (SDDL) de 'C:\'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (índice): a linha da raiz não é a devolução por SDDL ('$($wfAclIdxSeco[0])')" -ForegroundColor Red; $wbErrors++ }
+                # O passo do dono aparece como o COMANDO que vai rodar: quem lê a simulação tem de
+                # ver que a posse volta pelo icacls (a única via que habilita o SeRestorePrivilege)
+                # e que o vetor traz o SID e o '/L'.
+                elseif (([string]$wfAclIdxSeco[0]).IndexOf('/setowner *S-1-5-32-544 /L /Q', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (índice): a linha da raiz não mostra o '/setowner' do dono com SID e '/L' ('$($wfAclIdxSeco[0])')" -ForegroundColor Red; $wbErrors++ }
+                elseif (([string]$wfAclIdxSeco[0]).IndexOf([string](Get-WinForgeSystemExe -Name 'icacls.exe'), [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (índice): o '/setowner' da simulação não é o icacls por caminho completo ('$($wfAclIdxSeco[0])')" -ForegroundColor Red; $wbErrors++ }
                 if (([string]$wfAclIdxSeco[1]).IndexOf('/restore', [StringComparison]::Ordinal) -lt 0 -or ([string]$wfAclIdxSeco[1]).IndexOf(' /L', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (índice): a linha do perfil não é um '/restore' com '/L' ('$($wfAclIdxSeco[1])')" -ForegroundColor Red; $wbErrors++ }
             }
             foreach ($wfAclIdxLinha in $wfAclIdxSeco) {
@@ -3711,7 +3814,22 @@ if ($SelfTest) {
             $wfAclIdxRuim = Get-WinForgeAclBackupSet -Root $wfAclIdxRaiz
             if (@($wfAclIdxRuim.Items).Count) { Write-Host "  [ERRO] Permissões (índice): um índice ilegível devolveu $(@($wfAclIdxRuim.Items).Count) item(ns)" -ForegroundColor Red; $wbErrors++ }
             elseif ([string]::IsNullOrWhiteSpace([string]$wfAclIdxRuim.Reason)) { Write-Host "  [ERRO] Permissões (índice): um índice ilegível não disse por que não deu" -ForegroundColor Red; $wbErrors++ }
-            Write-Host "  Permissões (índice): JSON com 2 item(ns) lido de volta, SDDL e dono intactos, arquivo reancorado na pasta protegida, índice ilegível recusado com motivo"
+            elseif ($wfAclIdxRuim.Refused) { Write-Host "  [ERRO] Permissões (índice): um índice ilegível foi marcado como RECUSADO - são coisas diferentes, e só a recusa para tudo" -ForegroundColor Red; $wbErrors++ }
+            # A ORDEM: com '-Trusted' o índice é conferido ANTES de ser aberto. A pasta é de %TEMP%
+            # e os arquivos pertencem à identidade atual, então Test-WinForgeAclBackupFile recusa
+            # todos - e é justamente isso que prova a ordem: um JSON QUEBRADO tem de sair como
+            # 'Refused' (conferência do arquivo), e não como "não pôde ser lido" (analisador de
+            # JSON). Antes a conferência vinha depois do ConvertFrom-Json e a resposta era a outra.
+            $wfAclIdxTrust = Get-WinForgeAclBackupSet -Root $wfAclIdxRaiz -Trusted
+            if (-not $wfAclIdxTrust.Refused) { Write-Host "  [ERRO] Permissões (índice): com '-Trusted' o índice de %TEMP% deveria ser recusado (dono fora de SYSTEM/Administradores)" -ForegroundColor Red; $wbErrors++ }
+            elseif (@($wfAclIdxTrust.Items).Count) { Write-Host "  [ERRO] Permissões (índice): um índice recusado devolveu $(@($wfAclIdxTrust.Items).Count) item(ns)" -ForegroundColor Red; $wbErrors++ }
+            elseif (([string]$wfAclIdxTrust.Reason).IndexOf('não pôde ser lido', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (índice): o índice adulterado foi ANALISADO antes de ser conferido ('$($wfAclIdxTrust.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            # E o Desfazer de verdade pede a conferência ANTES de ler: a chamada com '-Trusted' tem
+            # de estar no caminho real, e a antiga conferência depois do fato não pode voltar.
+            $wfAclIdxFonte = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+            if ($wfAclIdxFonte.IndexOf('Get-WinForgeAclBackupSet -Root $BackupRoot -Trusted', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (índice): o Desfazer lê o conjunto sem '-Trusted' - o índice seria analisado antes de conferido" -ForegroundColor Red; $wbErrors++ }
+            if ($wfAclIdxFonte.IndexOf('Test-WinForgeAclBackupFile -Path ([string]$conjunto.Index)', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (índice): a conferência do índice voltou para DEPOIS da leitura" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Permissões (índice): JSON com 2 item(ns) lido de volta, SDDL e dono intactos, arquivo reancorado na pasta protegida, índice ilegível recusado com motivo, conferência antes da leitura"
         } finally {
             Remove-Item -LiteralPath $wfAclIdxRaiz -Recurse -Force -ErrorAction SilentlyContinue
         }
