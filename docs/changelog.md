@@ -1,5 +1,86 @@
 # Changelog
 
+## 1.5.0 (2026-09-10)
+
+### Interface em português
+
+- A interface inteira passou para o português: abas, botões, dicas, caixas de diálogo, mensagens do
+  console e o texto dos 137 aplicativos, dos 83 ajustes, dos 84 itens de Jogos, dos 22 de Servidor e
+  dos 54 de Configurações. O nome dos produtos da aba Instalar continua em inglês de propósito — é
+  como eles se chamam na tela de instalação e na busca.
+- Duas travas guardam isso. A do `-SelfTest` procura 37 termos em inglês no XAML gerado e no
+  Content/Description das configurações, e reprova o build se achar qualquer um; a de cobertura
+  exige que toda entrada vinda do arquivo base tenha tradução por chave, e que nenhuma tradução seja
+  igual ao texto original (tradução esquecida passava batida antes).
+- As abas mudaram de ordem e de nome: **Diagnóstico** (`Alt+D`), **Ajustes** (`Alt+T`), **Jogos**
+  (`Alt+J`), **Configurações** (`Alt+C`), **Servidor** (`Alt+S`), **Atualizações** (`Alt+U`),
+  **Instalar** (`Alt+I`) e **ISO Win11** (`Alt+W`). A janela abre no Diagnóstico, e não na lista de
+  aplicativos: a primeira tela diz o que a máquina é antes de oferecer o que instalar.
+
+### Aba Instalar
+
+- A lista caiu de 232 para **137 aplicativos**: saíram 95 entradas de nicho ou duplicadas. Os grupos
+  viraram nove, em português — Comunicação, Desenvolvimento, Documentos, Ferramentas Microsoft,
+  Ferramentas profissionais, Jogos, Multimídia, Navegadores e Utilitários — e abrem fechados.
+- Os botões da barra lateral voltaram à ordem declarada na configuração (Instalar/atualizar,
+  Desinstalar, Atualizar todos). A base ordenava pelo texto, e em português a ação principal caía
+  para o fim da lista.
+
+### Aba Diagnóstico
+
+- A lista de recomendações virou um **checklist espelhado**: cada linha tem uma caixa, e ela é a
+  mesma marcação da aba de origem (Ajustes, Jogos ou Servidor) nos dois sentidos. Um contador
+  mostra `N de M recomendados marcados`, e os botões **Marcar todos** / **Desmarcar todos** agem
+  sobre o checklist inteiro.
+- A roda do mouse sobre as tabelas de drivers passa a rolar a página. Antes o `DataGrid` engolia o
+  evento e a página ficava parada.
+- Nova coluna **Ação** na tabela de drivers. Numa placa NVIDIA atrasada, e só quando o link do
+  catálogo é de um domínio oficial da NVIDIA, aparece **Baixar `<versão>`**: o arquivo vai para
+  `%ProgramData%\WinForge\downloads` (recusado se a cadeia de pastas não for gravável apenas por
+  SYSTEM e Administradores), tem a **assinatura digital conferida** contra o nome exato do
+  certificado da NVIDIA e só então é aberto — pelo instalador da própria NVIDIA. Nos demais casos
+  sobra **Página do fabricante**, que apenas abre um endereço no navegador.
+- A tabela do Windows Update ganhou o botão **Instalar**, que **sempre pede confirmação** nomeando a
+  atualização, e que fica desabilitado quando o WinForge não está elevado.
+
+### Visual
+
+- Sistema visual próprio nos dois temas: paleta com contraste mínimo de 4,5:1 em todos os pares de
+  texto e fundo (conferido no `-SelfTest` pelo cálculo do WCAG 2.1), Segoe UI no lugar de
+  Consolas/Arial, botões de 32 px com largura pelo conteúdo, abas de largura igual, caixas de
+  seleção de 16 px, cartões com raio 6 e barra de status com fundo de cartão.
+- Nenhuma cor escrita à mão no XAML: as quatro do cartão "Desativar atualizações" e as cinco da aba
+  ISO Win11 viraram token de tema (`DangerColor`, `DiscouragedColor`), e um teste de build reprova
+  qualquer cor fixa nova fora de uma lista curta de exceções conhecidas.
+- Botão desabilitado deixou de nascer com a cor de SELEÇÃO (azul) nos gabaritos herdados da base -
+  agora é o fundo normal a 50 % de opacidade, igual ao resto.
+- No tema Claro os botões ganharam contorno de 1 px: `#E8ECF1` sobre `#F8FAFC` não se distinguia do
+  fundo e eles não pareciam controles.
+- Os botões da aba Configurações esticam na coluna em vez de flutuar com 350 px de largura fixa, e
+  as linhas da tabela de drivers passaram a 30 px para os botões da coluna Ação não se encostarem.
+
+### Segurança
+
+- A máscara de "ACE perigosa" da pasta de backup deixou de somar `FullControl` e `Modify`: os dois
+  carregam os bits de LEITURA, e qualquer ACE de "Ler e executar" era acusada como permissão de
+  escrita. A máscara agora lista direito a direito o que é escrita de fato (gravar, acrescentar,
+  excluir, trocar DACL, tomar posse e os bits genéricos GW/GA); `FullControl` e `Modify` continuam
+  sendo pegos pelos bits de escrita que carregam.
+- Consequência da cadeia de pastas fail-closed que entrou nesta versão: numa máquina em que
+  `%ProgramData%\WinForge` já exista com a ACL **herdada** — criada, por exemplo, por uma execução
+  anterior sem o launcher —, além do download de driver, o **backup do IIS e dos ajustes de
+  Servidor** também passa a recusar, nomeando a pasta. É o comportamento certo (a pasta de fato não
+  é confiável), mas é uma mudança de comportamento em campo: na instalação normal o launcher cria a
+  pasta já protegida e nada disso aparece.
+
+### Ferramentas
+
+- `tools/UI-Walkthrough.ps1` ganhou `-NoElevation` (abre o motor direto, como usuário comum) e
+  `-Theme Escuro|Claro`, e sobe o programa sempre com `-NoRestorePoint` — a caixa do ponto de
+  restauração é modal e travava o passeio.
+- `tools/List-EnglishStrings.ps1` passou a ler a chamada de `MessageBox::Show` inteira, e não linha
+  a linha: era por isso que cinco caixas em inglês não apareciam no inventário.
+
 ## 1.4.0 (2026-09-10)
 
 - Novo grupo "WinForge - Reparo de componentes" na aba Config, com doze botões. Cinco só leem:

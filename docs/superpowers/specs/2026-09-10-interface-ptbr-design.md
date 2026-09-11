@@ -30,6 +30,11 @@ Mecanismo híbrido, no build (`src/Engine/build.ps1`), base intocada:
 
 ## 5. Aba Instalar
 
+> **Nota da Tarefa 7 (10/09/2026):** os números "96 removidos / 139 mantidos" do texto abaixo estão
+> errados por um. A lista nominal desta mesma seção soma **95** entradas (7+9+25+9+8+5+3+5+6+18), o
+> arquivo base traz 232 aplicativos, e 232 − 95 = **137**. É 137 que a trava de contagem do
+> `-SelfTest` cobra e 137 que o programa mostra. A lista nominal continua valendo como está.
+
 - Categorias **fechadas** ao abrir (chama a mesma função do botão "Recolher todas" após montar a aba; o botão continua).
 - Remoção de 96 apps de nicho/duplicados, lista em `src/Engine/config/wf-apps.ps1` (`$sync.WinForgeRemovedApps`), aplicada em `Initialize-WinForgeBoostConfigs` antes de montar a UI; trava de contagem no SelfTest (139 apps). Lista:
   - Navegadores (7): Chromium, Firefox ESR, Floorp, Helium, Mullvad Browser, Ungoogled Chromium, Waterfox.

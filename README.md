@@ -20,10 +20,13 @@ Baixe na página de [releases](https://github.com/RafaelGFavero/WinForge/release
 
 ## Como usar
 
-1. Execute o `WinForge.exe`. Ele pede elevação de administrador (os tweaks não funcionam sem ela).
+1. Execute o `WinForge.exe`. Ele pede elevação de administrador (os ajustes não funcionam sem ela).
 2. Responda à pergunta de ponto de restauração que aparece ao abrir: crie o ponto se quiser poder
    voltar atrás pelo próprio Windows, ou pule se preferir usar só o Desfazer da ferramenta.
-3. Marque o que quer aplicar e clique em aplicar. Cada tweak tem seu Desfazer.
+3. A janela abre no **Diagnóstico**, que levanta o perfil da máquina e lista o que é recomendado
+   para ela. Marque na própria lista o que quiser aplicar — cada item marcado ali fica marcado
+   também na aba de origem (Ajustes, Jogos ou Servidor).
+4. Vá à aba correspondente e clique em aplicar. Cada ajuste tem o seu Desfazer.
 
 Na primeira execução o `WinForge.exe` extrai o motor em `%ProgramData%\WinForge\engine\<versão>\`,
 junto com o `NOTICE.txt` e o `LICENSE.txt`. Essa pasta é gravável só por administradores e pelo
@@ -40,23 +43,33 @@ Parâmetros de linha de comando:
 | `-HardwareRender` | Usa renderização WPF por hardware em vez do padrão por software. |
 | `-SelfTest` | Valida configurações, XAML e montagem das abas sem abrir a janela (rodando o `dist\engine\WinForge.ps1` diretamente não exige administrador; pelo `.exe` pede elevação). |
 
-## O que tem
+## Interface
 
-- **Install** — instalação de programas em lote via gerenciador de pacotes.
-- **Tweaks** — desempenho, privacidade, energia, serviços, anúncios, Cortana, pesquisa, VBS,
-  limpeza de disco, backup do registro, cache de RAM e otimização de unidades.
-- **Jogos** — prioridade de CPU por jogo (IFEO), GameDVR, MMCSS, HAGS e ajustes de shader cache
-  para NVIDIA, AMD e Intel.
-- **Config** — recursos do Windows, correções de sistema, reparo de componentes e atalhos de
-  manutenção.
-- **Updates** — política de atualizações do Windows (padrão, adiada ou desligada).
-- **Win11 Creator** — criação de mídia de instalação do Windows 11.
-- **AppX** — remoção de aplicativos pré-instalados.
-- **Servidor** — só no Windows Server: ajustes gerais do servidor, IIS e Active Directory.
-- **Diagnóstico** — o que foi detectado na máquina, as recomendações e os drivers instalados.
+A interface é toda em português. As abas ficam na barra de cima, na ordem em que costumam ser
+usadas — primeiro diagnosticar, depois ajustar, instalar por último:
+
+| # | Aba | Atalho | O que tem |
+|---|---|---|---|
+| 1 | Diagnóstico | `Alt+D` | O que foi detectado na máquina, a lista de recomendações e a tabela de drivers. É a aba que abre. |
+| 2 | Ajustes | `Alt+T` | Desempenho, privacidade, energia, serviços, anúncios, Cortana, pesquisa, VBS, limpeza de disco, backup do registro, cache de RAM, otimização de unidades e a remoção de aplicativos pré-instalados (AppX). |
+| 3 | Jogos | `Alt+J` | Prioridade de CPU por jogo (IFEO), GameDVR, MMCSS, HAGS e shader cache para NVIDIA, AMD e Intel. |
+| 4 | Configurações | `Alt+C` | Recursos do Windows, correções de sistema, reparo de componentes, painéis clássicos e atalhos de manutenção. |
+| 5 | Servidor | `Alt+S` | Só no Windows Server: ajustes gerais do servidor, IIS e Active Directory. Em máquina cliente o botão nem aparece. |
+| 6 | Atualizações | `Alt+U` | Política do Windows Update em três perfis: Recomendado, Padrão do Windows e Desativar atualizações. |
+| 7 | Instalar | `Alt+I` | Instalação de programas em lote pelo WinGet ou pelo Chocolatey. |
+| 8 | ISO Win11 | `Alt+W` | Criação de mídia de instalação do Windows 11. |
+
+Na barra de cima, à direita, ficam ainda a busca (`Ctrl+F`, nas abas que têm lista), o **tema**
+(Automático, que segue o Windows, Escuro ou Claro), o **tamanho da fonte** e o menu de
+importar/exportar configuração.
+
+A aba **Instalar** traz 137 programas divididos em 9 grupos — Comunicação, Desenvolvimento,
+Documentos, Ferramentas Microsoft, Ferramentas profissionais, Jogos, Multimídia, Navegadores e
+Utilitários. Os grupos abrem fechados; as fichas de filtro logo abaixo da busca mostram um grupo
+de cada vez (`Ctrl+clique` para escolher mais de um).
 
 A janela se adapta ao sistema: no Windows 10, os itens que só existem no Windows 11 não são
-exibidos; os tweaks marcados para uma marca de GPU só aparecem se aquela GPU for detectada; e no
+exibidos; os ajustes marcados para uma marca de GPU só aparecem se aquela GPU for detectada; e no
 Windows Server as abas de consumidor dão lugar à aba Servidor.
 
 ## Diagnóstico e recomendações
@@ -76,30 +89,48 @@ Com esse perfil, um conjunto de regras avalia cada item e desenha um contorno na
   é o host.
 
 O motivo completo aparece na dica ao passar o mouse sobre a linha. Nenhuma recomendação marca nada
-sozinha: quem marca é você, por um dos botões — **Marcar recomendados**, nas abas Tweaks e Jogos,
-marca o que é daquela aba; **Marcar todos os recomendados**, na aba Diagnóstico, marca as duas de
-uma vez. Nos três casos dá para desmarcar item por item antes de aplicar. Os toggles ficam de fora:
-eles aplicam o tweak no instante em que são ligados, e recomendação não muda o sistema.
+sozinha: quem marca é você.
 
 A aba **Diagnóstico** (`Alt+D`) reúne isso em nove cartões — Sistema, Máquina, Processador,
 Memória, Placa de vídeo, Armazenamento, Rede, Energia, e Segurança e estado —, mais um décimo,
 Servidor, no Windows Server, a lista das recomendações com seus motivos e a tabela dos drivers
-instalados. Os botões:
+instalados.
+
+**A lista de recomendações é um checklist espelhado.** Cada linha tem uma caixa de seleção, e ela
+é a MESMA marcação da aba de origem: marcar a linha aqui marca o item na aba Ajustes, Jogos ou
+Servidor, e marcar lá marca a linha aqui. O contador ao lado dos botões (`N de M recomendados
+marcados`) acompanha os dois sentidos. Os toggles ficam de fora do checklist: eles aplicam o
+ajuste no instante em que são ligados, e recomendação não muda o sistema.
 
 | Botão | O que faz |
 |---|---|
 | Atualizar diagnóstico | Coleta o perfil de novo e reavalia as recomendações. |
 | Buscar drivers no Windows Update | Pergunta ao Windows Update quais drivers ele tem para este computador (pode levar até um minuto). |
 | Exportar relatório HTML | Gera um relatório HTML com tudo desta aba e abre no navegador. |
-| Marcar todos os recomendados | Marca nas abas Tweaks e Jogos os itens recomendados para este PC. |
+| Marcar todos | Marca todas as linhas do checklist — e, com elas, os itens correspondentes nas abas Ajustes, Jogos e Servidor. |
+| Desmarcar todos | O contrário. |
+
+### Drivers: a coluna Ação
 
 Para placas NVIDIA, a versão instalada é comparada com a mais recente do catálogo do fabricante
-(consulta ao site da NVIDIA, guardada por 24 horas em `%LocalAppData%\WinForge\cache`); para AMD e
-Intel, a tabela leva à página de download da marca.
+(consulta ao site da NVIDIA, guardada por 24 horas em `%LocalAppData%\WinForge\cache`). A última
+coluna da tabela oferece, por linha, uma destas ações — e nenhuma delas acontece sozinha:
 
-**O WinForge não baixa nem instala driver nenhum.** Tudo o que a aba faz é olhar e comparar: a
-lista do Windows Update é informativa, os links abrem no seu navegador, e a decisão de instalar
-qualquer coisa continua sendo sua.
+- **Baixar `<versão>`** — só aparece numa placa NVIDIA que esteja atrás e cujo link do catálogo
+  seja de um domínio oficial da NVIDIA. O arquivo é gravado em
+  `%ProgramData%\WinForge\downloads`, uma pasta cuja cadeia inteira tem de ser gravável apenas por
+  SYSTEM e Administradores (se não for, o download é recusado antes de começar). Depois de baixar,
+  o WinForge **confere a assinatura digital** do instalador e exige o nome exato do certificado da
+  NVIDIA; assinatura inválida ou de outra empresa apaga o arquivo. Só então o instalador é aberto
+  — pelo instalador da própria NVIDIA, com a interface dele, e a instalação é você quem conduz.
+- **Página do fabricante** — abre o endereço de download da marca no seu navegador. Sem download e
+  sem execução. É o que sobra para AMD, Intel e para qualquer linha em que a regra acima não valha.
+- Linha sem nenhuma das duas fica sem botão.
+
+A tabela de baixo, **Drivers oferecidos pelo Windows Update**, aparece depois de "Buscar drivers no
+Windows Update" e traz o botão **Instalar**. Ele **sempre pede confirmação** numa caixa que nomeia
+a atualização antes de baixar e instalar qualquer coisa — e o botão fica desabilitado quando o
+WinForge não está elevado, porque instalar driver exige administrador.
 
 O relatório HTML descreve a máquina inteira: nome do computador, fabricante e modelo, modelos dos
 discos, servidores DNS e o estado de BitLocker, Secure Boot e TPM. O arquivo fica em
@@ -112,7 +143,7 @@ WinForge mantém ali as 30 sessões mais recentes e apaga as anteriores.
 ## Windows Server
 
 Se o Windows for Server, a janela muda de forma sozinha: aparece a aba **Servidor** (`Alt+S`) e
-somem as abas que não fazem sentido ali — Jogos, AppX e Win11 Creator. A detecção acontece antes
+somem as abas que não fazem sentido ali — Jogos e ISO Win11. A detecção acontece antes
 de a janela ser montada e lê a edição do Windows e os papéis instalados; hoje o WinForge reconhece
 IIS, Active Directory (inclusive se a máquina é controlador de domínio), Hyper-V, DNS, DHCP,
 servidor de arquivos e RDS.
@@ -202,7 +233,7 @@ lá — o WinForge não remove recurso); o perfil de atualização "só de segur
 **texto de orientação** no rodapé da aba, e não um item que se aplica; a verificação de horário
 (`w32tm`) fica no grupo **Servidor**, e não no grupo **Active Directory**, porque ela interessa
 igualmente a um servidor membro; e telemetria no mínimo, Delivery Optimization e hibernação
-continuam sendo itens da aba **Tweaks** recomendados pelo Diagnóstico, não itens da aba Servidor —
+continuam sendo itens da aba **Ajustes** recomendados pelo Diagnóstico, não itens da aba Servidor —
 quem trabalhar só nesta aba não os verá.
 
 ## Reparo de componentes
@@ -309,15 +340,36 @@ de máquina, defina antes de rodar:
 - `WINFORGE_SIMULATE_SERVER` com os papéis desejados — por exemplo `iis,ad` para um Windows Server
   com IIS e Active Directory. É o que a segunda rodada do `build.cmd` usa.
 
+### Ferramentas de QA
+
 Para conferir a interface de verdade, o passeio de QA abre o programa, clica em cada aba com o
-mouse e salva um PNG de cada tela em `dist\screenshots` (fora do git):
+mouse e salva um PNG de cada tela em `dist\screenshots` (fora do git). Uma rodada por tema:
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\UI-Walkthrough.ps1 -Launch
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\UI-Walkthrough.ps1 -Launch -NoElevation -Theme Escuro
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\UI-Walkthrough.ps1 -Launch -NoElevation -Theme Claro
 ```
 
-Precisa de administrador — o script se reabre elevado sozinho — e se recusa a rodar com CS2 ou
-CS:GO aberto, porque o jogo captura o mouse.
+Com `-NoElevation` o passeio abre o motor direto, como usuário comum, e as imagens vão para
+`dist\screenshots\dark` e `dist\screenshots\light`. Sem ele o script se reabre elevado sozinho e
+usa o `dist\WinForge.exe`. Em qualquer caso o programa sobe com `-NoRestorePoint` (a caixa do ponto
+de restauração é modal e travaria o passeio), e o script se recusa a rodar com CS2 ou CS:GO aberto,
+porque o jogo captura o mouse.
+
+Os outros dois inventários são de texto, e servem para achar o que traduzir — quem prova que
+acabou são as travas do `-SelfTest`:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\List-EnglishStrings.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\List-I18nKeys.ps1 -Orphans
+```
+
+`List-EnglishStrings.ps1` varre o motor gerado (`dist\engine\WinForge.ps1`) atrás de texto em
+inglês nos atributos do XAML, no miolo dos blocos de texto e nas caixas de diálogo — inclusive nas
+chamadas de `MessageBox::Show` que quebram em várias linhas. `List-I18nKeys.ps1` compara os blocos
+JSON do arquivo base com o dicionário por chave (`src\Engine\config\wf-i18n-configs.ps1`) e imprime
+as entradas que faltam já no formato de colar; com `-Orphans` lista também as chaves do dicionário
+que não existem mais na base.
 
 ## Estrutura
 
@@ -325,13 +377,13 @@ CS:GO aberto, porque o jogo captura o mouse.
 src/Engine/         gerador do motor PowerShell/WPF
   base/             cópia intocada do utilitário de origem
   winforge/         blocos de código do WinForge (funções, assets, launcher)
-  config/           tweaks, jogos, presets e curadoria da lista de aplicativos
-  xaml/             trechos de interface (barra de navegação e abas Jogos, Diagnóstico e Servidor)
+  config/           tweaks, jogos, presets, curadoria da lista de aplicativos, tema e tradução
+  xaml/             trechos de interface (estilos, barra de navegação e abas Jogos, Diagnóstico e Servidor)
   build.ps1         aplica os blocos sobre a base e escreve dist/engine/WinForge.ps1
 src/Launcher/       WinForge.exe (C# net48): splash, elevação e hospedagem do motor
 src/Launcher.Tests/ testes do launcher
 tests/engine/       verificações do motor gerado (marca, mojibake)
-tools/              utilitários de build (ícone) e de QA visual (passeio pela interface)
+tools/              ícone, passeio de QA pela interface e os dois inventários de tradução
 docs/               changelog e documentação
 ```
 
@@ -340,7 +392,7 @@ docs/               changelog e documentação
 Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)), a
 detecção de hardware, drivers e papéis de servidor com as recomendações da aba Diagnóstico, a aba
 Servidor com os ajustes de Windows Server, IIS e Active Directory, e o reparo de componentes do
-Windows na aba Config.
+Windows na aba Configurações.
 
 - Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
 
