@@ -339,10 +339,10 @@ negado" em toda parte. São três botões, e a ordem entre eles é a do atendime
 
 Três regras atravessam os três: todo direito é concedido **por SID**, nunca por nome (uma linha de
 `icacls` com `Administradores` falha calada num Windows em inglês, e a máquina quebrada fica pior);
-nenhum comando é montado como texto, e todo executável vem pelo caminho completo em System32; e o
-`icacls` **nunca** é apontado para dentro de `Windows` nem de `Program Files` — `/reset /T` na raiz
-e `takeown /R` não existem aqui, porque os dois descem a árvore inteira apagando o que o Windows
-sabe e o WinForge não.
+nenhum comando é montado como texto, e todo executável vem pelo caminho completo em System32; e nas
+pastas do sistema o `icacls` só faz duas coisas, **na própria pasta**: `/setowner` quando o dono
+está fora do padrão e `/inheritance:r /grant:r` com as ACEs medidas. `/reset`, `/T` e `/R` não
+existem ali, porque os três descem a árvore inteira apagando o que o Windows sabe e o WinForge não.
 
 **Verificar** — só lê, e pode ser clicado sempre (a leitura não pede elevação). Confere dono e
 permissões da raiz do disco, de `Windows`, `Program Files`, `Program Files (x86)`, `ProgramData`,
@@ -350,10 +350,15 @@ permissões da raiz do disco, de `Windows`, `Program Files`, `Program Files (x86
 contagem das diferenças. Dois detalhes que explicam o resultado: a comparação é **por SID**, então
 vale igual em qualquer idioma do Windows; e o que se cobra é um **piso** ("este SID tem ao menos
 este direito"), não igualdade exata — ACE a mais não é diferença, porque uma pasta do sistema tem
-ACEs que variam com a edição e com o que já foi instalado. Pasta que não existe nesta máquina não
-conta como diferença; pasta que existe e não deixa ler a lista, conta.
+ACEs que variam com a edição e com o que já foi instalado. A exceção é a ACE de **negação**:
+qualquer uma conta, porque nenhuma dessas pastas tem negação de fábrica e a negação vence a
+permissão — uma linha `Deny Todos:(OI)(CI)F` plantada em `C:\Users` tranca o disco sem tirar uma
+única permissão da lista. Pasta que não existe nesta máquina não conta como diferença; pasta que
+existe e não deixa ler a lista, conta.
 
-**Restaurar padrões** — altera o sistema e pede reinicialização. Seis fases, nesta ordem:
+**Restaurar padrões** — altera o sistema e pede reinicialização. Exige o WinForge aberto como
+administrador, e a pergunta pela elevação vem antes de a pasta de backup ser criada. Seis fases,
+nesta ordem:
 
 1. `chkdsk /scan` no disco do sistema. Se ele acusar erro no volume, a restauração **para aqui** e
    nenhuma permissão é alterada: reescrever a DACL de um disco com problema é consertar o que vai
@@ -361,24 +366,37 @@ conta como diferença; pasta que existe e não deixa ler a lista, conta.
 2. **Backup** das listas atuais com `icacls /save`, uma por pasta, em
    `%ProgramData%\WinForge\acl-backup`: a raiz, cada pasta de primeiro nível e a sua pasta de
    usuário. É o que o botão Desfazer consome.
-3. A **raiz**: `/inheritance:r` e as cinco ACEs padrão por SID.
-4. `secedit` com o `defltbase.inf`, áreas FILESTORE e REGKEYS. É ele, e não o `icacls`, que repõe as
-   DACLs de `Windows`, `Program Files`, `ProgramData`, `Users` e do registro — é o procedimento
-   documentado pela Microsoft. É também a fase mais demorada.
-5. A **sua pasta de usuário**: as três ACEs padrão nela e `/reset /T` abaixo dela, que devolve a
-   herança ao conteúdo. `/reset /T` é seguro aqui porque o alvo é um perfil.
+3. A **raiz**: negações fora (`/remove:d`, só se houver alguma), `/inheritance:r` e as ACEs padrão
+   por SID. O direito de criar arquivo dos Usuários Autenticados sai numa chamada separada — dentro
+   de um mesmo `/grant` o `icacls` guarda só a última entrada de cada SID.
+4. As **pastas do sistema**, uma a uma: `Windows`, `Program Files`, `Program Files (x86)`,
+   `ProgramData`, `Users` e `Users\Public`. Para cada uma, `/setowner` (só se o dono estiver fora do
+   padrão) e `/inheritance:r /grant:r` com as ACEs medidas — na pasta, sem `/T` e sem `/reset`. E só
+   nas pastas que a **verificação acusou**: pasta no padrão não é tocada.
+5. A **sua pasta de usuário**: dono, negações, as três ACEs padrão na raiz do perfil e, depois
+   delas, `/inheritance:e /T` no conteúdo. A ordem é dependência — a herança só propaga o que já
+   está concedido na raiz. `/reset /T` não é usado: ele apagaria as ACEs explícitas que os próprios
+   aplicativos põem dentro do perfil (`AppData\Local\Packages`, OneDrive), e `/inheritance:e` as
+   preserva.
 6. `takeown` na raiz, **sem recursão**, e só quando a fase 3 responder "acesso negado", seguido de
    uma segunda e última tentativa da fase 3.
+
+O `secedit` com o `defltbase.inf` **saiu** desta lista. No Windows 10 e no 11 as seções
+`[Registry Keys]` e `[File Security]` desse arquivo vêm vazias, então `/areas FILESTORE REGKEYS` não
+repõe DACL nenhuma: ele levava minutos e não consertava nada. A fase 4 faz esse trabalho de forma
+explícita, com a mesma tabela que a verificação usa.
 
 **Desfazer (restaurar backup)** — reaplica com `icacls /restore` o conjunto de backup mais recente,
 um arquivo por pasta, a partir da pasta anotada no índice (o `icacls` grava nomes relativos à pasta
 em que foi invocado, e restaurar da pasta errada aplicaria a DACL de uma coisa em outra). Sem
-backup gravado, ele apenas diz isso e não toca em nada.
+backup gravado, ele apenas diz isso e não toca em nada. Também exige elevação, conferida antes de
+qualquer pasta ser criada.
 
 O que o desfazer **não** alcança, e está escrito na descrição dos botões:
 
-- A parte de **registro** do `secedit` não tem desfazer. O backup da fase 2 é de sistema de
-  arquivos; as DACLs de chave de registro que o `defltbase.inf` repõe não são salvas antes.
+- **A posse.** O `icacls /restore` repõe a lista de permissões, não o dono. Pasta cujo dono a
+  restauração trocou (`/setowner` na fase 4 ou na 5, `takeown` na fase 6) continua com o dono novo
+  depois de desfazer.
 - O backup das pastas **fora do seu perfil** é sem recursão: guarda a DACL da pasta em si, não a de
   tudo que está dentro dela. Só a pasta de usuário é salva com `/T`.
 

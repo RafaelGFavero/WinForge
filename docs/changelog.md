@@ -47,23 +47,35 @@ fica sem acesso às próprias pastas.
   contra o padrão de fábrica, e termina com a contagem das diferenças. O confronto é **por SID**,
   então vale igual num Windows em inglês e num em português; e é um PISO, não um retrato: ACE a mais
   não é diferença, porque uma pasta do sistema tem ACEs que variam com a edição e com o que já foi
-  instalado. Pasta que não existe não conta; pasta que existe e não deixa ler a lista, conta.
+  instalado. A exceção é a ACE de NEGAÇÃO: qualquer uma conta, porque nenhuma dessas pastas tem
+  negação de fábrica e negar vence permitir — um `Deny Todos:(OI)(CI)F` plantado em `C:\Users`
+  tranca o disco sem tirar uma única permissão da lista. Pasta que não existe não conta; pasta que
+  existe e não deixa ler a lista, conta.
 - **Restaurar padrões** roda seis fases, nesta ordem: `chkdsk /scan` (se acusar erro no volume, para
   aí e nada é alterado); backup das listas atuais com `icacls /save` em
-  `%ProgramData%\WinForge\acl-backup`; a raiz, com `/inheritance:r` e as cinco ACEs padrão por SID;
-  `secedit` com o `defltbase.inf` nas áreas FILESTORE e REGKEYS, que é quem repõe Windows, Program
-  Files, ProgramData, Users e o registro; a pasta do usuário e a herança do conteúdo dela; e, só
-  quando a raiz responde acesso negado, um `takeown` sem recursão seguido de uma segunda tentativa.
-  `/reset /T` na raiz e `takeown /R` não existem aqui — os dois descem a árvore inteira apagando o
+  `%ProgramData%\WinForge\acl-backup`; a raiz, com as negações fora, `/inheritance:r` e as ACEs
+  padrão por SID; as pastas do sistema (Windows, Program Files, Program Files (x86), ProgramData,
+  Users e Users\Public) **uma a uma**, com `/setowner` só onde o dono está errado e
+  `/inheritance:r /grant:r` na própria pasta, e **só naquelas que a verificação acusou**; a pasta do
+  usuário, com a herança do conteúdo religada depois da concessão na raiz dela; e, só quando a raiz
+  responde acesso negado, um `takeown` sem recursão seguido de uma segunda tentativa. `/reset`, `/T`
+  e `/R` não existem na raiz nem nas pastas do sistema — os três descem a árvore inteira apagando o
   que o Windows sabe e o WinForge não. Leva minutos e pede reinicialização no fim.
+- O `secedit` com o `defltbase.inf` **não entrou**: foi medido nesta máquina e, no Windows 10 e no
+  11, as seções `[Registry Keys]` e `[File Security]` desse arquivo vêm vazias — `/areas FILESTORE
+  REGKEYS` levava minutos e não repunha DACL nenhuma. A fase por pasta faz esse trabalho de forma
+  explícita, com a mesma tabela de esperados que a verificação usa.
+- As duas ações que escrevem conferem a **elevação antes de criar a pasta de backup**: sem
+  administrador a pasta nasceria com a identidade atual como dona e ficaria plantada em
+  `%ProgramData%`, fazendo a conferência recusar todas as restaurações seguintes da máquina.
 - **Desfazer** reaplica com `icacls /restore` o conjunto de backup mais recente, uma pasta por
   arquivo, a partir da pasta anotada no índice (o icacls grava nomes relativos à pasta em que foi
   invocado). Sem backup gravado, ele apenas diz isso.
-- Três limites que a descrição dos botões não esconde: a parte de REGISTRO do `secedit` **não tem
-  desfazer** — o backup é de sistema de arquivos; o backup das pastas fora do perfil é **sem
-  recursão** (só a DACL da pasta em si, não a do conteúdo); e a restauração não acontece sem backup,
-  em nenhuma das duas pontas (pasta de backup que não passa na conferência, ou nenhum arquivo
-  gravado, param tudo antes de a primeira permissão ser alterada).
+- Três limites que a descrição dos botões não esconde: o `/restore` devolve a LISTA e não a POSSE,
+  então pasta cujo dono a restauração trocou (`/setowner` ou `takeown`) fica com o dono novo; o
+  backup das pastas fora do perfil é **sem recursão** (só a DACL da pasta em si, não a do conteúdo);
+  e a restauração não acontece sem backup, em nenhuma das duas pontas (pasta de backup que não passa
+  na conferência, ou nenhum arquivo gravado, param tudo antes de a primeira permissão ser alterada).
 - A pasta de backup passa pela mesma conferência da pasta de downloads de driver: DACL própria sem
   herança, nenhum ponto de reanálise na cadeia, dono dentro de SYSTEM/Administradores e ninguém de
   fora deles com escrita. Cada arquivo gravado é endurecido, e o Desfazer recusa arquivo que não
