@@ -498,6 +498,13 @@ function Find-WinForgeSnapshotUnsafeAce {
         0x40000000 (GENERIC_WRITE) e 0x10000000 (GENERIC_ALL) não têm nome em FileSystemRights e
         aparecem crus numa ACE gravada por uma API antiga: sem eles, uma ACE de escrita genérica
         passaria batida.
+
+        A máscara só junta direitos ATÔMICOS de escrita. Os nomes compostos (FullControl, Modify)
+        não entram: FullControl é 0x1F01FF e Modify é 0x301BF, e os dois contêm os bits de LEITURA
+        (ReadData, ReadAttributes, Synchronize...). Somados à máscara, qualquer ACE de leitura
+        casava - uma pasta com 'Todos: Ler e executar', que é o padrão de meio %ProgramData%, era
+        recusada como se tivesse permissão de escrita. Tirá-los não afrouxa nada: uma ACE de
+        FullControl ou de Modify tem os bits de Write ligados e continua sendo pega por eles.
     .OUTPUTS
         O nome (ou o SID) de quem tem escrita indevida, ou $null se a DACL está limpa.
     #>
@@ -506,13 +513,14 @@ function Find-WinForgeSnapshotUnsafeAce {
         [Parameter(Mandatory)][hashtable]$Trusted
     )
 
-    $perigo = [int][System.Security.AccessControl.FileSystemRights]::Write -bor
-              [int][System.Security.AccessControl.FileSystemRights]::Modify -bor
-              [int][System.Security.AccessControl.FileSystemRights]::FullControl -bor
-              [int][System.Security.AccessControl.FileSystemRights]::Delete -bor
-              [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-              [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-              [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+    $perigo = [int][System.Security.AccessControl.FileSystemRights]::WriteData -bor              # 0x2
+              [int][System.Security.AccessControl.FileSystemRights]::AppendData -bor             # 0x4
+              [int][System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor # 0x10
+              [int][System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor        # 0x100
+              [int][System.Security.AccessControl.FileSystemRights]::Delete -bor                 # 0x10000
+              [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor # 0x40
+              [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor      # 0x40000
+              [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor          # 0x80000
               0x40000000 -bor 0x10000000
     foreach ($ace in $Access) {
         if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
