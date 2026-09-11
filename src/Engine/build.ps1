@@ -952,8 +952,15 @@ $src = Replace-Once $src @'
                 foreach ($checkboxName in $completedOperation.Checkboxes) {
                     if ($sync.$checkboxName) { $sync.$checkboxName.ischecked = $True }
                 }
-                $null = Set-WinForgeAppliedTweaks -Keys @($completedOperation.Checkboxes)
-                Update-WinForgeAppliedVisuals | Out-Null
+                # Este bloco é um [Action] que o Dispatcher executa, e o caminho da base é
+                # try/finally SEM catch: exceção aqui não tem para onde subir - ela sai pelo
+                # BeginInvoke, longe de quem pudesse tratá-la, e leva junto o `finally` que
+                # destrava $sync.ProcessRunning. O conjunto e as marcas são informação: não valem
+                # o risco de derrubar o botão.
+                try {
+                    $null = Set-WinForgeAppliedTweaks -Keys @($completedOperation.Checkboxes)
+                    Update-WinForgeAppliedVisuals | Out-Null
+                } catch { Write-WinForgeLog -Component "Applied" -Level "WARN" -Message "Detectar aplicados: o conjunto e as marcas não puderam ser atualizados -> $($_.Exception.Message)" }
             }
 '@ "detectar aplicados: guarda o conjunto"
 
@@ -1008,10 +1015,18 @@ $src = Insert-After $src @'
 # justamente o que mudou. A linha da base fica inteira (é ela que a tradução reconhece) e o resumo
 # passa por cima logo depois. O contador dos pulados atravessa em $sync porque o corpo abaixo roda
 # noutra runspace, que não enxerga as variáveis desta função.
+#
+# Antes da linha final vem a SEGUNDA repintura. A primeira, lá em cima, mostra o que a detecção do
+# clique achou - a verdade de ANTES de aplicar. Sem esta, tudo o que o laço acabou de aplicar
+# ficaria sem a marca " · aplicado" e fora do contador até o próximo diagnóstico: a tela mentindo
+# no instante exato em que o usuário olha para ela para ver se funcionou. A detecção é refeita
+# (Update-WinForgeAppliedFromSystem) porque repintar o conjunto velho não mudaria nada.
 $src = Replace-Once $src @'
     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Tweaks finished" -Percent 100
     $sync.ProcessRunning = $false
 '@ @'
+    $null = Update-WinForgeAppliedFromSystem
+    if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeAppliedResyncCallback }
     Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Tweaks finished" -Percent 100
     if ([int]$sync.WinForgeTweaksSkipped -gt 0) {
       Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Aplicados: $completedSteps · já estavam aplicados: $([int]$sync.WinForgeTweaksSkipped)" -Percent 100
@@ -4181,6 +4196,26 @@ if ($SelfTest) {
         )
         if (@($wfWuVazio.Kept).Count -ne 2) { Write-Host "  [ERRO] uma linha por dispositivo (sem modelo): $(@($wfWuVazio.Kept).Count) linha(s), esperado 2 - modelo vazio não pode agrupar" -ForegroundColor Red; $wbErrors++ }
         if (@($wfWuVazio.Superseded).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo (sem modelo): $(@($wfWuVazio.Superseded).Count) oculta(s), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        # Driver base e INF de extensão do MESMO dispositivo: o serviço manda os dois com o mesmo
+        # DriverModel e o mesmo DriverProvider, e só a classe os separa. São dois pacotes que se
+        # completam - agrupar pelos dois primeiros campos escondia metade da oferta.
+        $wfWuClasse = Select-WinForgeWindowsUpdateLatest -Rows @(
+            [pscustomobject]@{ Title = 'Realtek - MEDIA - 6.0.9622.1'; Driver = 'Realtek High Definition Audio'; Provider = 'Realtek'; Class = 'MEDIA'; Version = '6.0.9622.1'; Date = '2026-06-01'; UpdateId = 'c-media' },
+            [pscustomobject]@{ Title = 'Realtek - Extension - 1.0.0.5'; Driver = 'Realtek High Definition Audio'; Provider = 'Realtek'; Class = 'Extension'; Version = '1.0.0.5'; Date = '2026-06-02'; UpdateId = 'c-ext' }
+        )
+        if (@($wfWuClasse.Kept).Count -ne 2) { Write-Host "  [ERRO] uma linha por dispositivo (classe): ficou [$(@($wfWuClasse.Kept | ForEach-Object { $_.UpdateId }) -join ', ')], esperado as duas - base e extensão são pacotes diferentes" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfWuClasse.Superseded).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo (classe): $(@($wfWuClasse.Superseded).Count) oculta(s), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        # Mesma classe (com caixa diferente, que o serviço não respeita) volta a ser o mesmo pacote.
+        $wfWuClasseIgual = Select-WinForgeWindowsUpdateLatest -Rows @(
+            [pscustomobject]@{ Title = 'Realtek - MEDIA - 6.0.9622.1'; Driver = 'Realtek High Definition Audio'; Provider = 'Realtek'; Class = 'MEDIA'; Version = '6.0.9622.1'; Date = '2026-06-01'; UpdateId = 'ci-velho' },
+            [pscustomobject]@{ Title = 'Realtek - MEDIA - 6.0.9700.1'; Driver = 'Realtek High Definition Audio'; Provider = 'Realtek'; Class = 'media'; Version = '6.0.9700.1'; Date = '2026-07-01'; UpdateId = 'ci-novo' }
+        )
+        if (@($wfWuClasseIgual.Kept).Count -ne 1 -or [string]@($wfWuClasseIgual.Kept)[0].UpdateId -ne 'ci-novo') { Write-Host "  [ERRO] uma linha por dispositivo (mesma classe): ficou [$(@($wfWuClasseIgual.Kept | ForEach-Object { $_.UpdateId }) -join ', ')], esperado só 'ci-novo'" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfWuClasseIgual.Superseded).Count -ne 1) { Write-Host "  [ERRO] uma linha por dispositivo (mesma classe): $(@($wfWuClasseIgual.Superseded).Count) oculta(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # A busca real tem de TRAZER a classe: sem o campo na linha, o agrupamento acima nunca vê
+        # a diferença entre o driver base e a extensão, e o teste de cima passaria por engano.
+        if ([string]${function:Search-WinForgeWindowsUpdateDrivers} -notmatch 'DriverClass') { Write-Host "  [ERRO] uma linha por dispositivo (classe): Search-WinForgeWindowsUpdateDrivers não captura DriverClass" -ForegroundColor Red; $wbErrors++ }
+        if ([string]${function:Select-WinForgeWindowsUpdateLatest} -notmatch '\$linha\.Class') { Write-Host "  [ERRO] uma linha por dispositivo (classe): a chave de agrupamento não usa a classe" -ForegroundColor Red; $wbErrors++ }
         # Lista vazia é lista vazia, e não um item nulo.
         $wfWuNada = Select-WinForgeWindowsUpdateLatest -Rows @()
         if (@($wfWuNada.Kept).Count -ne 0 -or @($wfWuNada.Superseded).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo: lista vazia devolveu $(@($wfWuNada.Kept).Count)/$(@($wfWuNada.Superseded).Count)" -ForegroundColor Red; $wbErrors++ }
@@ -5415,8 +5450,10 @@ if ($SelfTest) {
         # Aplicar não passa essas chaves adiante. NADA aqui aplica coisa alguma - a detecção é
         # leitura de registro e de serviço, e o conjunto sintético dos testes é desfeito no fim.
         try {
+            # Matriz quando a detecção funciona; $null quando ela falha (e aí quem chama tem de
+            # manter o que já sabia, que é o teste da falha simulada mais abaixo).
             $wfAplDetectado = Get-WinForgeAppliedTweaks
-            if ($wfAplDetectado -isnot [array]) { Write-Host "  [ERRO] aplicados: Get-WinForgeAppliedTweaks devolveu '$($wfAplDetectado.GetType().Name)', esperado matriz" -ForegroundColor Red; $wbErrors++ }
+            if ($null -ne $wfAplDetectado -and $wfAplDetectado -isnot [array]) { Write-Host "  [ERRO] aplicados: Get-WinForgeAppliedTweaks devolveu '$($wfAplDetectado.GetType().Name)', esperado matriz ou `$null" -ForegroundColor Red; $wbErrors++ }
             $wfAplForaConfig = @(@($wfAplDetectado) | Where-Object { $_ -and -not $sync.configs.tweaks.PSObject.Properties[[string]$_] })
             if ($wfAplForaConfig.Count) { Write-Host "  [ERRO] aplicados: chave(s) fora de configs.tweaks -> $($wfAplForaConfig -join ', ')" -ForegroundColor Red; $wbErrors++ }
 
@@ -5488,6 +5525,25 @@ if ($SelfTest) {
             if ($wfAplResync -ne 2) { Write-Host "  [ERRO] repintura pós-aplicação: $wfAplResync linha(s) marcada(s), esperado 2" -ForegroundColor Red; $wbErrors++ }
             if ($sync.WPFDiagRecCount.Text -notmatch '\d+ já aplicados') { Write-Host "  [ERRO] repintura pós-aplicação: o contador não foi refeito ('$($sync.WPFDiagRecCount.Text)')" -ForegroundColor Red; $wbErrors++ }
 
+            # Detecção que FALHA não pode APAGAR o que já se sabia. O caminho errado era mudo e
+            # caro: o seletor gravava a lista vazia da falha em $sync.AppliedTweaks, as marcas
+            # sumiam das linhas e o contador voltava a "0 já aplicados" - como se o sistema
+            # estivesse limpo. A falha é simulada por $sync.WinForgeSelfTestAppliedFail, que é a
+            # única forma de provar isto sem mexer no registro desta máquina.
+            $sync.AppliedTweaks = $wfAplFake
+            $sync.WinForgeSelfTestAppliedFail = $true
+            try {
+                $wfAplFalha = Get-WinForgeAppliedTweaks
+                if ($null -ne $wfAplFalha) { Write-Host "  [ERRO] detecção com falha: devolveu '$(@($wfAplFalha).Count)' item(ns) em vez de `$null - quem chama não tem como distinguir 'nada aplicado' de 'não sei'" -ForegroundColor Red; $wbErrors++ }
+                $wfAplSelFalha = Select-WinForgeTweaksToApply -Keys @($wfAplCand[0], $wfAplCand[1], $wfAplCand[2])
+                if (@($wfAplSelFalha.Apply).Count -ne 3) { Write-Host "  [ERRO] detecção com falha: Apply veio com $(@($wfAplSelFalha.Apply).Count) chave(s), esperado as 3 pedidas - sem detecção nada pode ser pulado" -ForegroundColor Red; $wbErrors++ }
+                if (@($wfAplSelFalha.Skipped).Count -ne 0) { Write-Host "  [ERRO] detecção com falha: $(@($wfAplSelFalha.Skipped).Count) chave(s) pulada(s), esperado 0" -ForegroundColor Red; $wbErrors++ }
+                if (@($sync.AppliedTweaks).Count -ne 2) { Write-Host "  [ERRO] detecção com falha: `$sync.AppliedTweaks ficou com $(@($sync.AppliedTweaks).Count) chave(s), esperado as 2 que já estavam - a falha apagou o conjunto bom" -ForegroundColor Red; $wbErrors++ }
+                if ((Update-WinForgeAppliedVisuals) -ne 2) { Write-Host "  [ERRO] detecção com falha: as marcas das linhas sumiram depois de uma detecção que falhou" -ForegroundColor Red; $wbErrors++ }
+            } finally {
+                $sync.WinForgeSelfTestAppliedFail = $false
+            }
+
             # Trava de texto: a detecção roda DENTRO do corpo do runspace (ela lê registro e serviço
             # de ~80 entradas; no clique isso é a janela congelada sem nem pintar o rótulo, porque
             # quem pinta é o Dispatcher e o Dispatcher está parado dentro do handler) e ANTES do laço
@@ -5501,14 +5557,38 @@ if ($SelfTest) {
             elseif ($wfAplPos -gt $wfAplLaco) { Write-Host "  [ERRO] trava de texto: o filtro de aplicados vem DEPOIS do laço que aplica" -ForegroundColor Red; $wbErrors++ }
             elseif ($wfAplPos -lt $wfAplDespacho) { Write-Host "  [ERRO] trava de texto: a detecção do que já está aplicado ficou no caminho do clique - ela tem de rodar dentro do corpo do runspace" -ForegroundColor Red; $wbErrors++ }
             if ($wfAplCorpo.IndexOf('Conferindo o que já está aplicado', [System.StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] trava de texto: a barra não diz que está conferindo o que já está aplicado" -ForegroundColor Red; $wbErrors++ }
-            $wfAplRepintura = $wfAplCorpo.IndexOf('Invoke-WPFUIThread $sync.WinForgeAppliedResyncCallback', [System.StringComparison]::Ordinal)
+            # São DUAS repinturas, e é o par que importa. A primeira mostra o que a detecção do
+            # clique achou (as linhas que serão puladas); a segunda roda depois do laço, com o
+            # sistema já mexido - sem ela, o que ACABOU de ser aplicado ficaria sem marca até o
+            # próximo diagnóstico, que é a tela mentindo justamente no instante em que o usuário
+            # olha para ela.
+            $wfAplRepinturas = @([regex]::Matches($wfAplCorpo, [regex]::Escape('Invoke-WPFUIThread $sync.WinForgeAppliedResyncCallback')))
+            $wfAplRepintura = $(if ($wfAplRepinturas.Count) { $wfAplRepinturas[0].Index } else { -1 })
             if ($wfAplRepintura -lt 0) { Write-Host "  [ERRO] trava de texto: o corpo do runspace não repinta as linhas pela thread da janela depois da detecção" -ForegroundColor Red; $wbErrors++ }
             elseif ($wfAplRepintura -lt $wfAplPos) { Write-Host "  [ERRO] trava de texto: a repintura é agendada ANTES da detecção, e mostraria a verdade velha" -ForegroundColor Red; $wbErrors++ }
+            if ($wfAplRepinturas.Count -ne 2) { Write-Host "  [ERRO] trava de texto: $($wfAplRepinturas.Count) repintura(s) no corpo do runspace, esperado 2 (antes e depois do laço que aplica)" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAplLaco -ge 0) {
+                if ($wfAplRepinturas[0].Index -gt $wfAplLaco) { Write-Host "  [ERRO] trava de texto: a primeira repintura já vem depois do laço - ninguém mostra o que será pulado" -ForegroundColor Red; $wbErrors++ }
+                if ($wfAplRepinturas[1].Index -lt $wfAplLaco) { Write-Host "  [ERRO] trava de texto: a segunda repintura vem ANTES do laço, e mostraria o sistema como ele era antes de aplicar" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A segunda repintura precisa de verdade NOVA: repintar o mesmo conjunto depois do laço
+            # não marcaria nada do que acabou de ser aplicado.
+            $wfAplRedeteccao = $wfAplCorpo.IndexOf('Update-WinForgeAppliedFromSystem', [System.StringComparison]::Ordinal)
+            if ($wfAplRedeteccao -lt 0) { Write-Host "  [ERRO] trava de texto: o corpo do runspace não refaz a detecção depois do laço que aplica" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAplLaco -ge 0 -and $wfAplRedeteccao -lt $wfAplLaco) { Write-Host "  [ERRO] trava de texto: a redetecção do fim ficou ANTES do laço que aplica" -ForegroundColor Red; $wbErrors++ }
             if ($wfAplCorpo.IndexOf('$sync.WinForgeAppliedResyncCallback = {', [System.StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] trava de texto: o bloco da repintura não nasce na runspace principal (no caminho do clique)" -ForegroundColor Red; $wbErrors++ }
+            # "Detectar aplicados" roda dentro de um [Action] que o Dispatcher executa: exceção ali
+            # não tem para onde subir e mata o BeginInvoke. O caminho da base é try/finally SEM
+            # catch, então o catch tem de ser nosso.
+            $wfAplGetCorpo = [string](Get-Command Invoke-WPFGetInstalled).ScriptBlock
+            $wfAplGetSet = $wfAplGetCorpo.IndexOf('Set-WinForgeAppliedTweaks -Keys @($completedOperation.Checkboxes)', [System.StringComparison]::Ordinal)
+            $wfAplGetCatch = $wfAplGetCorpo.IndexOf('catch { Write-WinForgeLog -Component "Applied" -Level "WARN" -Message "Detectar aplicados', [System.StringComparison]::Ordinal)
+            if ($wfAplGetSet -lt 0) { Write-Host "  [ERRO] trava de texto: 'Detectar aplicados' não alimenta mais o conjunto de aplicados" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAplGetCatch -lt $wfAplGetSet) { Write-Host "  [ERRO] trava de texto: 'Detectar aplicados' atualiza o conjunto e as marcas sem catch - exceção ali escapa pelo Dispatcher" -ForegroundColor Red; $wbErrors++ }
             # A barra conta os passos que vão acontecer de verdade: sem descontar os pulados ela
             # pararia em "8/12" e pareceria travada.
             if ($wfAplCorpo.IndexOf('$totalSteps = [Math]::Max($totalSteps - $wfPulados.Count, 1)', [System.StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] trava de texto: o total de passos não desconta os ajustes pulados" -ForegroundColor Red; $wbErrors++ }
-            Write-Host "  Estado já aplicado: $(@($wfAplDetectado).Count) chave(s) detectada(s) nesta máquina; marca, seletor e contador conferidos com conjunto sintético | chave com script nunca é pulada | detecção fora do clique"
+            Write-Host "  Estado já aplicado: $(@($wfAplDetectado).Count) chave(s) detectada(s) nesta máquina; marca, seletor e contador conferidos com conjunto sintético | chave com script nunca é pulada | detecção fora do clique | falha na detecção não apaga o conjunto | repintura antes e depois do laço"
         } catch {
             Write-Host "  [ERRO] estado já aplicado: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         } finally {

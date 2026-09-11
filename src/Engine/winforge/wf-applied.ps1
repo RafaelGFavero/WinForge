@@ -39,20 +39,45 @@ function Get-WinForgeAppliedTweaks {
     .DESCRIPTION
         Invoke-WinForgeCurrentSystem cria a unidade HKU: se ela não existir e lê registro e
         serviços - tudo leitura, e tudo sem exigir elevação. Falha ali não pode derrubar o
-        diagnóstico nem o botão Aplicar: vira aviso no log e uma lista vazia, que é o estado
-        "não sei de nada aplicado" - o mais conservador, porque nada será pulado.
+        diagnóstico nem o botão Aplicar: vira aviso no log e $null.
+
+        $null e lista vazia são coisas DIFERENTES, e confundir as duas custava caro: lista vazia é
+        "detectei e não achei nada aplicado", $null é "não sei". Devolvendo @() na falha, quem
+        chama gravava a ignorância por cima do que já sabia - as marcas sumiam das linhas e o
+        contador voltava a "0 já aplicados", com o sistema exatamente como estava. Agora $null quer
+        dizer "mantenha o que você tinha", e ninguém é pulado enquanto a dúvida durar.
+
         O 2>$null existe porque o detector da base chama Get-Service sem -ErrorAction: serviço que
         não existe nesta máquina escreve no fluxo de erro sem interromper nada, e essas linhas só
         sujariam a saída do SelfTest.
     .OUTPUTS
-        [string[]] - vazio quando a detecção falha.
+        [string[]] com o que está aplicado, ou $null quando a detecção falha.
     #>
     try {
+        # A falha só acontece de verdade em máquina com registro ou serviço fora do lugar; sem esta
+        # porta o SelfTest não teria como provar que ela preserva o conjunto bom.
+        if ($sync -and $sync.WinForgeSelfTestAppliedFail) { throw "falha de detecção simulada pelo SelfTest" }
         return @(Invoke-WinForgeCurrentSystem -CheckBox tweaks 2>$null)
     } catch {
         Write-WinForgeLog -Component "Applied" -Level "WARN" -Message "Não foi possível detectar o que já está aplicado: $($_.Exception.Message)"
-        return @()
+        return $null
     }
+}
+
+function Update-WinForgeAppliedFromSystem {
+    <#
+    .SYNOPSIS
+        Detecta o que está aplicado e, SÓ se a detecção funcionar, regrava $sync.AppliedTweaks.
+    .DESCRIPTION
+        O par Get/Set aparecia solto em três lugares, e em todos eles a falha da detecção apagava o
+        conjunto bom. Este é o único caminho que os três usam agora: detecção que falha devolve
+        $null e não escreve nada em $sync - o que se sabia continua valendo até a próxima passada.
+    .OUTPUTS
+        O HashSet gravado, ou $null quando a detecção falhou.
+    #>
+    $detectado = Get-WinForgeAppliedTweaks
+    if ($null -eq $detectado) { return $null }
+    return Set-WinForgeAppliedTweaks -Keys $detectado
 }
 
 function Set-WinForgeAppliedTweaks {
@@ -87,6 +112,10 @@ function Select-WinForgeTweaksToApply {
         deixou de estar aplicado seria pior que reaplicar um que ainda está.
         O ponto de restauração nunca é pulado - ele não é um estado do sistema, é uma ação, e quem
         decide se ele se repete é a trava de sessão ($sync.RestorePointCreated).
+
+        Detecção que FALHA não apaga o que já se sabia: o conjunto local vira vazio (nada é pulado,
+        que é o lado seguro do erro) e $sync.AppliedTweaks fica como estava, com as marcas nas
+        linhas e o contador do checklist intactos.
     .PARAMETER Keys
         As chaves selecionadas na interface.
     .PARAMETER Applied
@@ -99,7 +128,8 @@ function Select-WinForgeTweaksToApply {
         $Applied
     )
 
-    $set = if ($null -ne $Applied) { $Applied } else { Set-WinForgeAppliedTweaks -Keys (Get-WinForgeAppliedTweaks) }
+    $set = if ($null -ne $Applied) { $Applied } else { Update-WinForgeAppliedFromSystem }
+    if ($null -eq $set) { $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
 
     $apply = [System.Collections.Generic.List[string]]::new()
     $skipped = [System.Collections.Generic.List[string]]::new()
@@ -211,6 +241,9 @@ function Update-WinForgeAppliedAfterApply {
         clique. Sem esta passada, as marcas " · aplicado" e o contador do checklist continuariam
         mostrando o resultado do diagnóstico da abertura - duas verdades diferentes na mesma tela,
         e a mais visível delas sendo a velha.
+        Ela é chamada DUAS vezes por aplicação: uma com a verdade de antes (o que será pulado) e
+        outra depois do laço, com a detecção refeita, para que o que acabou de ser aplicado apareça
+        marcado sem esperar o próximo diagnóstico.
         Roda na thread da janela (quem chama de dentro do runspace usa Invoke-WPFUIThread com um
         scriptblock nascido na runspace principal).
         O contador vem depois e num try próprio: ele depende dos controles da aba Diagnóstico, que

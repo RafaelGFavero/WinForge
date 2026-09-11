@@ -393,9 +393,14 @@ function Select-WinForgeWindowsUpdateLatest {
         Quando o fabricante publica uma revisão, o Windows Update passa a oferecer as DUAS - mesmo
         DriverModel, versões diferentes. As duas na tabela é um convite a instalar a antiga.
 
-        O agrupamento é por DriverModel + DriverProvider, sem ligar para caixa (o serviço não é
-        consistente nisso). DriverModel vazio não identifica dispositivo nenhum: cada linha assim
-        fica sozinha, senão ofertas de placas diferentes sumiriam uma atrás da outra.
+        O agrupamento é por DriverModel + DriverProvider + DriverClass, sem ligar para caixa (o
+        serviço não é consistente nisso). DriverModel vazio não identifica dispositivo nenhum: cada
+        linha assim fica sozinha, senão ofertas de placas diferentes sumiriam uma atrás da outra.
+
+        A classe entra na chave porque o mesmo dispositivo recebe DOIS pacotes que se completam: o
+        driver base (classe 'MEDIA', 'Display', 'Net') e o INF de extensão (classe 'Extension'),
+        publicados com o mesmo DriverModel e o mesmo DriverProvider. Sem ela, um escondia o outro
+        como se fosse revisão antiga, e metade da oferta sumia da tabela.
 
         Quem ganha é a maior [version]. Sem versão dos dois lados (ou com número que não vira
         [version]), quem ganha é a data mais nova - DriverVerDate a API sempre traz. Empate fica
@@ -414,8 +419,8 @@ function Select-WinForgeWindowsUpdateLatest {
         if ($null -eq $linha) { continue }
         $modelo = [string]$linha.Driver
         # A chave leva o índice quando não há modelo: é o que impede duas placas anônimas de virarem
-        # uma. O "`u{1}" separa modelo de fornecedor para 'ab'+'c' não colidir com 'a'+'bc'.
-        $chave = if ([string]::IsNullOrWhiteSpace($modelo)) { "#$i" } else { ($modelo + [char]1 + [string]$linha.Provider).ToLowerInvariant() }
+        # uma. O "`u{1}" separa os três campos para 'ab'+'c' não colidir com 'a'+'bc'.
+        $chave = if ([string]::IsNullOrWhiteSpace($modelo)) { "#$i" } else { ($modelo + [char]1 + [string]$linha.Provider + [char]1 + [string]$linha.Class).ToLowerInvariant() }
         $i++
         if (-not $grupos.ContainsKey($chave)) {
             $ordem.Add($chave)
@@ -494,10 +499,16 @@ function Search-WinForgeWindowsUpdateDrivers {
             $updateId = ''
             try { $updateId = [string]$u.Identity.UpdateID } catch { $updateId = '' }
             if ($updateId) { try { if ($sync -and $sync.DiagWUUpdates) { $sync.DiagWUUpdates[$updateId] = $u } } catch { } }
+            # A classe separa o driver base do INF de extensão do MESMO dispositivo - os dois vêm
+            # com DriverModel e DriverProvider iguais. Nem toda atualização traz o campo, e o
+            # acesso a uma propriedade COM que não existe estoura: vazio é resposta válida.
+            $class = ''
+            try { if ($u.DriverClass) { $class = [string]$u.DriverClass } } catch { $class = '' }
             [pscustomobject]@{
                 Title    = [string]$u.Title
                 Driver   = [string]$u.DriverModel
                 Provider = [string]$u.DriverProvider
+                Class    = $class
                 Version  = $version
                 Date     = $date
                 KB       = (@($u.KBArticleIDs) -join ',')

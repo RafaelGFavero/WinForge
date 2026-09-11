@@ -284,9 +284,10 @@ function Start-WinForgeProfileJob {
 
             # O que JÁ está aplicado. Roda aqui, no job, porque é leitura de registro e de serviço
             # de todas as entradas e leva alguns segundos - na thread da janela isso apareceria
-            # como travamento. Falha não derruba o diagnóstico: a função devolve lista vazia.
+            # como travamento. Falha não derruba o diagnóstico nem apaga o conjunto anterior: a
+            # função devolve $null e o que já se sabia continua valendo.
             $null = Set-WinForgeProfileProgress -Label "Conferindo o que já está aplicado..." -Percent 85
-            $null = Set-WinForgeAppliedTweaks -Keys (Get-WinForgeAppliedTweaks)
+            $null = Update-WinForgeAppliedFromSystem
 
             # Janela fechando: Invoke-WPFUIThread é síncrono e esperaria por um Dispatcher que está
             # sendo desligado. Não há mais interface para atualizar - o job só termina de se despedir.
