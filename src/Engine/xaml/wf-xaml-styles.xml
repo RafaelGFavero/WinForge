@@ -300,6 +300,11 @@
                  uma barra contínua (apareceu em dark/11 da Tarefa 6). Com 30 a margem de 4 px do
                  botão fecha a conta e sobram 8 px entre um botão e o seguinte. -->
             <Setter Property="Height" Value="30"/>
+            <!-- O fundo da linha é DAQUI, e nenhum DataGrid pode escrever RowBackground: esse
+                 valor é coagido para DataGridRow.Background com precedência Local, que vence
+                 tanto este Setter quanto o gatilho de IsMouseOver abaixo. Com
+                 RowBackground="Transparent" nas duas tabelas da aba Diagnóstico o realce do
+                 mouse existia no papel e nunca aparecia na tela. O -SelfTest cobra a ausência. -->
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="{DynamicResource MainForegroundColor}"/>
             <Style.Triggers>

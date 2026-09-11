@@ -36,7 +36,7 @@
                             <DataGrid Name="WPFDiagDrivers" Margin="10,0,5,0" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal" SelectionMode="Single" HorizontalAlignment="Stretch"
                                       ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                      Background="{DynamicResource CardBackgroundColor}" RowBackground="Transparent"
+                                      Background="{DynamicResource CardBackgroundColor}"
                                       Foreground="{DynamicResource MainForegroundColor}" BorderBrush="{DynamicResource BorderColor}"
                                       HorizontalGridLinesBrush="{DynamicResource BorderColor}" BorderThickness="1"
                                       FontSize="{DynamicResource FontSize}">
@@ -77,7 +77,7 @@
                             <DataGrid Name="WPFDiagWU" Margin="10,0,5,10" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" Visibility="Collapsed"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal" SelectionMode="Single" HorizontalAlignment="Stretch"
                                       ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                      Background="{DynamicResource CardBackgroundColor}" RowBackground="Transparent"
+                                      Background="{DynamicResource CardBackgroundColor}"
                                       Foreground="{DynamicResource MainForegroundColor}" BorderBrush="{DynamicResource BorderColor}"
                                       HorizontalGridLinesBrush="{DynamicResource BorderColor}" BorderThickness="1"
                                       FontSize="{DynamicResource FontSize}">
