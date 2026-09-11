@@ -1,5 +1,90 @@
 # Changelog
 
+## 1.6.0 (2026-09-11)
+
+### Aba Diagnóstico
+
+- O checklist de recomendações deixou de ser só leitura: **Aplicar marcados** e **Desfazer
+  marcados** ficam ao lado do contador, na mesma faixa de Marcar todos / Desmarcar todos. Eles
+  chamam o MESMO caminho dos botões da aba Ajustes (`Invoke-WPFtweaksbutton` e `Invoke-WPFundoall`)
+  — marcar a linha no Diagnóstico já marca a caixa de verdade na aba de destino, e é ela que
+  alimenta a lista de aplicação. Não existe caminho de aplicação paralelo: a pergunta do ponto de
+  restauração, a trava de um trabalho por vez e o runspace continuam sendo os da base.
+- Os dois ficam desabilitados enquanto há trabalho em andamento, em vez de aceitar o clique e
+  responder com uma caixa de erro depois dele.
+
+### Correções da aba Configurações
+
+- Os cinco botões do grupo **Correções** que demoram — Rede - Redefinir, Servidor NTP - Ativar,
+  Verificação de corrupção do sistema, Windows Update - Redefinir e WinGet - Reinstalar — rodavam
+  na thread da janela e escreviam num console que o lançador esconde: a aba congelava e nada
+  aparecia na tela. Agora rodam num runspace, com a saída ao vivo numa **janela própria** que se
+  enche enquanto o comando trabalha (cabeçalho "Em andamento: `<título>` (mm:ss)", que vira
+  "Concluído em mm:ss (código N)" no fim), e a janela principal continua respondendo.
+- Cada passo fecha com uma linha `== Passo N: <nome> — código X ==`, e o cabeçalho final diz qual
+  passo falhou. Antes, um chkdsk + sfc + DISM saía emendado com um único código no fim, e não dava
+  para saber qual dos três tinha falhado.
+- A **Verificação de corrupção do sistema** passou a rodar `chkdsk /scan /perf` antes do
+  `sfc /scannow` e do `DISM /RestoreHealth`. A ordem é dependência: um setor ruim corrompe de novo o
+  que o sfc acabou de consertar, e é o DISM que repõe a imagem de onde o sfc copia os arquivos bons.
+- Os cinco passaram a pedir confirmação de Sim/Não antes de agir, com o texto da própria descrição
+  do botão — que foi reescrita para dizer o que de fato acontece. A do **Windows Update -
+  Redefinir** é a que mais mudou: além de mexer no Windows Update, ela apaga a diretiva de grupo
+  local inteira, e com ela os ajustes do WinForge que moram em diretiva (Edge, Brave,
+  ConsumerFeatures, telemetria), que precisam ser marcados de novo. O histórico de atualizações é
+  preservado.
+- A saída fica em `repair-<nome>-<data-hora>.txt`, em `%LocalAppData%\WinForge\logs`, e a janela
+  tem **Copiar** e **Abrir arquivo**.
+
+### Permissões do disco C:
+
+Novo grupo de três botões no reparo de componentes, para o caso em que a cadeia de permissões do
+disco do Windows cai — depois de uma atualização de fabricante, por exemplo — e o dono da máquina
+fica sem acesso às próprias pastas.
+
+- **Verificar** só lê (`Get-Acl`, sem elevação). Confere dono e ACEs da raiz do disco, de Windows,
+  Program Files, Program Files (x86), ProgramData, Users, Users\Public e da pasta do usuário atual
+  contra o padrão de fábrica, e termina com a contagem das diferenças. O confronto é **por SID**,
+  então vale igual num Windows em inglês e num em português; e é um PISO, não um retrato: ACE a mais
+  não é diferença, porque uma pasta do sistema tem ACEs que variam com a edição e com o que já foi
+  instalado. Pasta que não existe não conta; pasta que existe e não deixa ler a lista, conta.
+- **Restaurar padrões** roda seis fases, nesta ordem: `chkdsk /scan` (se acusar erro no volume, para
+  aí e nada é alterado); backup das listas atuais com `icacls /save` em
+  `%ProgramData%\WinForge\acl-backup`; a raiz, com `/inheritance:r` e as cinco ACEs padrão por SID;
+  `secedit` com o `defltbase.inf` nas áreas FILESTORE e REGKEYS, que é quem repõe Windows, Program
+  Files, ProgramData, Users e o registro; a pasta do usuário e a herança do conteúdo dela; e, só
+  quando a raiz responde acesso negado, um `takeown` sem recursão seguido de uma segunda tentativa.
+  `/reset /T` na raiz e `takeown /R` não existem aqui — os dois descem a árvore inteira apagando o
+  que o Windows sabe e o WinForge não. Leva minutos e pede reinicialização no fim.
+- **Desfazer** reaplica com `icacls /restore` o conjunto de backup mais recente, uma pasta por
+  arquivo, a partir da pasta anotada no índice (o icacls grava nomes relativos à pasta em que foi
+  invocado). Sem backup gravado, ele apenas diz isso.
+- Três limites que a descrição dos botões não esconde: a parte de REGISTRO do `secedit` **não tem
+  desfazer** — o backup é de sistema de arquivos; o backup das pastas fora do perfil é **sem
+  recursão** (só a DACL da pasta em si, não a do conteúdo); e a restauração não acontece sem backup,
+  em nenhuma das duas pontas (pasta de backup que não passa na conferência, ou nenhum arquivo
+  gravado, param tudo antes de a primeira permissão ser alterada).
+- A pasta de backup passa pela mesma conferência da pasta de downloads de driver: DACL própria sem
+  herança, nenhum ponto de reanálise na cadeia, dono dentro de SYSTEM/Administradores e ninguém de
+  fora deles com escrita. Cada arquivo gravado é endurecido, e o Desfazer recusa arquivo que não
+  esteja diretamente na pasta ou cujo dono não seja o SYSTEM ou o grupo Administradores. Sem
+  elevação a pasta nasce com a identidade atual como dona e a restauração inteira para.
+
+### Descrições
+
+- Toda descrição visível foi revisada para dizer as três coisas que decidem se alguém marca ou não
+  marca o item: o mecanismo em palavras simples, o efeito prático e o custo. As que só repetiam o
+  título ("IPv6 - Desativar" → "Desativa o IPv6.") ou diziam a mesma frase duas vezes dentro de si
+  mesmas foram reescritas, e sete botões de ação que não tinham descrição nenhuma ganharam uma.
+- Nova trava no `-SelfTest`, sobre `Description` de tweaks e Config e `description` dos aplicativos,
+  já mesclados e traduzidos: nenhuma frase repetida dentro da mesma descrição nem **entre**
+  descrições, 40 caracteres no mínimo, nada de ser igual ao título nem começar por ele, no máximo
+  uma "Origem:" e nenhum "CUIDADO:" escrito à mão — quem prefixa isso é a auditoria de risco.
+  Descrição em branco só passa para 14 botões de painel clássico do Windows, numa lista explícita
+  que o próprio teste cobra por tamanho.
+- `tools/List-Descriptions.ps1` põe chave, título e descrição lado a lado para a revisão que a
+  trava não consegue fazer — se o texto é bom. Tem `-Grupo`, `-MenorQue` e `-Csv`.
+
 ## 1.5.0 (2026-09-10)
 
 ### Interface em português
