@@ -2839,6 +2839,52 @@ if ($SelfTest) {
     } finally {
         Remove-Item -Path $wfCatRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- consulta ao vivo fora da thread da janela
+    # A consulta ao vivo são três requisições de 5 s mais a do tamanho (10 s): rodando no clique,
+    # a janela ficava até ~25 s sem responder e o rótulo "Consultando o catálogo..." nem chegava a
+    # ser pintado - o Dispatcher estava parado dentro do próprio handler. Então o clique só liga a
+    # trava, escreve na barra e despacha; quem pergunta ao catálogo é o runspace, e a caixa de
+    # confirmação volta para a thread da janela pelo callback.
+    try {
+        # 1. O callback nasce no ESCOPO DO ARQUIVO, na runspace principal. Criado dentro do corpo do
+        #    job ele pertenceria à runspace do pool e travaria no primeiro pipeline que o Dispatcher
+        #    rodasse - o laço do Plano 3.
+        if ($sync.WinForgeDriverConfirmCallback -isnot [scriptblock]) {
+            Write-Host "  [ERRO] consulta ao vivo: `$sync.WinForgeDriverConfirmCallback não é um scriptblock de escopo de arquivo" -ForegroundColor Red; $wbErrors++
+        }
+        # 2. Trava de origem: no caminho do CLIQUE (depois da trava de SelfTest) nenhuma chamada a
+        #    Resolve-WinForgeNvidiaDownloadTarget pode aparecer ANTES do corpo do runspace. O
+        #    -DryRun continua chamando direto, e por isso o trecho começa na trava de SelfTest.
+        $wfVivoDef = [string]${function:Invoke-WinForgeDriverAction}
+        $wfVivoMarca = "Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeDriverAction (nvidia-download)'"
+        $wfVivoIni = $wfVivoDef.IndexOf($wfVivoMarca)
+        if ($wfVivoIni -lt 0) {
+            Write-Host "  [ERRO] consulta ao vivo: não achei a trava de SelfTest do download no corpo de Invoke-WinForgeDriverAction" -ForegroundColor Red; $wbErrors++
+        } else {
+            $wfVivoClique = $wfVivoDef.Substring($wfVivoIni)
+            $wfVivoCorpo = $wfVivoClique.IndexOf('$corpo = {')
+            $wfVivoResolve = $wfVivoClique.IndexOf('Resolve-WinForgeNvidiaDownloadTarget')
+            if ($wfVivoClique -notmatch 'Invoke-WPFRunspace') { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não despacha nada para um runspace" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfVivoCorpo -lt 0) { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não tem o corpo `$corpo do runspace" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfVivoResolve -lt 0) { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não consulta o catálogo" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfVivoResolve -lt $wfVivoCorpo) { Write-Host "  [ERRO] consulta ao vivo: Resolve-WinForgeNvidiaDownloadTarget roda na thread do clique, antes do corpo do runspace" -ForegroundColor Red; $wbErrors++ }
+            if ($wfVivoClique -notmatch 'WinForgeDriverConfirmCallback') { Write-Host "  [ERRO] consulta ao vivo: o caminho do clique não volta à thread da janela pelo callback" -ForegroundColor Red; $wbErrors++ }
+        }
+        # 3. Recusa da consulta ao vivo solta a trava: sem isso a interface ficava "ocupada" para
+        #    sempre depois de um clique sem rede, e nenhum outro comando começaria.
+        $wfVivoAntes = $sync.CommandRunning
+        $sync.CommandRunning = $true
+        $sync.WinForgeDriverConfirm = @{ Ok = $false; Url = $null; Version = $null; SizeText = $null; Reason = 'recusa sintética do SelfTest' }
+        try { & $sync.WinForgeDriverConfirmCallback } catch {
+            Write-Host "  [ERRO] consulta ao vivo: o callback lançou '$($_.Exception.Message)' na recusa" -ForegroundColor Red; $wbErrors++
+        }
+        if ($sync.CommandRunning) { Write-Host "  [ERRO] consulta ao vivo: a trava `$sync.CommandRunning ficou ligada depois da recusa" -ForegroundColor Red; $wbErrors++ }
+        $sync.CommandRunning = $wfVivoAntes
+        $sync.WinForgeDriverConfirm = $null
+        Write-Host "  Consulta ao vivo: fora da thread da janela, confirmação pelo callback de escopo de arquivo, trava solta na recusa"
+    } catch {
+        Write-Host "  [ERRO] consulta ao vivo: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     # ---------------------------------------------------------------- cadeia inteira da pasta protegida
     # Conferir só a ÚLTIMA pasta deixava um caminho aberto: '%ProgramData%\WinForge' criado com a ACL
     # herdada de %ProgramData% dá FILE_DELETE_CHILD a um processo de integridade média da mesma conta.
@@ -3683,8 +3729,10 @@ if ($SelfTest) {
             }
             # E o corpo do download cala o medidor de progresso do Invoke-WebRequest: no PowerShell
             # 5.1 ele emite um registro por bloco lido e fica uma ordem de grandeza mais lento num
-            # arquivo de 700 MB.
-            if ([string]${function:Invoke-WinForgeDriverAction} -notmatch "ProgressPreference = 'SilentlyContinue'") { Write-Host "  [ERRO] barra: o corpo do download não desliga `$ProgressPreference" -ForegroundColor Red; $wbErrors++ }
+            # arquivo de 700 MB. O corpo do download mora no callback da confirmação; o da consulta
+            # ao vivo, na própria função - os dois chamam a rede, os dois calam o medidor.
+            if ([string]${function:Invoke-WinForgeDriverAction} -notmatch "ProgressPreference = 'SilentlyContinue'") { Write-Host "  [ERRO] barra: o corpo da consulta ao vivo não desliga `$ProgressPreference" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.WinForgeDriverConfirmCallback -notmatch "ProgressPreference = 'SilentlyContinue'") { Write-Host "  [ERRO] barra: o corpo do download não desliga `$ProgressPreference" -ForegroundColor Red; $wbErrors++ }
             Write-Host "  Job de diagnóstico: OK | barra: $($sync.ProfileJobLabel)"
         } catch {
             Write-Host "  [ERRO] job de diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++

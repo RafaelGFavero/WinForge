@@ -595,6 +595,85 @@ function Get-WinForgeDiagDriverRows {
     return ,$rows
 }
 
+# Resultado da consulta ao vivo esperando a thread da janela: quem escreve é o runspace, quem lê é
+# o callback abaixo. Um slot só, porque um trabalho por vez ($sync.CommandRunning) já é a regra.
+$sync.WinForgeDriverConfirm = $null
+
+# A caixa de confirmação do download NVIDIA, de volta na thread da janela. Nasce AQUI, no escopo do
+# arquivo e portanto na runspace principal, e não dentro do corpo do job: um scriptblock criado numa
+# runspace do pool e executado pelo Dispatcher trava na primeira pipeline - a thread da janela pede
+# a runspace de origem, que está parada esperando o Dispatcher terminar. É o mesmo laço que matou o
+# diagnóstico calado na tarefa do Plano 3, e a razão de $sync.WinForgeCommandOutputCallback existir.
+#
+# Invoke-WPFUIThread chama o bloco SEM argumento (Dispatcher.Invoke([action]) não passa parâmetro),
+# então o resultado da consulta viaja pelo slot $sync.WinForgeDriverConfirm.
+#
+# A trava $sync.CommandRunning foi ligada no clique e é SEGURADA até aqui: ela só solta quando não
+# há mais nada por vir - recusa da consulta, "Não" na caixa, ou despacho do download que falhou. No
+# "Sim" ela continua ligada e quem solta é o 'finally' do corpo do download.
+$sync.WinForgeDriverConfirmCallback = {
+    $pendente = $sync.WinForgeDriverConfirm
+    $sync.WinForgeDriverConfirm = $null
+    try {
+        if ($null -eq $pendente) {
+            $sync.CommandRunning = $false
+            return
+        }
+        if (-not $pendente.Ok) {
+            $recusa = "Download do driver NVIDIA recusado: $([string]$pendente.Reason)."
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $recusa
+            $null = Set-WinForgeDiagProgress -Label $recusa -Percent 0
+            $sync.CommandRunning = $false
+            return
+        }
+
+        $versao = [string]$pendente.Version
+        $null = Set-WinForgeDiagProgress -Label "Catálogo da NVIDIA: versão $versao disponível." -Percent 0
+        $resposta = [System.Windows.MessageBox]::Show($sync.Form,
+            "Baixar o driver NVIDIA $versao do site oficial ($([string]$pendente.SizeText))? O instalador abrirá para você concluir.",
+            "WinForge", "YesNo", "Warning")
+        if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
+            Write-WinForgeLog -Component "Diag" -Message "Download do driver NVIDIA $versao cancelado pelo usuário."
+            $null = Set-WinForgeDiagProgress -Label "Download do driver NVIDIA cancelado." -Percent 0
+            $sync.CommandRunning = $false
+            return
+        }
+
+        # Nasce na thread da janela, que é a runspace principal - mesma regra do callback.
+        $corpoDownload = {
+            param($wfArgs)
+            # Sem isto o Invoke-WebRequest do PowerShell 5.1 emite um registro de progresso por bloco
+            # lido e fica uma ordem de grandeza mais lento num arquivo de 700 MB - e o corpo roda num
+            # runspace preso ao host do console, que desenha esses registros.
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                $null = Set-WinForgeDiagProgress -Label "Baixando o driver NVIDIA $($wfArgs.Version) do site oficial..." -Percent 10
+                $wfRes = Install-WinForgeNvidiaDriver -Url $wfArgs.Url -Version $wfArgs.Version
+                $null = Set-WinForgeDiagProgress -Label ([string]$wfRes.Text) -Percent $(if ($wfRes.Started) { 100 } else { 0 })
+            } catch {
+                Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA falhou: $($_.Exception.Message)"
+                $null = Set-WinForgeDiagProgress -Label "Download do driver NVIDIA falhou: $($_.Exception.Message)" -Percent 0
+            } finally {
+                $sync.CommandRunning = $false
+            }
+        }
+        try {
+            # O par Url/Version é o que a consulta ao vivo acabou de trazer, e viaja como ARGUMENTO:
+            # o endereço vem da rede, e texto de fora não vira código.
+            Invoke-WPFRunspace -ScriptBlock $corpoDownload -ArgumentList @{ Url = [string]$pendente.Url; Version = $versao } | Out-Null
+        } catch {
+            # Despacho que falha (pool fechado, sem thread livre) nunca roda o 'finally' do corpo:
+            # sem este catch a trava ficaria ligada e nenhum outro comando começaria.
+            $sync.CommandRunning = $false
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)"
+            $null = Set-WinForgeDiagProgress -Label "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)" -Percent 0
+        }
+    } catch {
+        $sync.CommandRunning = $false
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Confirmação do download do driver NVIDIA falhou: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-WinForgeDriverAction {
     <#
     .SYNOPSIS
@@ -615,11 +694,20 @@ function Invoke-WinForgeDriverAction {
         A trava de SelfTest vem ANTES da caixa de confirmação, pela mesma razão de
         Invoke-WinForgeRepairCommand: num build sem ninguém na frente, uma caixa modal pendura tudo.
 
-        O trabalho vai para um runspace com o corpo criado AQUI, na runspace principal (esta função
-        roda no clique). Um scriptblock criado dentro do corpo do job pertenceria à runspace do pool
-        e travaria no primeiro pipeline quando o Dispatcher o executasse - o mesmo laço descrito em
-        Start-WinForgeProfileJob. E os dados viajam como ARGUMENTO, nunca concatenados num texto de
-        comando: o endereço vem da rede, e texto de fora não vira código.
+        A CONSULTA em si não roda no clique. São três requisições de 5 s mais a do tamanho (10 s):
+        na thread da janela isso era até ~25 s congelado, com o agravante de o rótulo "Consultando
+        o catálogo..." nunca aparecer - quem pinta é o Dispatcher, e o Dispatcher estava parado
+        dentro do handler do clique. O clique liga a trava, escreve na barra e despacha; o runspace
+        consulta e guarda o resultado em $sync.WinForgeDriverConfirm; a caixa de confirmação volta
+        para a thread da janela por Invoke-WPFUIThread com $sync.WinForgeDriverConfirmCallback, e é
+        de lá que sai o runspace do download, já com o par Url/Version que acabou de chegar.
+
+        O corpo do job e o callback nascem os dois na runspace PRINCIPAL (esta função roda no
+        clique; o callback é de escopo de arquivo). Um scriptblock criado dentro do corpo do job
+        pertenceria à runspace do pool e travaria no primeiro pipeline quando o Dispatcher o
+        executasse - o mesmo laço descrito em Start-WinForgeProfileJob. E os dados viajam como
+        ARGUMENTO, nunca concatenados num texto de comando: o endereço vem da rede, e texto de fora
+        não vira código.
     .PARAMETER DryRun
         Faz a consulta ao vivo e devolve o que FARIA, sem caixa, sem rede de download e sem disco.
         É o que o -SelfTest usa para provar que o endereço vem da consulta e não da linha.
@@ -677,55 +765,48 @@ function Invoke-WinForgeDriverAction {
         return 'ocupado'
     }
 
-    # A consulta ao vivo acontece AQUI, na thread do clique, porque é ela que decide o texto da
-    # caixa de confirmação: perguntar por uma versão e baixar outra seria pedir permissão para uma
-    # coisa e fazer outra. São três requisições de 5 s no pior caso.
-    $null = Set-WinForgeDiagProgress -Label "Consultando o catálogo da NVIDIA..." -Percent 5
-    $alvo = Resolve-WinForgeNvidiaDownloadTarget -Row $Row -Root $Root -Resolver $Resolver
-    if (-not $alvo.Ok) {
-        $recusa = "Download do driver NVIDIA recusado: $($alvo.Reason)."
-        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $recusa
-        $null = Set-WinForgeDiagProgress -Label $recusa -Percent 0
-        return 'recusado'
-    }
-    $versao = [string]$alvo.Version
-    $tamanho = Get-WinForgeNvidiaDownloadSizeText -Url ([string]$alvo.Url)
-    $null = Set-WinForgeDiagProgress -Label "Catálogo da NVIDIA: versão $versao disponível." -Percent 0
-
-    $resposta = [System.Windows.MessageBox]::Show($sync.Form,
-        "Baixar o driver NVIDIA $versao do site oficial ($tamanho)? O instalador abrirá para você concluir.",
-        "WinForge", "YesNo", "Warning")
-    if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
-        Write-WinForgeLog -Component "Diag" -Message "Download do driver NVIDIA $versao cancelado pelo usuário."
-        return 'cancelado'
-    }
-
+    # A consulta ao vivo NÃO roda aqui. São três requisições de 5 s mais a do tamanho (10 s): na
+    # thread do clique isso é até ~25 s de janela congelada, e o rótulo abaixo nem chegava a ser
+    # pintado, porque quem pinta é o Dispatcher e o Dispatcher estava parado dentro deste handler.
+    # Então o clique faz três coisas instantâneas - liga a trava, escreve na barra, despacha - e
+    # quem pergunta ao catálogo é o runspace.
     $sync.CommandRunning = $true
+    $sync.WinForgeDriverConfirm = $null
+    $null = Set-WinForgeDiagProgress -Label "Consultando o catálogo da NVIDIA..." -Percent 5
     $corpo = {
         param($wfArgs)
-        # Sem isto o Invoke-WebRequest do PowerShell 5.1 emite um registro de progresso por bloco
-        # lido e fica uma ordem de grandeza mais lento num arquivo de 700 MB - e o corpo roda num
-        # runspace preso ao host do console, que desenha esses registros.
         $ProgressPreference = 'SilentlyContinue'
         try {
-            $null = Set-WinForgeDiagProgress -Label "Baixando o driver NVIDIA $($wfArgs.Version) do site oficial..." -Percent 10
-            $wfRes = Install-WinForgeNvidiaDriver -Url $wfArgs.Url -Version $wfArgs.Version
-            $null = Set-WinForgeDiagProgress -Label ([string]$wfRes.Text) -Percent $(if ($wfRes.Started) { 100 } else { 0 })
+            # Continua sendo a consulta ao vivo que decide o texto da caixa: perguntar por uma versão
+            # e baixar outra seria pedir permissão para uma coisa e fazer outra. O que mudou é só a
+            # thread em que ela roda.
+            $wfAlvo = Resolve-WinForgeNvidiaDownloadTarget -Row $wfArgs.Row -Root $wfArgs.Root -Resolver $wfArgs.Resolver
+            if ($wfAlvo.Ok) {
+                $sync.WinForgeDriverConfirm = @{
+                    Ok = $true; Url = [string]$wfAlvo.Url; Version = [string]$wfAlvo.Version
+                    SizeText = [string](Get-WinForgeNvidiaDownloadSizeText -Url ([string]$wfAlvo.Url)); Reason = ''
+                }
+            } else {
+                $sync.WinForgeDriverConfirm = @{ Ok = $false; Url = $null; Version = $null; SizeText = $null; Reason = [string]$wfAlvo.Reason }
+            }
         } catch {
-            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA falhou: $($_.Exception.Message)"
-            $null = Set-WinForgeDiagProgress -Label "Download do driver NVIDIA falhou: $($_.Exception.Message)" -Percent 0
-        } finally {
-            $sync.CommandRunning = $false
+            $sync.WinForgeDriverConfirm = @{ Ok = $false; Url = $null; Version = $null; SizeText = $null; Reason = [string]$_.Exception.Message }
         }
+        # Janela fechando: o Dispatcher já está desligando e Invoke-WPFUIThread ficaria parado
+        # esperando por ele. Sem ninguém para mostrar a caixa, a trava solta aqui mesmo.
+        if ($sync.WinForgeClosing) { $sync.CommandRunning = $false; return }
+        Invoke-WPFUIThread $sync.WinForgeDriverConfirmCallback
     }
     try {
-        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Url = [string]$alvo.Url; Version = $versao } | Out-Null
+        # A linha e a costura de teste viajam como ARGUMENTO, nunca concatenadas num texto de
+        # comando: o endereço vem da rede, e texto de fora não vira código.
+        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Row = $Row; Root = $Root; Resolver = $Resolver } | Out-Null
     } catch {
-        # Despacho que falha (pool fechado, sem thread livre) nunca roda o 'finally' do corpo: sem
+        # Despacho que falha (pool fechado, sem thread livre) nunca roda o corpo nem o callback: sem
         # este catch a trava ficaria ligada e nenhum outro comando começaria.
         $sync.CommandRunning = $false
-        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)"
-        $null = Set-WinForgeDiagProgress -Label "Download do driver NVIDIA não pôde começar: $($_.Exception.Message)" -Percent 0
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Consulta ao catálogo da NVIDIA não pôde começar: $($_.Exception.Message)"
+        $null = Set-WinForgeDiagProgress -Label "Consulta ao catálogo da NVIDIA não pôde começar: $($_.Exception.Message)" -Percent 0
     }
     return 'nvidia-download'
 }
