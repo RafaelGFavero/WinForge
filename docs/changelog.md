@@ -33,6 +33,26 @@
   local inteira, e com ela os ajustes do WinForge que moram em diretiva (Edge, Brave,
   ConsumerFeatures, telemetria), que precisam ser marcados de novo. O histórico de atualizações é
   preservado.
+- A frase de fechamento de cada comando ("Configuração de rede redefinida. Reinicie o computador.")
+  passou a sair **só com código 0**. Ela é escrita no presente do indicativo e é a última linha que
+  a pessoa lê: imprimi-la logo abaixo de um `== Falhou no passo N ==` era dizer que deu certo no
+  exato lugar em que a saída diz que não deu. Com erro sai uma frase neutra, que aponta o passo.
+- **Fechar a janela principal no meio de um reparo agora pergunta antes**, com "Não" como resposta
+  padrão. O fechamento deixou de esperar pelo pool nesta versão (era o que travava o programa no
+  meio de um diagnóstico), e o preço disso é que as threads de segundo plano morrem onde estiverem:
+  uma restauração de permissões interrompida entre "tomar a posse" e "devolver a posse" deixa a
+  pasta do sistema aceitando alteração de qualquer processo elevado. Diagnóstico e busca de driver
+  continuam fechando direto, sem pergunta.
+- O `Requires` das linhas com fluxo ao vivo passou a ser conferido **antes** de abrir a janela e de
+  tomar as travas. Era dado morto: numa edição do Windows sem `w32tm.exe` a falta virava exceção de
+  `Start-Process` dentro do runspace, em vez da frase que a máquina de comandos tem para isso.
+- Os botões **Aplicar marcados** / **Desfazer marcados** da aba Diagnóstico passaram a ser
+  repintados no começo e no fim de cada comando com fluxo ao vivo. Antes só o contador de marcações
+  os repintava: eles ficavam habilitados durante o comando (a caixa de recusa vinha depois do
+  clique) e, se alguém marcasse uma caixa no meio, ficavam desabilitados até a marca seguinte.
+- A janela ao vivo passou a ter **teto por tique** (512 KB): um passo que despeja dezenas de MB de
+  uma vez congelava a thread da interface num `AppendText` só. O arquivo continua completo, e é ele
+  o resultado; a caixa recebe a última parte, com um aviso.
 - A saída fica em `repair-<nome>-<data-hora>.txt`, em `%LocalAppData%\WinForge\logs`, e a janela
   tem **Copiar** e **Abrir arquivo**.
 
@@ -52,7 +72,7 @@ fica sem acesso às próprias pastas.
   tranca o disco sem tirar uma única permissão da lista. Pasta que não existe não conta; pasta que
   existe e não deixa ler a lista, conta.
 - **Restaurar padrões** roda seis fases, nesta ordem: `chkdsk /scan` (se acusar erro no volume, para
-  aí e nada é alterado); backup das listas atuais com `icacls /save` em
+  aí e nada é alterado); backup das listas atuais em
   `%ProgramData%\WinForge\acl-backup`; a raiz, com as negações fora, `/inheritance:r` e as ACEs
   padrão por SID; as pastas do sistema (Windows, Program Files, Program Files (x86), ProgramData,
   Users e Users\Public) **uma a uma**, com `/setowner` só onde o dono está errado e
@@ -77,14 +97,50 @@ fica sem acesso às próprias pastas.
 - As duas ações que escrevem conferem a **elevação antes de criar a pasta de backup**: sem
   administrador a pasta nasceria com a identidade atual como dona e ficaria plantada em
   `%ProgramData%`, fazendo a conferência recusar todas as restaurações seguintes da máquina.
-- **Desfazer** reaplica com `icacls /restore` o conjunto de backup mais recente, uma pasta por
-  arquivo, a partir da pasta anotada no índice (o icacls grava nomes relativos à pasta em que foi
-  invocado). Sem backup gravado, ele apenas diz isso.
-- Três limites que a descrição dos botões não esconde: o `/restore` devolve a LISTA e não a POSSE,
-  então pasta cujo dono a restauração trocou (`/setowner` ou `takeown`) fica com o dono novo; o
-  backup das pastas fora do perfil é **sem recursão** (só a DACL da pasta em si, não a do conteúdo);
-  e a restauração não acontece sem backup, em nenhuma das duas pontas (pasta de backup que não passa
-  na conferência, ou nenhum arquivo gravado, param tudo antes de a primeira permissão ser alterada).
+- **O backup da pasta em si passou a ser SDDL, guardado no índice**, e não mais um arquivo de
+  `icacls /save`. Foi medido, com elevação, numa pasta descartável: `icacls <pasta>\ /save f /C`
+  grava a entrada da própria pasta com o **nome vazio**, e `icacls <pasta>\ /restore f /C /L`
+  **não** a aplica — monta o caminho `<pasta>\<descritor>`, responde "arquivo não encontrado" e a
+  lista alterada fica como estava. Ou seja: o `/save` desfaz os filhos de uma pasta, nunca a pasta
+  em si — que é exatamente o que as fases 3 e 4 reescrevem. Agora a DACL e o dono de cada pasta
+  guardada vão para o índice (JSON, na mesma pasta protegida) e voltam por
+  `SetSecurityDescriptorSddlForm` + `DirectoryInfo.SetAccessControl`. O único arquivo de `icacls`
+  que sobra é o do **conteúdo** do perfil, salvo com `/T /L /C /Q`.
+- Quem escreve o descritor é `DirectoryInfo.SetAccessControl`, e **não** o `Set-Acl`: foi medido
+  numa pasta de `%TEMP%` que, com `Set-Acl`, um descritor que só teve `SetOwner()` chamado
+  reescreve **também a DACL**, apagando toda ACE explícita e deixando só as herdadas. Numa pasta do
+  sistema restaurada com `/inheritance:r`, onde tudo é explícito, o passo do dono apagaria a lista
+  que o passo anterior acabou de devolver — e a única pista seria o disco continuar quebrado depois
+  do Desfazer. O `-SelfTest` prova as duas seções como independentes.
+- **Desfazer** aplica esses dois caminhos: o SDDL na pasta, e `icacls <pasta acima> /restore
+  <arquivo> /C /L` no conteúdo do perfil, a partir da pasta anotada no índice (o icacls grava nomes
+  relativos à pasta em que foi invocado). Sem backup gravado, ele apenas diz isso.
+- **O `/L` do `/restore` faltava, e a falta era grave.** O backup do perfil é gravado com `/T /L`,
+  então o arquivo tem uma entrada para cada junção de compatibilidade de dentro dele (`Dados de
+  aplicativos`, `Configurações locais`, `Cookies`), com a DACL da própria junção — que carrega uma
+  negação de travessia para Todos, que é como o Windows impede que sejam percorridas. Sem `/L` o
+  `/restore` abre cada item seguindo o ponto de reanálise e derramaria essa negação em
+  `AppData\Roaming`, `AppData\Local` e `InetCookies`, trancando o usuário fora do próprio AppData
+  com o botão que existe para destrancá-lo. A trava do build agora cobra `/L` em todo `/restore`,
+  como já cobrava em todo `/T`.
+- **A posse voltou a ser tentada.** Junto com a lista de cada pasta vai uma tentativa separada de
+  devolver o dono guardado. Devolver a posse ao TrustedInstaller exige um privilégio que nem todo
+  administrador tem: quando falha, o Desfazer diz em qual pasta, e a lista volta do mesmo jeito.
+- O nome dos arquivos de backup passou a ser **injetivo** (codificação por porcentagem, byte a
+  byte). O anterior trocava tudo que não fosse `[A-Za-z0-9._-]` por `_`, e `Program Files` e
+  `Program_Files` viravam o mesmo nome: como qualquer Usuário Autenticado cria pasta na raiz do
+  disco (a ACE `(AD)` que a própria restauração repõe), uma `C:\Program_Files` plantada sem
+  elevação sobrescrevia o backup da pasta do Windows, e o Desfazer devolvia a lista do invasor,
+  calado.
+- O `/save` do perfil ganhou `/Q` e passou a ter o **código de saída conferido**. Sem `/Q` o icacls
+  escreve "arquivo processado: `<caminho>`" por arquivo — centenas de milhares de linhas indo para
+  a janela num bloco só. E um `/save` que termina em acesso negado ainda deixa um arquivo no disco:
+  contá-lo pela simples existência inflava o "N pasta(s) guardadas" com rede de segurança que não
+  existia. Agora a fase imprime o número de entradas lido do arquivo.
+- Dois limites que a descrição dos botões não esconde: o backup das pastas fora do perfil é **sem
+  recursão** (volta a lista da pasta em si, não a do conteúdo); e a restauração não acontece sem
+  backup, em nenhuma das duas pontas (pasta de backup que não passa na conferência, ou nenhum
+  backup gravado, param tudo antes de a primeira permissão ser alterada).
 - A pasta de backup passa pela mesma conferência da pasta de downloads de driver: DACL própria sem
   herança, nenhum ponto de reanálise na cadeia, dono dentro de SYSTEM/Administradores e ninguém de
   fora deles com escrita. Cada arquivo gravado é endurecido, e o Desfazer recusa arquivo que não

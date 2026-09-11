@@ -322,6 +322,13 @@ escreviam num console que o lançador esconde — a aba congelava e nada apareci
   inteira — que foi reescrita para descrever o que de fato acontece.
 - Cada passo fecha com uma linha `== Passo N: <nome> — código X ==`, e no fim o cabeçalho diz qual
   passo falhou. Num `chkdsk` + `sfc` + `DISM`, o código de um não apaga o erro do outro.
+- A frase de fechamento ("Configuração de rede redefinida. Reinicie o computador.") só aparece
+  quando **tudo** deu certo. Com erro, a última linha aponta o passo que falhou em vez de dizer que
+  deu certo logo abaixo da linha que diz que não deu.
+- **Fechar a janela no meio de um desses botões pergunta antes**, com "Não" como resposta padrão.
+  Fechar interrompe o trabalho onde ele estiver: uma restauração de permissões parada entre "tomar
+  a posse" e "devolver a posse" deixa a pasta do sistema aberta a qualquer processo elevado. Para
+  leitura e diagnóstico o fechamento continua imediato, sem pergunta.
 
 | Botão | O que roda |
 |---|---|
@@ -330,6 +337,13 @@ escreviam num console que o lançador esconde — a aba congelava e nada apareci
 | Verificação de corrupção do sistema - Executar | `chkdsk /scan /perf`, depois `sfc /scannow`, depois `DISM /Online /Cleanup-Image /RestoreHealth`. A ordem é dependência: um setor ruim corrompe de novo o que o sfc consertou, e é o DISM que repõe a imagem de onde o sfc copia os arquivos bons. Pode levar mais de uma hora. |
 | Windows Update - Redefinir | Para os serviços, limpa a fila do BITS, renomeia a pasta de downloads, registra as DLLs de novo e remove as configurações de WSUS. **Vai além do Windows Update:** apaga a diretiva de grupo local inteira, e com ela os ajustes do WinForge que moram em diretiva (enxugamento do Edge e do Brave, bloqueio de ConsumerFeatures, políticas de telemetria), que precisam ser marcados de novo. O histórico de atualizações é preservado. Reinicie no fim. |
 | WinGet - Reinstalar | Se o winget já responde, não faz nada. Se não, instala o provedor NuGet, baixa da Galeria do PowerShell o módulo `Microsoft.WinGet.Client` e chama o `Repair-WinGetPackageManager`. Precisa de internet e confia na Galeria do PowerShell como fonte do módulo. |
+
+Uma ressalva sobre os dois últimos: o corpo deles vem do utilitário de origem e não foi reescrito.
+O WinForge resolve todo executável do sistema pelo **caminho completo** em `System32`, mas essas
+duas funções da base ainda chamam `netsh`, `secedit`, `regsvr32`, `gpupdate` e `cmd` pelo `PATH`.
+Numa máquina com o `PATH` adulterado é possível que um executável de mesmo nome seja encontrado
+antes do do Windows. O comportamento é o mesmo de antes desta versão; o que mudou foi a descrição,
+que agora diz tudo que essas funções fazem.
 
 ### Permissões do disco C:
 
@@ -363,12 +377,21 @@ nesta ordem:
 1. `chkdsk /scan` no disco do sistema. Se ele acusar erro no volume, a restauração **para aqui** e
    nenhuma permissão é alterada: reescrever a DACL de um disco com problema é consertar o que vai
    corromper de novo.
-2. **Backup** das listas atuais com `icacls /save`, uma por pasta, em
-   `%ProgramData%\WinForge\acl-backup`: a raiz, cada pasta de primeiro nível, cada pasta aninhada
-   que a fase 4 pode reescrever (`Users\Public`) e a sua pasta de usuário. A regra é essa, e não
-   uma lista: pasta que a restauração toca tem backup. O do perfil é o único recursivo, com
-   `/T /L` — o `/L` mantém a caminhada dentro do perfil em vez de sair por um OneDrive ou por uma
-   junção de compatibilidade. É o que o botão Desfazer consome.
+2. **Backup** das listas atuais em `%ProgramData%\WinForge\acl-backup`, uma por pasta: a raiz, cada
+   pasta de primeiro nível, cada pasta aninhada que a fase 4 pode reescrever (`Users\Public`) e a
+   sua pasta de usuário. A regra é essa, e não uma lista: pasta que a restauração toca tem backup.
+   De cada uma vão para o **índice** (um JSON na mesma pasta protegida) a lista de permissões em
+   **SDDL** e o dono. Só a sua pasta de usuário ganha, além disso, um arquivo de
+   `icacls /save /T /L /C /Q` com o **conteúdo** dela — é a única pasta em que a restauração desce
+   a árvore; o `/L` mantém a caminhada dentro do perfil em vez de sair por um OneDrive ou por uma
+   junção de compatibilidade, e o `/Q` evita uma linha de saída por arquivo. É o que o botão
+   Desfazer consome.
+
+   O SDDL não é preciosismo: foi medido, com elevação, numa pasta descartável. O
+   `icacls <pasta>\ /save` grava a entrada da própria pasta com o **nome vazio**, e o
+   `icacls <pasta>\ /restore` **não aplica** essa entrada — ele monta o caminho `<pasta>\<descritor>`
+   e responde "arquivo não encontrado", deixando a lista alterada como estava. O `/save` desfaz os
+   filhos de uma pasta; a pasta em si, nunca. E as fases 3 e 4 mexem exatamente nas pastas em si.
 3. A **raiz**: negações fora (`/remove:d`, só se houver alguma), `/inheritance:r` e as ACEs padrão
    por SID. O direito de criar arquivo dos Usuários Autenticados sai numa chamada separada — dentro
    de um mesmo `/grant` o `icacls` guarda só a última entrada de cada SID.
@@ -392,18 +415,27 @@ O `secedit` com o `defltbase.inf` **saiu** desta lista. No Windows 10 e no 11 as
 repõe DACL nenhuma: ele levava minutos e não consertava nada. A fase 4 faz esse trabalho de forma
 explícita, com a mesma tabela que a verificação usa.
 
-**Desfazer (restaurar backup)** — reaplica com `icacls /restore` o conjunto de backup mais recente,
-um arquivo por pasta, a partir da pasta anotada no índice (o `icacls` grava nomes relativos à pasta
-em que foi invocado, e restaurar da pasta errada aplicaria a DACL de uma coisa em outra). Sem
-backup gravado, ele apenas diz isso e não toca em nada. Também exige elevação, conferida antes de
-qualquer pasta ser criada.
+**Desfazer (restaurar backup)** — reaplica o conjunto de backup mais recente, de duas formas
+conforme o item. A lista de cada **pasta** volta do SDDL guardado no índice, e logo depois dela vem
+uma tentativa **separada** de devolver o dono. O **conteúdo** da sua pasta de usuário volta por
+`icacls <pasta acima> /restore <arquivo> /C /L`, rodado a partir da pasta anotada no índice (o
+`icacls` grava nomes relativos à pasta em que foi invocado, e restaurar da pasta errada aplicaria a
+DACL de uma coisa em outra). Sem backup gravado, ele apenas diz isso e não toca em nada. Também
+exige elevação, conferida antes de qualquer pasta ser criada.
 
-O que o desfazer **não** alcança, e está escrito na descrição dos botões:
+O `/L` do `/restore` é obrigatório e é o par do `/T` do backup. Sem ele o `icacls` abre cada item
+**seguindo** o ponto de reanálise, e o perfil está cheio deles: as junções de compatibilidade
+(`Dados de aplicativos`, `Configurações locais`, `Cookies`) carregam uma negação de travessia para
+Todos, que é como o Windows impede que sejam percorridas. Restaurar sem `/L` derramaria essa
+negação em `AppData\Roaming`, `AppData\Local` e `InetCookies` — trancando você fora do próprio
+AppData com o botão que existe para destrancá-lo.
 
-- **A posse.** O `icacls /restore` repõe a lista de permissões, não o dono. Pasta cujo dono a
-  restauração trocou (`/setowner` na fase 4 ou na 5, `takeown` na fase 6) continua com o dono novo
-  depois de desfazer.
-- O backup das pastas **fora do seu perfil** é sem recursão: guarda a DACL da pasta em si, não a de
+Os limites do desfazer, que estão escritos na descrição dos botões:
+
+- **A posse volta quando dá.** Devolver a posse ao TrustedInstaller exige um privilégio que nem
+  todo administrador tem. Quando a lista volta e o dono não, o Desfazer diz em qual pasta — em vez
+  de ficar calado ou de deixar a lista de fora por causa disso.
+- O backup das pastas **fora do seu perfil** é sem recursão: volta a lista da pasta em si, não a de
   tudo que está dentro dela. Só a pasta de usuário é salva com `/T`.
 
 A pasta de backup passa pela mesma conferência da pasta de downloads de driver — DACL própria sem
