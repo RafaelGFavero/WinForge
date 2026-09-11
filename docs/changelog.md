@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.7.0 (2026-09-11)
+
+### Ajustes que já estão em vigor
+
+- O diagnóstico de abertura passou a conferir, junto com o perfil da máquina, **o que já está
+  aplicado**. Quem detecta é o mesmo mecanismo da base (`Invoke-WinUtilCurrentSystem`), dentro do
+  job do perfil e depois das regras de recomendação, com a barra dizendo "Conferindo o que já está
+  aplicado...".
+- A linha nessa situação ganha um `· aplicado` ao lado da caixa, nas abas Ajustes, Jogos e
+  Servidor, e a dica passa a começar com "✔ Já aplicado neste sistema.".
+- No checklist do Diagnóstico o contador virou `N de M recomendados marcados · A já aplicados`, e
+  **Marcar todos** deixa de fora o que já está aplicado. Marcar na mão continua valendo: a marca
+  informa, não impede.
+- **Aplicar** refaz a detecção no momento do clique — você pode ter desfeito algo desde que a
+  janela abriu — e pula as entradas que já estão em vigor. A barra fecha com "Aplicados: A · já
+  estavam aplicados: S", e o total de passos já desconta os pulados, para a barra não parar em
+  8/12. A detecção roda dentro do runspace, e não no caminho do clique: feita ali, a janela
+  congelaria enquanto ela durasse, porque quem pintaria a barra é a mesma thread que estaria
+  esperando.
+- Três coisas nunca são puladas: o ponto de restauração, os toggles, botões e listas — que agem no
+  instante do clique e não têm estado a detectar — e todo ajuste que também roda um script. A
+  detecção enxerga registro e serviço; a hibernação, por exemplo, grava duas chaves **e** chama
+  `powercfg /hibernate off`, e pular com as chaves já gravadas deixaria a hibernação ligada para
+  sempre.
+
+### Drivers do Windows Update
+
+- A tabela trazia a mesma placa duas vezes, uma linha por revisão oferecida pelo serviço, e
+  convidava a instalar a antiga. Agora é **uma linha por dispositivo** (Driver + Fornecedor), com
+  a versão mais nova; o rótulo avisa `· M versão(ões) mais antiga(s) oculta(s)` e a dica lista os
+  títulos que ficaram de fora. Quando não há revisão repetida, o rótulo não muda.
+- A coluna **Versão** dizia "n/d" em todas as linhas. O número está no título, entre parênteses —
+  "Intel Corporation - Display Driver Update (32.0.101.7088)" —, e o programa só o procurava no
+  fim do texto, que termina em `)`. Agora sai a versão de verdade.
+- Depois do clique em **Instalar**, a linha conta o que aconteceu: "instalando…", depois
+  "instalado" ou "instalado (reinicie)" em verde claro, ou "falhou (código N)" em vermelho claro.
+  A coluna nova **Situação** repete em palavras o que a cor diz — cor sozinha não serve a quem não
+  a distingue, nem sobrevive a uma captura de tela em cinza. O botão some da linha instalada e
+  continua na que falhou, que é a hora de tentar de novo.
+- Esse estado vale só enquanto a janela estiver aberta. Quem sabe o que está instalado é o Windows
+  Update: guardar "instalado" em disco seria mentir na abertura seguinte se a instalação tivesse
+  sido revertida.
+
 ## 1.6.0 (2026-09-11)
 
 ### Aba Diagnóstico
