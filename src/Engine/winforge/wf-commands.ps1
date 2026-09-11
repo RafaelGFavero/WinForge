@@ -815,6 +815,11 @@ function Invoke-WinForgeFollowTick {
            já não há tique seguinte e o que sobrou tem de aparecer.
         3. O BOM do arquivo só é pulado na primeira leitura, e conta no deslocamento: sem contá-lo,
            os três bytes voltariam como texto no tique seguinte.
+        4. O que vai para a caixa por tique tem TETO (512 KB). Um passo pode despejar dezenas de MB
+           de uma vez - o 'icacls /save /T' sem '/Q' num perfil é o caso conhecido -, e um
+           AppendText desse tamanho congela a thread da interface por muito tempo. O deslocamento
+           avança sobre o bloco inteiro de qualquer jeito: o arquivo continua completo, e é ele o
+           resultado. A caixa recebe a última parte, precedida de um aviso.
     #>
     param([Parameter(Mandatory)]$Window)
 
@@ -838,11 +843,19 @@ function Invoke-WinForgeFollowTick {
                     $corte = $texto.LastIndexOf("`n")
                     $texto = if ($corte -lt 0) { '' } else { $texto.Substring(0, $corte + 1) }
                 }
+                $avanco = $inicio + [System.Text.Encoding]::UTF8.GetByteCount($texto)
+                if ($texto.Length -gt 524288) {
+                    # A PRIMEIRA quebra de linha a partir do teto, e não a última antes dele: é o
+                    # que garante que o pedaço mostrado tem no máximo o tamanho do teto, e não o
+                    # tamanho da distância até a quebra anterior.
+                    $corteTeto = $texto.IndexOf("`n", $texto.Length - 524288)
+                    $texto = "… (o começo desta parte ficou só no arquivo)`r`n" + $texto.Substring($(if ($corteTeto -lt 0) { $texto.Length - 524288 } else { $corteTeto + 1 }))
+                }
                 if ($texto.Length -gt 0) {
                     $estado.Box.AppendText($texto)
                     $estado.Box.ScrollToEnd()
                 }
-                $estado.Offset = [long]$estado.Offset + $inicio + [System.Text.Encoding]::UTF8.GetByteCount($texto)
+                $estado.Offset = [long]$estado.Offset + $avanco
             }
         } finally { $arquivo.Dispose() }
     } catch {
@@ -883,23 +896,46 @@ $sync.WinForgeStreamExit = [System.Collections.Hashtable]::Synchronized(@{})
 # para cá quando ela vem de outra thread; o pacote de argumentos viaja por $sync porque
 # Invoke-WPFUIThread chama o bloco SEM argumento.
 #
+# UM PACOTE POR CHAMADA, com chave própria, e não um slot único: era um hashtable só, escrito pela
+# runspace e lido pelo callback. Hoje $sync.CommandRunning e $sync.ProcessRunning mantêm o comando
+# com fluxo ao vivo e a runspace de ajustes mutuamente exclusivos, então só existe um escritor -
+# mas no dia em que um terceiro chamador (busca de drivers, job de perfil) chamar a função do pool,
+# duas chamadas entrelaçadas perderiam uma atualização. A fila guarda a ORDEM das chaves, porque o
+# callback é chamado sem argumento e precisa saber qual pacote é o dele. É o mesmo desenho de
+# $sync.CommandOutputs.
+#
 # Com a janela FECHANDO o desvio não acontece: Set-WinUtilTaskbaritem devolve na hora (o build põe
 # a guarda de $sync.WinForgeClosing na primeira linha dela). Enquanto o Add_Closing roda, a thread
 # da janela está desligando o Dispatcher; um salto para lá de dentro da runspace ficaria esperando
 # uma fila que ninguém mais vai processar, e o ícone da barra de tarefas está indo embora de
 # qualquer jeito.
 $sync.WinForgeTaskbarArgs = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.WinForgeTaskbarQueue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
 $sync.WinForgeTaskbarCallback = {
     try {
+        $wfTbChaveAtual = $null
+        try { if ($sync.WinForgeTaskbarQueue.Count -gt 0) { $wfTbChaveAtual = [string]$sync.WinForgeTaskbarQueue.Dequeue() } } catch { $wfTbChaveAtual = $null }
+        if ([string]::IsNullOrWhiteSpace($wfTbChaveAtual)) { return }
+        $wfTbPacote = $sync.WinForgeTaskbarArgs[$wfTbChaveAtual]
+        # Removido AQUI: o pacote é desta chamada e de mais ninguém.
+        [void]$sync.WinForgeTaskbarArgs.Remove($wfTbChaveAtual)
+        if ($null -eq $wfTbPacote) { return }
         $wfTb = @{}
         foreach ($wfTbChave in @('state', 'overlay', 'description')) {
-            $wfTbValor = [string]$sync.WinForgeTaskbarArgs[$wfTbChave]
+            $wfTbValor = [string]$wfTbPacote[$wfTbChave]
             if (-not [string]::IsNullOrWhiteSpace($wfTbValor)) { $wfTb[$wfTbChave] = $wfTbValor }
         }
-        $wfTbValue = [double]$sync.WinForgeTaskbarArgs['value']
+        $wfTbValue = [double]$wfTbPacote['value']
         if ($wfTbValue) { $wfTb['value'] = $wfTbValue }
         if ($wfTb.Count) { Set-WinUtilTaskbaritem @wfTb }
     } catch { }
+}
+
+# Repintar os dois botões de ação da aba Diagnóstico. Nasce aqui, na runspace principal, pela
+# mesma regra dos outros callbacks; roda na thread da janela porque mexe em IsEnabled de Button.
+# Sai calado quando a aba ainda não foi montada (a função já cuida disso).
+$sync.WinForgeDiagButtonsCallback = {
+    try { Update-WinForgeDiagActionButtons } catch { }
 }
 
 # O callback da interface nasce AQUI, na runspace principal, e não dentro do runspace do comando.
@@ -1087,6 +1123,12 @@ function Invoke-WinForgeStreamedSteps {
 
         O código que fica é o do PRIMEIRO passo que falhou, e o cabeçalho final diz QUAL foi: um
         DISM bem-sucedido depois de um chkdsk com erro não pode apagar o erro do chkdsk.
+
+        A frase de fechamento ($Final) só sai com código 0. Ela é a última linha que a pessoa lê, e
+        é escrita no presente do indicativo ("Configuração de rede redefinida. Reinicie o
+        computador."): imprimi-la depois de um '== Falhou no passo N ==' é dizer que deu certo
+        logo abaixo da linha que diz que não deu. Com erro sai uma frase neutra, que aponta para o
+        passo e não promete nada.
     .OUTPUTS
         O código final: 0 se todos os passos deram certo, senão o código do primeiro que falhou.
     #>
@@ -1107,11 +1149,16 @@ function Invoke-WinForgeStreamedSteps {
         if ($codigo -eq 0 -and $passoCodigo -ne 0) { $codigo = $passoCodigo; $falhou = "$n ($titulo)" }
     }
     Write-WinForgeStreamLine -Path $Path -Text ""
-    if ($codigo -eq 0) { Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $n) }
-    else { Write-WinForgeStreamLine -Path $Path -Text ("== Falhou no passo {0}: código {1} ==" -f $falhou, $codigo) }
-    if (-not [string]::IsNullOrWhiteSpace($Final)) {
+    if ($codigo -eq 0) {
+        Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $n)
+        if (-not [string]::IsNullOrWhiteSpace($Final)) {
+            Write-WinForgeStreamLine -Path $Path -Text ""
+            Write-WinForgeStreamLine -Path $Path -Text ([string]$Final)
+        }
+    } else {
+        Write-WinForgeStreamLine -Path $Path -Text ("== Falhou no passo {0}: código {1} ==" -f $falhou, $codigo)
         Write-WinForgeStreamLine -Path $Path -Text ""
-        Write-WinForgeStreamLine -Path $Path -Text ([string]$Final)
+        Write-WinForgeStreamLine -Path $Path -Text ("Terminou com erro no passo {0}; veja acima. Nada mais foi feito." -f $falhou)
     }
     return $codigo
 }
@@ -1139,6 +1186,18 @@ $sync.WinForgeStreamBody = {
         $sync.WinForgeStreamDone[$wfCaminho] = $true
         $sync.CommandRunning = $false
         $sync.ProcessRunning = $false
+        # O nome e o tipo do que estava rodando saem JUNTO com as travas: é o par que o Add_Closing
+        # consulta para decidir se pergunta antes de fechar, e deixá-lo para trás faria a pergunta
+        # aparecer num fechamento em que não há mais nada em andamento.
+        $sync.WinForgeStreamName = ''
+        $sync.WinForgeStreamKind = ''
+        # Os dois botões da aba Diagnóstico ("Aplicar marcados", "Desfazer marcados") são
+        # habilitados por $sync.ProcessRunning, e quem os repinta é Update-WinForgeDiagActionButtons
+        # - que até aqui só rodava no contador de marcações. Sem esta chamada eles ficavam
+        # desabilitados depois do fim do comando até alguém marcar uma caixa.
+        if (-not $sync.WinForgeClosing) {
+            try { Invoke-WPFUIThread $sync.WinForgeDiagButtonsCallback } catch { }
+        }
         Write-WinForgeLog -Component "Repair" -Message "$($wfArgs.Name) concluído (código $wfCodigo): $wfCaminho"
     }
 }
@@ -1204,6 +1263,16 @@ function Start-WinForgeStreamedCommand {
         Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$Name não tem passos para rodar."
         return
     }
+    # A ferramenta exigida, conferida ANTES de abrir janela e de tomar as travas. Invoke-WinForgeCommandCore
+    # já fazia isso no caminho de leitura; aqui o 'Requires' era dado morto. Hoje todos eles são
+    # caminhos do System32 que existem em qualquer Windows com interface gráfica, mas num SKU sem
+    # w32tm.exe a falta virava exceção de Start-Process dentro do runspace, e não esta frase.
+    if (-not (Test-WinForgeCommandRequirement -Requires ([string]$Spec.Requires))) {
+        $wfFalta = "Ferramenta necessária não encontrada nesta máquina: $($Spec.Requires). Nada foi feito."
+        Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$Name não pôde começar: $wfFalta"
+        [System.Windows.MessageBox]::Show($wfFalta, "WinForge", "OK", "Warning") | Out-Null
+        return
+    }
 
     # As DUAS travas, e não só a de comando: $sync.ProcessRunning é a que os botões da base olham
     # (instalar, desinstalar, aplicar ajustes, instalar recursos). Sem ela, uma redefinição do
@@ -1212,6 +1281,16 @@ function Start-WinForgeStreamedCommand {
     # gerenciador de pacotes. Os dois são soltos no 'finally' do corpo da runspace.
     $sync.CommandRunning = $true
     $sync.ProcessRunning = $true
+    # QUEM está rodando, para o Add_Closing: fechar a janela no meio de um 'repair' mata as threads
+    # do pool onde elas estiverem, e uma restauração de permissões morta entre "posse para os
+    # Administradores" e "posse de volta ao TrustedInstaller" deixa a pasta do sistema aberta a
+    # qualquer processo elevado. Com isto aqui o fechamento pergunta antes; sem 'repair' ele segue
+    # direto, como já fazia para o diagnóstico e a busca de drivers.
+    $sync.WinForgeStreamName = [string]$Spec.Title
+    $sync.WinForgeStreamKind = [string]$Spec.Kind
+    # Os botões da aba Diagnóstico desabilitam na hora, e não no próximo clique numa caixa de
+    # marcação (esta função já roda na thread da janela: é o handler do botão).
+    try { Update-WinForgeDiagActionButtons } catch { }
     $caminho = $null
     try {
         $caminho = Get-WinForgeCommandOutputPath -Name $Name -Prefix 'repair'
@@ -1229,6 +1308,9 @@ function Start-WinForgeStreamedCommand {
         # ficariam presas e todos os botões de comando morreriam até fechar o programa.
         $sync.CommandRunning = $false
         $sync.ProcessRunning = $false
+        $sync.WinForgeStreamName = ''
+        $sync.WinForgeStreamKind = ''
+        try { Update-WinForgeDiagActionButtons } catch { }
         if ($caminho) { $sync.WinForgeStreamDone[$caminho] = $true }
         Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$Name não pôde começar: $($_.Exception.Message)"
         [System.Windows.MessageBox]::Show("O comando não pôde começar: $($_.Exception.Message)", "WinForge", "OK", "Error") | Out-Null
