@@ -56,7 +56,7 @@ function Get-WinForgeAppliedTweaks {
     try {
         # A falha só acontece de verdade em máquina com registro ou serviço fora do lugar; sem esta
         # porta o SelfTest não teria como provar que ela preserva o conjunto bom.
-        if ($sync -and $sync.WinForgeSelfTestAppliedFail) { throw "falha de detecção simulada pelo SelfTest" }
+        if ($sync -and $sync.SelfTest -and $sync.WinForgeSelfTestAppliedFail) { throw "falha de detecção simulada pelo SelfTest" }
         return @(Invoke-WinForgeCurrentSystem -CheckBox tweaks 2>$null)
     } catch {
         Write-WinForgeLog -Component "Applied" -Level "WARN" -Message "Não foi possível detectar o que já está aplicado: $($_.Exception.Message)"
