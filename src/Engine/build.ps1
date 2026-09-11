@@ -817,6 +817,12 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         # resultado é o contador ao lado dos botões, e ele fica na tela depois do clique.
         "WPFDiagSelectRecommended" {Set-WinForgeDiagRecommendationSelection -Checked $true | Out-Null}
         "WPFDiagClearRecommended" {Set-WinForgeDiagRecommendationSelection -Checked $false | Out-Null}
+        # Aplicar/desfazer sem sair do Diagnóstico. NÃO existe caminho de aplicação próprio daqui:
+        # marcar a linha já marcou a caixa de verdade na aba de destino, e é ela que alimenta
+        # $sync.selectedTweaks - a mesma variável que estes dois lêem. Então o botão daqui é o
+        # botão da aba Ajustes, com a trava de $sync.ProcessRunning e o runspace da base.
+        "WPFDiagApplySelected" {Invoke-WPFtweaksbutton}
+        "WPFDiagUndoSelected" {Invoke-WPFundoall}
 '@.TrimEnd() "button switch"
 
 # ---------------------------------------------------------------- preset vazio: não chamar Update-WinUtilSelections
@@ -3116,7 +3122,7 @@ if ($SelfTest) {
         $wbWindow = [Windows.Markup.XamlReader]::Load($wbReader)
         $wbTabs = @($wbWindow.FindName("WPFTabNav").Items | ForEach-Object { $_.Header })
         Write-Host "  XAML: OK - abas: $($wbTabs -join ', ')"
-        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','WPFDiagClearRecommended','WPFDiagRecCount','WPFDiagScroll','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
+        foreach ($n in 'gamespanel','WPFTab7BT','WPFPresetWinForge','WPFPresetGamer','WPFAppxWinForgeSelection','WPFGamesApplyButton','WPFGamesUndoButton','WPFSelectRecommended','WPFGamesSelectRecommended','WPFTab8BT','WPFDiagCards','WPFDiagDrivers','WPFDiagRefresh','WPFDiagExport','WPFDiagStatus','WPFDiagInfos','WPFDiagRecs','WPFDiagWU','WPFDiagWULabel','WPFDiagWUDrivers','WPFDiagSelectRecommended','WPFDiagClearRecommended','WPFDiagApplySelected','WPFDiagUndoSelected','WPFDiagRecCount','WPFDiagScroll','serverpanel','WPFTab9BT','WPFServerApplyButton','WPFServerUndoButton','WPFServerSelectRecommended','WPFClearServerSelection','WPFGetInstalledServer') {
             if ($null -eq $wbWindow.FindName($n)) { Write-Host "  [ERRO] XAML: elemento '$n' não encontrado" -ForegroundColor Red; $wbErrors++ }
         }
         # Ordem da barra de navegação: é a ordem de leitura da ferramenta (diagnosticar, ajustar,
@@ -3531,6 +3537,42 @@ if ($SelfTest) {
             Write-Host "  Checklist do Diagnóstico: $wfChkCaixas caixa(s), Marcar todos = $wfChkTodos, contador '$($sync.WPFDiagRecCount.Text)'"
         } catch {
             Write-Host "  [ERRO] checklist do Diagnóstico: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        }
+        # "Aplicar marcados" / "Desfazer marcados": a lista do Diagnóstico deixou de ser só leitura.
+        # Os dois botões NÃO têm caminho próprio de aplicação - eles chamam o mesmo
+        # Invoke-WPFtweaksbutton / Invoke-WPFundoall da aba Ajustes, que leem $sync.selectedTweaks.
+        # Por isso o que se prova aqui é a PONTE: marcar pela lista enche selectedTweaks, desmarcar
+        # esvazia, e o switch dos botões manda para as funções da base (nada de caminho paralelo).
+        try {
+            if ([string]$sync.WPFDiagApplySelected.Content -ne 'Aplicar marcados') { Write-Host "  [ERRO] Diagnóstico: WPFDiagApplySelected deveria dizer 'Aplicar marcados', diz '$($sync.WPFDiagApplySelected.Content)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.WPFDiagUndoSelected.Content -ne 'Desfazer marcados') { Write-Host "  [ERRO] Diagnóstico: WPFDiagUndoSelected deveria dizer 'Desfazer marcados', diz '$($sync.WPFDiagUndoSelected.Content)'" -ForegroundColor Red; $wbErrors++ }
+            $wfAplDef = [string](Get-Command Invoke-WPFButton).ScriptBlock
+            foreach ($wfAplCaso in '"WPFDiagApplySelected" {Invoke-WPFtweaksbutton}', '"WPFDiagUndoSelected" {Invoke-WPFundoall}') {
+                if ($wfAplDef.IndexOf($wfAplCaso, [System.StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Diagnóstico: o switch de botões não tem o caso $wfAplCaso" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A prova de que a base vai enxergar os itens: marcar pela lista tem de encher
+            # $sync.selectedTweaks, que é literalmente a variável que Invoke-WPFtweaksbutton lê.
+            $null = Set-WinForgeDiagRecommendationSelection -Checked $true
+            $wfAplChaves = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $_ -like 'WPFTweaks*' -and $sync.WinForgeDiagMirrors[$_].IsEnabled })
+            if ($wfAplChaves.Count -eq 0) { Write-Host "  [ERRO] Aplicar marcados: nenhuma chave marcável na lista do Diagnóstico - o teste não provaria nada" -ForegroundColor Red; $wbErrors++ }
+            $wfAplFora = @($wfAplChaves | Where-Object { -not $sync.selectedTweaks.Contains($_) })
+            if ($wfAplFora.Count) { Write-Host "  [ERRO] Aplicar marcados: $($wfAplFora.Count) chave(s) da lista ficaram fora de selectedTweaks: $($wfAplFora -join ', ')" -ForegroundColor Red; $wbErrors++ }
+            $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+            $wfAplSobra = @($wfAplChaves | Where-Object { $sync.selectedTweaks.Contains($_) })
+            if ($wfAplSobra.Count) { Write-Host "  [ERRO] Desfazer marcados: $($wfAplSobra -join ', ') continuaram em selectedTweaks depois de desmarcar tudo" -ForegroundColor Red; $wbErrors++ }
+            # Trabalho em andamento desabilita os dois: o caminho da base recusa com uma caixa de
+            # mensagem, e o botão morto é esse aviso dado ANTES do clique.
+            $sync.ProcessRunning = $true
+            Update-WinForgeDiagRecommendationCount
+            if ($sync.WPFDiagApplySelected.IsEnabled -or $sync.WPFDiagUndoSelected.IsEnabled) { Write-Host "  [ERRO] Aplicar/Desfazer marcados: continuaram habilitados com `$sync.ProcessRunning ligado" -ForegroundColor Red; $wbErrors++ }
+            $sync.ProcessRunning = $false
+            Update-WinForgeDiagRecommendationCount
+            if (-not $sync.WPFDiagApplySelected.IsEnabled -or -not $sync.WPFDiagUndoSelected.IsEnabled) { Write-Host "  [ERRO] Aplicar/Desfazer marcados: não voltaram a ficar habilitados com o trabalho terminado" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Aplicar/Desfazer marcados: $($wfAplChaves.Count) chave(s) da lista entram e saem de selectedTweaks; botões seguem `$sync.ProcessRunning"
+        } catch {
+            Write-Host "  [ERRO] Aplicar/Desfazer marcados: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            $sync.ProcessRunning = $false
         }
         # Recomendação que NÃO se aplica a esta máquina. A linha existia habilitada e só descobria o
         # problema no clique: montava a aba de destino, não achava a caixa e aí se desabilitava - com

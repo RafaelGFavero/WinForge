@@ -12,6 +12,8 @@
                             <Button Name="WPFDiagExport" Content="Exportar relatório HTML" Margin="5" Height="{DynamicResource ButtonHeight}" ToolTip="Gera um relatório HTML com tudo desta aba e abre no navegador."/>
                             <Button Name="WPFDiagSelectRecommended" Content="Marcar todos" Margin="5" Height="{DynamicResource ButtonHeight}" ToolTip="Marca todos os itens da lista de recomendações abaixo (e as caixas correspondentes nas abas Ajustes, Jogos e Servidor)."/>
                             <Button Name="WPFDiagClearRecommended" Content="Desmarcar todos" Margin="5" Height="{DynamicResource ButtonHeight}" ToolTip="Desmarca todos os itens da lista de recomendações abaixo (e as caixas correspondentes nas abas Ajustes, Jogos e Servidor)."/>
+                            <Button Name="WPFDiagApplySelected" Content="Aplicar marcados" Margin="5" Height="{DynamicResource ButtonHeight}" ToolTip="Aplica os itens marcados, igual ao botão da aba Ajustes; pode pedir ponto de restauração."/>
+                            <Button Name="WPFDiagUndoSelected" Content="Desfazer marcados" Margin="5" Height="{DynamicResource ButtonHeight}" ToolTip="Desfaz os itens marcados, igual ao botão 'Desfazer' da aba Ajustes."/>
                             <TextBlock Name="WPFDiagRecCount" Text="0 de 0 recomendados marcados" Margin="10,5,5,5" VerticalAlignment="Center"
                                        FontSize="{DynamicResource FontSize}" Foreground="{DynamicResource LabelboxForegroundColor}"/>
                         </WrapPanel>
