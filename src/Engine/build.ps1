@@ -148,6 +148,7 @@ $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
+$appliedBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-applied.ps1")
 $themeFuncs     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-theme-functions.ps1")
 $diagBlock      = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-diag.ps1")
 $commandsBlock  = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-commands.ps1")
@@ -382,6 +383,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.Tri
 # ---------------------------------------------------------------- recomendações na interface (contornos, dicas, job)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($recoUiBlock.TrimEnd() + "`n`n") "insert reco ui"
 
+# ---------------------------------------------------------------- estado já aplicado (detecção, marca na linha, pular na aplicação)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($appliedBlock.TrimEnd() + "`n`n") "insert applied"
+
 # ---------------------------------------------------------------- sistema visual (contraste dos tokens)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($themeFuncs.TrimEnd() + "`n`n") "insert theme functions"
 
@@ -611,6 +615,9 @@ $src = Replace-Once $src @'
 
     # WinForge: contorno/dica das recomendações nos controles recém-criados
     Update-WinForgeRecommendationVisuals | Out-Null
+    # WinForge: marca " · aplicado" nas linhas cuja chave já está aplicada (depois da dica de
+    # recomendação, porque o prefixo dela entra na frente do que a outra escreveu)
+    Update-WinForgeAppliedVisuals | Out-Null
 }
 '@ "tab init reco visuals"
 
@@ -931,6 +938,77 @@ $src = Replace-Once $src @'
         Update-WinUtilSelections -flatJson $CheckBoxesToCheck
     }
 '@ "preset vazio"
+
+# ---------------------------------------------------------------- "Detectar aplicados" alimenta o conjunto de aplicados
+# O botão continua marcando as caixas como sempre; o que muda é que o resultado dele passa a ser a
+# mesma verdade que a marca " · aplicado" e o filtro do botão Aplicar usam. Sem isto, detectar na
+# mão deixaria as duas visões discordando até o próximo diagnóstico.
+$src = Replace-Once $src @'
+                foreach ($checkboxName in $completedOperation.Checkboxes) {
+                    if ($sync.$checkboxName) { $sync.$checkboxName.ischecked = $True }
+                }
+            }
+'@ @'
+                foreach ($checkboxName in $completedOperation.Checkboxes) {
+                    if ($sync.$checkboxName) { $sync.$checkboxName.ischecked = $True }
+                }
+                $null = Set-WinForgeAppliedTweaks -Keys @($completedOperation.Checkboxes)
+                Update-WinForgeAppliedVisuals | Out-Null
+            }
+'@ "detectar aplicados: guarda o conjunto"
+
+# ---------------------------------------------------------------- não reaplicar o que já está aplicado
+# A queixa era direta: marcar de novo uma chave que já está ativa fazia o WinForge reaplicá-la.
+# A detecção é REFEITA aqui, e não lida do diagnóstico da abertura: entre abrir a janela e clicar
+# em Aplicar o usuário pode ter desfeito alguma coisa, e pular um tweak que deixou de estar
+# aplicado seria pior que reaplicar um que ainda está.
+# O filtro entra ANTES de $tweaksToRun/$totalSteps para que a barra conte os passos que vão
+# acontecer de verdade - com ele depois, a barra pararia em "8/12" e pareceria travada.
+$src = Insert-After $src @'
+  $Tweaks = $sync.selectedTweaks
+'@ @'
+
+  $wfSel = Select-WinForgeTweaksToApply -Keys @($Tweaks)
+  $wfPulados = @($wfSel.Skipped)
+  $Tweaks = @($wfSel.Apply)
+  $sync.WinForgeTweaksSkipped = $wfPulados.Count
+  if ($wfPulados.Count -gt 0) {
+    foreach ($wfPulado in $wfPulados) { Write-WinUtilLog -Component "Tweaks" -Message "Ajuste '$wfPulado' pulado: já está aplicado neste sistema." }
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Pulado(s) por já estarem aplicados: $($wfPulados.Count)" -Percent 0
+  }
+'@.TrimEnd() "tweaks: pular aplicados"
+
+# Tudo que estava marcado já estava aplicado: a base cairia na caixa "Marque os ajustes que você
+# quer aplicar", que é mentira - o usuário marcou, e não havia o que fazer. Aqui a resposta é o
+# resumo na barra, sem caixa nenhuma.
+$src = Replace-Once $src @'
+  if ($tweaks.count -eq 0 -and $dnsProvider -eq "Default") {
+    $msg = "Please check the tweaks you wish to perform."
+'@ @'
+  if ($tweaks.count -eq 0 -and $dnsProvider -eq "Default" -and $wfPulados.Count -gt 0) {
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Aplicados: 0 · já estavam aplicados: $($wfPulados.Count)" -Percent 100
+    Write-WinUtilLog -Component "Tweaks" -Message "Nada a aplicar: as $($wfPulados.Count) seleção(ões) já estavam aplicadas."
+    return
+  }
+
+  if ($tweaks.count -eq 0 -and $dnsProvider -eq "Default") {
+    $msg = "Please check the tweaks you wish to perform."
+'@ "tweaks: nada a aplicar"
+
+# Linha final da barra: com alguma coisa pulada, o "Ajustes concluídos" sozinho esconderia
+# justamente o que mudou. A linha da base fica inteira (é ela que a tradução reconhece) e o resumo
+# passa por cima logo depois. O contador dos pulados atravessa em $sync porque o corpo abaixo roda
+# noutra runspace, que não enxerga as variáveis desta função.
+$src = Replace-Once $src @'
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Tweaks finished" -Percent 100
+    $sync.ProcessRunning = $false
+'@ @'
+    Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Tweaks finished" -Percent 100
+    if ([int]$sync.WinForgeTweaksSkipped -gt 0) {
+      Set-WinUtilTweaksProgressIndicator -Visible $true -Label "Aplicados: $completedSteps · já estavam aplicados: $([int]$sync.WinForgeTweaksSkipped)" -Percent 100
+    }
+    $sync.ProcessRunning = $false
+'@ "tweaks: resumo final com pulados"
 
 # ---------------------------------------------------------------- ponto de restauração: não duplicar na mesma sessão
 $src = Insert-After $src @'
@@ -5060,14 +5138,23 @@ if ($SelfTest) {
             }
             if ($wfChkCaixas -ne $wfChkEsperado) { Write-Host "  [ERRO] checklist: $wfChkCaixas caixa(s) na lista do Diagnóstico, esperado $wfChkEsperado" -ForegroundColor Red; $wbErrors++ }
             if (@($sync.WinForgeDiagMirrors.Keys).Count -ne $wfChkEsperado) { Write-Host "  [ERRO] checklist: $(@($sync.WinForgeDiagMirrors.Keys).Count) espelho(s) registrado(s), esperado $wfChkEsperado" -ForegroundColor Red; $wbErrors++ }
-            # "Marcar todos" / "Desmarcar todos": sem caixa de mensagem, com o contador na tela
+            # "Marcar todos" / "Desmarcar todos": sem caixa de mensagem, com o contador na tela.
+            # A limpeza antes do "Marcar todos" deixa a conta determinística: as linhas já aplicadas
+            # ficam de fora da marcação em massa, e uma delas marcada de antes faria o N do contador
+            # passar do que a função devolve.
+            $null = Set-WinForgeDiagRecommendationSelection -Checked $false
+            $wfChkAplicados = 0
+            foreach ($wfChkK in @($sync.WinForgeDiagMirrors.Keys)) {
+                if ($sync.WinForgeDiagMirrors[$wfChkK].IsEnabled -and (Test-WinForgeDiagRecApplied -Key $wfChkK)) { $wfChkAplicados++ }
+            }
             $wfChkTodos = Set-WinForgeDiagRecommendationSelection -Checked $true
-            if ($sync.WPFDiagRecCount.Text -notmatch '^\d+ de \d+ recomendados marcados$') { Write-Host "  [ERRO] contador: texto '$($sync.WPFDiagRecCount.Text)' fora do formato 'N de M recomendados marcados'" -ForegroundColor Red; $wbErrors++ }
-            if ($sync.WPFDiagRecCount.Text -ne "$wfChkTodos de $wfChkEsperado recomendados marcados") { Write-Host "  [ERRO] contador depois de Marcar todos: '$($sync.WPFDiagRecCount.Text)', esperado '$wfChkTodos de $wfChkEsperado recomendados marcados'" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WPFDiagRecCount.Text -notmatch '^\d+ de \d+ recomendados marcados · \d+ já aplicados$') { Write-Host "  [ERRO] contador: texto '$($sync.WPFDiagRecCount.Text)' fora do formato 'N de M recomendados marcados · A já aplicados'" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WPFDiagRecCount.Text -ne "$wfChkTodos de $wfChkEsperado recomendados marcados · $wfChkAplicados já aplicados") { Write-Host "  [ERRO] contador depois de Marcar todos: '$($sync.WPFDiagRecCount.Text)', esperado '$wfChkTodos de $wfChkEsperado recomendados marcados · $wfChkAplicados já aplicados'" -ForegroundColor Red; $wbErrors++ }
+            if ($wfChkTodos -ne ($wfChkEsperado - $wfChkAplicados)) { Write-Host "  [ERRO] Marcar todos: marcou $wfChkTodos linha(s), esperado $($wfChkEsperado - $wfChkAplicados) ($wfChkEsperado menos $wfChkAplicados já aplicada(s))" -ForegroundColor Red; $wbErrors++ }
             $wfChkMarcadosReais = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] -and $sync[$_].IsChecked }).Count
             if ($wfChkMarcadosReais -ne $wfChkTodos) { Write-Host "  [ERRO] Marcar todos: $wfChkMarcadosReais caixa(s) real(is) marcada(s), esperado $wfChkTodos" -ForegroundColor Red; $wbErrors++ }
             $null = Set-WinForgeDiagRecommendationSelection -Checked $false
-            if ($sync.WPFDiagRecCount.Text -ne "0 de $wfChkEsperado recomendados marcados") { Write-Host "  [ERRO] contador depois de Desmarcar todos: '$($sync.WPFDiagRecCount.Text)'" -ForegroundColor Red; $wbErrors++ }
+            if ($sync.WPFDiagRecCount.Text -ne "0 de $wfChkEsperado recomendados marcados · $wfChkAplicados já aplicados") { Write-Host "  [ERRO] contador depois de Desmarcar todos: '$($sync.WPFDiagRecCount.Text)'" -ForegroundColor Red; $wbErrors++ }
             $wfChkSobraram = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync[$_] -is [System.Windows.Controls.CheckBox] -and $sync[$_].IsChecked })
             if ($wfChkSobraram.Count) { Write-Host "  [ERRO] Desmarcar todos: continuam marcadas: $($wfChkSobraram -join ', ')" -ForegroundColor Red; $wbErrors++ }
             if ($sync.WinForgeMirrorBusy) { Write-Host "  [ERRO] checklist: `$sync.WinForgeMirrorBusy ficou ligado" -ForegroundColor Red; $wbErrors++ }
@@ -5090,7 +5177,9 @@ if ($SelfTest) {
             # A prova de que a base vai enxergar os itens: marcar pela lista tem de encher
             # $sync.selectedTweaks, que é literalmente a variável que Invoke-WPFtweaksbutton lê.
             $null = Set-WinForgeDiagRecommendationSelection -Checked $true
-            $wfAplChaves = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $_ -like 'WPFTweaks*' -and $sync.WinForgeDiagMirrors[$_].IsEnabled })
+            # Chave já aplicada fica de fora do "Marcar todos" e, por isso, de selectedTweaks: é o
+            # comportamento novo, não uma falha da ponte (ver o bloco "estado já aplicado" abaixo).
+            $wfAplChaves = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $_ -like 'WPFTweaks*' -and $sync.WinForgeDiagMirrors[$_].IsEnabled -and -not (Test-WinForgeDiagRecApplied -Key $_) })
             if ($wfAplChaves.Count -eq 0) { Write-Host "  [ERRO] Aplicar marcados: nenhuma chave marcável na lista do Diagnóstico - o teste não provaria nada" -ForegroundColor Red; $wbErrors++ }
             $wfAplFora = @($wfAplChaves | Where-Object { -not $sync.selectedTweaks.Contains($_) })
             if ($wfAplFora.Count) { Write-Host "  [ERRO] Aplicar marcados: $($wfAplFora.Count) chave(s) da lista ficaram fora de selectedTweaks: $($wfAplFora -join ', ')" -ForegroundColor Red; $wbErrors++ }
@@ -5110,6 +5199,79 @@ if ($SelfTest) {
             Write-Host "  [ERRO] Aplicar/Desfazer marcados: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
         } finally {
             $sync.ProcessRunning = $false
+        }
+        # Estado já aplicado. A queixa era que remarcar uma flag já ativa reaplicava tudo de novo:
+        # agora o detector da base alimenta um conjunto, a linha ganha " · aplicado" e o botão
+        # Aplicar não passa essas chaves adiante. NADA aqui aplica coisa alguma - a detecção é
+        # leitura de registro e de serviço, e o conjunto sintético dos testes é desfeito no fim.
+        try {
+            $wfAplDetectado = Get-WinForgeAppliedTweaks
+            if ($wfAplDetectado -isnot [array]) { Write-Host "  [ERRO] aplicados: Get-WinForgeAppliedTweaks devolveu '$($wfAplDetectado.GetType().Name)', esperado matriz" -ForegroundColor Red; $wbErrors++ }
+            $wfAplForaConfig = @(@($wfAplDetectado) | Where-Object { $_ -and -not $sync.configs.tweaks.PSObject.Properties[[string]$_] })
+            if ($wfAplForaConfig.Count) { Write-Host "  [ERRO] aplicados: chave(s) fora de configs.tweaks -> $($wfAplForaConfig -join ', ')" -ForegroundColor Red; $wbErrors++ }
+
+            # Duas chaves com linha de verdade na aba Ajustes, para o teste não depender do que esta
+            # máquina por acaso já tenha aplicado.
+            $wfAplCand = @(@($sync.configs.tweaks.PSObject.Properties.Name) | Where-Object { $_ -like 'WPFTweaks*' -and (Test-WinForgeAppliedEligible -Key $_) -and $null -ne (Get-WinForgeRecoRow -Key $_) })
+            if ($wfAplCand.Count -lt 3) { throw "menos de 3 linhas montadas na aba Ajustes ($($wfAplCand.Count)) - o teste não provaria nada" }
+            $wfAplFake = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $null = $wfAplFake.Add($wfAplCand[0])
+            $null = $wfAplFake.Add($wfAplCand[1])
+
+            # O seletor: o ponto de restauração passa sempre, a chave aplicada fica de fora e a que
+            # não está aplicada passa.
+            $wfAplSel = Select-WinForgeTweaksToApply -Keys @('WPFTweaksRestorePoint', $wfAplCand[0], $wfAplCand[2]) -Applied $wfAplFake
+            if (@($wfAplSel.Apply) -join ',' -ne "WPFTweaksRestorePoint,$($wfAplCand[2])") { Write-Host "  [ERRO] seletor: Apply veio '$(@($wfAplSel.Apply) -join ', ')', esperado 'WPFTweaksRestorePoint, $($wfAplCand[2])'" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfAplSel.Skipped) -join ',' -ne $wfAplCand[0]) { Write-Host "  [ERRO] seletor: Skipped veio '$(@($wfAplSel.Skipped) -join ', ')', esperado '$($wfAplCand[0])'" -ForegroundColor Red; $wbErrors++ }
+            # Toggle nunca é pulado, mesmo constando como aplicado: o interruptor já mostra o estado
+            # e ele não passa pelo botão Aplicar.
+            $wfAplTog = @(@($sync.configs.tweaks.PSObject.Properties.Name) | Where-Object { $_ -like 'WPFToggle*' })
+            if ($wfAplTog.Count) {
+                $wfAplTogSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $null = $wfAplTogSet.Add($wfAplTog[0])
+                if (@((Select-WinForgeTweaksToApply -Keys @($wfAplTog[0]) -Applied $wfAplTogSet).Skipped).Count -ne 0) { Write-Host "  [ERRO] seletor: o Toggle '$($wfAplTog[0])' foi pulado" -ForegroundColor Red; $wbErrors++ }
+            }
+
+            # A marca na linha: exatamente duas, e rodar de novo não empilha uma terceira.
+            $wfAplAntes = $sync.AppliedTweaks
+            $sync.AppliedTweaks = $wfAplFake
+            $wfAplMarcadas = Update-WinForgeAppliedVisuals
+            if ($wfAplMarcadas -ne 2) { Write-Host "  [ERRO] marca 'aplicado': $wfAplMarcadas linha(s) marcada(s), esperado 2" -ForegroundColor Red; $wbErrors++ }
+            $null = Update-WinForgeAppliedVisuals
+            foreach ($wfAplK in @($wfAplCand[0], $wfAplCand[1])) {
+                $wfAplPanel = $sync[$wfAplK].Parent
+                $wfAplSufixos = @(@($wfAplPanel.Children) | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and [string]$_.Tag -eq "WFApplied_$wfAplK" })
+                if ($wfAplSufixos.Count -ne 1) { Write-Host "  [ERRO] marca 'aplicado': '$wfAplK' ficou com $($wfAplSufixos.Count) sufixo(s) depois de duas passadas, esperado 1" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfAplSufixos[0].Text -ne ' · aplicado') { Write-Host "  [ERRO] marca 'aplicado': texto '$($wfAplSufixos[0].Text)'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$sync[$wfAplK].ToolTip -notmatch '^✔ Já aplicado neste sistema\. ') { Write-Host "  [ERRO] marca 'aplicado': a dica de '$wfAplK' não começa com o aviso ('$($sync[$wfAplK].ToolTip)')" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Saiu do conjunto, sai da tela: a marca e o prefixo da dica são desfeitos.
+            $sync.AppliedTweaks = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            if ((Update-WinForgeAppliedVisuals) -ne 0) { Write-Host "  [ERRO] marca 'aplicado': conjunto vazio deveria deixar 0 linha(s) marcada(s)" -ForegroundColor Red; $wbErrors++ }
+            $wfAplSobrou = @(@($sync[$wfAplCand[0]].Parent.Children) | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and [string]$_.Tag -eq "WFApplied_$($wfAplCand[0])" })
+            if ($wfAplSobrou.Count) { Write-Host "  [ERRO] marca 'aplicado': o sufixo de '$($wfAplCand[0])' não foi removido" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync[$wfAplCand[0]].ToolTip -match '^✔ Já aplicado neste sistema\. ') { Write-Host "  [ERRO] marca 'aplicado': o prefixo continuou na dica de '$($wfAplCand[0])'" -ForegroundColor Red; $wbErrors++ }
+
+            # O contador do checklist ganhou a terceira conta.
+            Update-WinForgeDiagRecommendationCount
+            if ($sync.WPFDiagRecCount.Text -notmatch '\d+ de \d+ recomendados marcados · \d+ já aplicados') { Write-Host "  [ERRO] contador: '$($sync.WPFDiagRecCount.Text)' sem a conta de já aplicados" -ForegroundColor Red; $wbErrors++ }
+
+            # Trava de texto: o filtro tem de estar DENTRO de Invoke-WPFtweaksbutton e ANTES do laço
+            # que aplica - depois dele, o motor reaplicaria tudo antes de descobrir o que pular.
+            $wfAplCorpo = [string](Get-Command Invoke-WPFtweaksbutton).ScriptBlock
+            $wfAplPos = $wfAplCorpo.IndexOf('$wfSel = Select-WinForgeTweaksToApply -Keys @($Tweaks)', [System.StringComparison]::Ordinal)
+            $wfAplLaco = $wfAplCorpo.IndexOf('Invoke-WinForgeTweaks $tweaks[$i]', [System.StringComparison]::Ordinal)
+            if ($wfAplPos -lt 0) { Write-Host "  [ERRO] trava de texto: Invoke-WPFtweaksbutton não chama Select-WinForgeTweaksToApply" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAplLaco -lt 0) { Write-Host "  [ERRO] trava de texto: Invoke-WPFtweaksbutton não tem o laço de aplicação da base" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfAplPos -gt $wfAplLaco) { Write-Host "  [ERRO] trava de texto: o filtro de aplicados vem DEPOIS do laço que aplica" -ForegroundColor Red; $wbErrors++ }
+            if ($wfAplCorpo.IndexOf('$totalSteps = [Math]::Max($Tweaks.Count, 1)', [System.StringComparison]::Ordinal) -lt $wfAplPos) { Write-Host "  [ERRO] trava de texto: `$totalSteps é calculado antes do filtro e contaria passos que não vão acontecer" -ForegroundColor Red; $wbErrors++ }
+            Write-Host "  Estado já aplicado: $(@($wfAplDetectado).Count) chave(s) detectada(s) nesta máquina; marca, seletor e contador conferidos com conjunto sintético"
+        } catch {
+            Write-Host "  [ERRO] estado já aplicado: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            $sync.AppliedTweaks = $wfAplAntes
+            $null = Update-WinForgeAppliedVisuals
+            Update-WinForgeDiagRecommendationCount
         }
         # Recomendação que NÃO se aplica a esta máquina. A linha existia habilitada e só descobria o
         # problema no clique: montava a aba de destino, não achava a caixa e aí se desabilitava - com
@@ -5131,11 +5293,12 @@ if ($SelfTest) {
                 if ($wfIndispLinha.IsEnabled) { Write-Host "  [ERRO] recomendação indisponível: a linha nasceu habilitada" -ForegroundColor Red; $wbErrors++ }
                 if ([string]$wfIndispLinha.ToolTip -notmatch 'não se aplica') { Write-Host "  [ERRO] recomendação indisponível: a dica não diz que o item não se aplica ('$($wfIndispLinha.ToolTip)')" -ForegroundColor Red; $wbErrors++ }
                 $wfIndispHab = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync.WinForgeDiagMirrors[$_].IsEnabled }).Count
+                $wfIndispApl = @(@($sync.WinForgeDiagMirrors.Keys) | Where-Object { $sync.WinForgeDiagMirrors[$_].IsEnabled -and (Test-WinForgeDiagRecApplied -Key $_) }).Count
                 if (@($sync.WinForgeDiagMirrors.Keys).Count -ne ($wfIndispHab + 1)) { Write-Host "  [ERRO] recomendação indisponível: esperado exatamente 1 linha desabilitada, veio $(@($sync.WinForgeDiagMirrors.Keys).Count - $wfIndispHab)" -ForegroundColor Red; $wbErrors++ }
-                if ($sync.WPFDiagRecCount.Text -ne "0 de $wfIndispHab recomendados marcados") { Write-Host "  [ERRO] recomendação indisponível: contador '$($sync.WPFDiagRecCount.Text)', esperado '0 de $wfIndispHab recomendados marcados' (a linha desabilitada não entra no total)" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WPFDiagRecCount.Text -ne "0 de $wfIndispHab recomendados marcados · $wfIndispApl já aplicados") { Write-Host "  [ERRO] recomendação indisponível: contador '$($sync.WPFDiagRecCount.Text)', esperado '0 de $wfIndispHab recomendados marcados · $wfIndispApl já aplicados' (a linha desabilitada não entra no total)" -ForegroundColor Red; $wbErrors++ }
                 $wfIndispTodos = Set-WinForgeDiagRecommendationSelection -Checked $true
                 if ($wfIndispLinha.IsChecked) { Write-Host "  [ERRO] recomendação indisponível: 'Marcar todos' marcou a linha desabilitada" -ForegroundColor Red; $wbErrors++ }
-                if ($wfIndispTodos -ne $wfIndispHab) { Write-Host "  [ERRO] recomendação indisponível: 'Marcar todos' marcou $wfIndispTodos linha(s), esperado $wfIndispHab" -ForegroundColor Red; $wbErrors++ }
+                if ($wfIndispTodos -ne ($wfIndispHab - $wfIndispApl)) { Write-Host "  [ERRO] recomendação indisponível: 'Marcar todos' marcou $wfIndispTodos linha(s), esperado $($wfIndispHab - $wfIndispApl)" -ForegroundColor Red; $wbErrors++ }
                 $null = Set-WinForgeDiagRecommendationSelection -Checked $false
                 Write-Host "  Recomendação indisponível: linha desabilitada com dica, fora do total do contador ($wfIndispHab disponível(is))"
             } finally {

@@ -293,6 +293,24 @@ function Test-WinForgeRecommendationToggle {
     return ($entry -and [string]$entry.Type -eq 'Toggle')
 }
 
+function Test-WinForgeDiagRecApplied {
+    <#
+    .SYNOPSIS
+        Diz se a chave de uma linha do checklist já está aplicada neste sistema.
+    .DESCRIPTION
+        Lê o conjunto guardado pelo diagnóstico ($sync.AppliedTweaks, ver wf-applied.ps1) - não
+        detecta nada por conta própria: o checklist é redesenhado a cada marca, e uma varredura do
+        registro por linha travaria a janela.
+        Antes do primeiro diagnóstico o conjunto é nulo e a resposta é $false, que é o estado
+        conservador: nenhuma linha nasce "aplicada" sem prova.
+    #>
+    param([Parameter(Mandatory)][string]$Key)
+
+    if ($null -eq $sync.AppliedTweaks) { return $false }
+    if (-not (Test-WinForgeAppliedEligible -Key $Key)) { return $false }
+    return [bool]$sync.AppliedTweaks.Contains($Key)
+}
+
 function Test-WinForgeRecommendationAvailable {
     <#
     .SYNOPSIS
@@ -384,15 +402,19 @@ function Update-WinForgeDiagRecommendationCount {
 
     $total = 0
     $marcados = 0
+    $aplicados = 0
     if ($sync.WinForgeDiagMirrors) {
         foreach ($key in @($sync.WinForgeDiagMirrors.Keys)) {
             $mirror = $sync.WinForgeDiagMirrors[$key]
             if ($null -eq $mirror -or -not $mirror.IsEnabled) { continue }
             $total++
             if ($mirror.IsChecked) { $marcados++ }
+            if (Test-WinForgeDiagRecApplied -Key $key) { $aplicados++ }
         }
     }
-    $sync.WPFDiagRecCount.Text = "$marcados de $total recomendados marcados"
+    # A terceira conta entra sempre, inclusive zerada: contador que muda de formato conforme o
+    # resultado obriga quem lê (e quem testa) a decorar dois formatos.
+    $sync.WPFDiagRecCount.Text = "$marcados de $total recomendados marcados · $aplicados já aplicados"
 }
 
 function Set-WinForgeRecommendationMirror {
@@ -473,6 +495,9 @@ function Set-WinForgeDiagRecommendationSelection {
         Mexe nas linhas, não nos controles reais: o evento de cada linha é que leva a marca para a aba
         de destino, montando-a se preciso. Linha desabilitada (entrada que não existe nesta máquina)
         fica de fora.
+        Linha JÁ APLICADA fica de fora do "Marcar todos", e só dele: marcar em massa o que já está
+        no sistema é exatamente o trabalho repetido que o usuário reclamou. Quem quiser reaplicar
+        uma delas continua podendo marcá-la na mão, e "Desmarcar todos" continua limpando tudo.
     .OUTPUTS
         Quantidade de linhas que terminaram no estado pedido.
     #>
@@ -484,6 +509,7 @@ function Set-WinForgeDiagRecommendationSelection {
     foreach ($key in @($sync.WinForgeDiagMirrors.Keys)) {
         $mirror = $sync.WinForgeDiagMirrors[$key]
         if ($null -eq $mirror -or -not $mirror.IsEnabled) { continue }
+        if ($Checked -and (Test-WinForgeDiagRecApplied -Key $key)) { continue }
         $mirror.IsChecked = $Checked
         if ([bool]$mirror.IsChecked -eq $Checked) { $count++ }
     }
@@ -512,7 +538,10 @@ function New-WinForgeDiagRecRow {
     if ($Item.Kind -eq 'recomendado' -and -not (Test-WinForgeRecommendationToggle -Key $key)) {
         $head = New-Object System.Windows.Controls.CheckBox
         $head.Tag = $key
-        $head.Content = "$($Item.Icon) $($Item.Content)"
+        # O sufixo vai no próprio texto da linha, e não num TextBlock ao lado como na aba Ajustes:
+        # aqui a lista inteira é redesenhada a cada diagnóstico, então não há marca velha para
+        # reconhecer nem para tirar.
+        $head.Content = "$($Item.Icon) $($Item.Content)$(if (Test-WinForgeDiagRecApplied -Key $key) { ' · aplicado' })"
         Set-WinForgeStatusBrush -Element $head -Property ([System.Windows.Controls.Control]::ForegroundProperty) -Resource ([string]$Item.Resource) -Fallback ([string]$Item.Hex)
         $head.VerticalAlignment = 'Center'
         $head.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
