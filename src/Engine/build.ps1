@@ -1184,6 +1184,68 @@ if ($SelfTest) {
     $wfIdiomaConfigs = Test-WinForgeEnglishLeftovers -Text $wfI18nTexto.ToString() -Where 'configurações'
     if ($wfIdiomaConfigs) { $wbErrors += $wfIdiomaConfigs }
     else { Write-Host "  Idioma: nenhum termo em inglês no Content/Description de tweaks, Config e aplicativos" }
+    # Qualidade da descrição. A descrição é o texto que decide se a pessoa marca ou não marca o
+    # item, e o vício que ela tinha era escrever duas vezes a mesma frase dentro de si mesma
+    # ("Desativa o IPv6." depois do título "IPv6 - Desativar") ou não dizer nada além do título.
+    # As cinco regras abaixo não conseguem julgar se o texto é BOM, mas reprovam exatamente as
+    # formas de ser vazio que já apareceram aqui.
+    #
+    # O texto conferido é o de ORIGEM: item de Cuidado chega nesta altura com o prefixo
+    # "CUIDADO: <motivo>. " colado por Initialize-WinForgeAudit, e ele sai antes da conferência -
+    # senão a trava cobraria do autor da descrição um texto que quem escreveu foi a auditoria. O
+    # prefixo é remontado a partir do motivo, e não cortado "até o primeiro ponto": há motivo com
+    # ponto no meio, e o corte ingênuo comeria metade da frase.
+    $wfDescAlvos = @(
+        @{ Nome = 'tweaks';      Config = $sync.configs.tweaks;       Campo = 'Description' }
+        @{ Nome = 'Config';      Config = $sync.configs.feature;      Campo = 'Description' }
+        @{ Nome = 'aplicativos'; Config = $sync.configs.applications; Campo = 'description' }
+    )
+    $wfDescMin = 40
+    $wfDescProblemas = @()
+    $wfDescTotal = 0
+    foreach ($wfAlvo in $wfDescAlvos) {
+        foreach ($p in $wfAlvo.Config.PSObject.Properties) {
+            $wfDescProp = $p.Value.PSObject.Properties[$wfAlvo.Campo]
+            if (-not $wfDescProp) { continue }
+            $wfDesc = ([string]$wfDescProp.Value).Trim()
+            if ([string]::IsNullOrWhiteSpace($wfDesc)) { continue }
+            $wfDescAud = $sync.WinForgeAudit[$p.Name]
+            if ($wfDescAud -and $wfDescAud.Class -eq 'Cuidado') {
+                $wfDescPre = "CUIDADO: {0}. " -f ([string]$wfDescAud.Reason).TrimEnd('.')
+                if ($wfDesc.StartsWith($wfDescPre, [StringComparison]::Ordinal)) { $wfDesc = $wfDesc.Substring($wfDescPre.Length).Trim() }
+            }
+            $wfDescTotal++
+            $wfDescOnde = "$($wfAlvo.Nome):$($p.Name)"
+            $wfDescTitulo = ''
+            $wfDescPropC = $p.Value.PSObject.Properties['Content']
+            if ($wfDescPropC) { $wfDescTitulo = ([string]$wfDescPropC.Value).Trim() }
+            # (a) frase repetida dentro da mesma descrição
+            $wfDescFrases = @()
+            foreach ($wfFrase in [regex]::Split($wfDesc, '(?<=[.!?])\s+')) {
+                $wfFraseN = ([regex]::Replace([string]$wfFrase, '\s+', ' ')).Trim().TrimEnd('.', '!', '?').ToLowerInvariant()
+                if ($wfFraseN.Length -gt 0) { $wfDescFrases += $wfFraseN }
+            }
+            $wfDescRepetida = @($wfDescFrases | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+            if ($wfDescRepetida.Count) { $wfDescProblemas += "$wfDescOnde -> frase repetida: '$($wfDescRepetida[0])'" }
+            # (b) tamanho mínimo: abaixo disso não cabe mecanismo + efeito
+            if ($wfDesc.Length -lt $wfDescMin) { $wfDescProblemas += "$wfDescOnde -> $($wfDesc.Length) caractere(s), mínimo $wfDescMin" }
+            # (c) descrição que só repete o título não informa nada
+            if ($wfDescTitulo.Length -gt 0) {
+                if ($wfDesc.Equals($wfDescTitulo, [StringComparison]::OrdinalIgnoreCase)) { $wfDescProblemas += "$wfDescOnde -> descrição igual ao Content" }
+                elseif ($wfDesc.StartsWith($wfDescTitulo, [StringComparison]::OrdinalIgnoreCase)) { $wfDescProblemas += "$wfDescOnde -> descrição começa repetindo o Content" }
+            }
+            # (d) a procedência do Windows Boost é UMA, no fim
+            $wfDescOrigem = ([regex]::Matches($wfDesc, 'Origem:')).Count
+            if ($wfDescOrigem -gt 1) { $wfDescProblemas += "$wfDescOnde -> $wfDescOrigem 'Origem:' na mesma descrição" }
+            # (e) quem escreve 'CUIDADO:' é a auditoria, não o texto de origem
+            if ($wfDesc.IndexOf('CUIDADO:', [StringComparison]::Ordinal) -ge 0) { $wfDescProblemas += "$wfDescOnde -> 'CUIDADO:' escrito na descrição de origem (quem prefixa é a auditoria)" }
+        }
+    }
+    if ($wfDescProblemas.Count) {
+        Write-Host "  [ERRO] descrições: $($wfDescProblemas.Count) problema(s) em $wfDescTotal descrição(ões)" -ForegroundColor Red; $wbErrors++
+        foreach ($wfDescP in $wfDescProblemas) { Write-Host "         $wfDescP" -ForegroundColor Red }
+    }
+    else { Write-Host "  Descrições: $wfDescTotal com $wfDescMin+ caracteres, sem frase repetida, sem repetir o título e com no máximo uma 'Origem:'" }
     # Auditoria de risco
     $wbUnclassified = @(); $wbPresetViolations = @()
     foreach ($t in $sync.configs.tweaks.PSObject.Properties) {
