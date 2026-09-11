@@ -263,6 +263,9 @@ function Start-WinForgeProfileJob {
         # de escrever a linha final - exatamente o silêncio que este bloco existe para evitar.
         try {
             Update-WinForgeRecommendationVisuals | Out-Null
+            # Depois da dica de recomendação: o prefixo "já aplicado" entra na frente do que ela
+            # escreveu, e a passada dela restaura a dica original de quem saiu das recomendações.
+            if (Get-Command Update-WinForgeAppliedVisuals -ErrorAction SilentlyContinue) { Update-WinForgeAppliedVisuals | Out-Null }
             if (Get-Command Update-WinForgeDiagnosticsTab -ErrorAction SilentlyContinue) { Update-WinForgeDiagnosticsTab }
         } catch {
             Write-WinForgeLog -Component "Profile" -Level "ERROR" -Message "Diagnóstico: falha ao atualizar a interface -> $($_.Exception.Message)"
@@ -278,6 +281,13 @@ function Start-WinForgeProfileJob {
             $sync.Profile = if ($wfSkipNetwork) { Get-WinForgeSystemProfile -SkipNetwork } else { Get-WinForgeSystemProfile }
             $null = Set-WinForgeProfileProgress -Label "Avaliando recomendações..." -Percent 70
             $wfRules = Invoke-WinForgeRules -Profile $sync.Profile
+
+            # O que JÁ está aplicado. Roda aqui, no job, porque é leitura de registro e de serviço
+            # de todas as entradas e leva alguns segundos - na thread da janela isso apareceria
+            # como travamento. Falha não derruba o diagnóstico nem apaga o conjunto anterior: a
+            # função devolve $null e o que já se sabia continua valendo.
+            $null = Set-WinForgeProfileProgress -Label "Conferindo o que já está aplicado..." -Percent 85
+            $null = Update-WinForgeAppliedFromSystem
 
             # Janela fechando: Invoke-WPFUIThread é síncrono e esperaria por um Dispatcher que está
             # sendo desligado. Não há mais interface para atualizar - o job só termina de se despedir.

@@ -313,6 +313,24 @@
                 </Trigger>
             </Style.Triggers>
         </Style>
+        <!-- Linha da tabela do Windows Update. É um estilo PRÓPRIO dessa tabela, herdando o de cima:
+             só ela tem estado de instalação (a tabela de drivers instalados não instala nada), e um
+             gatilho de State no estilo implícito pintaria também as linhas que nunca terão esse
+             campo. O fundo é a resposta ao "instalei e não mudou nada na tela": verde quando o driver
+             entrou, vermelho quando o Windows Update recusou. A coluna "Situação" diz a mesma coisa
+             em palavras - a cor sozinha não serve a quem não a distingue.
+             O gatilho do estilo derivado vence o de IsMouseOver do estilo base, e é isso mesmo: a
+             linha instalada continua verde quando o mouse passa por cima. -->
+        <Style x:Key="WFWindowsUpdateRow" TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding State}" Value="instalado">
+                    <Setter Property="Background" Value="{DynamicResource RowSuccessBackgroundColor}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="falhou">
+                    <Setter Property="Background" Value="{DynamicResource RowFailureBackgroundColor}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
         <!-- SEM Setter de Padding aqui: o gabarito padrão do WPF para DataGridCell é uma Border com
              Background/BorderBrush/BorderThickness e um ContentPresenter, e NÃO amarra Padding em
              lugar nenhum. O Setter que existia até a Tarefa 7 era escrito e ignorado - nas fotos do

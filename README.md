@@ -99,8 +99,8 @@ instalados.
 **A lista de recomendações é um checklist espelhado.** Cada linha tem uma caixa de seleção, e ela
 é a MESMA marcação da aba de origem: marcar a linha aqui marca o item na aba Ajustes, Jogos ou
 Servidor, e marcar lá marca a linha aqui. O contador ao lado dos botões (`N de M recomendados
-marcados`) acompanha os dois sentidos. Os toggles ficam de fora do checklist: eles aplicam o
-ajuste no instante em que são ligados, e recomendação não muda o sistema.
+marcados · A já aplicados`) acompanha os dois sentidos. Os toggles ficam de fora do checklist:
+eles aplicam o ajuste no instante em que são ligados, e recomendação não muda o sistema.
 
 **E dá para aplicar sem sair daqui.** Ao lado do contador ficam **Aplicar marcados** e **Desfazer
 marcados**: eles chamam o mesmo caminho dos botões da aba Ajustes, sobre os mesmos itens marcados —
@@ -118,6 +118,28 @@ trabalho em andamento.
 | Desmarcar todos | O contrário. |
 | Aplicar marcados | Aplica os itens marcados, igual ao botão da aba Ajustes. |
 | Desfazer marcados | Desfaz os itens marcados, igual ao botão Desfazer da aba Ajustes. |
+
+### O que já está aplicado
+
+Junto com o perfil, o diagnóstico de abertura confere quais ajustes **já estão em vigor** nesta
+máquina. O que estiver aplicado aparece assim:
+
+- Nas abas Ajustes, Jogos e Servidor, a linha ganha um `· aplicado` ao lado da caixa, e a dica
+  começa com "✔ Já aplicado neste sistema.".
+- No checklist do Diagnóstico, o contador soma a conta: `N de M recomendados marcados · A já
+  aplicados`. **Marcar todos** deixa essas linhas de fora. Você pode marcá-las na mão, mas isso
+  não força nada: **Aplicar** pula o que está aplicado, com ou sem a caixa marcada. Para aplicar
+  de novo, **Desfazer** primeiro e **Aplicar** em seguida — é o único caminho.
+- **Aplicar** refaz a detecção no momento do clique, porque você pode ter desfeito algo desde que
+  a janela abriu, e pula o que já está em vigor. No fim, a barra diz "Aplicados: A · já estavam
+  aplicados: S", e as linhas que acabaram de ser aplicadas já aparecem marcadas — a detecção é
+  refeita ao terminar, sem esperar o próximo diagnóstico.
+
+Nunca são pulados: o ponto de restauração, os toggles, botões e listas — que agem no instante do
+clique e não têm estado a detectar — e todo ajuste que, além de mexer no registro ou num serviço,
+roda um script. A detecção enxerga registro e serviço; a hibernação, por exemplo, grava duas
+chaves e ainda chama `powercfg /hibernate off`, e pular com as chaves já gravadas deixaria a
+hibernação ligada.
 
 ### Drivers: a coluna Ação
 
@@ -140,6 +162,20 @@ A tabela de baixo, **Drivers oferecidos pelo Windows Update**, aparece depois de
 Windows Update" e traz o botão **Instalar**. Ele **sempre pede confirmação** numa caixa que nomeia
 a atualização antes de baixar e instalar qualquer coisa — e o botão fica desabilitado quando o
 WinForge não está elevado, porque instalar driver exige administrador.
+
+É **uma linha por dispositivo**. O serviço costuma oferecer mais de uma revisão do mesmo driver, e
+mostrar as duas é convidar a instalar a antiga: a tabela mantém só a mais nova, avisa no título
+quantas escondeu (`· M versão(ões) mais antiga(s) oculta(s)`) e lista os títulos na dica. O que
+conta como "mesmo driver" é modelo, fornecedor **e** classe juntos: o driver base e o INF de
+extensão de uma mesma placa chegam com modelo e fornecedor iguais, são pacotes que se completam e
+por isso ficam os dois. A coluna **Versão** sai do próprio título da atualização.
+
+Depois do clique em Instalar, a linha conta o que aconteceu: "instalando…", depois "instalado" (ou
+"instalado (reinicie)") em verde, ou "falhou (código N)" em vermelho. A coluna **Situação** repete
+em palavras o que a cor diz. O botão continua na linha, desabilitado enquanto ela estiver
+"instalando…" ou "instalado", e clicável de novo na que falhou. Esse estado
+vale só enquanto a janela estiver aberta: quem sabe o que está instalado é o Windows Update, e na
+próxima abertura é ele que responde.
 
 O relatório HTML descreve a máquina inteira: nome do computador, fabricante e modelo, modelos dos
 discos, servidores DNS e o estado de BitLocker, Secure Boot e TPM. O arquivo fica em
@@ -558,9 +594,8 @@ docs/               changelog e documentação
 Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)), a
 detecção de hardware, drivers e papéis de servidor com as recomendações da aba Diagnóstico, a aba
 Servidor com os ajustes de Windows Server, IIS e Active Directory, o reparo de componentes do
-Windows na aba Configurações e a restauração das permissões padrão do disco do sistema.
-
-- Auditoria de tweaks: relatório do que já está aplicado no sistema antes de mexer em nada.
+Windows na aba Configurações, a restauração das permissões padrão do disco do sistema e a
+detecção do que já está aplicado na máquina antes de aplicar qualquer coisa.
 
 ## Licença
 

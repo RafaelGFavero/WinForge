@@ -364,6 +364,113 @@ function Update-WinForgeProfileDriverStatus {
     }
 }
 
+function Get-WinForgeWindowsUpdateDriverVersion {
+    <#
+    .SYNOPSIS
+        A versão do driver tirada do título da atualização.
+    .DESCRIPTION
+        A API do Windows Update não tem campo de versão (DriverVerDate é data), então o número só
+        existe no título - e em duas formas. A moderna traz entre parênteses ("Intel Corporation
+        Display Driver Update (32.0.101.7088)") e a antiga no fim ("Intel - Display - 32.0.101.7088").
+        A dos parênteses vem primeiro porque o título dela TERMINA em ')': procurando só no fim, a
+        coluna "Versão" da tabela ficava inteira em "n/d" mesmo com o número à vista.
+
+        Sem número reconhecível devolve $null - melhor vazio do que uma data disfarçada de versão.
+    #>
+    param([string]$Title)
+
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $null }
+    if ($Title -match '\((\d+(?:\.\d+){1,3})\)') { return $Matches[1] }
+    if ($Title -match '(\d+(?:\.\d+){2,3})\s*$') { return $Matches[1] }
+    return $null
+}
+
+function Select-WinForgeWindowsUpdateLatest {
+    <#
+    .SYNOPSIS
+        Uma linha por dispositivo: da mesma placa fica só a oferta mais nova.
+    .DESCRIPTION
+        Quando o fabricante publica uma revisão, o Windows Update passa a oferecer as DUAS - mesmo
+        DriverModel, versões diferentes. As duas na tabela é um convite a instalar a antiga.
+
+        O agrupamento é por DriverModel + DriverProvider + DriverClass, sem ligar para caixa (o
+        serviço não é consistente nisso). DriverModel vazio não identifica dispositivo nenhum: cada
+        linha assim fica sozinha, senão ofertas de placas diferentes sumiriam uma atrás da outra.
+
+        A classe entra na chave porque o mesmo dispositivo recebe DOIS pacotes que se completam: o
+        driver base (classe 'MEDIA', 'Display', 'Net') e o INF de extensão (classe 'Extension'),
+        publicados com o mesmo DriverModel e o mesmo DriverProvider. Sem ela, um escondia o outro
+        como se fosse revisão antiga, e metade da oferta sumia da tabela.
+
+        Quem ganha é a maior [version]. Sem versão dos dois lados (ou com número que não vira
+        [version]), quem ganha é a data mais nova - DriverVerDate a API sempre traz. Empate fica
+        com a primeira linha vista, e a ordem de saída é a da primeira aparição de cada dispositivo.
+
+        Devolve @{ Kept; Superseded }, com Superseded trazendo @{ UpdateId; Title; ReplacedBy } de
+        cada oferta escondida. Isto é uma escolha de VISTA: o mapa $sync.DiagWUUpdates continua com
+        o objeto COM das duas, e instalar a antiga pelo id segue possível.
+    #>
+    param($Rows)
+
+    $ordem  = [System.Collections.Generic.List[string]]::new()
+    $grupos = @{}
+    $i = 0
+    foreach ($linha in @($Rows)) {
+        if ($null -eq $linha) { continue }
+        $modelo = [string]$linha.Driver
+        # A chave leva o índice quando não há modelo: é o que impede duas placas anônimas de virarem
+        # uma. O "`u{1}" separa os três campos para 'ab'+'c' não colidir com 'a'+'bc'.
+        $chave = if ([string]::IsNullOrWhiteSpace($modelo)) { "#$i" } else { ($modelo + [char]1 + [string]$linha.Provider + [char]1 + [string]$linha.Class).ToLowerInvariant() }
+        $i++
+        if (-not $grupos.ContainsKey($chave)) {
+            $ordem.Add($chave)
+            $grupos[$chave] = @{ Winner = $linha; Losers = [System.Collections.Generic.List[object]]::new() }
+            continue
+        }
+        $grupo = $grupos[$chave]
+        if (Test-WinForgeWindowsUpdateNewer -Candidate $linha -Current $grupo.Winner) {
+            $grupo.Losers.Add($grupo.Winner)
+            $grupo.Winner = $linha
+        } else {
+            $grupo.Losers.Add($linha)
+        }
+    }
+
+    $mantidos = [System.Collections.Generic.List[object]]::new()
+    $ocultos  = [System.Collections.Generic.List[object]]::new()
+    foreach ($chave in $ordem) {
+        $grupo = $grupos[$chave]
+        $mantidos.Add($grupo.Winner)
+        foreach ($perdedor in $grupo.Losers) {
+            $ocultos.Add([pscustomobject]@{
+                UpdateId   = [string]$perdedor.UpdateId
+                Title      = [string]$perdedor.Title
+                ReplacedBy = [string]$grupo.Winner.UpdateId
+            })
+        }
+    }
+    return @{ Kept = @($mantidos); Superseded = @($ocultos) }
+}
+
+function Test-WinForgeWindowsUpdateNewer {
+    <#
+    .SYNOPSIS
+        A oferta candidata é mais nova que a atual?
+    .DESCRIPTION
+        Versão primeiro, e só quando os DOIS lados viram [version]: comparar '32.0.101.7088' com
+        '32.0.101.785' como texto diria que a segunda é maior. Quando um dos lados não tem número
+        utilizável, a decisão passa para a data (texto 'yyyy-MM-dd', que ordena sozinho). Empate ou
+        falta dos dois dados responde $false - quem chegou primeiro fica.
+    #>
+    param($Candidate, $Current)
+
+    $vCand = $null; $vAtual = $null
+    $okCand  = [version]::TryParse([string]$Candidate.Version, [ref]$vCand)
+    $okAtual = [version]::TryParse([string]$Current.Version, [ref]$vAtual)
+    if ($okCand -and $okAtual) { return ($vCand -gt $vAtual) }
+    return ([string]$Candidate.Date -gt [string]$Current.Date)
+}
+
 function Search-WinForgeWindowsUpdateDrivers {
     <#
     .SYNOPSIS
@@ -387,18 +494,21 @@ function Search-WinForgeWindowsUpdateDrivers {
         return @(foreach ($u in $found.Updates) {
             $date = ''
             try { if ($u.DriverVerDate) { $date = ([datetime]$u.DriverVerDate).ToString('yyyy-MM-dd') } } catch { }
-            # A API do Windows Update não expõe a versão do driver em campo próprio (DriverVerDate é
-            # data, não versão): o número só existe no fim do título ("... - 32.0.15.6636").
-            # Sem esse número no título, Version fica $null - melhor vazio do que uma data disfarçada.
-            $version = $null
-            if ([string]$u.Title -match '(\d+(?:\.\d+){2,3})\s*$') { $version = $Matches[1] }
+            # A versão não tem campo próprio na API: sai do título, nas duas formas que o serviço usa.
+            $version = Get-WinForgeWindowsUpdateDriverVersion -Title ([string]$u.Title)
             $updateId = ''
             try { $updateId = [string]$u.Identity.UpdateID } catch { $updateId = '' }
             if ($updateId) { try { if ($sync -and $sync.DiagWUUpdates) { $sync.DiagWUUpdates[$updateId] = $u } } catch { } }
+            # A classe separa o driver base do INF de extensão do MESMO dispositivo - os dois vêm
+            # com DriverModel e DriverProvider iguais. Nem toda atualização traz o campo, e o
+            # acesso a uma propriedade COM que não existe estoura: vazio é resposta válida.
+            $class = ''
+            try { if ($u.DriverClass) { $class = [string]$u.DriverClass } } catch { $class = '' }
             [pscustomobject]@{
                 Title    = [string]$u.Title
                 Driver   = [string]$u.DriverModel
                 Provider = [string]$u.DriverProvider
+                Class    = $class
                 Version  = $version
                 Date     = $date
                 KB       = (@($u.KBArticleIDs) -join ',')
