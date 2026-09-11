@@ -2869,7 +2869,11 @@ if ($SelfTest) {
         $wfEncExe = Get-WinForgeSystemExe -Name 'takeown.exe'
         $wfEncCerto = [string](Invoke-WinForgeNativeCommand -FilePath $wfEncExe -Arguments @('/?') -StreamTo $wfEncArq -Encoding 'oem').Text
         $wfEncErrado = [string](Invoke-WinForgeNativeCommand -FilePath $wfEncExe -Arguments @('/?') -StreamTo $wfEncArq -Encoding 'unicode').Text
-        if ($wfEncCerto.IndexOf('usuário', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM não trouxe 'usuário' acentuado" -ForegroundColor Red; $wbErrors++ }
+        # 'usuário' só existe na ajuda em português; noutro idioma (o runner do CI é en-US) a prova
+        # é que a leitura OEM não tem caractere de substituição e difere da leitura como UTF-16.
+        $wfEncPt = ([System.Globalization.CultureInfo]::CurrentUICulture.Name -like 'pt*')
+        if ($wfEncPt -and $wfEncCerto.IndexOf('usuário', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM não trouxe 'usuário' acentuado" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not $wfEncPt -and ($wfEncCerto.IndexOf([char]0xFFFD) -ge 0 -or $wfEncCerto.Length -lt 50 -or $wfEncCerto -eq $wfEncErrado)) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM veio ilegível ou igual à leitura UTF-16 (idioma $([System.Globalization.CultureInfo]::CurrentUICulture.Name))" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfEncErrado.IndexOf('usuário', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Correções (codificação): a dica não chegou ao processo - lido como UTF-16 o texto saiu igual" -ForegroundColor Red; $wbErrors++ }
         else { Write-Host "  Correções (codificação): 4 nome(s) viram code page, $wfEncVistos passo(s) com a dica medida (chkdsk ANSI, sfc UTF-16, DISM/w32tm OEM, netsh UTF-8), dica conferida no processo" }
         Remove-Item -LiteralPath $wfEncArq -Force -ErrorAction SilentlyContinue
@@ -3611,7 +3615,11 @@ if ($SelfTest) {
             if (-not $wfAclRtRes.DaclOk) { Write-Host "  [ERRO] Permissões (SDDL): a lista não pôde ser devolvida ($($wfAclRtRes.Reason))" -ForegroundColor Red; $wbErrors++ }
             else {
                 $wfAclRtVolta = Get-WinForgeAclFolderSecurity -Path $wfAclRtRaiz
-                if ([string]$wfAclRtVolta.Sddl -ne [string]$wfAclRtSeg.Sddl) { Write-Host "  [ERRO] Permissões (SDDL): a lista voltou diferente.`n    antes: $($wfAclRtSeg.Sddl)`n    volta: $($wfAclRtVolta.Sddl)" -ForegroundColor Red; $wbErrors++ }
+                # A comparação ignora as flags de controle da DACL ('AI' = herança automática já
+                # propagada, 'P' = protegida): no runner do CI a pasta recém-criada sai sem 'AI' e ganha
+                # a flag na primeira gravação, sem nenhuma ACE ter mudado. O que importa é a lista de ACEs.
+                $wfAclRtNorm = { param($s) [regex]::Replace([string]$s, '^D:[A-Z]*', 'D:') }
+                if ((& $wfAclRtNorm $wfAclRtVolta.Sddl) -ne (& $wfAclRtNorm $wfAclRtSeg.Sddl)) { Write-Host "  [ERRO] Permissões (SDDL): a lista voltou diferente.`n    antes: $($wfAclRtSeg.Sddl)`n    volta: $($wfAclRtVolta.Sddl)" -ForegroundColor Red; $wbErrors++ }
                 # O dono é operação SEPARADA, e é assim que uma falha nele (devolver a posse ao
                 # TrustedInstaller exige SeRestorePrivilege) não derruba a volta da lista.
                 if (-not $wfAclRtRes.OwnerTried) { Write-Host "  [ERRO] Permissões (SDDL): o dono nem chegou a ser tentado" -ForegroundColor Red; $wbErrors++ }
