@@ -19,7 +19,7 @@ $sync.configs.wfrepair = @'
 {
   "WPFWFRepSecurityStatus": {
     "Content": "Estado de TPM, Secure Boot e BitLocker",
-    "Description": "Só lê. Mostra numa janela se o TPM está presente e pronto, se o Secure Boot está ligado, o estado do BitLocker de cada volume e se a segurança baseada em virtualização (VBS/Credential Guard) está configurada e rodando. Não muda nada. TPM e BitLocker só respondem com o WinForge aberto como administrador; sem elevação aparecem como 'n/d'.",
+    "Description": "Só lê, sem alterar nada. Mostra numa janela se o TPM está presente e pronto, se o Secure Boot está ligado, o estado do BitLocker de cada volume e se a segurança baseada em virtualização (VBS/Credential Guard) está configurada e rodando. TPM e BitLocker só respondem com o WinForge aberto como administrador; sem elevação aparecem como 'n/d'.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -27,7 +27,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepSmartReport": {
     "Content": "Saúde dos discos (SMART)",
-    "Description": "Só lê. Lista os discos físicos (modelo, tipo, tamanho, estado) e os contadores SMART de cada um: temperatura, horas ligado, desgaste e erros de leitura/escrita não corrigidos. Não muda nada. Os contadores dependem do disco e do controlador: em USB e em alguns RAID eles não existem, e aí a linha diz 'indisponíveis'.",
+    "Description": "Só lê, sem alterar nada. Lista os discos físicos (modelo, tipo, tamanho, estado) e os contadores SMART de cada um: temperatura, horas ligado, desgaste e erros de leitura/escrita não corrigidos. Os contadores dependem do disco e do controlador: em USB e em alguns RAID eles não existem, e aí a linha diz 'indisponíveis'.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -35,7 +35,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepDotNetStatus": {
     "Content": "Estado do .NET Framework 3.5 e 4.8",
-    "Description": "Só lê. Diz se o recurso NetFx3 (.NET Framework 3.5) está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro (528040 ou maior = 4.8). Não muda nada. A parte do 3.5 exige o WinForge aberto como administrador; sem elevação aparece como 'n/d'.",
+    "Description": "Só lê, sem alterar nada. Diz se o recurso NetFx3 (.NET Framework 3.5) está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro (528040 ou maior = 4.8). A parte do 3.5 exige o WinForge aberto como administrador; sem elevação aparece como 'n/d'.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",
@@ -43,7 +43,7 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepChkdskScan": {
     "Content": "Verificar disco do sistema agora (chkdsk /scan)",
-    "Description": "Só lê. Roda 'chkdsk /scan' no disco do Windows: é a verificação online, com o sistema em uso, que relata problemas sem reparar nada e sem reiniciar. Pode demorar minutos num disco grande. Para reparar de verdade, use o botão de agendar o chkdsk /f.",
+    "Description": "Só lê, sem alterar nada. Roda 'chkdsk /scan' no disco do Windows: é a verificação online, com o sistema em uso, que relata problemas sem reparar nada e sem reiniciar. Pode demorar minutos num disco grande. Para reparar de verdade, use o botão de agendar o chkdsk /f.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",

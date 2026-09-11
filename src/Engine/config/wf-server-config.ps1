@@ -228,7 +228,7 @@ $sync.configs.wfserver = @'
 
   "WPFWFSrvTimeCheck": {
     "Content": "Verificar fonte de horário (w32tm)",
-    "Description": "Mostra a fonte de horário configurada e o estado do serviço W32Time. Só lê, não altera nada.",
+    "Description": "Roda 'w32tm /query' para mostrar de onde este servidor tira a hora (NTP externo, hierarquia do domínio ou o relógio local), o estado do serviço W32Time e o desvio da última sincronização. Serve para achar a causa de erro de autenticação Kerberos e de certificado, que reclamam quando o relógio foge mais de cinco minutos. Só lê, não altera nada.",
     "category": "Servidor",
     "panel": "2",
     "tab": "Servidor",
@@ -238,7 +238,7 @@ $sync.configs.wfserver = @'
   },
   "WPFWFSrvDefenderExclusions": {
     "Content": "Listar exclusões do Defender",
-    "Description": "Mostra as exclusões de caminho, extensão e processo do Microsoft Defender neste servidor. Só lê, não altera nada.",
+    "Description": "Lista as exclusões de caminho, de extensão e de processo configuradas no Microsoft Defender desta máquina. Serve para conferir se as pastas de banco de dados, de log e de aplicação recomendadas pelo fabricante estão mesmo fora da verificação em tempo real - e para descobrir exclusão demais, que é buraco de segurança. Só lê, não altera nada.",
     "category": "Servidor",
     "panel": "2",
     "tab": "Servidor",
@@ -258,7 +258,7 @@ $sync.configs.wfserver = @'
   },
   "WPFWFAdDcdiag": {
     "Content": "Executar dcdiag /q",
-    "Description": "Roda o dcdiag em modo silencioso: só aparece o que está errado no controlador de domínio. Só lê, não altera nada.",
+    "Description": "Roda o 'dcdiag /q', a bateria de testes de saúde de controlador de domínio, no modo em que só o que falhou é impresso. Saída vazia é boa notícia: quer dizer que replicação, DNS, serviços e confiança passaram em todos os testes. Só lê, não altera nada.",
     "category": "Active Directory",
     "panel": "2",
     "tab": "Servidor",
@@ -269,7 +269,7 @@ $sync.configs.wfserver = @'
   },
   "WPFWFAdReplSummary": {
     "Content": "Resumo de replicação (repadmin)",
-    "Description": "Mostra o resumo de replicação entre os controladores de domínio (repadmin /replsummary): atrasos e falhas por parceiro. Só lê, não altera nada.",
+    "Description": "Roda 'repadmin /replsummary' e mostra, por parceiro de replicação, há quanto tempo foi a última troca bem-sucedida e quantas falharam. É o primeiro lugar a olhar quando uma senha trocada num controlador não vale no outro. Só lê, não altera nada.",
     "category": "Active Directory",
     "panel": "2",
     "tab": "Servidor",
@@ -280,7 +280,7 @@ $sync.configs.wfserver = @'
   },
   "WPFWFAdDnsScavenging": {
     "Content": "Limpeza de registros DNS (scavenging)",
-    "Description": "Mostra a configuração de limpeza automática de registros DNS antigos neste servidor. Só lê, não altera nada.",
+    "Description": "Mostra se a limpeza automática de registros DNS antigos (scavenging) está ligada neste servidor e com que intervalos de atualização e de expiração. Sem ela, a zona vai acumulando registro de máquina que não existe mais e o nome passa a resolver para o IP errado. Só lê, não altera nada.",
     "category": "Active Directory",
     "panel": "2",
     "tab": "Servidor",

@@ -66,7 +66,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBAds": {
     "Content": "Anúncios e sugestões do Windows - Desativar",
-    "Description": "Desliga sugestões de apps no menu Iniciar, dicas, apps instalados silenciosamente, conteúdo promocional na tela de bloqueio/Configurações (ContentDeliveryManager). Origem: 'Desativar Anúncios e sugestões.bat' + opção 22 do iGust Debloater.",
+    "Description": "Zera as doze chaves do ContentDeliveryManager que alimentam as sugestões de aplicativo no menu Iniciar, as dicas do Windows, a instalação silenciosa de programas patrocinados e o conteúdo promocional na tela de bloqueio e nas Configurações. O menu Iniciar passa a mostrar só o que você instalou, e nenhum aplicativo novo aparece sozinho. Vale para o usuário atual; o Windows Spotlight da tela de bloqueio para junto. Origem: 'Desativar Anúncios e sugestões.bat' + opção 22 do iGust Debloater.",
     "category": "WinForge - Privacidade e Interface",
     "panel": "1",
     "registry": [
@@ -86,7 +86,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBCortana": {
     "Content": "Cortana - Desativar",
-    "Description": "Bloqueia a Cortana por política (AllowCortana=0) e desliga a integração dela na pesquisa. Para remover o app, use a aba AppX. Origem: 'Desativar Cortana.bat' + 'Desativar Bing Search.bat'.",
+    "Description": "Bloqueia a Cortana por política (AllowCortana=0) e tira o consentimento e a integração dela na caixa de pesquisa. A assistente deixa de responder e de aparecer no menu Iniciar, e a pesquisa volta a ser só local. O aplicativo continua instalado: para removê-lo de vez, use a aba AppX. Origem: 'Desativar Cortana.bat' + 'Desativar Bing Search.bat'.",
     "category": "WinForge - Privacidade e Interface",
     "panel": "1",
     "registry": [
@@ -97,7 +97,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBSearchSuggestions": {
     "Content": "Pesquisa - Sem histórico, sem sugestões da web e sem conteúdo da nuvem",
-    "Description": "Desliga o histórico de pesquisa do dispositivo, as sugestões/resultados da web na caixa de pesquisa (DisableSearchBoxSuggestions) e a pesquisa de conteúdo na nuvem (conta Microsoft/corporativa). Origem: 'Desativar Sugestões de Pesquisa.bat' (revisado: a chave original era inócua).",
+    "Description": "Desliga o histórico de pesquisa do dispositivo, as sugestões e resultados da web na caixa de pesquisa (DisableSearchBoxSuggestions) e a busca de conteúdo na nuvem da conta Microsoft ou corporativa. O menu Iniciar passa a procurar só em arquivos, aplicativos e configurações locais, e responde sem esperar a internet. Arquivo no OneDrive e no SharePoint deixa de aparecer nos resultados. Origem: 'Desativar Sugestões de Pesquisa.bat' (revisado: a chave original era inócua).",
     "category": "WinForge - Privacidade e Interface",
     "panel": "1",
     "registry": [
@@ -128,7 +128,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBSvcSpooler": {
     "Content": "Serviço de impressão (Spooler) - Desativar",
-    "Description": "Desativa o Spooler de Impressão. Origem: 'Desativar seviços.bat'.",
+    "Description": "Põe o serviço Spooler em Desabilitado. Some um processo que fica sempre carregado e que é alvo frequente de falha de segurança (a família PrintNightmare). Em máquina que imprime, nada mais funciona: nem impressora física, nem 'Imprimir em PDF', nem fila de impressão. Origem: 'Desativar seviços.bat'.",
     "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "service": [
@@ -137,7 +137,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBSvcBluetooth": {
     "Content": "Bluetooth (bthserv) - Desativar",
-    "Description": "Desativa o serviço de suporte a Bluetooth. Origem: 'Desativar seviços.bat'.",
+    "Description": "Põe o serviço bthserv em Desabilitado, que é o que mantém o rádio Bluetooth descoberto e os dispositivos pareados. Faz sentido em desktop ligado por cabo, onde o rádio fica ligado sem nunca ser usado. Fone, mouse, teclado e transferência por Bluetooth param de funcionar até reativar. Origem: 'Desativar seviços.bat'.",
     "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "service": [
@@ -146,7 +146,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBSvcRdp": {
     "Content": "Área de Trabalho Remota (TermService) - Desativar",
-    "Description": "Desativa o serviço de Área de Trabalho Remota. Origem: 'Desativar seviços.bat'.",
+    "Description": "Põe o serviço TermService em Desabilitado, fechando a porta 3389 e a escuta de sessão remota. É uma superfície de ataque a menos numa máquina doméstica, que quase nunca recebe conexão por RDP. Ninguém mais acessa este computador por Área de Trabalho Remota, inclusive você de fora. Origem: 'Desativar seviços.bat'.",
     "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "service": [
@@ -155,7 +155,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBSvcHello": {
     "Content": "Biometria / Windows Hello (WbioSrvc) - Desativar",
-    "Description": "Desativa o serviço de biometria. Origem: 'Desativar seviços.bat'.",
+    "Description": "Põe o serviço WbioSrvc em Desabilitado, que é quem fala com o leitor de digital e com a câmera infravermelha. Útil em desktop sem nenhum sensor biométrico, onde o serviço sobe à toa. A entrada por rosto e por digital do Windows Hello para de funcionar; sobram PIN e senha. Origem: 'Desativar seviços.bat'.",
     "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "service": [
@@ -164,7 +164,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBSvcTouchKeyboard": {
     "Content": "Teclado virtual e caneta (TabletInputService) - Desativar",
-    "Description": "Desativa o teclado na tela e o painel de caneta. Origem: 'Desativar seviços.bat'.",
+    "Description": "Põe o serviço TabletInputService em Desabilitado, que é quem desenha o teclado na tela e o painel de escrita à caneta. Em desktop com teclado físico ele nunca é chamado e some da memória. Em tablet e 2-em-1, o teclado virtual deixa de aparecer e a máquina fica sem como digitar no modo tablet. Origem: 'Desativar seviços.bat'.",
     "category": "zz__Avançado (CUIDADO)",
     "panel": "1",
     "service": [
@@ -230,7 +230,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBMMCSSGames": {
     "Content": "Prioridade das tarefas de jogos (MMCSS) - Alta",
-    "Description": "Perfil 'Games' do MMCSS: Priority 6, Scheduling Category High, SFIO High, GPU Priority 8; SystemResponsiveness 0 e NetworkThrottlingIndex desligado (sem limite de pacotes por ms). Origem: 'Forçar o windows a priorizar tarefas de jogos.reg', 'Otimizar Foreground.reg' e scripts por jogo.",
+    "Description": "Sobe o perfil 'Games' do MMCSS (Priority 6, Scheduling Category High, SFIO High, GPU Priority 8), zera o SystemResponsiveness - que por padrão reserva 20% da CPU para tarefas de multimídia em segundo plano - e tira o limite de pacotes por milissegundo do NetworkThrottlingIndex. O jogo passa a ganhar a disputa por CPU, disco e rede contra o que roda atrás dele, o que se nota mais em queda de quadros esporádica do que na média. Só vale para quem declara a tarefa 'Games' ao MMCSS, ou seja, a maioria dos jogos, mas não todos. Origem: 'Forçar o windows a priorizar tarefas de jogos.reg', 'Otimizar Foreground.reg' e scripts por jogo.",
     "category": "Otimizações para jogos",
     "panel": "2",
     "tab": "Jogos",
@@ -245,7 +245,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBWin32PrioritySeparation": {
     "Content": "Prioridade do programa em primeiro plano (Win32PrioritySeparation = 0x26)",
-    "Description": "Quantum curto, fixo, com forte prioridade para o app em primeiro plano (o jogo). Padrão do Windows é 2. Vale para qualquer CPU, não só Intel. Origem: 'Intel Priority Optimization.bat'.",
+    "Description": "Grava Win32PrioritySeparation = 0x26 no lugar do padrão 2: fatia de tempo curta, de tamanho fixo, e o triplo de fatias para a janela que está em primeiro plano. O jogo em foco é interrompido com menos frequência por processo de fundo, ao custo de o resto da máquina ficar visivelmente mais lento enquanto ele roda. Vale para qualquer processador, não só Intel, apesar do nome do script de origem. Origem: 'Intel Priority Optimization.bat'.",
     "category": "Otimizações para jogos",
     "panel": "2",
     "tab": "Jogos",
@@ -316,7 +316,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBNvidiaDriver": {
     "Content": "Baixar driver NVIDIA (site oficial)",
-    "Description": "Abre nvidia.com/drivers no navegador.",
+    "Description": "Abre a página oficial de drivers da NVIDIA no seu navegador, onde se escolhe a placa e se baixa o pacote. O WinForge não baixa nem instala nada: o download e a execução do instalador são seus. Use quando a aba Diagnóstico apontar driver de vídeo antigo e você preferir o instalador oficial ao Windows Update.",
     "category": "GPU NVIDIA",
     "panel": "2",
     "tab": "Jogos",
@@ -328,7 +328,7 @@ $sync.configs.wbtweaks = @'
 
   "WPFTweaksWBAmdTelemetry": {
     "Content": "AMD - Desativar conteúdo web e telemetria do Adrenalin",
-    "Description": "HKLM\\SOFTWARE\\AMD\\CN: AllowWebContent=0 e AutoUpdate=0. Origem: 'Desativar AMD Overlay e Telemetria.reg'.",
+    "Description": "Zera AllowWebContent e AutoUpdate em HKLM\\SOFTWARE\\AMD\\CN, as duas chaves que o AMD Software Adrenalin consulta para buscar conteúdo na internet e avisar de driver novo. O painel abre sem a aba de notícias e sem a checagem de atualização, e para de conversar com os servidores da AMD em segundo plano. Você passa a saber de driver novo só pela página oficial. Origem: 'Desativar AMD Overlay e Telemetria.reg'.",
     "category": "GPU AMD",
     "panel": "2",
     "tab": "Jogos",
@@ -354,7 +354,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBAmdShaderCache": {
     "Content": "AMD - Forçar Shader Cache sempre ativo",
-    "Description": "amdkmdag\\ShaderCache=2 (sempre ligado). Origem: 'Forçar Shader Cache sempre ativo (AMD).reg'.",
+    "Description": "Grava ShaderCache = 2 no driver amdkmdag, que é o valor 'sempre ligado' - no padrão do Adrenalin quem decide guardar shader compilado é o perfil de cada jogo. Com o cache garantido, o engasgo da primeira passagem por uma área nova acontece uma vez só, e não toda vez que o jogo abre. Em troca, a pasta de cache cresce em disco. Origem: 'Forçar Shader Cache sempre ativo (AMD).reg'.",
     "category": "GPU AMD",
     "panel": "2",
     "tab": "Jogos",
@@ -365,7 +365,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBAmdCrashDefender": {
     "Content": "AMD - Desativar serviço Crash Defender",
-    "Description": "Desativa o 'AMD Crash Defender Service' (proteção contra travamentos do driver que consome recursos em segundo plano). Origem: 'Desativar AMD Crash Defender (serviços.bat'.",
+    "Description": "Põe o 'AMD Crash Defender Service' em Desabilitado. Ele fica residente vigiando o driver de vídeo para tentar recuperá-lo quando trava, e o custo disso é um processo sempre carregado. Sem ele, uma falha do driver vira tela preta ou reinício em vez de recuperação silenciosa - se a sua placa trava com frequência, deixe ligado. Origem: 'Desativar AMD Crash Defender (serviços.bat'.",
     "category": "GPU AMD",
     "panel": "2",
     "tab": "Jogos",
@@ -387,7 +387,7 @@ $sync.configs.wbtweaks = @'
   },
   "WPFTweaksWBAmdDriver": {
     "Content": "Baixar driver AMD (site oficial)",
-    "Description": "Abre amd.com/support no navegador.",
+    "Description": "Abre a página oficial de suporte e drivers da AMD no seu navegador, onde se escolhe a placa e se baixa o Adrenalin. O WinForge não baixa nem instala nada: o download e a execução do instalador são seus. Use quando a aba Diagnóstico apontar driver de vídeo antigo e você preferir o instalador oficial ao Windows Update.",
     "category": "GPU AMD",
     "panel": "2",
     "tab": "Jogos",
@@ -399,7 +399,7 @@ $sync.configs.wbtweaks = @'
 
   "WPFTweaksWBIntelDriver": {
     "Content": "Baixar driver Intel (site oficial)",
-    "Description": "Abre o Intel Download Center no navegador. As otimizações 'Intel' do repositório (prioridade e timer) estão em 'Otimizações para jogos' porque valem para qualquer CPU.",
+    "Description": "Abre a central de downloads da Intel no seu navegador, onde ficam os drivers de vídeo integrado, de rede e de chipset. O WinForge não baixa nem instala nada: o download e a execução do instalador são seus. As otimizações 'Intel' do repositório de origem (prioridade e timer) não estão aqui, e sim em 'Otimizações para jogos', porque valem para qualquer processador.",
     "category": "GPU Intel",
     "panel": "2",
     "tab": "Jogos",
@@ -418,7 +418,7 @@ $sync.configs.wbfeatures = @'
 {
   "WPFPanelWBRestorePoint": {
     "Content": "Ponto de restauração - Criar agora",
-    "Description": "Cria um ponto de restauração do sistema (o mesmo que a pergunta feita ao abrir a ferramenta).",
+    "Description": "Liga a Proteção do Sistema no disco do Windows se preciso e grava um ponto de restauração agora - é a mesma coisa que o WinForge oferece na pergunta ao abrir. Serve para marcar um estado bom antes de aplicar uma leva de ajustes. Leva de segundos a alguns minutos e ocupa espaço dentro da cota da Proteção do Sistema.",
     "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
@@ -445,7 +445,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBFullCleanup": {
     "Content": "Limpeza completa (Temp, Recentes, Windows Update, DNS, Lixeira)",
-    "Description": "Apaga temporários do usuário e do Windows, itens recentes, cache do Windows Update, cache de internet legado, cache de shaders DirectX, relatórios de erro, limpa o DNS e esvazia a Lixeira. Origem: 'Limpeza Completa PC.bat' (revisado).",
+    "Description": "Apaga temporários do usuário e do Windows, itens recentes, cache do Windows Update, cache de internet legado, cache de shaders do DirectX e relatórios de erro, limpa o resolvedor de DNS e esvazia a Lixeira. Costuma liberar de centenas de MB a vários GB numa máquina que nunca foi limpa. Repare na Lixeira: o que estava lá dentro não volta, e os jogos vão recompilar os shaders na próxima abertura. Origem: 'Limpeza Completa PC.bat' (revisado).",
     "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
@@ -463,7 +463,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBShaderCache": {
     "Content": "Limpar Shader Cache (NVIDIA / AMD / Intel / DirectX)",
-    "Description": "Apaga os caches de shaders de todos os fabricantes e do DirectX. Origem: 'Limpar Shader Cache NVIDIA.bat' (estendido).",
+    "Description": "Apaga as pastas de shader compilado dos três fabricantes (NVIDIA, AMD e Intel) e do DirectX de uma vez. É o conserto de engasgo, artefato na tela e travamento que aparecem logo depois de trocar ou atualizar o driver de vídeo, quando sobra cache do driver antigo. Os jogos recompilam os shaders na próxima execução, então a primeira partida depois disto engasga um pouco. Origem: 'Limpar Shader Cache NVIDIA.bat' (estendido).",
     "category": "WinForge - Manutenção",
     "panel": "2",
     "Type": "Button",
@@ -472,7 +472,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolISLC": {
     "Content": "ISLC - Intelligent Standby List Cleaner",
-    "Description": "Abre o ISLC da pasta 'Apps' (ao lado do script) ou a página oficial da Wagnardsoft.",
+    "Description": "Abre o ISLC da pasta 'Apps' (ao lado do script) ou, se ele não estiver ali, a página oficial da Wagnardsoft. O programa vigia a Standby List e a esvazia sozinho quando ela passa de um limite, o que evita o engasgo periódico em jogo de mundo aberto em máquina com pouca RAM. É um utilitário de terceiro: o WinForge só abre, não instala nem configura.",
     "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
@@ -481,7 +481,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolMSI": {
     "Content": "MSI Utility v3 (modo MSI para GPU/placas)",
-    "Description": "Abre o MSI_util da pasta 'Apps' ou o tópico oficial no fórum Guru3D.",
+    "Description": "Abre o MSI_util da pasta 'Apps' ou, se ele não estiver ali, o tópico oficial no fórum Guru3D. O programa troca a interrupção de um dispositivo PCI do modo por linha para o modo MSI, o que costuma resolver estalo no áudio e microtravamento causados por placa de vídeo ou controladora USB. É um utilitário de terceiro que mexe direto no registro de drivers: use com um ponto de restauração pronto.",
     "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
@@ -490,7 +490,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolDnsJumper": {
     "Content": "DNS Jumper (teste e troca de DNS)",
-    "Description": "Abre o DnsJumper da pasta 'Apps' ou a página oficial da Sordum. A aba Ajustes também tem um seletor de DNS (Cloudflare, Google, etc.).",
+    "Description": "Abre o DnsJumper da pasta 'Apps' ou, se ele não estiver ali, a página oficial da Sordum. O programa mede o tempo de resposta de dezenas de servidores DNS públicos a partir da sua conexão e aplica o mais rápido com um clique. Para só trocar por um servidor conhecido, a aba Ajustes já tem um seletor com Cloudflare, Google e outros.",
     "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",
@@ -499,7 +499,7 @@ $sync.configs.wbfeatures = @'
   },
   "WPFPanelWBToolFiremin": {
     "Content": "Firemin (reduz RAM do Firefox)",
-    "Description": "Abre o instalador do Firemin da pasta 'Apps' ou a página oficial da Rizonesoft.",
+    "Description": "Abre o instalador do Firemin da pasta 'Apps' ou, se ele não estiver ali, a página oficial da Rizonesoft. O programa devolve ao sistema, de tempos em tempos, a memória que o Firefox reservou e não está usando, o que ajuda em máquina com 4 ou 8 GB e muitas abas abertas. É um utilitário de terceiro: o WinForge só abre, não instala nem configura.",
     "category": "WinForge - Ferramentas externas",
     "panel": "2",
     "Type": "Button",

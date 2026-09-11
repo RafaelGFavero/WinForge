@@ -198,7 +198,7 @@ na interface.
 | `WPFTweaksWBXboxServices` | Serviços Xbox - Desativar | quebra login no app Xbox, Game Pass, Minecraft Bedrock e jogos com conta Xbox |
 | `WPFTweaksWFIisMemoryRecycling` | Pools: reciclar por memória, não por tempo | recicla o pool quando passa do limite de memória privada calculado (60% da RAM dividido pelos pools); pools com muitos dados em memória podem reciclar mais que hoje |
 | `WPFTweaksWFSrvIEESC` | Desativar a Configuração de Segurança Reforçada do IE (administradores) | reduz a proteção do navegador para administradores no servidor; use só se administra pelo navegador local |
-| `WPFTweaksWFSrvSmbSigning` | SMB: exigir assinatura | custo de CPU em servidores de arquivos e clientes antigos sem assinatura param de acessar |
+| `WPFTweaksWFSrvSmbSigning` | SMB: exigir assinatura | assinar cada pacote custa CPU num servidor de arquivos, e o cliente antigo que não sabe assinar para de acessar os compartilhamentos |
 | `WPFTweaksWindowsAI` | IA do Windows - Desativar e remover | remove o Copilot/Recall e componentes de IA (pacote CoreAI) do sistema; reinstalar exige atualização do Windows |
 
 ## Removido (2)

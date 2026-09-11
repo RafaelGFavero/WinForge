@@ -34,7 +34,7 @@ $sync.WinForgeAudit = @{
     'WPFTweaksDiskCleanup'                       = @{ Class = 'Seguro';  Reason = ''
                                                       Override = @{
                                                           InvokeScript = @("cleanmgr.exe /d C: /VERYLOWDISK", "Dism.exe /online /Cleanup-Image /StartComponentCleanup")
-                                                          Description  = "Executa a Limpeza de Disco e o StartComponentCleanup do DISM (sem /ResetBase, para manter a possibilidade de desinstalar atualizações)."
+                                                          Description  = "Roda o cleanmgr em /VERYLOWDISK na unidade C:, que limpa todas as categorias sem abrir caixa de diálogo, e em seguida o StartComponentCleanup do DISM, que compacta os componentes antigos do WinSxS. Libera de poucos GB a algumas dezenas numa instalação antiga e pode demorar vários minutos. Fica de fora o /ResetBase que a base usava: com ele, as atualizações já instaladas deixariam de poder ser desinstaladas."
                                                       } }
     'WPFTweaksDeleteTempFiles'                   = @{ Class = 'Seguro';  Reason = '' }
     'WPFTweaksDisableExplorerAutoDiscovery'      = @{ Class = 'Seguro';  Reason = '' }
@@ -126,7 +126,7 @@ $sync.WinForgeAudit = @{
     'WPFTweaksWFSrvHighPerf'                     = @{ Class = 'Seguro';  Reason = '' }
     'WPFTweaksWFSrvRdpNla'                       = @{ Class = 'Seguro';  Reason = '' }
     'WPFTweaksWFSrvSmb1Off'                      = @{ Class = 'Seguro';  Reason = '' }
-    'WPFTweaksWFSrvSmbSigning'                   = @{ Class = 'Cuidado'; Reason = 'custo de CPU em servidores de arquivos e clientes antigos sem assinatura param de acessar' }
+    'WPFTweaksWFSrvSmbSigning'                   = @{ Class = 'Cuidado'; Reason = 'assinar cada pacote custa CPU num servidor de arquivos, e o cliente antigo que não sabe assinar para de acessar os compartilhamentos' }
     'WPFTweaksWFSrvTcpAutotuning'                = @{ Class = 'Seguro';  Reason = '' }
 
     # ---------------------------------------------------------------- aba Servidor (IIS)

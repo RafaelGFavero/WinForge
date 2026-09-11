@@ -229,7 +229,7 @@ function Initialize-WinUtilBoostConfigs {
         }
         $entry = [PSCustomObject]@{
             Content     = $g.Name
-            Description = "Prioridade de CPU ALTA para: $($g.Exes -join ', ') (IFEO\PerfOptions CpuPriorityClass=3). O Windows passa a iniciar o processo com prioridade Alta. Marque + 'Desfazer selecionados' para remover."
+            Description = "Grava CpuPriorityClass=3 em IFEO\PerfOptions para $($g.Exes -join ', '), então o Windows já abre esse executável na classe Alta em vez da Normal. O jogo ganha a disputa por processador contra navegador, antivírus e o resto do que estiver rodando, o que ajuda em queda de quadros esporádica e não muda nada se a CPU já estava sobrando. Reversível: marque a linha e use 'Desfazer selecionados'."
             category    = "Prioridade de CPU por jogo (IFEO)"
             panel       = "1"
             tab         = "Jogos"
