@@ -5798,9 +5798,13 @@ function Invoke-WinForgeAclCleanup {
     # pasta vem de Get-ChildItem sobre a pasta já conferida; caminho de FORA vem de dentro de um
     # índice, e só vale se aquele índice passou na conferência de confiança. Sem esta porta, um
     # processo de integridade média que consiga reescrever um índice escolhe o que a limpeza apaga.
+    # A pergunta é só 'Trusted', e não 'não é externo OU é confiável': item de dentro da pasta já
+    # nasce confiável no inventário, e fazer a conta aqui deixaria o campo sem efeito - um inventário
+    # futuro que esquecesse de preenchê-lo passaria batido. Assim, item sem confiança declarada
+    # simplesmente não é apagado, que é o lado seguro do esquecimento.
     $apagavel = {
         param($item)
-        [bool]((-not $item.External) -or $item.Trusted)
+        [bool]$item.Trusted
     }
     $linha = {
         param($item)
