@@ -1237,6 +1237,19 @@ function Invoke-WinForgeFollowTick {
                 $lidos = $arquivo.Read($bytes, 0, $bytes.Length)
                 $inicio = 0
                 if ([long]$janelaLeitura.Start -eq 0 -and $lidos -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $inicio = 3 }
+                # O começo da CAUDA cai num byte qualquer, e ele pode ser a continuação de um
+                # caractere de vários bytes. Um byte de continuação solto vira U+FFFD, que tem TRÊS
+                # bytes em UTF-8: o GetByteCount lá embaixo contaria 3 onde 1 foi consumido, e o
+                # deslocamento sairia do lugar - para sempre, porque ele é cumulativo. MEDIDO antes
+                # deste laço: deslocamento 8686019 num arquivo de 8686017 bytes, dois bytes além do
+                # fim, e a linha seguinte chegando à janela com as primeiras letras comidas.
+                #
+                # É o mesmo cuidado que o corte na última quebra de linha já tem com o FIM da
+                # janela. Só vale quando houve salto: no começo do arquivo o primeiro byte nunca é
+                # continuação, e pular bytes ali comeria texto de verdade.
+                if ([long]$janelaLeitura.Start -gt 0) {
+                    while ($inicio -lt $lidos -and ($bytes[$inicio] -band 0xC0) -eq 0x80) { $inicio++ }
+                }
                 $texto = [System.Text.Encoding]::UTF8.GetString($bytes, $inicio, $lidos - $inicio)
                 if (-not $concluido) {
                     $corte = $texto.LastIndexOf("`n")

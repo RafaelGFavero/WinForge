@@ -3621,6 +3621,68 @@ if ($SelfTest) {
     } finally {
         Remove-Item -LiteralPath (Join-Path $wbSelfTestRaiz 'tetos') -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- Janela de saída: salto em UTF-8
+    # O salto da cauda (8 MB de crescimento -> 1 MB lido) começa num byte QUALQUER, e esse byte pode
+    # ser a continuação de um caractere de vários bytes. O byte solto vira U+FFFD, que tem TRÊS bytes
+    # em UTF-8: o 'GetByteCount' do texto mostrado conta 3 onde 1 foi consumido, e o deslocamento sai
+    # do lugar para sempre. MEDIDO no código real, antes do conserto: deslocamento 11760013 num
+    # arquivo de 11760012 bytes - um byte ALÉM do fim -, e o tique seguinte entregou o marcador com a
+    # primeira letra comida. O arquivo em disco fica íntegro; quem perde é a janela.
+    #
+    # É o mesmo defeito que o corte na última quebra de linha já evitava no FIM da janela. Ninguém
+    # cuidava do começo.
+    $wfUtfDir = Join-Path $wbSelfTestRaiz 'utf8-salto'
+    try {
+        if (Test-Path -LiteralPath $wfUtfDir) { Remove-Item -LiteralPath $wfUtfDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfUtfDir -Force | Out-Null
+        $wfUtfArq = Join-Path $wfUtfDir 'saida.txt'
+        # Linhas só de 'á' (0xC3 0xA1): assim metade dos bytes do arquivo é byte de continuação, e dá
+        # para POSICIONAR o começo da cauda em cima de um deles em vez de torcer para cair lá.
+        $wfUtfSb = New-Object System.Text.StringBuilder
+        $wfUtfLinha = ('á' * 100) + "`r`n"
+        foreach ($wfUtfI in 1..43000) { [void]$wfUtfSb.Append($wfUtfLinha) }     # ~8,7 MB, acima dos 8 MB do salto
+        $wfUtfCorpo = [System.Text.Encoding]::UTF8.GetBytes($wfUtfSb.ToString())
+        $wfUtfSb = $null
+        # Um byte a mais NO FIM desloca o começo da cauda em um sem mexer no corpo, e em duas
+        # tentativas ele cai em cima de um byte de continuação. (Padding no CABEÇALHO não serve:
+        # ele empurra o corpo e a cauda na mesma medida, e o byte de chegada nunca muda.)
+        $wfUtfCab = [System.Text.Encoding]::UTF8.GetBytes('cabecalho' + "`r`n")
+        $wfUtfTudo = $null
+        $wfUtfStart = 0
+        foreach ($wfUtfPad in 0..3) {
+            $wfUtfFim = [System.Text.Encoding]::UTF8.GetBytes(('z' * $wfUtfPad) + "`r`n")
+            $wfUtfTudo = (New-Object byte[] (3 + $wfUtfCab.Length + $wfUtfCorpo.Length + $wfUtfFim.Length))
+            [System.Array]::Copy(([byte[]]@(0xEF, 0xBB, 0xBF)), 0, $wfUtfTudo, 0, 3)
+            [System.Array]::Copy($wfUtfCab, 0, $wfUtfTudo, 3, $wfUtfCab.Length)
+            [System.Array]::Copy($wfUtfCorpo, 0, $wfUtfTudo, 3 + $wfUtfCab.Length, $wfUtfCorpo.Length)
+            [System.Array]::Copy($wfUtfFim, 0, $wfUtfTudo, 3 + $wfUtfCab.Length + $wfUtfCorpo.Length, $wfUtfFim.Length)
+            $wfUtfStart = $wfUtfTudo.Length - 1048576
+            if (($wfUtfTudo[$wfUtfStart] -band 0xC0) -eq 0x80) { break }
+        }
+        if (($wfUtfTudo[$wfUtfStart] -band 0xC0) -ne 0x80) { Write-Host "  [ERRO] Salto (UTF-8): o cenário não vale - o começo da cauda não caiu no meio de um caractere" -ForegroundColor Red; $wbErrors++ }
+        [System.IO.File]::WriteAllBytes($wfUtfArq, $wfUtfTudo)
+        # A janela abre e o PRIMEIRO tique já é o do salto: 8,7 MB de crescimento contra 8 MB de teto.
+        $wfUtfJan = Show-WinForgeOutputWindow -Title 'SelfTest salto' -FollowPath $wfUtfArq -NoShow
+        if ($wfUtfJan -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Salto (UTF-8): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfUtfCaixa = $wfUtfJan.FindName('WFOutputText')
+            # 1. O deslocamento NÃO pode passar do fim do arquivo. É a forma medida do defeito.
+            if ([long]$wfUtfJan.Tag.Offset -gt $wfUtfTudo.Length) { Write-Host "  [ERRO] Salto (UTF-8): o deslocamento ficou em $($wfUtfJan.Tag.Offset) num arquivo de $($wfUtfTudo.Length) byte(s) - passou do fim" -ForegroundColor Red; $wbErrors++ }
+            # 2. E nada de caractere de substituição na tela: é o byte de continuação virando losango.
+            if (([string]$wfUtfCaixa.Text).IndexOf([char]0xFFFD) -ge 0) { Write-Host "  [ERRO] Salto (UTF-8): a caixa recebeu caractere de substituição - o salto pegou o meio de um caractere" -ForegroundColor Red; $wbErrors++ }
+            # 3. E o tique SEGUINTE entrega a linha nova inteira. Com o deslocamento fora do lugar,
+            #    ela chega com a(s) primeira(s) letra(s) comida(s) - foi assim que o defeito apareceu.
+            [System.IO.File]::AppendAllText($wfUtfArq, "MARCADOR-INTEIRO`r`n", (New-Object System.Text.UTF8Encoding($false)))
+            Invoke-WinForgeFollowTick -Window $wfUtfJan
+            if (([string]$wfUtfCaixa.Text).IndexOf('MARCADOR-INTEIRO', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Salto (UTF-8): o marcador não chegou inteiro à janela (deslocamento $($wfUtfJan.Tag.Offset), arquivo $((Get-Item -LiteralPath $wfUtfArq).Length))" -ForegroundColor Red; $wbErrors++ }
+            if ([long]$wfUtfJan.Tag.Offset -gt (Get-Item -LiteralPath $wfUtfArq).Length) { Write-Host "  [ERRO] Salto (UTF-8): depois do segundo tique o deslocamento passou do fim do arquivo" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Salto (UTF-8): cauda começando em byte de continuação não embaralha a janela nem move o deslocamento"
+    } catch {
+        Write-Host "  [ERRO] Salto (UTF-8): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfUtfDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Janela de saída: cabeçalho
     # O caso que abriu esta leva: 404 minutos olhando um contador subir, sem nada na tela dizendo se
     # aquilo era normal. O cabeçalho passa a ter a noção do que é normal PARA AQUELA LINHA, e a cor
