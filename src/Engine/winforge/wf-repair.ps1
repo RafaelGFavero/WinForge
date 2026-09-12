@@ -2337,10 +2337,22 @@ function Write-WinForgeAclContentBackup {
         chamador que desvia essas pastas para um '/save' de verdade; aqui não há como recuperar uma
         ordem que já chegou canônica.
 
+        'Count' sai do ARQUIVO RELIDO, nunca da lista de entrada. Medido: uma entrada cujo '.Sddl'
+        estoura na leitura NÃO derruba a gravação - '[string]$e.Sddl' sobre uma propriedade que lança
+        devolve '' em silêncio, e o par vira nome + linha em branco. Contando a lista, a função
+        respondia Ok = $true e Count = 2 com um descritor só no disco: backup incompleto passando por
+        bom, e o Desfazer só descobriria na hora de desfazer. Relido, o arquivo denuncia sozinho.
+
+        A ordem é ORDINAL (§1.3). Não é estética: a fase 5 roda 'icacls <pasta> /inheritance:e' por
+        entrada, SEM '/T', e depende do pai chegar antes do filho. Ordinal garante isso porque um
+        prefixo sempre ordena antes do que o estende. 'Sort-Object' ordena pela CULTURA, onde 'ab'
+        vem antes de 'a-b' e a caixa não separa - e aí a garantia de prefixo some.
+
         A trava de SelfTest vem antes de qualquer abertura de arquivo: esta função escreve, e o
         SelfTest não altera a máquina.
     .OUTPUTS
-        @{ Ok; Reason; Count; Bytes }.
+        @{ Ok; Reason; Count; Bytes }. 'Count' é quantos descritores o arquivo tem DEPOIS de gravado;
+        com Ok = $false não sobra arquivo no disco, e Count e Bytes são 0.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -2357,22 +2369,53 @@ function Write-WinForgeAclContentBackup {
         $r.Reason = 'A lista de pastas veio vazia; não há permissão nenhuma para guardar.'
         return $r
     }
+    # Caminho ABSOLUTO e prefixo '\\?\' em toda chamada .NET, a mesma regra da caminhada.
+    # StreamWriter e FileInfo resolvem caminho relativo contra o diretório do PROCESSO, e não contra
+    # a localização do PowerShell (Set-Content faria o contrário): um caminho relativo gravaria o
+    # backup em outro lugar EM SILÊNCIO, e o Desfazer depois procuraria onde não está.
+    if (-not [System.IO.Path]::IsPathRooted([string]$Path)) {
+        $r.Reason = "O caminho do backup precisa ser absoluto; veio '$Path'."
+        return $r
+    }
+    $longo = if ([string]$Path -like '\\?\*') { [string]$Path } else { '\\?\' + [string]$Path }
+    # Ordem ordinal (§1.3), por CompareOrdinal e não por Sort-Object: é o código do caractere que
+    # entrega prefixo antes do que o estende, e é disso que a fase 5 depende para ligar a herança do
+    # pai antes da do filho.
+    $ordenados = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $itens) { $ordenados.Add($e) }
+    $ordenados.Sort([System.Comparison[object]] { param($a, $b) [string]::CompareOrdinal([string]$a.Name, [string]$b.Name) })
+
+    $abriu = $false
     try {
         # UnicodeEncoding($false, $false): UTF-16LE, sem BOM e sem detecção. É o formato medido no
-        # arquivo que o 'icacls /save' escreve, e é o que o '/restore' aceita - com BOM ele recusa.
+        # arquivo que o 'icacls /save' escreve.
         $enc = New-Object System.Text.UnicodeEncoding($false, $false)
-        $escritor = New-Object System.IO.StreamWriter($Path, $false, $enc)
+        $escritor = New-Object System.IO.StreamWriter($longo, $false, $enc)
+        $abriu = $true
         try {
-            foreach ($e in $itens) {
+            foreach ($e in $ordenados) {
                 $escritor.Write([string]$e.Name); $escritor.Write("`r`n")
                 $escritor.Write([string]$e.Sddl); $escritor.Write("`r`n")
             }
         } finally { $escritor.Dispose() }
-        $r.Count = $itens.Count
-        $r.Bytes = [long](New-Object System.IO.FileInfo ([string]$Path)).Length
+        # A conferência: quantos descritores o ARQUIVO tem. Divergiu do que foi mandado gravar, o
+        # backup está incompleto e não sai daqui como bom.
+        $r.Count = [int](Measure-WinForgeAclSaveEntry -Path $longo)
+        if ($r.Count -ne $ordenados.Count) {
+            throw ("O arquivo saiu com {0} descritor(es) para {1} pasta(s); a cópia das permissões está incompleta. Nada foi alterado." -f $r.Count, $ordenados.Count)
+        }
+        $r.Bytes = [long](New-Object System.IO.FileInfo ($longo)).Length
         $r.Ok = $true
     } catch {
         $r.Reason = $_.Exception.Message
+    }
+    # §1.6: arquivo pela metade não fica no disco. Só apaga o que ESTA chamada abriu - se a própria
+    # abertura falhou, o que estiver lá é de outro, e apagar seria o estrago. (A trava para o
+    # processo morrer NO MEIO da gravação é de quem orquestra, não do escritor.)
+    if (-not $r.Ok -and $abriu) {
+        try { [System.IO.File]::Delete($longo) } catch { }
+        $r.Count = 0
+        $r.Bytes = 0
     }
     return $r
 }
@@ -2389,6 +2432,10 @@ function Get-WinForgeAclContentHash {
 
         O hash sai do FLUXO, não dos bytes carregados na memória: ComputeHash(Stream) lê em pedaços,
         e o arquivo pode ter centenas de MB.
+
+        Caminho absoluto e prefixo '\\?\', pelo mesmo motivo de Write-WinForgeAclContentBackup:
+        'File::Open' resolve relativo contra o diretório do PROCESSO, e a impressão digital do
+        arquivo errado é pior que impressão digital nenhuma.
     .OUTPUTS
         @{ Ok; Reason; Hash }. 'Hash' são 64 caracteres hexadecimais em MAIÚSCULAS, ou '' quando o
         arquivo não pôde ser lido.
@@ -2398,9 +2445,14 @@ function Get-WinForgeAclContentHash {
     $r = @{ Ok = $false; Reason = ''; Hash = '' }
     $sha = $null
     $fluxo = $null
+    if (-not [System.IO.Path]::IsPathRooted([string]$Path)) {
+        $r.Reason = "O caminho do backup precisa ser absoluto; veio '$Path'."
+        return $r
+    }
+    $longo = if ([string]$Path -like '\\?\*') { [string]$Path } else { '\\?\' + [string]$Path }
     try {
         $sha = [System.Security.Cryptography.SHA256]::Create()
-        $fluxo = [System.IO.File]::Open([string]$Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $fluxo = [System.IO.File]::Open($longo, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         $r.Hash = [string](([System.BitConverter]::ToString($sha.ComputeHash($fluxo))) -replace '-', '')
         $r.Ok = $true
     } catch {

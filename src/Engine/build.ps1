@@ -4354,6 +4354,8 @@ if ($SelfTest) {
         if ($wfArqBytes.Length -lt 4) { Write-Host "  [ERRO] Permissões (arquivo): o arquivo saiu com $($wfArqBytes.Length) byte(s)" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfArqBytes[0] -eq 0xFF -and $wfArqBytes[1] -eq 0xFE) { Write-Host "  [ERRO] Permissões (arquivo): o arquivo saiu COM BOM - o formato medido é UTF-16LE sem BOM" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfArqBytes[0] -ne 0x70 -or $wfArqBytes[1] -ne 0x00) { Write-Host "  [ERRO] Permissões (arquivo): os dois primeiros bytes são $('0x{0:X2} 0x{1:X2}' -f $wfArqBytes[0], $wfArqBytes[1]), esperado 0x70 0x00 - isto não é UTF-16LE" -ForegroundColor Red; $wbErrors++ }
+        # Count no caminho feliz. Sozinha esta linha é fraca - compara a lista de entrada com ela
+        # mesma -, e quem prova que 'Count' vem do ARQUIVO é o bloco "contagem" mais abaixo.
         if ([int]$wfArqGrav.Count -ne @($wfArqEscopo.Entries).Count) { Write-Host "  [ERRO] Permissões (arquivo): a gravação relatou Count=$($wfArqGrav.Count) para $(@($wfArqEscopo.Entries).Count) entrada(s)" -ForegroundColor Red; $wbErrors++ }
         if ([long]$wfArqGrav.Bytes -ne [long]$wfArqBytes.Length) { Write-Host "  [ERRO] Permissões (arquivo): a gravação relatou Bytes=$($wfArqGrav.Bytes) e o arquivo tem $($wfArqBytes.Length)" -ForegroundColor Red; $wbErrors++ }
         $wfArqLinhas = @([System.IO.File]::ReadAllText($wfArqArquivo, [System.Text.Encoding]::Unicode) -split "`r`n" | Where-Object { $_ -ne '' })
@@ -4406,6 +4408,81 @@ if ($SelfTest) {
         $sync.SelfTest = $wfArqSelfAntes
         if ($wfArqVazio.Ok) { Write-Host "  [ERRO] Permissões (arquivo): a lista vazia devolveu Ok=`$true" -ForegroundColor Red; $wbErrors++ }
         if (Test-Path -LiteralPath $wfArqVazioCam) { Write-Host "  [ERRO] Permissões (arquivo): a lista vazia deixou um arquivo em '$wfArqVazioCam'" -ForegroundColor Red; $wbErrors++ }
+        # CONTAGEM LIDA DO ARQUIVO, e não da lista de entrada. Medido: '[string]$e.Sddl' sobre uma
+        # propriedade que LANÇA devolve '' em silêncio - o PowerShell engole erro de propriedade -, e
+        # o par vira nome + linha em branco. Contando a lista, a função respondia Ok=$true com
+        # Count=2 e um descritor só no disco: backup incompleto passando por bom, descoberto só na
+        # hora de desfazer. A asserção de Count lá em cima não pega isto, porque compara a lista de
+        # entrada com ela mesma.
+        $wfArqMau = New-Object PSObject
+        $wfArqMau | Add-Member -MemberType NoteProperty -Name Name -Value 'perfil\Explode'
+        $wfArqMau | Add-Member -MemberType ScriptProperty -Name Sddl -Value { throw 'leitura do SDDL falhou' }
+        $wfArqMeioCam = Join-Path $wfArqRaiz 'meio.txt'
+        $sync.SelfTest = $false
+        $wfArqMeio = Write-WinForgeAclContentBackup -Path $wfArqMeioCam -Entries @(@($wfArqEscopo.Entries)[0], $wfArqMau)
+        $sync.SelfTest = $wfArqSelfAntes
+        if ($wfArqMeio.Ok) { Write-Host "  [ERRO] Permissões (contagem): uma entrada que falha no meio devolveu Ok=`$true com Count=$($wfArqMeio.Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfArqMeio.Reason -notmatch 'incompleta') { Write-Host "  [ERRO] Permissões (contagem): a recusa não diz que a cópia está incompleta ('$($wfArqMeio.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfArqMeio.Count -ne 0) { Write-Host "  [ERRO] Permissões (contagem): a gravação recusada relatou Count=$($wfArqMeio.Count), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        # §1.6: o arquivo pela metade não fica no disco.
+        if (Test-Path -LiteralPath $wfArqMeioCam) { Write-Host "  [ERRO] Permissões (contagem): o arquivo pela metade ficou em '$wfArqMeioCam'" -ForegroundColor Red; $wbErrors++ }
+
+        # ORDEM ORDINAL (§1.3). Não é estética: a fase 5 roda 'icacls <pasta> /inheritance:e' entrada
+        # por entrada, SEM '/T', e depende do pai chegar antes do filho - garantia que só o ordinal
+        # dá, porque nele um prefixo ordena sempre antes do que o estende. A lista de teste foi
+        # escolhida para SEPARAR ordinal de cultura: por 'Sort-Object' ela sai
+        # 'ab | a-b | AppData | AppData\Local | Zebra' (o hífen é ignorado, a caixa não separa); no
+        # ordinal, 'A'(0x41) e 'Z'(0x5A) vêm antes de 'a'(0x61), e '-'(0x2D) antes de 'b'(0x62).
+        $wfArqOrdEsperado = @('perfil\AppData', 'perfil\AppData\Local', 'perfil\Zebra', 'perfil\a-b', 'perfil\ab')
+        $wfArqOrdEntradas = @(@('perfil\ab', 'perfil\a-b', 'perfil\Zebra', 'perfil\AppData\Local', 'perfil\AppData') | ForEach-Object { @{ Name = $_; Sddl = 'D:PAI(A;OICI;FA;;;SY)' } })
+        $wfArqOrdCam = Join-Path $wfArqRaiz 'ordem.txt'
+        $sync.SelfTest = $false
+        $wfArqOrd = Write-WinForgeAclContentBackup -Path $wfArqOrdCam -Entries $wfArqOrdEntradas
+        $sync.SelfTest = $wfArqSelfAntes
+        if (-not $wfArqOrd.Ok) { Write-Host "  [ERRO] Permissões (ordem): a gravação de teste falhou ('$($wfArqOrd.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfArqOrdSaiu = @(@([System.IO.File]::ReadAllText($wfArqOrdCam, [System.Text.Encoding]::Unicode) -split "`r`n" | Where-Object { $_ -ne '' }) | Where-Object { -not ([string]$_).StartsWith('D:', [StringComparison]::Ordinal) })
+            if (($wfArqOrdSaiu -join ' | ') -cne ($wfArqOrdEsperado -join ' | ')) { Write-Host "  [ERRO] Permissões (ordem): saiu '$($wfArqOrdSaiu -join ' | ')', esperada a ordem ordinal '$($wfArqOrdEsperado -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+            if ([int]$wfArqOrd.Count -ne $wfArqOrdEsperado.Count) { Write-Host "  [ERRO] Permissões (ordem): Count=$($wfArqOrd.Count) para $($wfArqOrdEsperado.Count) entrada(s)" -ForegroundColor Red; $wbErrors++ }
+        }
+
+        # Caminho RELATIVO recusado nas duas funções: StreamWriter e File::Open resolvem contra o
+        # diretório do PROCESSO, e não contra a localização do PowerShell como o Set-Content faria.
+        # O backup nasceria fora da pasta protegida sem ninguém ver.
+        $sync.SelfTest = $false
+        $wfArqRel = Write-WinForgeAclContentBackup -Path 'acl-relativo-do-selftest.txt' -Entries @($wfArqEscopo.Entries)
+        $sync.SelfTest = $wfArqSelfAntes
+        $wfArqRelH = Get-WinForgeAclContentHash -Path 'acl-relativo-do-selftest.txt'
+        if ($wfArqRel.Ok) { Write-Host "  [ERRO] Permissões (caminho): a gravação aceitou caminho relativo" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfArqRel.Reason -notmatch 'absoluto') { Write-Host "  [ERRO] Permissões (caminho): a recusa da gravação não fala em caminho absoluto ('$($wfArqRel.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfArqRelH.Ok) { Write-Host "  [ERRO] Permissões (caminho): a impressão digital aceitou caminho relativo" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfArqRelH.Reason -notmatch 'absoluto') { Write-Host "  [ERRO] Permissões (caminho): a recusa da impressão digital não fala em caminho absoluto ('$($wfArqRelH.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # E o prefixo '\\?\' provado por COMPORTAMENTO, não por grep no fonte. Duas medições feitas
+        # aqui, e as duas custaram um mutante sobrevivente antes de aparecerem:
+        #   1. COMPRIMENTO sozinho não prova nada nesta máquina: LongPathsEnabled=1, e 306
+        #      caracteres abrem sem prefixo nenhum. Continua valendo para o PC do usuário, onde a
+        #      chave é 0 - por isso o caminho fundo fica -, mas não mata mutação aqui.
+        #   2. ESPAÇO no fim também não, para ESTAS chamadas: medido, 'Directory::Exists' sem
+        #      prefixo responde False numa pasta 'cache ', mas o StreamWriter escreve no destino
+        #      exato do mesmo jeito. (No bloco da caminhada o espaço MATA, porque lá quem pergunta é
+        #      GetAttributes/GetAccessControl - outro caminho de normalização.)
+        # Quem mata aqui é o PONTO no fim: o Win32 come o '.', o StreamWriter vai procurar a pasta
+        # 'cache', não acha e estoura. O prefixo desliga essa normalização, e isso nenhuma chave de
+        # registro reverte.
+        $wfArqFundo = $wfArqRaiz
+        while ($wfArqFundo.Length -lt 250) { $wfArqFundo = $wfArqFundo + '\' + ('n' * 30) }
+        $wfArqFundo = $wfArqFundo + '\cache.'
+        [System.IO.Directory]::CreateDirectory('\\?\' + $wfArqFundo) | Out-Null
+        $wfArqLongoCam = $wfArqFundo + '\conteudo-longo.txt'
+        $sync.SelfTest = $false
+        $wfArqLongo = Write-WinForgeAclContentBackup -Path $wfArqLongoCam -Entries @($wfArqEscopo.Entries)
+        $sync.SelfTest = $wfArqSelfAntes
+        $wfArqLongoH = Get-WinForgeAclContentHash -Path $wfArqLongoCam
+        if (-not $wfArqLongo.Ok) { Write-Host "  [ERRO] Permissões (caminho longo): a gravação em $($wfArqLongoCam.Length) caracteres falhou ('$($wfArqLongo.Reason)') - falta o prefixo \\?\" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfArqLongoH.Ok) { Write-Host "  [ERRO] Permissões (caminho longo): a impressão digital em $($wfArqLongoCam.Length) caracteres falhou ('$($wfArqLongoH.Reason)') - falta o prefixo \\?\" -ForegroundColor Red; $wbErrors++ }
+        # E o arquivo foi mesmo parar DENTRO de 'cache.' - sem o prefixo ele nem chegaria lá.
+        if (-not [System.IO.File]::Exists('\\?\' + $wfArqLongoCam)) { Write-Host "  [ERRO] Permissões (caminho longo): nada foi gravado em '$wfArqLongoCam' (a pasta com ponto no fim)" -ForegroundColor Red; $wbErrors++ }
+
         # E a gravação recusa em modo SelfTest - é o único ponto que escreve. Duas provas: a trava no
         # fonte e o COMPORTAMENTO, porque uma trava posta depois da abertura do arquivo passaria na
         # primeira e escreveria assim mesmo.
@@ -4421,11 +4498,14 @@ if ($SelfTest) {
         $wfArqFonteM = [string](Get-Command Measure-WinForgeAclSaveEntry).ScriptBlock
         if ($wfArqFonteM -match 'Get-Content') { Write-Host "  [ERRO] Permissões (contagem): Measure-WinForgeAclSaveEntry ainda usa Get-Content - tem de ler por StreamReader" -ForegroundColor Red; $wbErrors++ }
         if ($wfArqFonteM -notmatch 'StreamReader') { Write-Host "  [ERRO] Permissões (contagem): Measure-WinForgeAclSaveEntry não usa StreamReader" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Permissões (arquivo): UTF-16LE sem BOM, $(@($wfArqEscopo.Entries).Count) par(es) idênticos aos do 'icacls /save' da mesma árvore, SHA-256 sensível a um byte"
+        Write-Host "  Permissões (arquivo): UTF-16LE sem BOM, o par de 'perfil\Protegida' idêntico ao do 'icacls /save' da mesma árvore, contagem lida do arquivo, ordem ordinal em $($wfArqOrdEsperado.Count) nomes, caminho de $($wfArqLongoCam.Length) caracteres, SHA-256 sensível a um byte"
     } catch {
         Write-Host "  [ERRO] Permissões (arquivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
         $sync.SelfTest = $wfArqSelfAntes
+        # Delete COM prefixo, como no bloco da caminhada: o Remove-Item não alcança o caminho de mais
+        # de 250 caracteres criado aqui e deixaria a árvore plantada em %TEMP% para sempre.
+        try { [System.IO.Directory]::Delete('\\?\' + $wfArqRaiz, $true) } catch { }
         Remove-Item -LiteralPath $wfArqRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
