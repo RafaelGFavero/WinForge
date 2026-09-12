@@ -1383,6 +1383,35 @@ function Get-WinForgeRepairConfirmText {
     return "$($cmd.Title)`r`n`r`n$($descricao.Trim())`r`n`r`nContinuar?"
 }
 
+function Get-WinForgeRepairBusyReason {
+    <#
+    .SYNOPSIS
+        A frase de "já tem coisa rodando", ou '' quando não tem. Só LÊ o estado compartilhado: não
+        toma trava nenhuma, não abre caixa e não despacha nada.
+    .DESCRIPTION
+        São duas travas, e elas dizem coisas diferentes:
+
+        - $sync.CommandRunning é a desta máquina de comandos (um chkdsk /scan leva minutos).
+        - $sync.ProcessRunning é a do BASE - o botão "sfc + DISM" e os de instalação. Ela só barra o
+          que ALTERA o sistema: duas sessões de manutenção ao mesmo tempo fazem a segunda falhar com
+          "outra operação em andamento", e ler o estado da máquina enquanto o base trabalha não
+          atrapalha nada. Por isso o -Kind.
+
+        A pergunta virou função porque ela passou a ser feita DUAS vezes no mesmo clique, e as duas
+        com a mesma frase: uma antes da caixa de confirmação e outra antes da caixa de destino do
+        backup de permissões. Duplicar o texto seria duplicar a manutenção dele.
+    .PARAMETER Kind
+        O tipo da linha da tabela. 'read' não é barrado por $sync.ProcessRunning; o resto é.
+    .OUTPUTS
+        A frase, ou '' quando não há nada rodando.
+    #>
+    param([string]$Kind = 'repair')
+
+    if ($sync.CommandRunning) { return 'Já existe um comando em andamento. Espere ele terminar.' }
+    if ([string]$Kind -ne 'read' -and $sync.ProcessRunning) { return 'O WinForge já está com uma instalação ou manutenção em andamento. Espere ela terminar antes de reparar ou instalar componente.' }
+    return ''
+}
+
 function Invoke-WinForgeRepairCommand {
     <#
     .SYNOPSIS
@@ -1413,7 +1442,9 @@ function Invoke-WinForgeRepairCommand {
         permissões vai ficar (Show-WinForgeAclBackupDestination). Ela é WPF e precisa da thread da
         janela, e o seletor de pasta do shell precisa do apartamento STA em que este processo nasce -
         a runspace do pool não tem nenhum dos dois. O que atravessa para lá é só o texto do caminho,
-        em $sync.WinForgeAclExternalRoot, zerado a cada clique.
+        em $sync.WinForgeAclExternalRoot, escrito UMA vez e só depois da caixa: ele é estado
+        compartilhado com a restauração que já estiver correndo, e Get-WinForgeRepairBusyReason é
+        perguntada outra vez logo antes de abrir a caixa por causa disso.
     .PARAMETER NoUI
         Devolve a decisão em vez de mostrar janela ou caixa de mensagem, e não despacha nada. É o que
         o -SelfTest usa: ele roda sem ninguém na frente, não pode abrir caixa nenhuma (não há quem
@@ -1442,17 +1473,8 @@ function Invoke-WinForgeRepairCommand {
     # As duas travas de "já tem coisa rodando" vêm ANTES da caixa de confirmação, e não depois.
     # Perguntar primeiro e recusar depois é o pior dos dois mundos: o usuário lê o aviso inteiro,
     # decide, clica em "Sim" e só então descobre que o clique não valia nada.
-    #
-    # $sync.CommandRunning é a trava desta máquina de comandos (um chkdsk /scan leva minutos).
-    # $sync.ProcessRunning é a do BASE - o botão "sfc + DISM" e os de instalação. Ela só barra o que
-    # altera o sistema: duas sessões de manutenção ao mesmo tempo fazem a segunda falhar com "outra
-    # operação em andamento", e ler o estado da máquina enquanto o base trabalha não atrapalha nada.
-    $ocupado = $null
-    if ($sync.CommandRunning) {
-        $ocupado = 'Já existe um comando em andamento. Espere ele terminar.'
-    } elseif ($kind -ne 'read' -and $sync.ProcessRunning) {
-        $ocupado = 'O WinForge já está com uma instalação ou manutenção em andamento. Espere ela terminar antes de reparar ou instalar componente.'
-    }
+    $ocupado = [string](Get-WinForgeRepairBusyReason -Kind $kind)
+    if ([string]::IsNullOrWhiteSpace($ocupado)) { $ocupado = $null }
     if ($null -ne $ocupado) {
         Write-WinForgeLog -Component "Repair" -Message "$Name não despachado: $ocupado"
         if ($NoUI) { return @{ Dispatched = $false; Reason = 'ocupado'; Kind = $kind } }
@@ -1505,19 +1527,33 @@ function Invoke-WinForgeRepairCommand {
     # o programa sem botões enquanto alguém lê; e o seletor de pasta do shell exige o apartamento STA
     # em que este processo nasce, que a runspace do pool não tem.
     #
-    # O que atravessa é só o texto do caminho, em $sync.WinForgeAclExternalRoot - zerado a cada
-    # clique, porque sobra de uma escolha anterior mandaria o backup desta rodada para o disco de
-    # outra. Cancelar na caixa NÃO despacha nada: a pessoa ainda está decidindo onde o Desfazer dela
-    # vai morar.
+    # O que atravessa é só o texto do caminho, em $sync.WinForgeAclExternalRoot. Ele é ESTADO
+    # COMPARTILHADO com a restauração que já estiver correndo, e é daí que vêm as duas regras abaixo.
+    #
+    # 1. PERGUNTAR DE NOVO se há coisa rodando. A trava do começo desta função foi lida antes da
+    #    caixa de confirmação, e entre uma coisa e outra o usuário passou um tempo lendo. A trava de
+    #    verdade só é TOMADA em Start-WinForgeStreamedCommand, que tem a conferência dela própria -
+    #    ou seja, este caminho pode chegar até lá e ser recusado. Com uma restauração de quinze
+    #    minutos em curso, um segundo clique recusado lá embaixo já teria zerado o destino da rodada
+    #    EM ANDAMENTO, e a fase 2 dela passaria a gravar na pasta protegida sem dizer nada a ninguém:
+    #    o usuário escolheu um disco e o arquivo não estaria lá.
+    # 2. ESCREVER UMA VEZ SÓ, depois da caixa. Enquanto a pessoa lê e escolhe, o valor de quem está
+    #    rodando continua intacto; cancelar não mexe em nada. Não há mais "zerar agora e preencher
+    #    depois".
     if ($Name -eq 'AclRestore') {
-        $sync.WinForgeAclExternalRoot = ''
+        $ocupadoDestino = [string](Get-WinForgeRepairBusyReason -Kind $kind)
+        if (-not [string]::IsNullOrWhiteSpace($ocupadoDestino)) {
+            Write-WinForgeLog -Component "Repair" -Message "$Name não despachado: $ocupadoDestino"
+            [System.Windows.MessageBox]::Show($ocupadoDestino, "WinForge", "OK", "Warning") | Out-Null
+            return
+        }
         $destino = Show-WinForgeAclBackupDestination
         if (-not $destino.Ok) {
             Write-WinForgeLog -Component "Repair" -Message "$Name cancelado na escolha do destino do backup. Nada foi alterado."
             return
         }
+        $sync.WinForgeAclExternalRoot = if ($destino.External) { [string]$destino.Path } else { '' }
         if ($destino.External) {
-            $sync.WinForgeAclExternalRoot = [string]$destino.Path
             Write-WinForgeLog -Component "Repair" -Message "${Name}: o backup do conteúdo vai para '$([string]$destino.Path)', fora da pasta protegida."
         } else {
             Write-WinForgeLog -Component "Repair" -Message "${Name}: o backup do conteúdo vai para a pasta protegida do WinForge."

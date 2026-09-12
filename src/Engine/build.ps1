@@ -5468,6 +5468,51 @@ if ($SelfTest) {
         $wfDestFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
         if ($wfDestFonteU -notmatch 'ExternalPath') { Write-Host "  [ERRO] Permissões (Desfazer): o item de conteúdo não considera ExternalPath" -ForegroundColor Red; $wbErrors++ }
         if ($wfDestFonteU -notmatch 'ligue o disco') { Write-Host "  [ERRO] Permissões (Desfazer): com o arquivo externo ausente, o texto não diz qual disco ligar" -ForegroundColor Red; $wbErrors++ }
+        # O destino é ESTADO COMPARTILHADO, e o clique que o escolhe pode ser recusado lá embaixo,
+        # em Start-WinForgeStreamedCommand, que tem a conferência de trava dela própria. Zerar
+        # '$sync.WinForgeAclExternalRoot' antes disso mandava o backup de uma restauração de quinze
+        # minutos JÁ EM CURSO para a pasta protegida, calado - o usuário escolheu um disco e o
+        # arquivo não estaria lá. Achado do revisor da Tarefa 7.
+        #
+        # Primeiro a pergunta, por comportamento, com as duas travas nos dois valores. O estado é
+        # devolvido no fim: o -SelfTest não pode deixar a máquina de comandos travada.
+        $wfDestCmdAntes = $sync.CommandRunning
+        $wfDestProcAntes = $sync.ProcessRunning
+        try {
+            $sync.CommandRunning = $false
+            $sync.ProcessRunning = $false
+            if (-not [string]::IsNullOrWhiteSpace([string](Get-WinForgeRepairBusyReason -Kind 'repair'))) { Write-Host "  [ERRO] Permissões (destino): com nada rodando, a pergunta de ocupado respondeu '$(Get-WinForgeRepairBusyReason -Kind 'repair')'" -ForegroundColor Red; $wbErrors++ }
+            $sync.CommandRunning = $true
+            if ([string](Get-WinForgeRepairBusyReason -Kind 'repair') -notmatch 'comando em andamento') { Write-Host "  [ERRO] Permissões (destino): com um comando em andamento, a pergunta de ocupado não acusa" -ForegroundColor Red; $wbErrors++ }
+            if ([string](Get-WinForgeRepairBusyReason -Kind 'read') -notmatch 'comando em andamento') { Write-Host "  [ERRO] Permissões (destino): a trava de comando vale também para leitura" -ForegroundColor Red; $wbErrors++ }
+            # E o botão inteiro recusa, com o motivo 'ocupado', antes de qualquer caixa.
+            $wfDestOcup = Invoke-WinForgeRepairCommand -Name AclRestore -NoUI
+            if ($null -eq $wfDestOcup -or [string]$wfDestOcup.Reason -ne 'ocupado') { Write-Host "  [ERRO] Permissões (destino): com um comando em andamento, AclRestore respondeu '$($wfDestOcup.Reason)', esperado 'ocupado'" -ForegroundColor Red; $wbErrors++ }
+            $sync.CommandRunning = $false
+            $sync.ProcessRunning = $true
+            if ([string](Get-WinForgeRepairBusyReason -Kind 'repair') -notmatch 'instalação ou manutenção') { Write-Host "  [ERRO] Permissões (destino): com o base em andamento, a pergunta de ocupado não acusa para 'repair'" -ForegroundColor Red; $wbErrors++ }
+            # 'read' não é barrado pelo base: ler o estado da máquina enquanto ele trabalha não atrapalha.
+            if (-not [string]::IsNullOrWhiteSpace([string](Get-WinForgeRepairBusyReason -Kind 'read'))) { Write-Host "  [ERRO] Permissões (destino): a trava do base barrou uma leitura" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            $sync.CommandRunning = $wfDestCmdAntes
+            $sync.ProcessRunning = $wfDestProcAntes
+        }
+        if ($sync.CommandRunning -ne $wfDestCmdAntes -or $sync.ProcessRunning -ne $wfDestProcAntes) { Write-Host "  [ERRO] Permissões (destino): as travas de comando não voltaram ao que eram" -ForegroundColor Red; $wbErrors++ }
+        # Depois a ORDEM no fonte do botão, que é o que a prova de comportamento não alcança: a
+        # segunda pergunta de ocupado vem ANTES da caixa, a caixa vem ANTES da escrita, e a escrita
+        # acontece UMA vez só - "zera agora, preenche depois" é exatamente o defeito consertado.
+        $wfDestFonteB = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        $wfDestNEscritas = @([regex]::Matches($wfDestFonteB, [regex]::Escape('$sync.WinForgeAclExternalRoot ='))).Count
+        if ($wfDestNEscritas -ne 1) { Write-Host "  [ERRO] Permissões (destino): o botão escreve em `$sync.WinForgeAclExternalRoot $wfDestNEscritas vez(es), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # A agulha é a ATRIBUIÇÃO da segunda pergunta, e não o nome da função: as duas chamadas usam
+        # '-Kind $kind', e procurar pela última ocorrência faria a trava cair na PRIMEIRA quando
+        # alguém apagasse a segunda - e a primeira está antes da caixa, então a ordem passaria.
+        $wfDestPosOcup = $wfDestFonteB.IndexOf('$ocupadoDestino = [string](Get-WinForgeRepairBusyReason', [StringComparison]::Ordinal)
+        $wfDestPosCaixa = $wfDestFonteB.IndexOf('$destino = Show-WinForgeAclBackupDestination', [StringComparison]::Ordinal)
+        $wfDestPosEscrita = $wfDestFonteB.IndexOf('$sync.WinForgeAclExternalRoot =', [StringComparison]::Ordinal)
+        if ($wfDestPosOcup -lt 0 -or $wfDestPosCaixa -lt 0 -or $wfDestPosEscrita -lt 0) { Write-Host "  [ERRO] Permissões (destino): o botão não tem a sequência pergunta-caixa-escrita no fonte" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfDestPosOcup -gt $wfDestPosCaixa) { Write-Host "  [ERRO] Permissões (destino): a caixa de destino abre ANTES de perguntar se há coisa rodando" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfDestPosCaixa -gt $wfDestPosEscrita) { Write-Host "  [ERRO] Permissões (destino): `$sync.WinForgeAclExternalRoot é escrito ANTES da caixa - o destino de uma restauração em curso seria perdido" -ForegroundColor Red; $wbErrors++ }
         # Travas de FORMA DE CHAMADA, e não de nome solto, pelo mesmo motivo de
         # 'Test-WinForgeAclRestoreAllowed -Root' mais acima: o bloco de ajuda destas mesmas funções
         # explica o campo e cita o nome dele, então procurar pelo nome aceitaria a PROSA no lugar do
