@@ -1242,7 +1242,10 @@ function Invoke-WinForgeStreamStep {
 
     Write-WinForgeStreamLine -Path $Path -Text ""
     Write-WinForgeStreamLine -Path $Path -Text "> $($Step.FilePath) $(@($Step.Arguments) -join ' ')"
-    $res = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Encoding ([string]$Step.Encoding)
+    # -NoCapture: as duas linhas abaixo só leem o código de saída, e o texto já foi para o arquivo
+    # linha a linha. Sem ele, um DISM ou um sfc é acumulado inteiro num StringBuilder para ser
+    # descartado no retorno - o mesmo desperdício que as fases das permissões tinham.
+    $res = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Encoding ([string]$Step.Encoding) -NoCapture
     if ($null -eq $res.ExitCode) { return 0 }
     return [int]$res.ExitCode
 }

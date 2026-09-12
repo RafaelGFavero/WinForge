@@ -2977,6 +2977,8 @@ if ($SelfTest) {
             'dism.exe'   = 'oem'
             'netsh.exe'  = 'utf8'
             'w32tm.exe'  = 'oem'
+            'icacls.exe' = 'oem'
+            'takeown.exe' = 'oem'
         }
         $wfEncPares = @{
             'oem'     = [int][System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
@@ -3005,6 +3007,25 @@ if ($SelfTest) {
                 else { $wfEncVistos++ }
             }
         }
+        # O PLANO DAS PERMISSÕES passa pela mesma régua, e não passava: a varredura acima só olhava a
+        # tabela de comandos, e o plano não transmitia nada. Depois que as fases 1 e 3 a 5 entraram no
+        # fluxo ao vivo, todo passo dele também manda a saída para a janela - e um passo sem dica cai
+        # calado em OEM. Era o caso do chkdsk da fase 1: 'concluídos' chegava como 'conclu?dos'.
+        foreach ($wfEncAclPasso in @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestRaiz 'acl-plano-encoding') -Stamp '20260912-101010')) {
+            if ([string]::IsNullOrWhiteSpace([string]$wfEncAclPasso.FilePath)) { continue }
+            $wfEncAclFolha = [string](Split-Path -Leaf ([string]$wfEncAclPasso.FilePath))
+            if (-not $wfEncEsperado.ContainsKey($wfEncAclFolha.ToLowerInvariant())) { Write-Host "  [ERRO] Correções (codificação): '$wfEncAclFolha' (fase $($wfEncAclPasso.Phase) das permissões) não está na tabela medida" -ForegroundColor Red; $wbErrors++; continue }
+            $wfEncAclQuer = [string]$wfEncEsperado[$wfEncAclFolha.ToLowerInvariant()]
+            # Dica AUSENTE vale 'oem' aqui, e a régua compara o valor EFETIVO: é o que
+            # Get-WinForgeOutputEncoding faz com nome vazio, e o plano é quase todo icacls e takeown,
+            # que são oem. O buraco que isso poderia abrir não existe - um passo cuja medição NÃO é
+            # oem (o chkdsk da fase 1, um sfc que alguém acrescente) sai vermelho por omissão, que é
+            # exatamente o defeito que esta trava veio pegar.
+            $wfEncAclTem = ([string]$wfEncAclPasso.Encoding).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($wfEncAclTem)) { $wfEncAclTem = 'oem' }
+            if ($wfEncAclTem -ne $wfEncAclQuer) { Write-Host "  [ERRO] Correções (codificação): '$wfEncAclFolha' da fase $($wfEncAclPasso.Phase) das permissões está como '$wfEncAclTem', medido '$wfEncAclQuer'" -ForegroundColor Red; $wbErrors++ }
+            else { $wfEncVistos++ }
+        }
         # A prova do chkdsk, com bytes sintéticos: "concluídos" escrito em ANSI (o 'í' é 0xED) tem
         # de voltar acentuado pela codificação do PASSO do chkdsk, e tem de sair errado se lido em
         # OEM - que é o que a janela mostrou na máquina do usuário.
@@ -3028,7 +3049,7 @@ if ($SelfTest) {
         if ($wfEncPt -and $wfEncCerto.IndexOf('usuário', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM não trouxe 'usuário' acentuado" -ForegroundColor Red; $wbErrors++ }
         elseif (-not $wfEncPt -and ($wfEncCerto.IndexOf([char]0xFFFD) -ge 0 -or $wfEncCerto.Length -lt 50 -or $wfEncCerto -eq $wfEncErrado)) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM veio ilegível ou igual à leitura UTF-16 (idioma $([System.Globalization.CultureInfo]::CurrentUICulture.Name))" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfEncErrado.IndexOf('usuário', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Correções (codificação): a dica não chegou ao processo - lido como UTF-16 o texto saiu igual" -ForegroundColor Red; $wbErrors++ }
-        else { Write-Host "  Correções (codificação): 4 nome(s) viram code page, $wfEncVistos passo(s) com a dica medida (chkdsk ANSI, sfc UTF-16, DISM/w32tm OEM, netsh UTF-8), dica conferida no processo" }
+        else { Write-Host "  Correções (codificação): 4 nome(s) viram code page, $wfEncVistos passo(s) com a dica medida (chkdsk ANSI, sfc UTF-16, DISM/w32tm/icacls/takeown OEM, netsh UTF-8), tabela de comandos e plano das permissões, dica conferida no processo" }
         Close-WinForgeStreamWriter -Path $wfEncArq
         Remove-Item -LiteralPath $wfEncArq -Force -ErrorAction SilentlyContinue
     } catch {
@@ -3466,11 +3487,21 @@ if ($SelfTest) {
         if ($wfMemFonteP -notmatch '\$processo\.StandardOutput\.ReadLineAsync\(\)') { Write-Host "  [ERRO] Fluxo (saída): o fluxo de saída não é lido linha a linha" -ForegroundColor Red; $wbErrors++ }
         if ($wfMemFonteP -notmatch '\[System\.Threading\.Tasks\.Task\]::WaitAny\(') { Write-Host "  [ERRO] Fluxo (erro): saída e erro não são esperados JUNTOS - o que não for lido enche o cano de 4 KB e trava os dois lados" -ForegroundColor Red; $wbErrors++ }
         if ($wfMemFonteP -match '::Run\(\[') { Write-Host "  [ERRO] Fluxo (erro): o fluxo de erro voltou a ser lido por um scriptblock dentro de uma Task - nessa thread não há runspace e ele nunca roda" -ForegroundColor Red; $wbErrors++ }
-        # As fases 3 a 5 passaram a usar o fluxo (a fase 2 não roda mais processo nenhum: depois da
-        # Tarefa 3 ela é caminhada do motor). São as três chamadas da fase 3, o laço por entrada da
-        # fase 5 e - a que faltava - a fase 4, dentro de Invoke-WinForgeAclOwnerFallback.
+        # E o passo do fluxo ao vivo dos CINCO botões de correção também descarta o texto: as linhas
+        # seguintes só leem o código de saída. Num DISM ou num sfc isso é o volume inteiro guardado
+        # num StringBuilder para ser jogado fora no fim.
+        $wfMemFonteS = [string](Get-Command Invoke-WinForgeStreamStep).ScriptBlock
+        if ($wfMemFonteS.IndexOf('-StreamTo $Path -Encoding ([string]$Step.Encoding) -NoCapture', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Fluxo (passo): Invoke-WinForgeStreamStep acumula um texto que ninguém lê" -ForegroundColor Red; $wbErrors++ }
+        # As fases 1 e 3 a 5 usam o fluxo (a fase 2 não roda mais processo nenhum: depois da Tarefa 3
+        # ela é caminhada do motor). A busca é pela FORMA de CADA chamada, uma por alvo, e não por uma
+        # contagem: um piso de "pelo menos quatro" fica verde com metade dos passos fora do fluxo.
         $wfMemFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
-        if (@([regex]::Matches($wfMemFonteR, 'Invoke-WinForgeAclStreamStep')).Count -lt 4) { Write-Host "  [ERRO] Fluxo (fases): menos de 4 passos das fases 3 a 5 usam o fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfMemAlvo in @('$fase1', '$fase3', '$fase6', '$passo', '$p5')) {
+            if ($wfMemFonteR.IndexOf("Invoke-WinForgeAclStreamStep -Path `$fluxo -Step $wfMemAlvo", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Fluxo (fases): o passo '$wfMemAlvo' não vai pelo fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E NENHUM passo escapa: sobrar uma chamada direta ao executável é sobrar o caminho de
+        # captura, que é o que enchia a memória.
+        if ($wfMemFonteR -match 'Invoke-WinForgeNativeCommand -FilePath') { Write-Host "  [ERRO] Fluxo (fases): sobrou passo chamando o executável fora do fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
         $wfMemFonteF4 = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
         if ($wfMemFonteF4 -notmatch 'Invoke-WinForgeAclStreamStep') { Write-Host "  [ERRO] Fluxo (fase 4): Invoke-WinForgeAclOwnerFallback continua em Invoke-WinForgeNativeCommand, fora do fluxo" -ForegroundColor Red; $wbErrors++ }
         if ($wfMemFonteF4 -match 'Invoke-WinForgeNativeCommand') { Write-Host "  [ERRO] Fluxo (fase 4): sobrou chamada direta a Invoke-WinForgeNativeCommand na troca de posse" -ForegroundColor Red; $wbErrors++ }

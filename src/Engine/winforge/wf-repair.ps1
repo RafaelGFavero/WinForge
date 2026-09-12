@@ -3556,6 +3556,12 @@ function Get-WinForgeAclRestorePlan {
         Title     = "Verificação do disco $unidade (chkdsk /scan, só leitura)"
         FilePath  = $chkdsk
         Arguments = @($unidade, '/scan')
+        # A dica de decodificação, e ela NÃO é a de todo mundo aqui: o resto do plano é icacls e
+        # takeown, que escrevem OEM (o padrão de Get-WinForgeOutputEncoding, e por isso não
+        # declarado). O chkdsk escreve ANSI - medido, o 'ó' dele é 0xF3 -, e sem esta chave o
+        # 'concluídos' dele chegava embaralhado à janela. Passou a doer quando a fase 1 entrou no
+        # fluxo ao vivo: antes o texto ia para a janela pelo mesmo erro, agora vai linha a linha.
+        Encoding  = 'ansi'
     }
 
     # As pastas de primeiro nível saem de uma listagem, e não de uma lista escrita à mão: cada
@@ -3871,8 +3877,11 @@ function Invoke-WinForgeAclStreamStep {
         que é outra fila.
 
         Sem -Path - isto é, fora de um comando com fluxo ao vivo - o passo volta ao caminho de
-        captura e escreve por Write-Host. Sem janela para acompanhar, a saída tem de aparecer em
-        algum lugar; o que não pode acontecer é ela sumir calada.
+        captura e escreve por Write-Host. Não é zelo: '-StreamTo' vazio cai no caminho de captura, e
+        '-NoCapture' ali ESTOURA por desenho (a guarda de Invoke-WinForgeNativeCommand recusa
+        descartar um texto que não foi para lugar nenhum). Sem este ramo, uma chamada fora do fluxo
+        derrubaria a restauração no primeiro passo em vez de rodá-lo; com ele, a saída aparece na
+        única porta que sobrou.
     .PARAMETER Path
         O arquivo que a janela de saída está acompanhando ($sync.WinForgeStreamPath). Vazio, o passo
         roda pelo caminho de captura. Não confundir com '$Step.Path', que nos passos da fase 5 é a
