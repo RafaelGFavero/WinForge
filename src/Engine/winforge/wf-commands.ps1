@@ -389,6 +389,102 @@ function Write-WinForgeStreamLine {
     try { (Open-WinForgeStreamWriter -Path $Path).WriteLine([string]$Text) } catch { }
 }
 
+function Enter-WinForgeStreamProtected {
+    <#
+    .SYNOPSIS
+        Abre a janela em que o cancelamento NÃO vale para este arquivo de saída.
+    .DESCRIPTION
+        Existe para o trecho que não pode ser interrompido no meio. O caso que a define: entre
+        "posse da pasta para os Administradores" e "posse de volta ao dono padrão", parar deixa uma
+        pasta do sistema pertencendo aos Administradores - aberta a qualquer processo elevado, que é
+        um estrago pior do que o reparo não terminar.
+
+        Dentro dela o pedido do usuário continua sendo GUARDADO: ele não some, só não vence. Quando
+        a janela fecha, ele passa a valer no passo seguinte. Quem chama é a Tarefa 12.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $sync.WinForgeStreamProtected[$Path] = $true
+}
+
+function Exit-WinForgeStreamProtected {
+    <#
+    .SYNOPSIS
+        Fecha a janela protegida deste arquivo de saída. O pedido guardado volta a valer.
+    .DESCRIPTION
+        Sai do dicionário em vez de virar $false: chave ausente e chave falsa respondem a mesma coisa
+        em Test-WinForgeStreamCancelled, e uma a menos é uma a menos para limpar no fim.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    [void]$sync.WinForgeStreamProtected.Remove($Path)
+}
+
+function Test-WinForgeStreamCancelled {
+    <#
+    .SYNOPSIS
+        Diz se o comando deste arquivo de saída foi cancelado. Só lê.
+    .DESCRIPTION
+        Responde $false enquanto a janela protegida estiver aberta, mesmo com o pedido levantado: é
+        assim que o pedido fica GUARDADO em vez de vencer no meio de uma troca de posse. Quem
+        pergunta é o laço dos passos, entre um passo e o seguinte.
+
+        Falha de leitura responde $false. Um dicionário que não pôde ser lido não é motivo para
+        interromper um reparo pela metade - o lado seguro aqui é continuar.
+    .OUTPUTS
+        [bool].
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        if ([bool]$sync.WinForgeStreamProtected[$Path]) { return $false }
+        return [bool]$sync.WinForgeStreamCancel[$Path]
+    } catch { return $false }
+}
+
+function Request-WinForgeStreamCancel {
+    <#
+    .SYNOPSIS
+        Pede o cancelamento do comando deste arquivo de saída: levanta a marca e mata a árvore de
+        processos.
+    .DESCRIPTION
+        Duas metades, e as duas fazem falta:
+
+        1. A MARCA, que o laço dos passos lê entre um passo e o seguinte. Sozinha ela só impede o
+           PRÓXIMO passo de começar - um sfc que já está rodando levaria meia hora para terminar.
+        2. O JOB OBJECT, que mata o processo que está rodando AGORA e toda a árvore dele de uma vez.
+           Medido: 'Stop-Process -Force' sobre o powershell.exe deixa vivo o filho iniciado com
+           UseShellExecute=$false, e era assim que fechar o WinForge deixava um icacls.exe elevado
+           reescrevendo permissões do sistema sem ninguém olhando.
+
+        Dentro da janela protegida ele NÃO mata nada: a marca fica guardada e vale a partir do passo
+        seguinte. É o que separa "parar" de "parar no pior instante possível".
+
+        RESSALVA do '-NoElevate': ali o WinForge roda sem elevação e os processos filhos também, mas
+        um comando que já tenha sido lançado elevado por outro caminho fica fora do alcance - MEDIDO,
+        OpenProcess sobre processo elevado, a partir de pai não elevado, devolve handle 0 e erro 5.
+        O Parar promete o que ele alcança, e num processo não elevado esse alcance é o próprio job.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string> }. 'Ok' é a marca levantada, e não a morte do processo:
+        um comando entre passos não tem processo nenhum para matar, e isso é sucesso.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try { $sync.WinForgeStreamCancel[$Path] = $true } catch { return @{ Ok = $false; Reason = 'o pedido de cancelamento não pôde ser registrado' } }
+    $protegido = $false
+    try { $protegido = [bool]$sync.WinForgeStreamProtected[$Path] } catch { $protegido = $false }
+    if ($protegido) {
+        return @{ Ok = $true; Reason = 'a etapa atual não pode ser interrompida no meio; o pedido foi guardado e vale a partir do próximo passo' }
+    }
+    $trabalho = [IntPtr]::Zero
+    try { if ($null -ne $sync.WinForgeStreamJob[$Path]) { $trabalho = [IntPtr]$sync.WinForgeStreamJob[$Path] } } catch { $trabalho = [IntPtr]::Zero }
+    if ($trabalho -eq [IntPtr]::Zero -or -not ('WfJob' -as [type])) {
+        return @{ Ok = $true; Reason = 'nenhum processo em andamento; o comando para no próximo passo' }
+    }
+    try { [void][WfJob]::TerminateJobObject($trabalho, 1) } catch { return @{ Ok = $true; Reason = "a marca foi levantada, mas a árvore de processos não pôde ser encerrada ($($_.Exception.Message))" } }
+    return @{ Ok = $true; Reason = '' }
+}
+
 function Invoke-WinForgeStreamedProcess {
     <#
     .SYNOPSIS
@@ -453,6 +549,38 @@ function Invoke-WinForgeStreamedProcess {
     $codigo = $null
     try {
         $escritor = Open-WinForgeStreamWriter -Path $StreamTo
+        # O Job Object nasce ANTES do processo, e a atribuição acontece na linha seguinte ao Start():
+        # não há como atribuir um processo que ainda não existe, e este é o instante mais cedo
+        # possível. KILL_ON_JOB_CLOSE fecha o outro buraco: morto o WinForge pelo Gerenciador de
+        # Tarefas, o handle do job morre com ele e o Windows derruba a árvore - é o que impede um
+        # icacls.exe elevado de continuar reescrevendo permissão sem ninguém olhando.
+        #
+        # A janela PROTEGIDA fica de fora de propósito: processo que não está em job nenhum não é
+        # morto por TerminateJobObject, e é assim que a troca de posse da Fase 4 não pode ser
+        # interrompida no meio nem por engano.
+        #
+        # Sem o tipo (chamada fora do corpo da runspace, como no -SelfTest) o comando roda igual,
+        # só sem Parar: o job é um extra, não um pré-requisito.
+        $trabalho = [IntPtr]::Zero
+        $protegido = $false
+        try { $protegido = [bool]$sync.WinForgeStreamProtected[$StreamTo] } catch { $protegido = $false }
+        if (-not $protegido -and ('WfJob' -as [type])) {
+            try {
+                $trabalho = [WfJob]::CreateJobObject([IntPtr]::Zero, $null)
+                if ($trabalho -ne [IntPtr]::Zero) {
+                    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION: 144 bytes em 64 bits, 112 em 32. O campo
+                    # LimitFlags está em 16 nos dois, e 0x2000 é JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+                    $tamanho = $(if ([IntPtr]::Size -eq 8) { 144 } else { 112 })
+                    $info = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($tamanho)
+                    try {
+                        for ($z = 0; $z -lt $tamanho; $z += 4) { [System.Runtime.InteropServices.Marshal]::WriteInt32($info, $z, 0) }
+                        [System.Runtime.InteropServices.Marshal]::WriteInt32($info, 16, 0x2000)
+                        [void][WfJob]::SetInformationJobObject($trabalho, 9, $info, [uint32]$tamanho)
+                    } finally { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($info) }
+                    $sync.WinForgeStreamJob[$StreamTo] = $trabalho
+                }
+            } catch { $trabalho = [IntPtr]::Zero }
+        }
         # O teto do ARQUIVO desta execução, já estourado por um passo anterior ou não. Passado o
         # teto, as linhas continuam sendo LIDAS (parar de ler enche o cano de 4 KB e trava os dois
         # lados) e deixam de ser escritas.
@@ -462,6 +590,7 @@ function Invoke-WinForgeStreamedProcess {
         # sem parar, e um Get-Item por linha seria um acesso a disco por linha.
         $desdeAConta = 0
         [void]$processo.Start()
+        if ($trabalho -ne [IntPtr]::Zero) { try { [void][WfJob]::AssignProcessToJobObject($trabalho, $processo.Handle) } catch { } }
         $tSaida = $processo.StandardOutput.ReadLineAsync()
         $tErro = $processo.StandardError.ReadLineAsync()
         while ($null -ne $tSaida -or $null -ne $tErro) {
@@ -510,6 +639,13 @@ function Invoke-WinForgeStreamedProcess {
         $processo.WaitForExit()
         $codigo = $processo.ExitCode
     } finally {
+        # O handle sai do dicionário ANTES de ser fechado: um Parar que chegasse entre as duas
+        # linhas encontraria um handle já morto. E o fechamento é o que dispara KILL_ON_JOB_CLOSE -
+        # aqui o processo já terminou, e no caminho de exceção é exatamente o que se quer.
+        if ($trabalho -ne [IntPtr]::Zero) {
+            [void]$sync.WinForgeStreamJob.Remove($StreamTo)
+            try { [void][WfJob]::CloseHandle($trabalho) } catch { }
+        }
         try { $processo.Dispose() } catch { }
     }
 
@@ -1350,6 +1486,22 @@ $sync.WinForgeStreamExit = [System.Collections.Hashtable]::Synchronized(@{})
 # Open-WinForgeStreamWriter, quem fecha é o 'finally' do corpo da runspace.
 $sync.WinForgeStreamWriters = [System.Collections.Hashtable]::Synchronized(@{})
 
+# O encanamento do Parar, pela mesma chave e com o mesmo tempo de vida dos dois de cima:
+#
+# - 'Cancel' é o pedido do usuário. Quem levanta é a thread da janela; quem lê é a runspace do pool.
+# - 'Job' é o handle do Job Object do processo que está rodando agora. Medido: 'powershell.exe'
+#   morto com Stop-Process -Force DEIXA VIVO o filho iniciado com UseShellExecute=$false - fechar o
+#   WinForge deixava um icacls.exe ELEVADO reescrevendo ACL de pasta do sistema, sem ninguém olhando.
+#   Um handle de job mata a árvore inteira de uma vez, e é a única forma que faz isso.
+# - 'Protected' é a janela em que o cancelamento NÃO vale. Ela existe para o trecho entre "posse aos
+#   Administradores" e "posse de volta ao dono padrão": parar ali deixa a pasta do sistema aberta a
+#   qualquer processo elevado, que é pior do que não parar. Quem a usa é a Tarefa 12; aqui ela nasce.
+#
+# Sincronizadas porque são exatamente isso - variáveis atravessando duas threads.
+$sync.WinForgeStreamCancel = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.WinForgeStreamJob = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.WinForgeStreamProtected = [System.Collections.Hashtable]::Synchronized(@{})
+
 # Quais arquivos já passaram do teto de tamanho desta execução. Mora ao lado do escritor porque é a
 # mesma chave e o mesmo tempo de vida: o aviso de "os detalhes daqui em diante foram descartados"
 # sai UMA vez por arquivo, e não uma por chamada de processo - a fase 5 de um perfil são centenas
@@ -1621,7 +1773,12 @@ function Invoke-WinForgeStreamedSteps {
     $codigo = 0
     $falhou = ''
     $n = 0
+    $cancelado = $false
     foreach ($passo in @($Steps)) {
+        # ENTRE passos, e não dentro de um: o processo que já está rodando é morto pelo job (ver
+        # Request-WinForgeStreamCancel), e o que esta pergunta decide é se o PRÓXIMO começa. Parar
+        # antes de começar é a única interrupção que não deixa nada pela metade.
+        if (Test-WinForgeStreamCancelled -Path $Path) { $cancelado = $true; break }
         $n++
         $titulo = if ($passo.Function) { [string]$passo.Function } else { [string](Split-Path -Leaf ([string]$passo.FilePath)) }
         $passoCodigo = [int](Invoke-WinForgeStreamStep -Path $Path -Step $passo)
@@ -1629,6 +1786,15 @@ function Invoke-WinForgeStreamedSteps {
         if ($codigo -eq 0 -and $passoCodigo -ne 0) { $codigo = $passoCodigo; $falhou = "$n ($titulo)" }
     }
     Write-WinForgeStreamLine -Path $Path -Text ""
+    if ($cancelado) {
+        # A frase de fechamento ($Final) NÃO sai aqui, pelo mesmo motivo que não sai num comando que
+        # falhou: ela está no presente do indicativo ("Configuração de rede redefinida."), e
+        # imprimi-la depois de uma interrupção é dizer que fez o que não fez.
+        Write-WinForgeStreamLine -Path $Path -Text ("== Interrompido a pedido depois de {0} passo(s): os seguintes não rodaram. ==" -f $n)
+        Write-WinForgeStreamLine -Path $Path -Text ""
+        Write-WinForgeStreamLine -Path $Path -Text "O que já tinha sido feito continua feito; o que faltava não foi começado."
+        return $codigo
+    }
     if ($codigo -eq 0) {
         Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $n)
         if (-not [string]::IsNullOrWhiteSpace($Final)) {
@@ -1658,6 +1824,28 @@ $sync.WinForgeStreamBody = {
     # Para onde um passo do tipo 'Function' manda a saída de um executável sem passar pelo Write-Host.
     # É o que as fases 3 a 5 das permissões consultam - ver $sync.WinForgeStreamPath.
     $sync.WinForgeStreamPath = $wfCaminho
+    # O tipo do Job Object nasce AQUI, dentro da runspace do POOL, e não na principal: MEDIDO, um
+    # tipo criado por Add-Type na runspace principal NÃO é visto nas runspaces do pool, e um segundo
+    # Add-Type do mesmo nome falha com "o tipo já existe". A guarda resolve as duas pontas - o
+    # primeiro comando cria, os seguintes encontram.
+    #
+    # O NOME da guarda e o NOME do tipo têm de ser o mesmo: com -Namespace preenchido o tipo nasceria
+    # 'Espaco.WfJob', a guarda nunca o encontraria e o segundo Add-Type é que estouraria.
+    try {
+        if (-not ('WfJob' -as [type])) {
+            Add-Type -Namespace '' -Name 'WfJob' -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);
+[DllImport("kernel32.dll")] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+[DllImport("kernel32.dll")] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+[DllImport("kernel32.dll")] public static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+'@
+        }
+    } catch {
+        # Sem o tipo o comando roda igual, só sem Parar. Derrubar um reparo porque o P/Invoke não
+        # compilou seria trocar um problema pequeno por um grande.
+        Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "O cancelamento por Job Object não pôde ser preparado: $($_.Exception.Message)"
+    }
     try {
         $wfCodigo = [int](Invoke-WinForgeStreamedSteps -Path $wfCaminho -Steps @($wfArgs.Steps) -Final ([string]$wfArgs.Final))
     } catch {
@@ -1671,6 +1859,12 @@ $sync.WinForgeStreamBody = {
         # do arquivo ficaria aberto até o programa fechar.
         Close-WinForgeStreamWriter -Path $wfCaminho
         [void]$sync.WinForgeStreamCapped.Remove($wfCaminho)
+        # O encanamento do Parar sai junto: pedido, handle de job e janela protegida são deste
+        # comando e de mais nenhum. Deixá-los para trás faria o comando SEGUINTE, com outro arquivo,
+        # conviver com lixo - e um pedido esquecido no dicionário é um Parar que ninguém pediu.
+        [void]$sync.WinForgeStreamCancel.Remove($wfCaminho)
+        [void]$sync.WinForgeStreamJob.Remove($wfCaminho)
+        [void]$sync.WinForgeStreamProtected.Remove($wfCaminho)
         $sync.WinForgeStreamPath = ''
         $sync.WinForgeStreamExit[$wfCaminho] = $wfCodigo
         $sync.WinForgeStreamDone[$wfCaminho] = $true

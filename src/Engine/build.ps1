@@ -3843,6 +3843,111 @@ if ($SelfTest) {
     } finally {
         Remove-Item -LiteralPath (Join-Path $wbSelfTestRaiz 'cabecalho') -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- Parar: encanamento e Job Object
+    # Medido: 'powershell.exe' morto com Stop-Process -Force DEIXA VIVO o filho iniciado com
+    # UseShellExecute=$false - fechar o WinForge deixava um icacls.exe elevado reescrevendo ACL de
+    # sistema. Daí o Job Object. E medido também: tipo criado por Add-Type na runspace PRINCIPAL não
+    # é visto no pool, e um segundo Add-Type do mesmo nome falha - daí a guarda.
+    $wfParRaiz = Join-Path $wbSelfTestRaiz 'parar'
+    try {
+        if (Test-Path -LiteralPath $wfParRaiz) { Remove-Item -LiteralPath $wfParRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfParRaiz -Force | Out-Null
+        $wfParArq = Join-Path $wfParRaiz 'saida.txt'
+        Set-Content -LiteralPath $wfParArq -Value 'cab' -Encoding UTF8
+        foreach ($wfParChave in @('WinForgeStreamCancel', 'WinForgeStreamJob', 'WinForgeStreamProtected')) {
+            if ($null -eq $sync.$wfParChave) { Write-Host "  [ERRO] Parar: `$sync.$wfParChave não existe" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $sync.$wfParChave.IsSynchronized) { Write-Host "  [ERRO] Parar: `$sync.$wfParChave não é sincronizada - ela atravessa duas threads" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (Test-WinForgeStreamCancelled -Path $wfParArq) { Write-Host "  [ERRO] Parar: arquivo novo já nasce cancelado" -ForegroundColor Red; $wbErrors++ }
+        $null = Request-WinForgeStreamCancel -Path $wfParArq
+        if (-not (Test-WinForgeStreamCancelled -Path $wfParArq)) { Write-Host "  [ERRO] Parar: o pedido de cancelamento não levantou a flag" -ForegroundColor Red; $wbErrors++ }
+        # A flag é IGNORADA dentro da janela protegida: cancelar entre 'posse aos Admins' e 'posse de
+        # volta' (Fase 4, Tarefa 12) deixa a pasta do sistema aberta a qualquer processo elevado.
+        Enter-WinForgeStreamProtected -Path $wfParArq
+        if (Test-WinForgeStreamCancelled -Path $wfParArq) { Write-Host "  [ERRO] Parar: a flag venceu dentro da janela protegida" -ForegroundColor Red; $wbErrors++ }
+        Exit-WinForgeStreamProtected -Path $wfParArq
+        if (-not (Test-WinForgeStreamCancelled -Path $wfParArq)) { Write-Host "  [ERRO] Parar: a flag sumiu ao sair da janela protegida" -ForegroundColor Red; $wbErrors++ }
+        # E o pedido feito DENTRO da janela protegida não mata nada na hora: ele fica guardado e vale
+        # a partir do passo seguinte. É a outra ponta da mesma regra.
+        [void]$sync.WinForgeStreamCancel.Remove($wfParArq)
+        Enter-WinForgeStreamProtected -Path $wfParArq
+        $wfParProt = Request-WinForgeStreamCancel -Path $wfParArq
+        if ([string]$wfParProt.Reason -notmatch 'interrompid|protegid') { Write-Host "  [ERRO] Parar: o pedido dentro da janela protegida não avisa que ele só vale depois ('$($wfParProt.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        Exit-WinForgeStreamProtected -Path $wfParArq
+        if (-not (Test-WinForgeStreamCancelled -Path $wfParArq)) { Write-Host "  [ERRO] Parar: o pedido feito na janela protegida não valeu depois que ela fechou" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfParArq)
+        # A checagem acontece ENTRE passos.
+        $wfParFonteS = [string](Get-Command Invoke-WinForgeStreamedSteps).ScriptBlock
+        if ($wfParFonteS.IndexOf('Test-WinForgeStreamCancelled -Path $Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar: Invoke-WinForgeStreamedSteps não confere a flag antes de cada passo" -ForegroundColor Red; $wbErrors++ }
+        # E o laço PARA de verdade: dois passos inofensivos, a flag levantada antes do primeiro, e
+        # nenhum deles pode rodar. Uma trava de fonte sozinha ficaria verde com a checagem num ramo
+        # morto - e é o laço que decide se o Parar para alguma coisa.
+        $wfParSeq = Join-Path $wfParRaiz 'passos.txt'
+        Set-Content -LiteralPath $wfParSeq -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamCancel[$wfParSeq] = $true
+        $wfParCod = Invoke-WinForgeStreamedSteps -Path $wfParSeq -Steps @(
+            @{ FilePath = (Get-WinForgeSystemExe -Name 'cmd.exe'); Arguments = @('/c', 'echo NAO-DEVIA-RODAR-1') }
+            @{ FilePath = (Get-WinForgeSystemExe -Name 'cmd.exe'); Arguments = @('/c', 'echo NAO-DEVIA-RODAR-2') }
+        ) -Final 'fim'
+        Close-WinForgeStreamWriter -Path $wfParSeq
+        $wfParTexto = [string](Get-Content -LiteralPath $wfParSeq -Raw)
+        if ($wfParTexto -match 'NAO-DEVIA-RODAR') { Write-Host "  [ERRO] Parar: com a flag levantada, um passo rodou assim mesmo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTexto -notmatch 'Interrompido') { Write-Host "  [ERRO] Parar: o arquivo não diz que a sequência foi interrompida a pedido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTexto -match '(?m)^fim$') { Write-Host "  [ERRO] Parar: a frase final de sucesso saiu numa sequência CANCELADA" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfParSeq)
+        [void]$sync.WinForgeStreamDone.Remove($wfParSeq)
+        # Add-Type GUARDADO, dentro do scriptblock do POOL.
+        $wfParCorpo = [string]$sync.WinForgeStreamBody
+        if ($wfParCorpo -notmatch "'WfJob'\s*-as\s*\[type\]") { Write-Host "  [ERRO] Parar: o Add-Type do job não está guardado por ('WfJob' -as [type])" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParCorpo -notmatch 'Add-Type') { Write-Host "  [ERRO] Parar: o Add-Type do job não está dentro do corpo da runspace" -ForegroundColor Red; $wbErrors++ }
+        # A guarda roda DUAS VEZES seguidas sem estourar - e com o MESMO nome nas duas pontas: com
+        # '-Namespace WinForgeProva' o tipo nasceria 'WinForgeProva.WfJobProva', a guarda
+        # ('WfJobProva' -as [type]) daria $null para sempre e o segundo Add-Type é que estouraria.
+        $wfParDef = '[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);' +
+                    '[DllImport("kernel32.dll")] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);' +
+                    '[DllImport("kernel32.dll")] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);' +
+                    '[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);'
+        $wfParGuarda = { if (-not ('WfJobProva' -as [type])) { Add-Type -Namespace '' -Name 'WfJobProva' -MemberDefinition $wfParDef } }
+        & $wfParGuarda; & $wfParGuarda
+        if (-not ('WfJobProva' -as [type])) { Write-Host "  [ERRO] Parar: a guarda não criou o tipo" -ForegroundColor Red; $wbErrors++ }
+        else {
+            # O JOB DE VERDADE, matando o PRÓPRIO filho: um grep de fonte não prova que um handle
+            # mata uma árvore, e é essa a única coisa que o Parar promete.
+            $wfParJob = [WfJobProva]::CreateJobObject([IntPtr]::Zero, $null)
+            if ($wfParJob -eq [IntPtr]::Zero) { Write-Host "  [ERRO] Parar (job): CreateJobObject devolveu handle nulo" -ForegroundColor Red; $wbErrors++ }
+            else {
+                $wfParFilho = Start-Process -FilePath (Get-WinForgeSystemExe -Name 'cmd.exe') -ArgumentList '/c', 'ping -n 30 127.0.0.1' -PassThru -WindowStyle Hidden
+                try {
+                    if (-not [WfJobProva]::AssignProcessToJobObject($wfParJob, $wfParFilho.Handle)) { Write-Host "  [ERRO] Parar (job): AssignProcessToJobObject falhou (erro $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" -ForegroundColor Red; $wbErrors++ }
+                    $null = [WfJobProva]::TerminateJobObject($wfParJob, 1)
+                    if (-not $wfParFilho.WaitForExit(5000)) { Write-Host "  [ERRO] Parar (job): o job NÃO matou a árvore - o filho continuou vivo depois do TerminateJobObject" -ForegroundColor Red; $wbErrors++ }
+                } finally {
+                    if (-not $wfParFilho.HasExited) { Stop-Process -Id $wfParFilho.Id -Force -ErrorAction SilentlyContinue }
+                    $null = [WfJobProva]::CloseHandle($wfParJob)
+                }
+            }
+        }
+        # O job é criado e guardado ANTES do Start(), a Fase 4 fica de fora e a limpeza é no finally.
+        $wfParFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        if ($wfParFonteP -notmatch 'AssignProcessToJobObject') { Write-Host "  [ERRO] Parar: o processo não é atribuído a nenhum job" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParFonteP -notmatch 'WinForgeStreamProtected') { Write-Host "  [ERRO] Parar: a atribuição ao job não pula os processos da janela protegida" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParFonteP -notmatch '(?s)finally\s*\{[^}]*WinForgeStreamJob') { Write-Host "  [ERRO] Parar: o job não é limpo no 'finally'" -ForegroundColor Red; $wbErrors++ }
+        # As duas âncoras são FORMA: a atribuição do handle e a instrução do Start. Os nomes soltos
+        # ('CreateJobObject', '.Start()') aparecem em prosa de bloco de ajuda com a maior facilidade,
+        # e aí a ordem medida seria a das FRASES, não a do código.
+        $wfParPosJob = $wfParFonteP.IndexOf('$trabalho = [WfJob]::CreateJobObject(', [StringComparison]::Ordinal)
+        $wfParPosStart = $wfParFonteP.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
+        if ($wfParPosJob -lt 0 -or $wfParPosStart -lt 0 -or $wfParPosJob -gt $wfParPosStart) { Write-Host "  [ERRO] Parar: o job é criado DEPOIS do Start() - há uma janela em que o filho não pertence a job nenhum" -ForegroundColor Red; $wbErrors++ }
+        # '-NoElevate' não promete Parar: medido, OpenProcess sobre processo elevado, de pai não
+        # elevado, devolve handle=0 err=5.
+        $wfParFonteR = [string](Get-Command Request-WinForgeStreamCancel).ScriptBlock
+        if ($wfParFonteR -notmatch 'NoElevate|não elevado') { Write-Host "  [ERRO] Parar: falta a ressalva de '-NoElevate' em Request-WinForgeStreamCancel" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Parar: três hashtables sincronizadas, flag ignorada na janela protegida, guarda do Add-Type roda duas vezes e o job matou a árvore do filho"
+    } catch {
+        Write-Host "  [ERRO] Parar: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfParRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Permissões do disco do sistema
     # O caso real: uma atualização de fabricante derrubou a cadeia de permissões do disco do Windows,
     # e o dono da máquina ficou sem acesso às próprias pastas. São três botões - Verificar (só lê),
