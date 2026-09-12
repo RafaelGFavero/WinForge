@@ -3732,6 +3732,60 @@ function Select-WinForgeAclTargetedSteps {
     return @($saida)
 }
 
+function Invoke-WinForgeAclStreamStep {
+    <#
+    .SYNOPSIS
+        Roda um passo do plano de permissões com a saída indo AO VIVO para o arquivo da janela.
+        Devolve o código de saída.
+    .DESCRIPTION
+        É o que as fases 3 a 5 usam no lugar do par 'Invoke-WinForgeNativeCommand' + 'Write-Host
+        ([string]$r.Text)'. Aquele par levava a saída inteira pela memória DUAS vezes: o
+        'Out-String -Width 4096' junta o que o executável escreveu numa string só, e o Write-Host
+        seguinte a repassa - uma linha de centenas de MB - pelo pipeline do passo. Medido: 135 MB de
+        saída viraram 1.575 MB de pico, 11,7x, e é isso que enchia a memória da máquina no meio de
+        uma restauração de permissões.
+
+        Com -StreamTo cada linha vai do processo direto para o arquivo que a janela acompanha, e
+        -NoCapture diz que ninguém quer o texto de volta: guardá-lo num StringBuilder seria juntar o
+        volume inteiro na memória para descartá-lo no fim.
+
+        O cabeçalho '> <exe> <args>' sai pela MESMA porta que a saída do processo (o escritor
+        persistente do arquivo) e não por Write-Host: ele tem de aparecer antes da primeira linha do
+        executável, e o Write-Host de um passo de função chega ao arquivo pelo pipeline do passo,
+        que é outra fila.
+
+        Sem -Path - isto é, fora de um comando com fluxo ao vivo - o passo volta ao caminho de
+        captura e escreve por Write-Host. Sem janela para acompanhar, a saída tem de aparecer em
+        algum lugar; o que não pode acontecer é ela sumir calada.
+    .PARAMETER Path
+        O arquivo que a janela de saída está acompanhando ($sync.WinForgeStreamPath). Vazio, o passo
+        roda pelo caminho de captura. Não confundir com '$Step.Path', que nos passos da fase 5 é a
+        PASTA em que o icacls vai mexer.
+    .PARAMETER Step
+        Um passo do plano: FilePath, Arguments e, quando houver, Encoding (a dica de decodificação;
+        sem ela vale 'oem', que é a do icacls e a do takeown).
+    .OUTPUTS
+        O código de saída do executável, ou 0 quando ele não devolveu nenhum.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Step,
+        [string]$Path = ''
+    )
+
+    $cabecalho = ("> {0} {1}" -f [string]$Step.FilePath, (@($Step.Arguments) -join ' ')).TrimEnd()
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        Write-Host $cabecalho
+        $semFluxo = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -Encoding ([string]$Step.Encoding)
+        Write-Host ([string]$semFluxo.Text)
+        if ($null -eq $semFluxo.ExitCode) { return 0 }
+        return [int]$semFluxo.ExitCode
+    }
+    Write-WinForgeStreamLine -Path $Path -Text $cabecalho
+    $comFluxo = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Encoding ([string]$Step.Encoding) -NoCapture
+    if ($null -eq $comFluxo.ExitCode) { return 0 }
+    return [int]$comFluxo.ExitCode
+}
+
 function Invoke-WinForgeAclRestore {
     <#
     .SYNOPSIS
@@ -3848,6 +3902,13 @@ function Invoke-WinForgeAclRestore {
     }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeAclRestore'
 
+    # Para onde as fases 3 a 5 mandam a saída dos executáveis. Esta função roda como um passo do
+    # tipo 'Function', que não recebe argumento nenhum: o arquivo que a janela acompanha chega por
+    # $sync.WinForgeStreamPath, escrito pelo corpo da runspace. Sem ele (chamada fora de um comando
+    # com fluxo ao vivo) os passos voltam ao caminho de captura - ver Invoke-WinForgeAclStreamStep.
+    $fluxo = ''
+    try { $fluxo = [string]$sync.WinForgeStreamPath } catch { $fluxo = '' }
+
     # A elevação vem antes de QUALQUER efeito colateral, inclusive o de criar a pasta de backup:
     # sem elevação ela nasceria com a identidade atual como dona e ficaria plantada, fazendo a
     # conferência recusar todas as restaurações seguintes desta máquina.
@@ -3879,10 +3940,12 @@ function Invoke-WinForgeAclRestore {
     $fase1 = @($plano | Where-Object { [int]$_.Phase -eq 1 })[0]
     Write-Host ''
     Write-Host "Fase 1 de 6 - $($fase1.Title). Num disco grande isso leva minutos."
-    $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase1.FilePath) -Arguments @($fase1.Arguments)
-    Write-Host ([string]$r.Text)
-    if ([int]$r.ExitCode -ne 0) {
-        Write-Error "O chkdsk terminou com código $($r.ExitCode): o volume tem erro de sistema de arquivos. PARADO antes de alterar qualquer permissão - use o botão 'Agendar chkdsk /f na próxima reinicialização', reinicie e volte aqui."
+    # Também pelo fluxo ao vivo, e aqui o motivo não é memória: são os MINUTOS. O chkdsk conta o
+    # progresso em estágios, e segurar esse texto até o fim é a janela parada justamente no passo
+    # mais longo do botão.
+    $codigo1 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $fase1)
+    if ($codigo1 -ne 0) {
+        Write-Error "O chkdsk terminou com código $($codigo1): o volume tem erro de sistema de arquivos. PARADO antes de alterar qualquer permissão - use o botão 'Agendar chkdsk /f na próxima reinicialização', reinicie e volte aqui."
         return
     }
 
@@ -4094,28 +4157,24 @@ function Invoke-WinForgeAclRestore {
     Invoke-WinForgeAclDenyRemoval -Plan $plano -Phase 3 -Path $raiz
     Write-Host ''
     Write-Host "Fase 3 de 6 - $($fase3.Title)"
-    $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase3.FilePath) -Arguments @($fase3.Arguments)
-    Write-Host ([string]$r.Text)
-    if ([int]$r.ExitCode -eq 5) {
+    $codigo3 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $fase3)
+    if ($codigo3 -eq 5) {
         $fase6 = @($plano | Where-Object { [int]$_.Phase -eq 6 })[0]
         Write-Host ''
         Write-Host "Acesso negado na raiz. Fase 6 de 6 - $($fase6.Title)"
-        $rt = Invoke-WinForgeNativeCommand -FilePath ([string]$fase6.FilePath) -Arguments @($fase6.Arguments)
-        Write-Host ([string]$rt.Text)
+        [void](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $fase6)
         Write-Host 'Segunda e última tentativa das permissões da raiz.'
-        $r = Invoke-WinForgeNativeCommand -FilePath ([string]$fase3.FilePath) -Arguments @($fase3.Arguments)
-        Write-Host ([string]$r.Text)
+        $codigo3 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $fase3)
     }
-    if ([int]$r.ExitCode -ne 0) {
+    if ($codigo3 -ne 0) {
         # Segue assim mesmo: as fases 4 e 5 consertam as pastas do sistema e o perfil
         # independentemente da raiz, e parar aqui deixaria a máquina no meio do caminho.
-        Write-Error "As permissões da raiz não puderam ser aplicadas (código $($r.ExitCode)). As fases seguintes continuam."
+        Write-Error "As permissões da raiz não puderam ser aplicadas (código $codigo3). As fases seguintes continuam."
     } else {
         foreach ($passo in @($plano | Where-Object { [int]$_.Phase -eq 3 -and [string]$_.Kind -eq 'grant-extra' })) {
             Write-Host "Fase 3 de 6 - $($passo.Title)"
-            $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
-            Write-Host ([string]$r.Text)
-            if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
+            $codigoExtra = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $passo)
+            if ($codigoExtra -ne 0) { Write-Error "Esta etapa terminou com código $codigoExtra." }
         }
     }
 
@@ -4132,12 +4191,11 @@ function Invoke-WinForgeAclRestore {
         foreach ($passo in $fase4) {
             Write-Host ''
             Write-Host "Fase 4 de 6 - $($passo.Title)"
-            $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
-            Write-Host ([string]$r.Text)
-            if (([int]$r.ExitCode -eq 5) -and ([string]$passo.Kind -ne 'setowner')) {
-                $r = Invoke-WinForgeAclOwnerFallback -Plan $plano -Step $passo
+            $codigo4 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $passo)
+            if (($codigo4 -eq 5) -and ([string]$passo.Kind -ne 'setowner')) {
+                $codigo4 = [int](Invoke-WinForgeAclOwnerFallback -Plan $plano -Step $passo -StreamPath $fluxo)
             }
-            if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
+            if ($codigo4 -ne 0) { Write-Error "Esta etapa terminou com código $codigo4." }
         }
     }
 
@@ -4172,8 +4230,12 @@ function Invoke-WinForgeAclRestore {
             }
             $passos5 = @(Get-WinForgeAclInheritSteps -Root $alvo5 -Entries @($escopo5.Entries))
             Write-Host "Fase 5 de 6 - $($passo.Title): $($passos5.Count) pasta(s)."
-            # Uma linha por pasta encheria a janela de saída com centenas de linhas que não dizem
-            # nada. O que interessa é o que FALHOU, e essa sai na hora, com a pasta e o código.
+            # Cada chamada vai para o arquivo pelo fluxo ao vivo, com o cabeçalho '> icacls ...'. São
+            # centenas de linhas, e elas são o ponto: este laço leva dezenas de segundos, e uma
+            # janela parada é indistinguível de uma janela travada - que foi a queixa que trouxe este
+            # trabalho. O '/Q' dos argumentos mantém o icacls calado quando dá certo, então o que
+            # cresce ali é uma linha por pasta, e não a árvore inteira. O RESUMO continua sendo o que
+            # se lê no fim; o que FALHOU sai também aqui, com a pasta e o código.
             #
             # O código de saída só existe porque o '/C' saiu do vetor - com ele, MEDIDO, uma pasta
             # que não existe mais sai com 0 e este laço não teria sinal nenhum. Mas ele NÃO separa
@@ -4183,12 +4245,14 @@ function Invoke-WinForgeAclRestore {
             $falhas5 = 0
             $sumidas5 = 0
             foreach ($p5 in $passos5) {
-                $r5 = Invoke-WinForgeNativeCommand -FilePath ([string]$p5.FilePath) -Arguments @($p5.Arguments)
-                $veredito5 = [string](Get-WinForgeAclInheritOutcome -Path ([string]$p5.Path) -ExitCode ([int]$r5.ExitCode))
+                $codigo5 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $p5)
+                $veredito5 = [string](Get-WinForgeAclInheritOutcome -Path ([string]$p5.Path) -ExitCode $codigo5)
                 if ($veredito5 -eq 'ok') { continue }
                 if ($veredito5 -eq 'sumida') { $sumidas5++; continue }
                 $falhas5++
-                Write-Host ("  '{0}': código {1}. {2}" -f $p5.Path, [int]$r5.ExitCode, ([string]$r5.Text).Trim())
+                # Sem o texto do icacls: ele acabou de sair no arquivo, logo acima desta linha, e
+                # repeti-lo aqui seria trazer de volta pela memória o que o fluxo ao vivo tirou dela.
+                Write-Host ("  '{0}': código {1}." -f $p5.Path, $codigo5)
             }
             $resumo5 = "Herança ligada em $($passos5.Count - $falhas5 - $sumidas5) de $($passos5.Count) pasta(s) que o backup cobre."
             if ($sumidas5) { $resumo5 += " $sumidas5 já não existia(m) desde a cópia das permissões - não havia o que ligar nelas." }
@@ -4199,9 +4263,8 @@ function Invoke-WinForgeAclRestore {
             Write-Host ''
             Write-Host "Fase 5 de 6 - $($passo.Title)"
         }
-        $r = Invoke-WinForgeNativeCommand -FilePath ([string]$passo.FilePath) -Arguments @($passo.Arguments)
-        Write-Host ([string]$r.Text)
-        if ([int]$r.ExitCode -ne 0) { Write-Error "Esta etapa terminou com código $($r.ExitCode)." }
+        $codigoPasso = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $passo)
+        if ($codigoPasso -ne 0) { Write-Error "Esta etapa terminou com código $codigoPasso." }
     }
 
     # ---- O veredito. O cabeçalho MUDA quando alguma pasta não pôde ser lida: a fase 5 percorre só
@@ -4239,16 +4302,26 @@ function Invoke-WinForgeAclOwnerFallback {
         Os dois passos de '/setowner' vêm do PLANO (Kind 'setowner-socorro' e 'setowner-devolver'),
         e não são montados aqui: é o plano que sabe o dono padrão de cada pasta, e é ele que o
         -SelfTest confere.
+
+        As três chamadas passam pelo fluxo ao vivo, como as das fases 3 e 5, e isso vale dizer
+        porque é aqui que o cancelamento é PROIBIDO: entre a posse tomada e a posse devolvida a
+        pasta do sistema fica aberta a qualquer processo elevado. Transmitir a saída e poder
+        interromper são coisas separadas - esta função faz a primeira e continua sem oferecer a
+        segunda.
     .PARAMETER Plan
         A saída de Get-WinForgeAclRestorePlan.
     .PARAMETER Step
         O passo da fase 4 que respondeu 5.
+    .PARAMETER StreamPath
+        O arquivo que a janela de saída está acompanhando. Vazio, as três chamadas voltam ao caminho
+        de captura - ver Invoke-WinForgeAclStreamStep.
     .OUTPUTS
-        O resultado da segunda tentativa (ou o da primeira, quando o par de socorro não existe).
+        O código da segunda tentativa (ou 5, quando o par de socorro não existe no plano).
     #>
     param(
         [Parameter(Mandatory)]$Plan,
-        [Parameter(Mandatory)]$Step
+        [Parameter(Mandatory)]$Step,
+        [string]$StreamPath = ''
     )
 
     $pasta = ([string]$Step.Folder).TrimEnd('\')
@@ -4256,24 +4329,21 @@ function Invoke-WinForgeAclOwnerFallback {
     $devolver = @($Plan | Where-Object { [int]$_.Phase -eq 4 -and [string]$_.Kind -eq 'setowner-devolver' -and ([string]$_.Folder).TrimEnd('\') -eq $pasta })
     if (-not $socorro.Count -or -not $devolver.Count) {
         Write-Warning "Acesso negado em '$pasta' e esta pasta não tem dono padrão no plano: a posse fica como está."
-        return @{ ExitCode = 5; Text = '' }
+        return 5
     }
     Write-Host ''
     Write-Host "Acesso negado. $($socorro[0].Title)"
-    $rs = Invoke-WinForgeNativeCommand -FilePath ([string]$socorro[0].FilePath) -Arguments @($socorro[0].Arguments)
-    Write-Host ([string]$rs.Text)
-    if ([int]$rs.ExitCode -ne 0) {
-        Write-Error "A posse de '$pasta' não pôde ser assumida (código $($rs.ExitCode)); a concessão fica sem a segunda tentativa."
-        return $rs
+    $codigoSocorro = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $socorro[0])
+    if ($codigoSocorro -ne 0) {
+        Write-Error "A posse de '$pasta' não pôde ser assumida (código $codigoSocorro); a concessão fica sem a segunda tentativa."
+        return $codigoSocorro
     }
     Write-Host 'Segunda e última tentativa desta etapa.'
-    $rr = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments)
-    Write-Host ([string]$rr.Text)
+    $codigoRetentativa = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $Step)
     Write-Host $devolver[0].Title
-    $rd = Invoke-WinForgeNativeCommand -FilePath ([string]$devolver[0].FilePath) -Arguments @($devolver[0].Arguments)
-    Write-Host ([string]$rd.Text)
-    if ([int]$rd.ExitCode -ne 0) { Write-Error "A posse de '$pasta' NÃO voltou ao dono padrão (código $($rd.ExitCode)): a pasta ficou com os Administradores como dona." }
-    return $rr
+    $codigoDevolver = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $devolver[0])
+    if ($codigoDevolver -ne 0) { Write-Error "A posse de '$pasta' NÃO voltou ao dono padrão (código $codigoDevolver): a pasta ficou com os Administradores como dona." }
+    return $codigoRetentativa
 }
 
 function Invoke-WinForgeAclDenyRemoval {

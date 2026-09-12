@@ -277,15 +277,76 @@ function Format-WinForgeProcessArguments {
     return ($partes -join ' ')
 }
 
+function Open-WinForgeStreamWriter {
+    <#
+    .SYNOPSIS
+        O escritor PERSISTENTE do arquivo que a janela de saída acompanha. Um por caminho.
+    .DESCRIPTION
+        Era um StreamWriter novo POR LINHA - abrir, escrever, fechar. Numa fase 5 com 338 pastas,
+        cada uma com o cabeçalho '> icacls ...' e a resposta do icacls, isso é abrir e fechar o
+        mesmo arquivo milhares de vezes: medido, duas ordens de grandeza mais lento do que escrever
+        pelo escritor que já está aberto.
+
+        UM escritor por caminho, e é por isso que Invoke-WinForgeStreamedProcess também pega o dele
+        AQUI em vez de abrir o seu: dois StreamWriter em ACRÉSCIMO sobre o mesmo arquivo não se
+        somam. Cada FileStream guarda a própria posição, e o segundo escreve por cima do que o
+        primeiro escreveu - e, antes disso, o próprio Windows recusa a segunda abertura, porque o
+        compartilhamento padrão do StreamWriter(path, append) é FileShare.Read.
+
+        O compartilhamento é ReadWrite|Delete de propósito: a janela lê o arquivo de meio em meio
+        segundo enquanto ele é escrito (Invoke-WinForgeFollowTick abre com os mesmos três) e o
+        -SelfTest apaga arquivos de prova com o escritor ainda aberto. Quem NÃO lê assim é
+        '[System.IO.File]::ReadAllText', que pede FileShare.Read e recusa um arquivo com escritor
+        aberto - MEDIDO; 'Get-Content' lê.
+
+        AutoFlush ligado: sem o flush, a janela leria um arquivo vazio até o buffer de 4 KB encher,
+        que num sfc é o comando inteiro. O BOM só é escrito quando o arquivo está VAZIO - o
+        StreamWriter olha a posição do fluxo, e num acréscimo a um arquivo que já tem cabeçalho ela
+        nasce maior que zero.
+
+        Quem fecha é Close-WinForgeStreamWriter, no 'finally' do corpo da runspace. Até lá o
+        escritor fica no cache e todo mundo que escreve neste caminho usa o mesmo.
+    .OUTPUTS
+        [System.IO.StreamWriter].
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $existente = $sync.WinForgeStreamWriters[$Path]
+    if ($null -ne $existente) { return $existente }
+    $fluxo = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    $escritor = New-Object System.IO.StreamWriter($fluxo, (New-Object System.Text.UTF8Encoding $true))
+    $escritor.AutoFlush = $true
+    $sync.WinForgeStreamWriters[$Path] = $escritor
+    return $escritor
+}
+
+function Close-WinForgeStreamWriter {
+    <#
+    .SYNOPSIS
+        Fecha o escritor persistente de um caminho e o tira do cache.
+    .DESCRIPTION
+        Sai do cache ANTES de ser fechado: um Dispose que estoure (o flush final num disco cheio)
+        não pode deixar para trás um escritor morto que a próxima escrita neste caminho
+        reutilizaria. Caminho sem escritor é silêncio, e não erro - o 'finally' do corpo da runspace
+        chama esta função mesmo quando nenhum passo chegou a escrever coisa alguma.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $escritor = $sync.WinForgeStreamWriters[$Path]
+    if ($null -eq $escritor) { return }
+    [void]$sync.WinForgeStreamWriters.Remove($Path)
+    try { $escritor.Dispose() } catch { }
+}
+
 function Write-WinForgeStreamLine {
     <#
     .SYNOPSIS
         Acrescenta uma linha ao arquivo que a janela de saída está acompanhando.
     .DESCRIPTION
         Existe para o cabeçalho de cada passo ('> netsh.exe winsock reset') e para as frases finais
-        chegarem ao arquivo pelo MESMO caminho que a saída dos executáveis - mesma codificação, mesma
-        forma de abrir o arquivo. O compartilhamento é ReadWrite porque a janela lê o arquivo de meio
-        em meio segundo enquanto ele é escrito.
+        chegarem ao arquivo pelo MESMO caminho que a saída dos executáveis - mesmo escritor, mesma
+        codificação, mesma forma de abrir o arquivo. O escritor é o persistente de
+        Open-WinForgeStreamWriter, e é lá que está o porquê de ser um só por arquivo.
 
         Falha de escrita não derruba o comando: o passo seguinte importa mais do que uma linha de
         cabeçalho, e a saída de verdade continua indo para o mesmo arquivo.
@@ -295,10 +356,7 @@ function Write-WinForgeStreamLine {
         [string]$Text = ''
     )
 
-    try {
-        $escritor = New-Object System.IO.StreamWriter($Path, $true, (New-Object System.Text.UTF8Encoding $true))
-        try { $escritor.WriteLine([string]$Text) } finally { $escritor.Dispose() }
-    } catch { }
+    try { (Open-WinForgeStreamWriter -Path $Path).WriteLine([string]$Text) } catch { }
 }
 
 function Invoke-WinForgeStreamedProcess {
@@ -310,18 +368,43 @@ function Invoke-WinForgeStreamedProcess {
         com o outro caminho: não troca a code page do processo, não pega o mutex e não usa
         $LASTEXITCODE. Ver a documentação de -StreamTo para o porquê de cada uma dessas três.
 
-        O arquivo é aberto em ACRÉSCIMO e fechado no fim do processo, com AutoFlush ligado: sem o
-        flush, a janela leria um arquivo vazio até o buffer de 4 KB encher - que num sfc é o comando
-        inteiro. O StreamWriter só escreve o BOM quando o arquivo está vazio, então um arquivo que já
-        tem o cabeçalho não ganha três bytes no meio.
+        O escritor vem de Open-WinForgeStreamWriter (persistente, um por arquivo) e NÃO é fechado
+        aqui: quem fecha é o 'finally' do corpo da runspace, quando o comando inteiro termina. Ele é
+        pedido ANTES do Start(), e não depois: se o arquivo não puder ser aberto (a pasta sumiu, o
+        disco encheu, um antivírus segurou o identificador), a falha acontece com o processo ainda
+        parado, em vez de deixar um sfc de meia hora rodando sem ninguém para ler a saída dele - e
+        sem ninguém para pará-lo, porque quem chama já terá recebido a exceção.
+
+        OS DOIS FLUXOS SÃO LIDOS JUNTOS, linha a linha, com ReadLineAsync e Task.WaitAny na thread
+        de quem chama. São três defeitos num desenho só, e cada peça responde por um:
+
+        1. O ReadToEndAsync do fluxo de erro juntava o erro INTEIRO na memória até o processo
+           terminar. Num icacls de perfil o erro É o volume, e era ele que a fase 5 empilhava.
+        2. Ler a saída até o fim e SÓ ENTÃO olhar o erro trava os dois lados: o cano tem 4 KB, e um
+           processo que enche o buffer de erro para de escrever enquanto nós esperamos a saída que
+           ele não vai mandar. Esperar os dois juntos é o que impede isso.
+        3. E o pump do erro NÃO pode ser uma Task do .NET rodando um scriptblock convertido em
+           delegate: MEDIDO nesta máquina, no PowerShell 5.1, ele morre com "Não há Runspace
+           disponível para executar scripts neste thread", a Task fica 'Faulted' e ninguém lê o
+           fluxo de erro - o defeito 2 de volta, agora calado. É a mesma regra que já proíbe
+           manipulador de evento aqui, e é por isso que a leitura assíncrona é de .NET puro: quem
+           espera é esta thread, que tem runspace.
+
+        Com uma thread só escrevendo no arquivo, não há duas linhas se intercalando no meio de um
+        caractere - e nenhuma trava é necessária para garantir isso.
+    .PARAMETER NoCapture
+        Não junta o texto para devolver: 'Text' volta vazio. É para quem só quer o código de saída -
+        as fases 3 a 5 das permissões -, porque acumular centenas de MB num StringBuilder para
+        descartá-los no fim é exatamente o consumo de memória que o fluxo ao vivo existe para tirar.
     .OUTPUTS
-        @{ Text = <string>; ExitCode = <int> }.
+        @{ Text = <string>; ExitCode = <int> }. Com -NoCapture, Text = ''.
     #>
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$Arguments = @(),
         [Parameter(Mandatory)][string]$StreamTo,
-        [Parameter(Mandatory)][System.Text.Encoding]$Encoding
+        [Parameter(Mandatory)][System.Text.Encoding]$Encoding,
+        [switch]$NoCapture
     )
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -336,35 +419,45 @@ function Invoke-WinForgeStreamedProcess {
 
     $processo = New-Object System.Diagnostics.Process
     $processo.StartInfo = $psi
-    $acumulado = New-Object System.Text.StringBuilder
+    $acumulado = if ($NoCapture) { $null } else { New-Object System.Text.StringBuilder }
     $codigo = $null
-    $escritor = $null
     try {
-        # O escritor nasce ANTES do Start(), e não depois: se o arquivo não puder ser aberto (a pasta
-        # sumiu, o disco encheu, um antivírus segurou o identificador), a falha acontece com o
-        # processo ainda parado, em vez de deixar um sfc de meia hora rodando sem ninguém para ler a
-        # saída dele - e sem ninguém para pará-lo, porque quem chama já terá recebido a exceção.
-        $escritor = New-Object System.IO.StreamWriter($StreamTo, $true, (New-Object System.Text.UTF8Encoding $true))
-        $escritor.AutoFlush = $true
+        $escritor = Open-WinForgeStreamWriter -Path $StreamTo
         [void]$processo.Start()
-        $tarefaErro = $processo.StandardError.ReadToEndAsync()
-        while ($null -ne ($linha = $processo.StandardOutput.ReadLine())) {
-            $escritor.WriteLine($linha)
-            [void]$acumulado.AppendLine($linha)
+        $tSaida = $processo.StandardOutput.ReadLineAsync()
+        $tErro = $processo.StandardError.ReadLineAsync()
+        while ($null -ne $tSaida -or $null -ne $tErro) {
+            if ($null -eq $tErro) { $tSaida.Wait() }
+            elseif ($null -eq $tSaida) { $tErro.Wait() }
+            else { [void][System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($tSaida, $tErro)) }
+            if ($null -ne $tSaida -and $tSaida.IsCompleted) {
+                $linha = $tSaida.Result
+                if ($null -eq $linha) {
+                    $tSaida = $null
+                } else {
+                    $escritor.WriteLine($linha)
+                    if ($null -ne $acumulado) { [void]$acumulado.AppendLine($linha) }
+                    $tSaida = $processo.StandardOutput.ReadLineAsync()
+                }
+            }
+            if ($null -ne $tErro -and $tErro.IsCompleted) {
+                $linha = $tErro.Result
+                if ($null -eq $linha) {
+                    $tErro = $null
+                } else {
+                    $escritor.WriteLine("[erro] $linha")
+                    if ($null -ne $acumulado) { [void]$acumulado.AppendLine("[erro] $linha") }
+                    $tErro = $processo.StandardError.ReadLineAsync()
+                }
+            }
         }
         $processo.WaitForExit()
         $codigo = $processo.ExitCode
-        foreach ($linha in @([string]$tarefaErro.Result -split "`r`n|`n|`r")) {
-            if ([string]::IsNullOrWhiteSpace($linha)) { continue }
-            $escritor.WriteLine("[erro] $linha")
-            [void]$acumulado.AppendLine("[erro] $linha")
-        }
     } finally {
-        if ($null -ne $escritor) { try { $escritor.Dispose() } catch { } }
         try { $processo.Dispose() } catch { }
     }
 
-    return @{ Text = $acumulado.ToString(); ExitCode = $codigo }
+    return @{ Text = $(if ($null -ne $acumulado) { $acumulado.ToString() } else { '' }); ExitCode = $codigo }
 }
 
 function Invoke-WinForgeNativeCommand {
@@ -419,22 +512,27 @@ function Invoke-WinForgeNativeCommand {
         quem decodifica é o próprio Process, pelo StandardOutputEncoding, que vale só para ele. Como
         efeito colateral bom, dois comandos com fluxo ao vivo não disputam nada entre si.
 
-        O fluxo de erro é lido por uma tarefa do .NET (ReadToEndAsync) e não por um manipulador de
-        evento em PowerShell: manipulador criado dentro de uma runspace do pool volta a chamar o
-        PowerShell de uma thread do pool de threads, que é a receita de travamento desta base de
-        código. Sem leitura paralela nenhuma, um comando falante no fluxo de erro encheria o buffer
-        do cano (4 KB) e ficaria parado esperando alguém esvaziá-lo enquanto nós esperamos o fluxo de
-        saída - travamento dos dois lados. As linhas de erro entram no arquivo com o prefixo '[erro]',
-        depois da saída normal.
+        O fluxo de erro é lido linha a linha, de forma assíncrona e de .NET puro, ao mesmo tempo que
+        o da saída - e não por um manipulador de evento em PowerShell nem por um scriptblock numa
+        thread do pool de threads: os dois voltam a chamar o PowerShell de fora da runspace, que é a
+        receita de travamento desta base de código. Sem leitura paralela nenhuma, um comando falante
+        no fluxo de erro encheria o buffer do cano (4 KB) e ficaria parado esperando alguém
+        esvaziá-lo enquanto nós esperamos o fluxo de saída - travamento dos dois lados. As linhas de
+        erro entram no arquivo com o prefixo '[erro]', na ordem em que chegam.
+    .PARAMETER NoCapture
+        Só com -StreamTo: descarta o texto em vez de acumulá-lo, e 'Text' volta vazio. Para quem só
+        precisa do código de saída - guardar centenas de MB num StringBuilder para jogar fora no fim
+        é o consumo de memória que o fluxo ao vivo existe para tirar do caminho.
     .OUTPUTS
-        @{ Text = <string>; ExitCode = <int> }.
+        @{ Text = <string>; ExitCode = <int> }. Com -NoCapture, Text = ''.
     #>
     param(
         [string]$Command,
         [string]$FilePath,
         [string[]]$Arguments = @(),
         [string]$StreamTo,
-        [string]$Encoding = 'oem'
+        [string]$Encoding = 'oem',
+        [switch]$NoCapture
     )
 
     if ([string]::IsNullOrWhiteSpace($Command) -and [string]::IsNullOrWhiteSpace($FilePath)) {
@@ -446,9 +544,14 @@ function Invoke-WinForgeNativeCommand {
     if (-not [string]::IsNullOrWhiteSpace($StreamTo) -and [string]::IsNullOrWhiteSpace($FilePath)) {
         throw "Invoke-WinForgeNativeCommand -StreamTo só vale com -FilePath: pipeline de cmdlet não tem fluxo para acompanhar."
     }
+    # -NoCapture sem -StreamTo seria descartar a saída sem tê-la mandado para lugar nenhum: o
+    # chamador ficaria com o código de saída e com mais nada. É engano de quem chama, não opção.
+    if ($NoCapture -and [string]::IsNullOrWhiteSpace($StreamTo)) {
+        throw "Invoke-WinForgeNativeCommand -NoCapture só vale com -StreamTo: sem fluxo ao vivo, descartar o texto é descartar o resultado."
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($StreamTo)) {
-        return Invoke-WinForgeStreamedProcess -FilePath $FilePath -Arguments $Arguments -StreamTo $StreamTo -Encoding (Get-WinForgeOutputEncoding -Name $Encoding)
+        return Invoke-WinForgeStreamedProcess -FilePath $FilePath -Arguments $Arguments -StreamTo $StreamTo -Encoding (Get-WinForgeOutputEncoding -Name $Encoding) -NoCapture:$NoCapture
     }
 
     $encodingAnterior = $null
@@ -909,6 +1012,20 @@ $sync.CommandOutputQueue = [System.Collections.Queue]::Synchronized((New-Object 
 $sync.WinForgeStreamDone = [System.Collections.Hashtable]::Synchronized(@{})
 $sync.WinForgeStreamExit = [System.Collections.Hashtable]::Synchronized(@{})
 
+# O escritor persistente de cada arquivo com fluxo ao vivo, pela mesma chave dos dois de cima. Um
+# por caminho, e não um por chamador: dois StreamWriter em acréscimo sobre o mesmo arquivo escrevem
+# por cima um do outro, quando o Windows não recusa a segunda abertura antes disso. Quem abre é
+# Open-WinForgeStreamWriter, quem fecha é o 'finally' do corpo da runspace.
+$sync.WinForgeStreamWriters = [System.Collections.Hashtable]::Synchronized(@{})
+
+# O arquivo que o comando com fluxo ao vivo está escrevendo AGORA. É como um passo do tipo
+# 'Function' - que roda com todos os fluxos redirecionados para o arquivo, sem receber argumento
+# nenhum - descobre para onde escrever quando ele próprio quer mandar a saída de um executável
+# direto para lá, sem passar pelo Write-Host: é o caso das fases 3 a 5 de Invoke-WinForgeAclRestore,
+# onde o texto do icacls chega a centenas de MB. Escrito e apagado no corpo da runspace, junto com o
+# nome e o tipo do que está rodando.
+$sync.WinForgeStreamPath = ''
+
 # O ícone da barra de tarefas é objeto da JANELA: escrever nele de uma runspace do pool morre com
 # "outra thread é dona deste objeto". As funções da base que rodam dentro dos passos
 # (Invoke-WPFFixesUpdate, Invoke-WPFFixesWinget) chamam Set-WinUtilTaskbaritem sem passar pelo
@@ -1197,6 +1314,9 @@ $sync.WinForgeStreamBody = {
     param($wfArgs)
     $wfCaminho = [string]$wfArgs.Path
     $wfCodigo = 0
+    # Para onde um passo do tipo 'Function' manda a saída de um executável sem passar pelo Write-Host.
+    # É o que as fases 3 a 5 das permissões consultam - ver $sync.WinForgeStreamPath.
+    $sync.WinForgeStreamPath = $wfCaminho
     try {
         $wfCodigo = [int](Invoke-WinForgeStreamedSteps -Path $wfCaminho -Steps @($wfArgs.Steps) -Final ([string]$wfArgs.Final))
     } catch {
@@ -1204,6 +1324,12 @@ $sync.WinForgeStreamBody = {
         Write-WinForgeStreamLine -Path $wfCaminho -Text "[erro] $($_.Exception.Message)"
         Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$($wfArgs.Name) falhou: $($_.Exception.Message)"
     } finally {
+        # O escritor persistente fecha AQUI, e antes de a janela ser avisada do fim: ela lê o arquivo
+        # de meio em meio segundo e o último tique tem de encontrar tudo o que foi escrito. É também
+        # a única saída - um passo que estoure passa por este 'finally', e sem ele o identificador
+        # do arquivo ficaria aberto até o programa fechar.
+        Close-WinForgeStreamWriter -Path $wfCaminho
+        $sync.WinForgeStreamPath = ''
         $sync.WinForgeStreamExit[$wfCaminho] = $wfCodigo
         $sync.WinForgeStreamDone[$wfCaminho] = $true
         $sync.CommandRunning = $false

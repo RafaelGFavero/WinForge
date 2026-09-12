@@ -2791,6 +2791,10 @@ if ($SelfTest) {
         foreach ($wfStrLinha in @('a', 'b')) {
             if ([string]$wfStrRes.Text -notmatch "(?m)^$wfStrLinha\s*$") { Write-Host "  [ERRO] Correções (fluxo): a linha '$wfStrLinha' não voltou no texto" -ForegroundColor Red; $wbErrors++ }
         }
+        # O escritor é persistente e fica aberto até alguém fechá-lo (no programa, o 'finally' do
+        # corpo da runspace). '[System.IO.File]::ReadAllText' pede FileShare.Read e RECUSA um
+        # arquivo com escritor aberto - medido -, então o fecho vem antes da leitura.
+        Close-WinForgeStreamWriter -Path $wfStrArq
         if (-not (Test-Path -LiteralPath $wfStrArq)) {
             Write-Host "  [ERRO] Correções (fluxo): -StreamTo não gravou '$wfStrArq'" -ForegroundColor Red; $wbErrors++
         } else {
@@ -2804,7 +2808,7 @@ if ($SelfTest) {
         # E o escritor nasce ANTES do Start(): arquivo que não abre tem de estourar com o processo
         # ainda parado, e não deixar um sfc de meia hora rodando sem ninguém para ler a saída dele.
         $wfStrProc = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
-        $wfStrProcEsc = $wfStrProc.IndexOf('$escritor = New-Object System.IO.StreamWriter', [StringComparison]::Ordinal)
+        $wfStrProcEsc = $wfStrProc.IndexOf('$escritor = Open-WinForgeStreamWriter', [StringComparison]::Ordinal)
         $wfStrProcIni = $wfStrProc.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
         if ($wfStrProcEsc -lt 0 -or $wfStrProcIni -lt 0) { Write-Host "  [ERRO] Correções (fluxo): não achei o escritor ou o Start() em Invoke-WinForgeStreamedProcess" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfStrProcEsc -gt $wfStrProcIni) { Write-Host "  [ERRO] Correções (fluxo): o arquivo de saída é aberto DEPOIS de o processo começar" -ForegroundColor Red; $wbErrors++ }
@@ -2818,10 +2822,14 @@ if ($SelfTest) {
         $wfStrFn = Join-Path $wfStrDir ("selftest-passo-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
         Write-WinForgeStreamLine -Path $wfStrFn -Text '> primeiro'
         # O arquivo tem de ser legível JÁ, antes da segunda escrita: é isso que separa "ao vivo" de
-        # "no fim". Com buffer, a leitura aqui traria vazio.
-        $wfStrParcial = [System.IO.File]::ReadAllText($wfStrFn, [System.Text.Encoding]::UTF8)
+        # "no fim". Com buffer, a leitura aqui traria vazio. E a leitura é por 'Get-Content' de
+        # propósito - o escritor persistente ainda está ABERTO neste ponto, que é exatamente a
+        # situação da janela lendo o arquivo enquanto ele cresce. '[System.IO.File]::ReadAllText'
+        # pede FileShare.Read e recusaria; Get-Content lê.
+        $wfStrParcial = [string](Get-Content -LiteralPath $wfStrFn -Raw)
         Write-WinForgeStreamLine -Path $wfStrFn -Text 'segundo, com acento: configuração'
-        $wfStrFnTexto = [System.IO.File]::ReadAllText($wfStrFn, [System.Text.Encoding]::UTF8)
+        $wfStrFnTexto = [string](Get-Content -LiteralPath $wfStrFn -Raw)
+        Close-WinForgeStreamWriter -Path $wfStrFn
         if ($wfStrParcial -notmatch '> primeiro') { Write-Host "  [ERRO] Correções (passo): a primeira linha não estava no arquivo antes da segunda" -ForegroundColor Red; $wbErrors++ }
         if ($wfStrFnTexto -notmatch 'configuração') { Write-Host "  [ERRO] Correções (passo): o acréscimo perdeu o acento ou não aconteceu" -ForegroundColor Red; $wbErrors++ }
         if (([regex]::Matches($wfStrFnTexto, '> primeiro')).Count -ne 1) { Write-Host "  [ERRO] Correções (passo): o acréscimo reescreveu o arquivo em vez de acrescentar" -ForegroundColor Red; $wbErrors++ }
@@ -2985,6 +2993,7 @@ if ($SelfTest) {
         elseif (-not $wfEncPt -and ($wfEncCerto.IndexOf([char]0xFFFD) -ge 0 -or $wfEncCerto.Length -lt 50 -or $wfEncCerto -eq $wfEncErrado)) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM veio ilegível ou igual à leitura UTF-16 (idioma $([System.Globalization.CultureInfo]::CurrentUICulture.Name))" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfEncErrado.IndexOf('usuário', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Correções (codificação): a dica não chegou ao processo - lido como UTF-16 o texto saiu igual" -ForegroundColor Red; $wbErrors++ }
         else { Write-Host "  Correções (codificação): 4 nome(s) viram code page, $wfEncVistos passo(s) com a dica medida (chkdsk ANSI, sfc UTF-16, DISM/w32tm OEM, netsh UTF-8), dica conferida no processo" }
+        Close-WinForgeStreamWriter -Path $wfEncArq
         Remove-Item -LiteralPath $wfEncArq -Force -ErrorAction SilentlyContinue
     } catch {
         Write-Host "  [ERRO] Correções (codificação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -3315,6 +3324,69 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Correções (ferramenta): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # ---------------------------------------------------------------- Janela de saída: memória
+    # Não é o TextBox. As fases 2 a 5 chamavam Invoke-WinForgeNativeCommand SEM -StreamTo, caíam no
+    # 'Out-String -Width 4096' e o Write-Host seguinte virava UMA linha de centenas de MB: medido,
+    # 135 MB de saída viraram 1.575 MB de pico (11,7x).
+    $wfMemRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\stream'
+    try {
+        if (Test-Path -LiteralPath $wfMemRaiz) { Remove-Item -LiteralPath $wfMemRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfMemRaiz -Force | Out-Null
+        $wfMemArq = Join-Path $wfMemRaiz 'saida.txt'
+        Set-Content -LiteralPath $wfMemArq -Value 'cabecalho' -Encoding UTF8
+        # O escritor é PERSISTENTE: abrir e fechar o arquivo por linha é 99x mais lento.
+        $wfMemE1 = Open-WinForgeStreamWriter -Path $wfMemArq
+        $wfMemE2 = Open-WinForgeStreamWriter -Path $wfMemArq
+        if (-not [object]::ReferenceEquals($wfMemE1, $wfMemE2)) { Write-Host "  [ERRO] Fluxo (escritor): duas aberturas do mesmo arquivo devolveram escritores diferentes" -ForegroundColor Red; $wbErrors++ }
+        $wfMemRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+        1..2000 | ForEach-Object { Write-WinForgeStreamLine -Path $wfMemArq -Text "linha $_" }
+        $wfMemRelogio.Stop()
+        Close-WinForgeStreamWriter -Path $wfMemArq
+        if ((Measure-Object -InputObject (Get-Content -LiteralPath $wfMemArq -Raw) -Character).Characters -lt 2000) { Write-Host "  [ERRO] Fluxo (escritor): as linhas não chegaram ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-Content -LiteralPath $wfMemArq).Count -ne 2001) { Write-Host "  [ERRO] Fluxo (escritor): $(@(Get-Content -LiteralPath $wfMemArq).Count) linha(s), esperado 2001" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemRelogio.Elapsed.TotalSeconds -gt 5) { Write-Host "  [ERRO] Fluxo (escritor): 2000 linhas levaram $([int]$wfMemRelogio.Elapsed.TotalSeconds)s - o arquivo continua sendo aberto por linha" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.WinForgeStreamWriters.ContainsKey($wfMemArq)) { Write-Host "  [ERRO] Fluxo (escritor): o escritor não saiu do cache no Close" -ForegroundColor Red; $wbErrors++ }
+        # -NoCapture: o único chamador descarta o texto, e acumulá-lo num StringBuilder é guardar o
+        # volume inteiro na memória para jogar fora.
+        $wfMemSaida = Join-Path $wfMemRaiz 'cmd.txt'
+        Set-Content -LiteralPath $wfMemSaida -Value '' -Encoding UTF8
+        $wfMemRes = Invoke-WinForgeStreamedProcess -FilePath (Get-WinForgeSystemExe -Name 'cmd.exe') -Arguments @('/c', 'echo alfa& echo beta 1>&2') -StreamTo $wfMemSaida -Encoding (Get-WinForgeOutputEncoding -Name 'oem') -NoCapture
+        if ([string]$wfMemRes.Text -ne '') { Write-Host "  [ERRO] Fluxo (-NoCapture): Text veio com $(([string]$wfMemRes.Text).Length) caractere(s), esperado vazio" -ForegroundColor Red; $wbErrors++ }
+        Close-WinForgeStreamWriter -Path $wfMemSaida
+        $wfMemTexto = [string](Get-Content -LiteralPath $wfMemSaida -Raw)
+        if ($wfMemTexto -notmatch 'alfa') { Write-Host "  [ERRO] Fluxo (-NoCapture): a saída padrão não chegou ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemTexto -notmatch '\[erro\] beta') { Write-Host "  [ERRO] Fluxo (-NoCapture): o fluxo de erro não chegou ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        # O fluxo de erro é lido LINHA A LINHA e JUNTO com o da saída: o ReadToEndAsync junta o erro
+        # sem teto, e aqui o erro É o volume. E o pump do erro não pode ser um scriptblock rodado
+        # por 'Task::Run' - MEDIDO nesta máquina, PowerShell 5.1: convertido em delegate e invocado
+        # numa thread do pool de threads, ele morre com "Não há Runspace disponível para executar
+        # scripts neste thread", a Task fica 'Faulted' e NINGUÉM lê o fluxo de erro. Quatro KB de
+        # erro depois, o processo para de escrever, nós paramos de ler e os dois lados esperam.
+        #
+        # As quatro travas pegam a FORMA DA CHAMADA, e não o nome: as duas proibições são citadas de
+        # propósito no bloco de ajuda da função (é lá que está o porquê de cada uma), e o bloco de
+        # ajuda entra no ScriptBlock. Uma trava por nome solto ficaria vermelha para sempre.
+        $wfMemFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        if ($wfMemFonteP -match 'ReadToEndAsync\(\)') { Write-Host "  [ERRO] Fluxo (erro): a chamada a ReadToEndAsync continua lá - ela junta o erro inteiro na memória" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -notmatch '\$processo\.StandardError\.ReadLineAsync\(\)') { Write-Host "  [ERRO] Fluxo (erro): o fluxo de erro não é lido linha a linha" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -notmatch '\$processo\.StandardOutput\.ReadLineAsync\(\)') { Write-Host "  [ERRO] Fluxo (saída): o fluxo de saída não é lido linha a linha" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -notmatch '\[System\.Threading\.Tasks\.Task\]::WaitAny\(') { Write-Host "  [ERRO] Fluxo (erro): saída e erro não são esperados JUNTOS - o que não for lido enche o cano de 4 KB e trava os dois lados" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -match '::Run\(\[') { Write-Host "  [ERRO] Fluxo (erro): o fluxo de erro voltou a ser lido por um scriptblock dentro de uma Task - nessa thread não há runspace e ele nunca roda" -ForegroundColor Red; $wbErrors++ }
+        # As fases 3 a 5 passaram a usar o fluxo (a fase 2 não roda mais processo nenhum: depois da
+        # Tarefa 3 ela é caminhada do motor). São as três chamadas da fase 3, o laço por entrada da
+        # fase 5 e - a que faltava - a fase 4, dentro de Invoke-WinForgeAclOwnerFallback.
+        $wfMemFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if (@([regex]::Matches($wfMemFonteR, 'Invoke-WinForgeAclStreamStep')).Count -lt 4) { Write-Host "  [ERRO] Fluxo (fases): menos de 4 passos das fases 3 a 5 usam o fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
+        $wfMemFonteF4 = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
+        if ($wfMemFonteF4 -notmatch 'Invoke-WinForgeAclStreamStep') { Write-Host "  [ERRO] Fluxo (fase 4): Invoke-WinForgeAclOwnerFallback continua em Invoke-WinForgeNativeCommand, fora do fluxo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteF4 -match 'Invoke-WinForgeNativeCommand') { Write-Host "  [ERRO] Fluxo (fase 4): sobrou chamada direta a Invoke-WinForgeNativeCommand na troca de posse" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteR -match 'Write-Host \(\[string\]\$r\.Text\)') { Write-Host "  [ERRO] Fluxo (fases): ainda existe 'Write-Host ([string]`$r.Text)' - é a linha de centenas de MB" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Fluxo (memória): escritor persistente (2000 linhas em $([int]$wfMemRelogio.Elapsed.TotalMilliseconds)ms), -NoCapture sem texto, erro linha a linha, fases 3 a 5 no fluxo"
+    } catch {
+        Write-Host "  [ERRO] Fluxo (memória): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfMemRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Permissões do disco do sistema
     # O caso real: uma atualização de fabricante derrubou a cadeia de permissões do disco do Windows,
     # e o dono da máquina ficou sem acesso às próprias pastas. São três botões - Verificar (só lê),
@@ -3591,7 +3663,7 @@ if ($SelfTest) {
         # concessão, DEVOLVER a posse. Sem o terceiro a pasta do sistema fica com os
         # Administradores como dona e passa a aceitar alteração de qualquer processo elevado.
         $wfAclFonteFb = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
-        $wfAclPosFb = @('$socorro[0].FilePath', '$Step.FilePath', '$devolver[0].FilePath') | ForEach-Object { $wfAclFonteFb.IndexOf($_, [StringComparison]::Ordinal) }
+        $wfAclPosFb = @('-Step $socorro[0]', '-Step $Step', '-Step $devolver[0]') | ForEach-Object { $wfAclFonteFb.IndexOf($_, [StringComparison]::Ordinal) }
         if (@($wfAclPosFb | Where-Object { $_ -lt 0 }).Count) { Write-Host "  [ERRO] Permissões (socorro): a função não roda os três movimentos (posse, segunda tentativa, devolução)" -ForegroundColor Red; $wbErrors++ }
         elseif (-not ($wfAclPosFb[0] -lt $wfAclPosFb[1] -and $wfAclPosFb[1] -lt $wfAclPosFb[2])) { Write-Host "  [ERRO] Permissões (socorro): a ordem é posse -> segunda tentativa -> devolução, e o fonte está em outra" -ForegroundColor Red; $wbErrors++ }
         # Fase 5: conceder na RAIZ do perfil antes de ligar a herança do conteúdo. Ao contrário, a
