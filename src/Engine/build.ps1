@@ -4952,6 +4952,25 @@ if ($SelfTest) {
         $wfIdxFonteM = [string](Get-Command Set-WinForgeAclIndexConsumed).ScriptBlock
         if ($wfIdxFonteM.IndexOf('[System.IO.File]::Replace(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): a marca não é gravada por troca ([System.IO.File]::Replace) - truncado no meio, o índice vira ilegível" -ForegroundColor Red; $wbErrors++ }
         if ($wfIdxFonteM -match "Set-Content -LiteralPath \(\[string\]\`$Path\)") { Write-Host "  [ERRO] Permissões (Consumed): a reescrita no lugar voltou - é ela que transforma uma interrupção em índice ilegível" -ForegroundColor Red; $wbErrors++ }
+        # O TEMPORÁRIO é endurecido ANTES da troca, e esta é a metade de segurança do conserto.
+        # File.Replace preserva a LISTA do destino (a asserção de SDDL acima mede isso), mas o
+        # arquivo que fica é o TEMPORÁRIO renomeado - e arquivo criado por processo elevado nasce
+        # pertencendo à CONTA, não ao grupo Administradores (wf-server.ps1, Protect-WinForgeSnapshotFile).
+        # Dono guarda WRITE_DAC implícito: um processo de integridade MÉDIA da mesma conta reabriria
+        # o índice já consumido, plantaria um 'ExternalPath' e a limpeza elevada apagaria aquele
+        # caminho. A busca é pela forma da CHAMADA, com o argumento junto.
+        $wfIdxPosProt = $wfIdxFonteM.IndexOf('Protect-WinForgeSnapshotFile -Path $temporario', [StringComparison]::Ordinal)
+        $wfIdxPosTroca = $wfIdxFonteM.IndexOf('[System.IO.File]::Replace(', [StringComparison]::Ordinal)
+        if ($wfIdxPosProt -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): o temporário não passa por Protect-WinForgeSnapshotFile - o índice trocado fica com o dono errado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIdxPosTroca -ge 0 -and $wfIdxPosProt -gt $wfIdxPosTroca) { Write-Host "  [ERRO] Permissões (Consumed): o endurecimento vem DEPOIS da troca - a essa altura o arquivo já está no lugar com o dono errado" -ForegroundColor Red; $wbErrors++ }
+        # A marca continua avançando a fila mesmo quando o endurecimento não é possível, e DIZ isso:
+        # parar aqui deixaria o conjunto pendente para sempre, que é o beco sem saída que a rodada
+        # anterior fechou. Sem elevação o endurecimento não acontece - é o caso desta máquina de build.
+        $wfIdxMarca = Set-WinForgeAclIndexConsumed -Path $wfIdxAlvoM
+        if (-not $wfIdxMarca.Ok) { Write-Host "  [ERRO] Permissões (Consumed): a marca deixou de avançar a fila quando o endurecimento falha ('$($wfIdxMarca.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfIdxMarca.ContainsKey('Hardened')) { Write-Host "  [ERRO] Permissões (Consumed): a marca não diz se o índice trocado ficou endurecido" -ForegroundColor Red; $wbErrors++ }
+        elseif ([bool]$wfIdxMarca.Hardened -and -not (Test-WinForgeRepairElevated)) { Write-Host "  [ERRO] Permissões (Consumed): a marca afirmou ter endurecido o arquivo SEM elevação - trocar o dono para Administradores exige elevação" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not [bool]$wfIdxMarca.Hardened -and [string]::IsNullOrWhiteSpace([string]$wfIdxMarca.Reason)) { Write-Host "  [ERRO] Permissões (Consumed): o endurecimento falhou CALADO - quem chama não tem como avisar" -ForegroundColor Red; $wbErrors++ }
         $wfIdxConj2 = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
         if ([string]$wfIdxConj2.Stamp -ne '20260202-000000') { Write-Host "  [ERRO] Permissões (Consumed): depois de consumido o primeiro, o conjunto é '$($wfIdxConj2.Stamp)', esperado '20260202-000000'" -ForegroundColor Red; $wbErrors++ }
         if ([int]$wfIdxConj2.Pending -ne 1) { Write-Host "  [ERRO] Permissões (Consumed): Pending=$($wfIdxConj2.Pending), esperado 1" -ForegroundColor Red; $wbErrors++ }
@@ -5189,13 +5208,24 @@ if ($SelfTest) {
         $wfLimpBytesPasta = [long]0
         foreach ($wfLimpFP in @(Get-ChildItem -LiteralPath $wfLimpRaiz -File)) { $wfLimpBytesPasta += [long]$wfLimpFP.Length }
         if ([long]$wfLimpAvisoExt.Bytes -ne $wfLimpBytesPasta) { Write-Host "  [ERRO] Permissões (externo): o aviso de tamanho somou $($wfLimpAvisoExt.Bytes) byte(s) e a pasta tem $wfLimpBytesPasta - arquivo de outro disco entrou na conta da pasta" -ForegroundColor Red; $wbErrors++ }
-        # A simulação lista os dois pelo caminho COMPLETO, e o ausente sai dizendo que o disco não
-        # está disponível - em vez de sumir da lista sem uma palavra.
+        # SEGURANÇA. O índice desta pasta de teste NÃO passa em Test-WinForgeAclBackupFile - ele mora
+        # em %TEMP% e pertence à identidade atual -, então o caminho externo que ele nomeia não pode
+        # virar argumento de um Remove-Item ELEVADO. É o caminho de escalonamento: conteúdo que um
+        # processo de integridade média controla virando remoção com privilégio.
+        foreach ($wfLimpX in $wfLimpInvExt) {
+            if ($wfLimpX.Trusted) { Write-Host "  [ERRO] Permissões (externo): '$($wfLimpX.Path)' saiu como CONFIÁVEL, e quem o nomeia é um índice de %TEMP% que não passa na conferência de confiança" -ForegroundColor Red; $wbErrors++ }
+        }
         $wfLimpSecoExt = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
-        if (-not @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) { Write-Host "  [ERRO] Permissões (externo): a simulação não lista o arquivo de conteúdo que foi para outro disco" -ForegroundColor Red; $wbErrors++ }
-        $wfLimpSecoAusente = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtSumido, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
-        if (-not $wfLimpSecoAusente.Count) { Write-Host "  [ERRO] Permissões (externo): a simulação omite o arquivo externo cujo disco não está disponível" -ForegroundColor Red; $wbErrors++ }
-        elseif (([string]$wfLimpSecoAusente[0]).IndexOf('não está disponível', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpSecoAusente[0])')" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpApagaExt = @($wfLimpSecoExt | Where-Object { ([string]$_).StartsWith('[simulação] apagar ', [StringComparison]::Ordinal) -and ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if ($wfLimpApagaExt.Count) { Write-Host "  [ERRO] Permissões (externo): um caminho vindo de índice NÃO confiável virou alvo de remoção elevada ('$($wfLimpApagaExt[0])')" -ForegroundColor Red; $wbErrors++ }
+        # Mas ele continua APARECENDO: omitir em silêncio é o defeito que a rodada passada consertou.
+        # O que muda é a instrução - apagar à mão, com o caminho completo na frente.
+        $wfLimpAvisaExt = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if (-not $wfLimpAvisaExt.Count) { Write-Host "  [ERRO] Permissões (externo): o arquivo de outro disco sumiu da simulação - ele tem de aparecer mesmo sem ser apagado" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpAvisaExt[0]).IndexOf('à mão', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo que o WinForge não vai apagar não diz o que fazer ('$($wfLimpAvisaExt[0])')" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpAvisaSumido = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtSumido, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if (-not $wfLimpAvisaSumido.Count) { Write-Host "  [ERRO] Permissões (externo): a simulação omite o arquivo externo cujo disco não está disponível" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpAvisaSumido[0]).IndexOf('não está disponível', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpAvisaSumido[0])')" -ForegroundColor Red; $wbErrors++ }
         Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue
         # E a linha recusa despacho sem ninguém para confirmar.

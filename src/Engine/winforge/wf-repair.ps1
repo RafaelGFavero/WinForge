@@ -4556,10 +4556,21 @@ function Set-WinForgeAclIndexConsumed {
         exatamente o estado que prende o conjunto na fila e deixa a restauração recusada. O texto
         novo vai para um temporário ao lado e [IO.File]::Replace() troca os dois de uma vez.
 
-        Replace mantém dono e lista do DESTINO - medido, lista idêntica antes e depois -, então o
-        endurecimento de Protect-WinForgeSnapshotFile continua valendo sem precisar ser refeito no
-        arquivo novo. O temporário nasce na MESMA pasta, por duas razões: Replace exige o mesmo
-        volume, e a pasta já é a protegida, então o arquivo intermediário nunca fica exposto.
+        Replace mantém a LISTA do destino - medido, SDDL idêntico antes e depois -, mas NÃO o DONO:
+        o arquivo que fica é o temporário renomeado, e arquivo criado por processo elevado nasce
+        pertencendo à CONTA, não ao grupo Administradores (ver Protect-WinForgeSnapshotFile). Dono
+        guarda WRITE_DAC implícito, e o estrago não é só funcional - índice com dono errado é
+        recusado na conferência do Desfazer seguinte: um processo de integridade MÉDIA da mesma
+        conta reabriria o índice já consumido e plantaria um 'ExternalPath', que a limpeza elevada
+        apagaria. Por isso o TEMPORÁRIO é endurecido ANTES da troca, e não o destino depois dela.
+
+        Endurecimento que falha NÃO cancela a marca, e isso é deliberado: parar aqui deixaria o
+        conjunto pendente para sempre, que é o beco sem saída já consertado. O que acontece é que
+        'Hardened' volta falso com o motivo, quem chama avisa, e a segunda porta continua de pé - o
+        inventário não honra caminho externo vindo de índice que não passa na conferência.
+
+        O temporário nasce na MESMA pasta, por duas razões: Replace exige o mesmo volume, e a pasta
+        já é a protegida, então o arquivo intermediário nunca fica exposto.
 
         Morrer ENTRE o '/restore' e a marca continua aceitável: a operação é idempotente e a
         execução seguinte reaplica o mesmo conjunto. O que não era aceitável é morrer DENTRO da
@@ -4570,11 +4581,12 @@ function Set-WinForgeAclIndexConsumed {
         O NOME é conferido antes da abertura: esta função escreve, e o caminho vem de um arquivo de
         índice. 'acl-index-*.json' é a única forma que ela aceita.
     .OUTPUTS
-        @{ Ok = <bool>; Reason = <string> }.
+        @{ Ok = <bool>; Reason = <string>; Hardened = <bool> }. 'Ok' é a marca gravada; 'Hardened'
+        é o dono e a lista do arquivo trocado, e pode ser falso com 'Ok' verdadeiro.
     #>
     param([Parameter(Mandatory)][string]$Path)
 
-    $r = @{ Ok = $false; Reason = '' }
+    $r = @{ Ok = $false; Reason = ''; Hardened = $false }
     $nome = ''
     try { $nome = [string](Split-Path -Leaf ([string]$Path)) } catch { $nome = '' }
     if ($nome -notmatch '^acl-index-.+\.json$') {
@@ -4592,6 +4604,11 @@ function Set-WinForgeAclIndexConsumed {
         # '-Force' porque o índice da 1.7.0 não TEM o campo: ali a marca é criada, não atualizada.
         $dados | Add-Member -NotePropertyName 'Consumed' -NotePropertyValue $true -Force
         Set-Content -LiteralPath $temporario -Value ($dados | ConvertTo-Json -Depth 5) -Encoding UTF8 -ErrorAction Stop
+        # Dono e lista ANTES da troca: é o temporário que vai ficar no lugar do índice, e o Replace
+        # não leva o dono do destino junto. Falhar aqui não cancela a marca - ver a descrição.
+        $endurecido = Protect-WinForgeSnapshotFile -Path $temporario
+        $r.Hardened = [bool]$endurecido.Hardened
+        if (-not $r.Hardened) { $r.Reason = "o índice trocado não pôde ser endurecido ($($endurecido.Reason)); o conjunto sai da fila do mesmo jeito, mas o arquivo fica com o dono de quem o gravou" }
         # '[NullString]::Value', e não '$null'. MEDIDO: '$null' num parâmetro [string] de método .NET
         # chega como STRING VAZIA, e '' não é caminho - a chamada morre com "O caminho tem um formato
         # inválido" e a marca nunca é gravada. '[NullString]::Value' existe exatamente para isso, e é
@@ -4600,6 +4617,7 @@ function Set-WinForgeAclIndexConsumed {
         $r.Ok = $true
     } catch {
         $r.Reason = $_.Exception.Message
+        $r.Hardened = $false
     } finally {
         # O temporário só sobrevive a uma troca que não aconteceu. Deixá-lo na pasta daria um órfão
         # para a limpeza apagar e um arquivo a mais na conta do aviso de tamanho.
@@ -5313,9 +5331,11 @@ function Get-WinForgeAclBackupInventory {
         Pasta de backup alternativa, para o teste. A padrão é Get-WinForgeAclBackupRoot.
     .OUTPUTS
         @(@{ Name; Path; Bytes; Date; Kind = 'indice'|'conteudo'; Orphan = <bool>; Consumed = <bool>;
-        Unreadable = <bool>; External = <bool>; Missing = <bool> }), em ordem ordinal por nome.
-        Com 'External', 'Path' é o caminho COMPLETO no outro disco e 'Missing' diz que ele não está
-        lá agora - disco desligado, que é o caso comum e não um erro.
+        Unreadable = <bool>; External = <bool>; Missing = <bool>; Trusted = <bool> }), em ordem
+        ordinal por nome. Com 'External', 'Path' é o caminho COMPLETO no outro disco e 'Missing' diz
+        que ele não está lá agora - disco desligado, que é o caso comum e não um erro. 'Trusted' é
+        se o índice que NOMEIA aquele caminho passou em Test-WinForgeAclBackupFile: só caminho
+        confiável pode virar argumento de uma remoção elevada.
     #>
     param([string]$Root)
 
@@ -5326,6 +5346,16 @@ function Get-WinForgeAclBackupInventory {
 
     $indices = @(Get-WinForgeAclIndexList -Root $dir)
     $cego = [bool]@($indices | Where-Object { -not $_.Readable }).Count
+    # SEGUNDA passada, com exigência de CONFIANÇA, e ela existe por segurança e não por arrumação.
+    # O caminho de um arquivo DENTRO da pasta sai de Get-ChildItem - conteúdo de arquivo nenhum
+    # escolhe esse caminho. Já 'ExternalPath' sai de DENTRO do índice, que é um arquivo de texto, e
+    # vira argumento de um Remove-Item ELEVADO: se esse índice puder ser reescrito por um processo
+    # de integridade média, quem escolhe o que a limpeza apaga é aquele processo. Test-WinForgeAclBackupFile
+    # é quem separa os dois casos, e o '-Trusted' a aplica ANTES de o JSON ser analisado.
+    $confiaveis = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($idx in @(Get-WinForgeAclIndexList -Root $dir -Trusted)) {
+        if (-not $idx.Refused) { [void]$confiaveis.Add([string]$idx.Path) }
+    }
     # Quem é citado por quem. O índice nomeia o arquivo de conteúdo pelo NOME, e é o Desfazer que
     # reancora esse nome dentro da pasta protegida - por isso a chave aqui também é o nome, e a
     # folha é tirada com Split-Path para um 'sub\..\x.txt' plantado no índice não virar chave nova.
@@ -5377,6 +5407,9 @@ function Get-WinForgeAclBackupInventory {
             Unreadable = $ilegivel
             External   = $false
             Missing    = $false
+            # Caminho que saiu de Get-ChildItem sobre a pasta já conferida: conteúdo de arquivo
+            # nenhum o escolheu, então não há o que desconfiar dele.
+            Trusted    = $true
         })
     }
 
@@ -5389,13 +5422,22 @@ function Get-WinForgeAclBackupInventory {
     # assim mesmo, porque omitir em silêncio é o que se está consertando. 'Orphan' nunca vale aqui -
     # se ele está nesta lista é porque um índice o citou.
     $externos = New-Object 'System.Collections.Generic.Dictionary[string,bool]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $externosFiaveis = New-Object 'System.Collections.Generic.Dictionary[string,bool]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($idx in $indices) {
+        $idxFiavel = $confiaveis.Contains([string]$idx.Path)
         foreach ($it in @($idx.Items)) {
             $ext = ''
             try { $ext = ([string]$it.ExternalPath).Trim() } catch { $ext = '' }
             if ([string]::IsNullOrWhiteSpace($ext)) { continue }
-            if ($externos.ContainsKey($ext)) { $externos[$ext] = $externos[$ext] -and [bool]$idx.Consumed }
-            else { $externos[$ext] = [bool]$idx.Consumed }
+            if ($externos.ContainsKey($ext)) {
+                $externos[$ext] = $externos[$ext] -and [bool]$idx.Consumed
+                # Um índice não confiável no meio derruba a confiança do caminho inteiro: basta um
+                # para que a escolha do caminho tenha passado por mãos erradas.
+                $externosFiaveis[$ext] = $externosFiaveis[$ext] -and $idxFiavel
+            } else {
+                $externos[$ext] = [bool]$idx.Consumed
+                $externosFiaveis[$ext] = $idxFiavel
+            }
         }
     }
     foreach ($ext in @($externos.Keys)) {
@@ -5415,6 +5457,7 @@ function Get-WinForgeAclBackupInventory {
             Unreadable = $false
             External   = $true
             Missing    = ($null -eq $info)
+            Trusted    = [bool]$externosFiaveis[$ext]
         })
     }
     $arr = $saida.ToArray()
@@ -5745,18 +5788,33 @@ function Invoke-WinForgeAclCleanup {
     # O que aparece na tela de um item de OUTRO disco é o caminho COMPLETO, e não a folha: 'ligue o
     # disco' só ajuda quem sabe qual. E o item ausente sai com o motivo do disco em vez de sumir da
     # lista - omitir em silêncio era o defeito.
+    # O WinForge só entrega a um Remove-Item ELEVADO caminho em que ele confia. Caminho de dentro da
+    # pasta vem de Get-ChildItem sobre a pasta já conferida; caminho de FORA vem de dentro de um
+    # índice, e só vale se aquele índice passou na conferência de confiança. Sem esta porta, um
+    # processo de integridade média que consiga reescrever um índice escolhe o que a limpeza apaga.
+    $apagavel = {
+        param($item)
+        [bool]((-not $item.External) -or $item.Trusted)
+    }
     $linha = {
         param($item)
         $onde = if ($item.External) { [string]$item.Path } else { [string]$item.Name }
         $quando = if ($null -eq $item.Date) { 'sem data' } else { ([datetime]$item.Date).ToString('dd/MM/yyyy HH:mm') }
-        $porque = if ($item.External -and $item.Missing) { "em outro disco, que não está disponível agora - $(& $motivo $item)" } else { & $motivo $item }
+        # Os dois motivos se EMPILHAM, não se escolhem: um arquivo pode estar num disco desligado E
+        # vir de um índice em que não se confia, e o usuário precisa dos dois fatos para decidir.
+        $porque = & $motivo $item
+        if ($item.External -and $item.Missing) { $porque = "em outro disco, que não está disponível agora - $porque" }
+        if ($item.External -and -not $item.Trusted) { $porque = "o índice que o nomeia não passou na conferência de confiança - $porque" }
         "'$onde' - $($item.Bytes) byte(s), $quando, $porque"
     }
 
     if ($DryRun) {
         $secos = @(Get-WinForgeAclBackupInventory -Root $BackupRoot | Where-Object { (& $solto $_) -or $DiscardPending })
         if (-not $secos.Count) { return @('[simulação] nada a apagar: todo arquivo desta pasta pertence a um backup que ninguém desfez.') }
-        return @($secos | ForEach-Object { "[simulação] apagar $(& $linha $_)" })
+        return @($secos | ForEach-Object {
+            if (& $apagavel $_) { "[simulação] apagar $(& $linha $_)" }
+            else { "[simulação] NÃO será apagado pelo WinForge, apague à mão: $(& $linha $_)" }
+        })
     }
     if ($Probe) {
         $elevado = [bool](Test-WinForgeRepairElevated)
@@ -5815,7 +5873,15 @@ function Invoke-WinForgeAclCleanup {
     $liberados = [long]0
     $falhas = @()
     $ausentes = @()
+    $aMao = @()
     foreach ($a in $alvos) {
+        # Caminho de fora vindo de índice que não passou na conferência: o WinForge não o apaga, e
+        # diz isso com o caminho na frente. Apagar "por garantia" aqui é o caminho de escalonamento.
+        if (-not (& $apagavel $a)) {
+            $aMao += ("'$($a.Path)'")
+            Write-Host ("  NÃO será apagado pelo WinForge, apague à mão: $(& $linha $a)")
+            continue
+        }
         # Disco desligado não é falha, é instrução: o item continua no índice, o arquivo continua no
         # outro disco, e a limpeza seguinte o alcança. Dizer qual disco ligar é o que resolve.
         if ($a.External -and $a.Missing) {
@@ -5842,6 +5908,7 @@ function Invoke-WinForgeAclCleanup {
     Write-Host ''
     Write-Host "Limpeza concluída: $apagados de $($alvos.Count) arquivo(s) apagados, $([math]::Round($liberados / 1MB, 1)) MB liberados."
     if ($ausentes.Count) { Write-Warning ("Backup de conteúdo em outro disco, que não está disponível agora: {0}. Ligue o disco e rode a limpeza de novo - eles continuam ocupando espaço lá." -f ($ausentes -join '; ')) }
+    if ($aMao.Count) { Write-Warning ("Estes arquivos estão fora da pasta protegida e o índice que os nomeia não passou na conferência de confiança, então o WinForge NÃO os apaga: {0}. Confira o caminho e apague à mão se ele for mesmo seu." -f ($aMao -join '; ')) }
     if ($falhas.Count) { Write-Error ("Não foi possível apagar: {0}." -f ($falhas -join '; ')) }
     $sobrando = @($todos | Where-Object { $_.Path -notin @($alvos | ForEach-Object { [string]$_.Path }) }).Count
     if ($sobrando) { Write-Host "$sobrando arquivo(s) ficaram: eles pertencem a backup que ninguém desfez, e é deles que o botão Desfazer depende. Para descartá-los, rode a limpeza de novo e confirme o descarte por escrito." }
