@@ -142,28 +142,58 @@ function Test-WinForgeCommandRequirement {
     return [bool](Get-Command $Requires -ErrorAction SilentlyContinue)
 }
 
-function Get-WinForgeCommandOutputPath {
+function Get-WinForgeCommandOutputRoot {
     <#
     .SYNOPSIS
-        Caminho do arquivo de saída de um comando: <prefixo>-<Nome>-<aaaaMMdd-HHmmss>.txt na pasta de logs.
+        A pasta onde vivem os arquivos de saída de comando. Cria se não existir.
     .DESCRIPTION
-        A pasta é a mesma da sessão ($sync.logPath): quem for pedir ajuda já sabe olhar lá, e não
-        aparece uma segunda pasta só para isso. Com os segundos no nome, dois cliques seguidos não se
-        sobrescrevem.
+        A mesma da sessão ($sync.logPath): quem for pedir ajuda já sabe olhar lá, e não aparece uma
+        segunda pasta só para isso.
 
-        O prefixo é de quem chama ('server', 'repair'): assim os arquivos de abas diferentes convivem
-        na mesma pasta sem se confundirem, e uma listagem por prefixo continua trazendo só os de uma.
+        Mora numa função própria porque tem DOIS donos - quem prepara um caminho novo e quem faz a
+        retenção -, e a segunda não pode chamar a primeira: a primeira dispara a retenção, e as duas
+        se chamariam em círculo.
+    .OUTPUTS
+        O caminho da pasta.
     #>
-    param(
-        [Parameter(Mandatory)][string]$Name,
-        [string]$Prefix = 'command'
-    )
+    param()
 
     $dir = $null
     if ($null -ne $sync -and $sync.logPath) { $dir = Split-Path -Parent $sync.logPath }
     # Get-WinForgeUserDataRoot, e não $env:LocalAppData: a mesma regra das outras pastas do motor.
     if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Join-Path (Get-WinForgeUserDataRoot) 'WinForge\logs' }
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    return [string]$dir
+}
+
+function Get-WinForgeCommandOutputPath {
+    <#
+    .SYNOPSIS
+        Prepara e devolve o caminho do arquivo de saída de um comando:
+        <prefixo>-<Nome>-<aaaaMMdd-HHmmss>.txt na pasta de logs.
+    .DESCRIPTION
+        Com os segundos no nome, dois cliques seguidos não se sobrescrevem.
+
+        O prefixo é de quem chama ('server', 'repair', 'command'): assim os arquivos de abas
+        diferentes convivem na mesma pasta sem se confundirem, e uma listagem por prefixo continua
+        trazendo só os de uma.
+
+        PREPARA, e não só calcula: além de criar a pasta, é AQUI que a retenção do prefixo roda. Este
+        é o único ponto por onde todo arquivo de saída passa - a aba Servidor, os botões de leitura e
+        o fluxo ao vivo do reparo -, e pendurar a limpeza em quem CRIA o arquivo deixava de fora
+        todos menos um: era só 'repair' que encolhia, e 'server' e 'command' cresciam para sempre.
+
+        A limpeza roda antes de o arquivo desta execução existir, então a pasta fica com os 20
+        anteriores MAIS o de agora. O teto é da fila que já estava lá, e não do conteúdo da pasta no
+        instante seguinte - 21 arquivos em vez de 20 não é o que essa retenção existe para evitar.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Prefix = 'command'
+    )
+
+    $dir = Get-WinForgeCommandOutputRoot
+    [void](Remove-WinForgeOldCommandOutput -Prefix $Prefix -Root $dir)
     return (Join-Path $dir ("{0}-{1}-{2}.txt" -f $Prefix, $Name, (Get-Date -Format 'yyyyMMdd-HHmmss')))
 }
 
@@ -1102,8 +1132,10 @@ function Remove-WinForgeOldCommandOutput {
         [string]$Root = ''
     )
 
+    # Get-WinForgeCommandOutputRoot, e NÃO Get-WinForgeCommandOutputPath: aquela dispara esta
+    # função, e as duas se chamariam em círculo até a pilha acabar.
     $dir = $Root
-    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Split-Path -Parent (Get-WinForgeCommandOutputPath -Name 'retencao' -Prefix $Prefix) }
+    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Get-WinForgeCommandOutputRoot }
     $apagados = @()
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return @{ Removed = @() } }
     $arquivos = @(Get-ChildItem -LiteralPath $dir -File -Filter ("{0}-*.txt" -f $Prefix) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
@@ -1754,11 +1786,6 @@ function Start-WinForgeStreamedCommand {
         $caminho = Get-WinForgeCommandOutputPath -Name $Name -Prefix 'repair'
         $cabecalho = "WinForge - $($Spec.Title)`r`n$((Get-Date).ToString('dd/MM/yyyy HH:mm:ss')) - $env:COMPUTERNAME`r`n" + ('-' * 78)
         Set-Content -LiteralPath $caminho -Value $cabecalho -Encoding UTF8 -ErrorAction Stop
-        # A retenção roda UMA vez por execução, aqui, e DEPOIS de o arquivo desta nascer: assim ela
-        # conta o de agora entre os vinte que ficam, e nunca apaga o que a janela vai acompanhar.
-        # Estes arquivos nunca eram apagados - um DISM de 40 MB por clique, semana após semana, é a
-        # pasta de logs crescendo para sempre, e disco cheio foi metade da queixa que abriu isto.
-        [void](Remove-WinForgeOldCommandOutput -Prefix 'repair')
         $sync.WinForgeStreamDone[$caminho] = $false
         $sync.WinForgeStreamExit[$caminho] = $null
 

@@ -3585,9 +3585,45 @@ if ($SelfTest) {
         # começo é o que separa retenção de "apagar o histórico que o usuário acabou de gerar".
         if (-not (Test-Path -LiteralPath (Join-Path $wfTetoDir 'repair-X-20260925-101010.txt'))) { Write-Host "  [ERRO] Tetos (retenção): o arquivo mais NOVO foi apagado - a fila está sendo cortada pelo lado errado" -ForegroundColor Red; $wbErrors++ }
         if (Test-Path -LiteralPath (Join-Path $wfTetoDir 'repair-X-20260901-101010.txt')) { Write-Host "  [ERRO] Tetos (retenção): o arquivo mais VELHO ficou - o corte de 20 não está tirando os de baixo da fila" -ForegroundColor Red; $wbErrors++ }
-        # E a retenção roda UMA vez por execução, de quem cria o arquivo.
-        $wfTetoFonteS = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
-        if ($wfTetoFonteS.IndexOf('Remove-WinForgeOldCommandOutput -Prefix', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (retenção): ninguém chama a limpeza ao abrir um comando com fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
+        # E a retenção é DISPARADA de verdade, para TODO prefixo, por quem prepara o caminho do
+        # arquivo de saída. Duas coisas trocadas de uma vez, e as duas eram achado:
+        #
+        # - só 'repair' era limpo, porque a chamada morava no botão de fluxo ao vivo; 'server' e
+        #   'command' (aba Servidor e botões de leitura) cresciam para sempre, e a especificação diz
+        #   "por prefixo", sem restringir;
+        # - e a trava era um IndexOf do nome da função com o nome do parâmetro colado, dentro do
+        #   fonte de quem chama. Isso é trava por NOME: ela fica verde com a chamada dentro de um
+        #   'if ($false)', com o parâmetro trocado por uma variante literal, ou com a linha virando
+        #   comentário. Aqui ela é por COMPORTAMENTO - a pasta de logs é sequestrada para dentro da
+        #   raiz desta rodada e o que se confere é o que sobrou no disco.
+        $wfRetDir = Join-Path $wbSelfTestRaiz 'retencao-prefixos'
+        New-Item -ItemType Directory -Path $wfRetDir -Force | Out-Null
+        $wfRetAntes = $sync.logPath
+        try {
+            $sync.logPath = Join-Path $wfRetDir 'winforge.log'
+            foreach ($wfRetPre in @('server', 'command', 'repair')) {
+                foreach ($wfRetN in 1..25) {
+                    $wfRetF = Join-Path $wfRetDir ("{0}-X-202609{1:00}-101010.txt" -f $wfRetPre, $wfRetN)
+                    Set-Content -LiteralPath $wfRetF -Value 'z' -Encoding UTF8
+                    (Get-Item -LiteralPath $wfRetF).LastWriteTime = (Get-Date '2026-09-01 10:10:10').AddDays($wfRetN - 1)
+                }
+            }
+            $wfRetNovo = Get-WinForgeCommandOutputPath -Name 'Teste' -Prefix 'server'
+            if ((Split-Path -Parent $wfRetNovo) -ne $wfRetDir) { Write-Host "  [ERRO] Tetos (retenção): o caminho preparado não caiu na pasta de logs desta rodada ('$wfRetNovo')" -ForegroundColor Red; $wbErrors++ }
+            if (@(Get-ChildItem -LiteralPath $wfRetDir -Filter 'server-*.txt').Count -gt 20) { Write-Host "  [ERRO] Tetos (retenção): preparar um caminho 'server' não limpou os antigos - sobraram $(@(Get-ChildItem -LiteralPath $wfRetDir -Filter 'server-*.txt').Count)" -ForegroundColor Red; $wbErrors++ }
+            if (Test-Path -LiteralPath (Join-Path $wfRetDir 'server-X-20260901-101010.txt')) { Write-Host "  [ERRO] Tetos (retenção): o 'server' mais velho ficou" -ForegroundColor Red; $wbErrors++ }
+            if (-not (Test-Path -LiteralPath (Join-Path $wfRetDir 'server-X-20260925-101010.txt'))) { Write-Host "  [ERRO] Tetos (retenção): o 'server' mais novo foi apagado" -ForegroundColor Red; $wbErrors++ }
+            # E só o prefixo da vez: os outros dois não podem ter sido tocados.
+            foreach ($wfRetOutro in @('command', 'repair')) {
+                if (@(Get-ChildItem -LiteralPath $wfRetDir -Filter "$wfRetOutro-*.txt").Count -ne 25) { Write-Host "  [ERRO] Tetos (retenção): preparar um caminho 'server' mexeu nos arquivos '$wfRetOutro'" -ForegroundColor Red; $wbErrors++ }
+            }
+            [void](Get-WinForgeCommandOutputPath -Name 'Teste' -Prefix 'command')
+            if (@(Get-ChildItem -LiteralPath $wfRetDir -Filter 'command-*.txt').Count -gt 20) { Write-Host "  [ERRO] Tetos (retenção): o prefixo 'command' não é limpo - ele cresce para sempre" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            $sync.logPath = $wfRetAntes
+        }
+        if ([string]$sync.logPath -ne [string]$wfRetAntes) { Write-Host "  [ERRO] Tetos (retenção): a pasta de logs não voltou ao que era" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath $wfRetDir -Recurse -Force -ErrorAction SilentlyContinue
         # 'IsUndoEnabled = $false' NÃO MUDA NADA (medido) e não pode aparecer.
         $wfTetoFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
         if ($wfTetoFonteT -match 'IsUndoEnabled') { Write-Host "  [ERRO] Tetos (caixa): 'IsUndoEnabled' voltou ao tique - medido, não muda nada" -ForegroundColor Red; $wbErrors++ }
