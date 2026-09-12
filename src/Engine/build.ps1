@@ -5464,6 +5464,68 @@ if ($SelfTest) {
         $wfDestFonteD = [string](Get-Command Show-WinForgeAclBackupDestination).ScriptBlock
         if ($wfDestFonteD -notmatch 'IsChecked\s*=\s*\$false') { Write-Host "  [ERRO] Permissões (destino): a caixa 'em outro disco' não nasce desmarcada" -ForegroundColor Red; $wbErrors++ }
         if ($wfDestFonteD -notmatch 'FolderBrowserDialog') { Write-Host "  [ERRO] Permissões (destino): o caminho não vem do seletor de pasta" -ForegroundColor Red; $wbErrors++ }
+        # E a caixa de verdade, montada sem aparecer na tela ('-NoShow', o mesmo desenho de
+        # Show-WinForgeOutputWindow e de Show-WinForgeAclCleanupConfirm). Daqui para baixo é
+        # COMPORTAMENTO: a regex acima aceita a prosa do bloco de ajuda, e os handlers ela não vê.
+        $wfDestJan = Show-WinForgeAclBackupDestination -NoShow
+        if ($wfDestJan -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Permissões (destino): Show-WinForgeAclBackupDestination -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfDestCx = $wfDestJan.FindName('WFAclDestCaixa')
+            $wfDestBtnEsc = $wfDestJan.FindName('WFAclDestEscolher')
+            $wfDestBtnOk = $wfDestJan.FindName('WFAclDestOk')
+            $wfDestRol = $wfDestJan.FindName('WFAclDestRolagem')
+            $wfDestBar = $wfDestJan.FindName('WFAclDestBarra')
+            if ($null -eq $wfDestCx -or $null -eq $wfDestBtnEsc -or $null -eq $wfDestBtnOk -or $null -eq $wfDestRol -or $null -eq $wfDestBar) { Write-Host "  [ERRO] Permissões (destino): a caixa não registrou a caixa de marcação, os botões, a rolagem ou a barra" -ForegroundColor Red; $wbErrors++ }
+            else {
+                # 1. O estado inicial e os dois handlers, que nenhuma leitura de fonte alcança.
+                if ($wfDestCx.IsChecked) { Write-Host "  [ERRO] Permissões (destino): a caixa 'em outro disco' nasceu MARCADA" -ForegroundColor Red; $wbErrors++ }
+                if ($wfDestBtnEsc.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): o botão de escolher pasta nasce habilitado com a caixa desmarcada" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wfDestBtnOk.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): 'Continuar' nasce desabilitado - o caminho padrão (pasta protegida) tem de estar a um clique" -ForegroundColor Red; $wbErrors++ }
+                $wfDestCx.IsChecked = $true
+                if (-not $wfDestBtnEsc.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): marcada a caixa, o botão de escolher pasta continua desabilitado" -ForegroundColor Red; $wbErrors++ }
+                if ($wfDestBtnOk.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): marcada a caixa e sem pasta conferida, 'Continuar' ficou habilitado - confirmar assim cairia na pasta protegida em silêncio" -ForegroundColor Red; $wbErrors++ }
+                $wfDestCx.IsChecked = $false
+                if ($wfDestBtnEsc.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): desmarcada a caixa, o botão de escolher pasta continua habilitado" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wfDestBtnOk.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): desmarcada a caixa, 'Continuar' continua desabilitado" -ForegroundColor Red; $wbErrors++ }
+                # 2. A altura. Medição do revisor na versão de altura fixa: o conteúdo ocupava 316,7
+                # pixels num cliente de 369 e, com a fonte do sistema 50% maior, ia a 460,2 - a barra
+                # com 'Continuar' e 'Cancelar' saía da janela, e a caixa modal ficava sem saída.
+                if ($wfDestJan.SizeToContent -ne [System.Windows.SizeToContent]::Height) { Write-Host "  [ERRO] Permissões (destino): a janela não acompanha a altura do conteúdo ('$($wfDestJan.SizeToContent)')" -ForegroundColor Red; $wbErrors++ }
+                if ([double]::IsInfinity([double]$wfDestJan.MaxHeight) -or [double]$wfDestJan.MaxHeight -le 0) { Write-Host "  [ERRO] Permissões (destino): a janela cresce sem teto - em fonte grande ela sai da tela e a barra vai junto" -ForegroundColor Red; $wbErrors++ }
+                # A barra fica FORA da rolagem: numa pilha única o teto de altura cortaria os botões
+                # junto com o texto.
+                if ([System.Windows.Controls.Grid]::GetRow($wfDestRol) -eq [System.Windows.Controls.Grid]::GetRow($wfDestBar)) { Write-Host "  [ERRO] Permissões (destino): a barra de botões está na mesma linha da rolagem - ela rolaria junto com o texto" -ForegroundColor Red; $wbErrors++ }
+                $wfDestDentro = $false
+                $wfDestSubindo = [System.Windows.Media.VisualTreeHelper]::GetParent($wfDestBar)
+                while ($null -ne $wfDestSubindo) {
+                    if ($wfDestSubindo -is [System.Windows.Controls.ScrollViewer]) { $wfDestDentro = $true; break }
+                    $wfDestSubindo = [System.Windows.Media.VisualTreeHelper]::GetParent($wfDestSubindo)
+                }
+                if ($wfDestDentro) { Write-Host "  [ERRO] Permissões (destino): a barra de botões está DENTRO da rolagem" -ForegroundColor Red; $wbErrors++ }
+                # As duas linhas da grade são o que garante isso quando o teto entra em ação: a do
+                # texto é ESTRELA (cede espaço) e a da barra é AUTO (fica com o que precisa). Com as
+                # duas em estrela, ou as duas em auto, o teto voltaria a comer os botões.
+                $wfDestGrade = $wfDestJan.Content
+                if ($wfDestGrade -isnot [System.Windows.Controls.Grid] -or @($wfDestGrade.RowDefinitions).Count -ne 2) { Write-Host "  [ERRO] Permissões (destino): o conteúdo da janela não é uma grade de duas linhas" -ForegroundColor Red; $wbErrors++ }
+                else {
+                    if (-not $wfDestGrade.RowDefinitions[0].Height.IsStar) { Write-Host "  [ERRO] Permissões (destino): a linha do texto não é estrela - ela não cede espaço para a barra quando o teto de altura entra" -ForegroundColor Red; $wbErrors++ }
+                    if (-not $wfDestGrade.RowDefinitions[1].Height.IsAuto) { Write-Host "  [ERRO] Permissões (destino): a linha da barra não é automática - os botões podem ser espremidos" -ForegroundColor Red; $wbErrors++ }
+                    # E a medição com a fonte 50% maior, que é o tamanho de quem usa acessibilidade:
+                    # o conteúdo cresce E a barra cresce junto. Se a barra não crescesse, ela estaria
+                    # fora da árvore em que a fonte é herdada, e a prova acima não valeria nada.
+                    # ('Measure' e não 'ShowDialog': a janela nunca aparece no -SelfTest.)
+                    $wfDestMedida = { param($Alvo) $Alvo.Measure((New-Object System.Windows.Size(608, [double]::PositiveInfinity))); return [double]$Alvo.DesiredSize.Height }
+                    $wfDestAlt1 = [double](& $wfDestMedida $wfDestGrade)
+                    $wfDestBarAlt1 = [double]$wfDestBar.DesiredSize.Height
+                    $wfDestJan.FontSize = [double]$wfDestJan.FontSize * 1.5
+                    $wfDestAlt2 = [double](& $wfDestMedida $wfDestGrade)
+                    $wfDestBarAlt2 = [double]$wfDestBar.DesiredSize.Height
+                    if ($wfDestBarAlt1 -le 0) { Write-Host "  [ERRO] Permissões (destino): a barra de botões mediu altura zero" -ForegroundColor Red; $wbErrors++ }
+                    if ($wfDestAlt2 -le $wfDestAlt1) { Write-Host "  [ERRO] Permissões (destino): com a fonte 50% maior o conteúdo não cresceu ($wfDestAlt1 -> $wfDestAlt2) - a medição não está vendo a fonte" -ForegroundColor Red; $wbErrors++ }
+                    if ($wfDestBarAlt2 -le $wfDestBarAlt1) { Write-Host "  [ERRO] Permissões (destino): com a fonte 50% maior a barra não cresceu ($wfDestBarAlt1 -> $wfDestBarAlt2) - ela não está na árvore que herda a fonte" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+        }
         # Desfazer: caminho externo ausente diz QUAL disco ligar, e a recusa termina com a frase de §1.7.
         $wfDestFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
         if ($wfDestFonteU -notmatch 'ExternalPath') { Write-Host "  [ERRO] Permissões (Desfazer): o item de conteúdo não considera ExternalPath" -ForegroundColor Red; $wbErrors++ }

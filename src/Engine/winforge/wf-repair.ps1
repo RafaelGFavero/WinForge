@@ -2677,12 +2677,26 @@ function Show-WinForgeAclBackupDestination {
 
         A pasta escolhida passa por Test-WinForgeAclContentRoot na hora, com o resultado na tela: o
         usuário descobre que o pen drive é exFAT ali, e não trinta e nove segundos depois.
+
+        A ALTURA acompanha o conteúdo, e a barra de botões fica FORA da rolagem. Medido pelo revisor
+        da Tarefa 7 na versão de altura fixa: o conteúdo ocupava 316,7 pixels num cliente de 369,
+        sem redimensionar e sem rolar; com a fonte do sistema 50% maior - o tamanho que quem usa
+        acessibilidade escolhe - ele ia a 460,2 e a barra com 'Continuar' e 'Cancelar' saía da
+        janela, deixando a caixa sem saída. Hoje são três coisas juntas, e nenhuma basta sozinha:
+        'SizeToContent = Height' faz a janela crescer com o texto; 'MaxHeight' na área de trabalho
+        impede que ela cresça para fora da tela; e a grade de duas linhas deixa o texto rolar sem
+        levar os botões junto.
+    .PARAMETER NoShow
+        Devolve a JANELA sem mostrá-la, em vez da resposta. É o que o -SelfTest usa - mesmo desenho
+        de Show-WinForgeOutputWindow e de Show-WinForgeAclCleanupConfirm -, e é assim que a caixa
+        desmarcada por padrão, os handlers dela e o lugar da barra são provados sem abrir nada.
     .OUTPUTS
+        Com -NoShow, a janela ([System.Windows.Window]). Sem ele,
         @{ Ok = <bool>; External = <bool>; Path = <string>; Warning = <string> }. 'Ok' falso é
         "cancelar": quem chamou não despacha nada. Com 'External' falso o backup vai para a pasta
         protegida de sempre, e 'Path' vem vazio.
     #>
-    param()
+    param([switch]$NoShow)
 
     # No uso normal o WPF já está carregado desde a montagem da janela principal; o Windows Forms
     # não, e é dele que vem o seletor de pasta do shell.
@@ -2710,9 +2724,18 @@ function Show-WinForgeAclBackupDestination {
     $janela = New-Object System.Windows.Window
     $janela.Title = 'WinForge - onde guardar o backup das permissões'
     $janela.Width = 640
-    $janela.Height = 400
+    # A altura SEGUE o conteúdo, e nunca o contrário: com altura fixa, a fonte grande do sistema
+    # empurrava a barra de botões para fora da janela. 'MinHeight' existe só para a caixa não nascer
+    # esmagada quando o texto for curto.
+    $janela.SizeToContent = [System.Windows.SizeToContent]::Height
+    $janela.MinHeight = 260
+    # E o teto: sem ele, 'SizeToContent' cresce para fora da tela em fonte muito grande, e aí a barra
+    # sai por baixo do mesmo jeito - só que agora sem nem dar para arrastar a janela de volta.
+    try { $janela.MaxHeight = [double]([System.Windows.SystemParameters]::WorkArea.Height * 0.9) } catch { $janela.MaxHeight = 900 }
     $janela.Background = $fundo
-    $janela.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    # Redimensionável de propósito: em fonte grande o teto acima entra em ação, e quem quiser ver
+    # mais texto de uma vez tem de poder esticar.
+    $janela.ResizeMode = [System.Windows.ResizeMode]::CanResize
     $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
     if ($null -ne $sync -and $null -ne $sync.Form -and $sync.Form.IsVisible) {
         try {
@@ -2721,8 +2744,18 @@ function Show-WinForgeAclBackupDestination {
         } catch { }
     }
 
+    # Duas linhas: o conteúdo rola, a barra não. Numa pilha única, o teto de altura cortaria os
+    # botões junto com o texto - e uma caixa modal sem 'Cancelar' visível é uma caixa sem saída.
+    $grade = New-Object System.Windows.Controls.Grid
+    $grade.Margin = New-Object System.Windows.Thickness 16
+    $linhaTexto = New-Object System.Windows.Controls.RowDefinition
+    $linhaTexto.Height = New-Object System.Windows.GridLength (1, [System.Windows.GridUnitType]::Star)
+    $linhaBarra = New-Object System.Windows.Controls.RowDefinition
+    $linhaBarra.Height = [System.Windows.GridLength]::Auto
+    $grade.RowDefinitions.Add($linhaTexto)
+    $grade.RowDefinitions.Add($linhaBarra)
+
     $pilha = New-Object System.Windows.Controls.StackPanel
-    $pilha.Margin = New-Object System.Windows.Thickness 16
 
     $novoTexto = {
         param($Conteudo, $Topo)
@@ -2762,10 +2795,20 @@ function Show-WinForgeAclBackupDestination {
     $rotuloAviso = & $novoTexto '' 10
     $pilha.Children.Add($rotuloAviso) | Out-Null
 
+    # A rolagem envolve SÓ o conteúdo, e vai na linha 0.
+    $rolagem = New-Object System.Windows.Controls.ScrollViewer
+    $rolagem.VerticalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
+    $rolagem.HorizontalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Disabled
+    $rolagem.Content = $pilha
+    [System.Windows.Controls.Grid]::SetRow($rolagem, 0)
+    $grade.Children.Add($rolagem) | Out-Null
+
     $barra = New-Object System.Windows.Controls.StackPanel
     $barra.Orientation = [System.Windows.Controls.Orientation]::Horizontal
     $barra.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
-    $barra.Margin = New-Object System.Windows.Thickness (0, 20, 0, 0)
+    $barra.Margin = New-Object System.Windows.Thickness (0, 16, 0, 0)
+    [System.Windows.Controls.Grid]::SetRow($barra, 1)
+    $grade.Children.Add($barra) | Out-Null
     $btnOk = New-Object System.Windows.Controls.Button
     $btnOk.Content = 'Continuar'
     $btnOk.MinWidth = 110
@@ -2777,7 +2820,6 @@ function Show-WinForgeAclBackupDestination {
     $btnCancelar.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
     $barra.Children.Add($btnOk) | Out-Null
     $barra.Children.Add($btnCancelar) | Out-Null
-    $pilha.Children.Add($barra) | Out-Null
 
     $caixaExterna.Add_Checked({
         $btnEscolher.IsEnabled = $true
@@ -2838,7 +2880,16 @@ function Show-WinForgeAclBackupDestination {
         $janela.Close()
     }.GetNewClosure())
 
-    $janela.Content = $pilha
+    $janela.Content = $grade
+    [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
+    $janela.RegisterName('WFAclDestCaixa', $caixaExterna)
+    $janela.RegisterName('WFAclDestEscolher', $btnEscolher)
+    $janela.RegisterName('WFAclDestOk', $btnOk)
+    $janela.RegisterName('WFAclDestCancelar', $btnCancelar)
+    $janela.RegisterName('WFAclDestRolagem', $rolagem)
+    $janela.RegisterName('WFAclDestBarra', $barra)
+
+    if ($NoShow) { return $janela }
     # Modal, e aqui isso é o certo: o handler do botão é síncrono e ainda não tomou a trava de
     # comando em andamento, então nada mais do programa está parado esperando esta resposta.
     $janela.ShowDialog() | Out-Null
