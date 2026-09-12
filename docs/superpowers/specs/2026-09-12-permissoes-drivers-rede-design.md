@@ -50,8 +50,11 @@ Test-WinForgeAclIndexOrigin -Index <object>                        → @{ Ok; Re
 
 ### 1.2 `Denied` — nunca sucesso silencioso
 
-`Denied` conta **exatamente `GetAccessControl` e `EnumerateFileSystemEntries`**. `GetAttributes` não entra — medido, em
-pasta negada ele **não lança**, então contá-lo daria zero justo onde há problema.
+`Denied` conta `GetAccessControl`, `EnumerateFileSystemEntries` **e o `GetAttributes` que lança**. As duas primeiras são
+a regra geral. O `GetAttributes` é o caso de borda que a revisão da Tarefa 1 mediu: em pasta negada ele **não lança** —
+por isso ele sozinho daria zero justo onde há problema — mas quando lança por outro motivo, tratar a falha como "não é
+ponto de reanálise" faz a caminhada DESCER na junção e reabre o laço que esta seção existe para fechar. Falha ao ler o
+atributo é recusa, não permissão.
 
 Em máquina já quebrada, `GetAccessControl` falha nas pastas que mais importam; elas ficam fora da lista e, como a Fase
 5 agora percorre só a lista, **deixam de ser consertadas** (a 1.7.0 as alcançava pelo `/T`). Então `Denied > 0` muda o
@@ -520,7 +523,8 @@ PCI" que precisava de driver de verdade continua sem ele e muda só o nome; e a 
 3. `AccessControlSections::All` lança sem `SeSecurityPrivilege` — **acatado**: `GetAccessControl($p)` +
    `GetSecurityDescriptorSddlForm('Access')`.
 4. `LongPathsEnabled` não é padrão, e `Denied` contava a chamada errada — **acatado**: prefixo `\\?\`, e `Denied`
-   envolvendo `GetAccessControl` e `EnumerateFileSystemEntries`, nunca `GetAttributes`.
+   envolvendo `GetAccessControl` e `EnumerateFileSystemEntries`. Corrigido na execucao (12/09): o `GetAttributes` que
+   lanca tambem entra, porque trata-lo como "nao e ponto de reanalise" fazia a caminhada descer na juncao.
 5. Falta gate de build para 1903 — **acatado**: linha nova na tabela de bloqueios.
 
 **Clareza do texto**
