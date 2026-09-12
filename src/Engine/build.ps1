@@ -5096,6 +5096,16 @@ if ($SelfTest) {
         if (-not $wfIdxMarca.ContainsKey('Hardened')) { Write-Host "  [ERRO] Permissões (Consumed): a marca não diz se o índice trocado ficou endurecido" -ForegroundColor Red; $wbErrors++ }
         elseif ([bool]$wfIdxMarca.Hardened -and -not (Test-WinForgeRepairElevated)) { Write-Host "  [ERRO] Permissões (Consumed): a marca afirmou ter endurecido o arquivo SEM elevação - trocar o dono para Administradores exige elevação" -ForegroundColor Red; $wbErrors++ }
         elseif (-not [bool]$wfIdxMarca.Hardened -and [string]::IsNullOrWhiteSpace([string]$wfIdxMarca.Reason)) { Write-Host "  [ERRO] Permissões (Consumed): o endurecimento falhou CALADO - quem chama não tem como avisar" -ForegroundColor Red; $wbErrors++ }
+        # E quem chama AVISA. A trava acima prova que a função DEVOLVE o motivo; sem esta, o motivo
+        # morria no retorno: com 'Ok' verdadeiro e 'Hardened' falso o Desfazer imprimia só "o
+        # conjunto sai da fila", e o usuário descobria o problema no Desfazer SEGUINTE, que recusa o
+        # índice por causa do dono sem dizer por quê. A busca é pela LEITURA da chave dentro do ramo
+        # do sucesso, e não pelo nome dela - 'Hardened' também aparece no bloco de ajuda.
+        $wfIdxFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        $wfIdxPosOk = $wfIdxFonteU.IndexOf('if ($marca.Ok)', [StringComparison]::Ordinal)
+        $wfIdxPosDuro = $wfIdxFonteU.IndexOf('-not $marca.Hardened', [StringComparison]::Ordinal)
+        if ($wfIdxPosOk -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): o Desfazer não consulta o resultado da marcação" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIdxPosDuro -lt $wfIdxPosOk) { Write-Host "  [ERRO] Permissões (Consumed): o Desfazer não avisa quando a marca foi gravada mas o índice NÃO ficou endurecido" -ForegroundColor Red; $wbErrors++ }
         $wfIdxConj2 = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
         if ([string]$wfIdxConj2.Stamp -ne '20260202-000000') { Write-Host "  [ERRO] Permissões (Consumed): depois de consumido o primeiro, o conjunto é '$($wfIdxConj2.Stamp)', esperado '20260202-000000'" -ForegroundColor Red; $wbErrors++ }
         if ([int]$wfIdxConj2.Pending -ne 1) { Write-Host "  [ERRO] Permissões (Consumed): Pending=$($wfIdxConj2.Pending), esperado 1" -ForegroundColor Red; $wbErrors++ }
@@ -5383,6 +5393,31 @@ if ($SelfTest) {
         $wfLimpAvisaSumido = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtSumido, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
         if (-not $wfLimpAvisaSumido.Count) { Write-Host "  [ERRO] Permissões (externo): a simulação omite o arquivo externo cujo disco não está disponível" -ForegroundColor Red; $wbErrors++ }
         elseif (([string]$wfLimpAvisaSumido[0]).IndexOf('não está disponível', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpAvisaSumido[0])')" -ForegroundColor Red; $wbErrors++ }
+        # O LADO POSITIVO, que faltava. Até aqui só o lado negativo era exercitado - índice não
+        # confiável, arquivo externo que não vira remoção -, e um erro de comparação que devolvesse
+        # "não confiável" para TUDO passaria batido: a limpeza mandaria todo arquivo de outro disco
+        # para a instrução manual, em silêncio, e o teste continuaria verde.
+        #
+        # A conferência de verdade exige pasta protegida e elevação, que este build não tem. O que se
+        # troca é a FUNÇÃO que responde por ela, dentro deste bloco e devolvida no 'finally'.
+        $wfLimpConfOriginal = ${function:Test-WinForgeAclBackupFile}
+        try {
+            ${function:Test-WinForgeAclBackupFile} = { param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Root) return @{ Trusted = $true; Reason = '' } }
+            $wfLimpInvFiel = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { $_.External -and [string]$_.Path -eq $wfLimpExtArq })
+            if ($wfLimpInvFiel.Count -ne 1) { Write-Host "  [ERRO] Permissões (externo confiável): o arquivo externo sumiu do inventário com o índice confiável" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wfLimpInvFiel[0].Trusted) { Write-Host "  [ERRO] Permissões (externo confiável): o índice passou na conferência e o caminho externo saiu NÃO confiável - nenhum arquivo de outro disco seria apagado" -ForegroundColor Red; $wbErrors++ }
+            $wfLimpSecoFiel = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+            $wfLimpApagaFiel = @($wfLimpSecoFiel | Where-Object { ([string]$_).StartsWith('[simulação] apagar ', [StringComparison]::Ordinal) -and ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+            if (-not $wfLimpApagaFiel.Count) { Write-Host "  [ERRO] Permissões (externo confiável): o arquivo de outro disco não virou linha de remoção nem com o índice confiável" -ForegroundColor Red; $wbErrors++ }
+            $wfLimpMaoFiel = @($wfLimpSecoFiel | Where-Object { ([string]$_).IndexOf('apague à mão', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+            if ($wfLimpMaoFiel.Count) { Write-Host "  [ERRO] Permissões (externo confiável): o arquivo continuou mandado para a instrução manual ('$($wfLimpMaoFiel[0])')" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            ${function:Test-WinForgeAclBackupFile} = $wfLimpConfOriginal
+        }
+        # E a conferência VOLTOU. Sem esta linha, um 'finally' quebrado deixaria todo teste seguinte
+        # rodando com a porta de confiança desligada - inclusive a trava de segurança aqui de cima,
+        # que ficaria verde por acidente.
+        if ((Test-WinForgeAclBackupFile -Path $wfLimpExtArq -Root $wfLimpRaiz).Trusted) { Write-Host "  [ERRO] Permissões (externo confiável): a conferência de confiança não voltou ao que era depois do teste" -ForegroundColor Red; $wbErrors++ }
         Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue
         # E a linha recusa despacho sem ninguém para confirmar.

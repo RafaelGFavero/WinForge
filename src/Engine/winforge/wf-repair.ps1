@@ -5384,7 +5384,14 @@ function Invoke-WinForgeAclUndo {
     # na mesma pasta inexistente a cada tentativa.
     if ($recusados -eq 0 -and $amostraFora -eq 0) {
         $marca = Set-WinForgeAclIndexConsumed -Path ([string]$conjunto.Index)
-        if ($marca.Ok) { Write-Host "O conjunto $($conjunto.Stamp) sai da fila do Desfazer; a pasta e o arquivo continuam no disco até você usar 'Limpar backups antigos'." }
+        if ($marca.Ok) {
+            Write-Host "O conjunto $($conjunto.Stamp) sai da fila do Desfazer; a pasta e o arquivo continuam no disco até você usar 'Limpar backups antigos'."
+            # 'Ok' e 'Hardened' são duas respostas, e a segunda morria aqui: a marca foi gravada (o
+            # conjunto sai da fila) e o índice ficou com o dono de quem o gravou - que é justamente o
+            # dono que a conferência do Desfazer SEGUINTE recusa. Sem este aviso, o usuário só
+            # descobre no próximo Desfazer, quando o índice é recusado sem explicação nenhuma.
+            if (-not $marca.Hardened) { Write-Warning "Conjunto $($conjunto.Stamp): $($marca.Reason). Se um Desfazer futuro recusar este índice por causa do dono, use 'Limpar backups antigos' para tirá-lo do caminho." }
+        }
         else { Write-Warning "O conjunto $($conjunto.Stamp) não pôde ser marcado como desfeito ($($marca.Reason)); ele continua aparecendo como pendente." }
     } else {
         Write-Host "O conjunto $($conjunto.Stamp) continua na fila do Desfazer, porque nem tudo voltou."
