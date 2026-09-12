@@ -2835,19 +2835,24 @@ function Get-WinForgeAclInheritSteps {
         apesar do erro", e num alvo ÚNICO não há o que continuar: ele só apaga o sinal. MEDIDO
         nesta forma exata de chamada, sem elevação, em %TEMP%:
 
-            pasta que existe          -> 0 com '/C' e 0 sem
-            pasta que não existe      -> 0 com '/C' e 2 sem
-            curinga sem correspondência -> 0 com '/C' e 3 sem
+            pasta que existe            -> 0 com '/C' e 0 sem
+            pasta que não existe        -> 0 com '/C' e 2 sem
+            PAI da pasta não existe     -> 3 sem '/C'
+            pai inexistente dois níveis -> 3 sem '/C'
+            unidade não existe          -> 3 sem '/C'
+            curinga sem correspondência -> 0 sem '/C'
 
         Com '/C' no vetor, o 'if ($r.ExitCode -ne 0)' do chamador era código MORTO: a fase 5 podia
         não ligar herança em pasta nenhuma e o log dizer "Concluído". O que sobra do argumento a
         favor do '/C' - pasta de cache some entre a caminhada da fase 2 e esta fase o tempo todo -
-        é resolvido onde deve ser, no CHAMADOR: código 2 é "a pasta sumiu desde o backup", que é
-        aviso; qualquer outro código diferente de zero é erro. Assim o sinal volta e o reparo que
-        correu bem não vira lista de erros.
+        é resolvido onde deve ser, no CHAMADOR, e pela EXISTÊNCIA da pasta, nunca pelo código de
+        saída: ver Get-WinForgeAclInheritOutcome.
 
-        Sem '/T' e sem curinga, o código 3 não é esperado aqui - ele é o da forma '<pasta>\*', que
-        é justamente a que saiu.
+        A linha do curinga acima já esteve errada aqui, e a linha errada sustentou uma conclusão
+        errada: ela dizia que o curinga sem correspondência sai 3, e daí se concluía que o código 3
+        não era produzível nesta forma de chamada, sem '/T' e sem curinga. O curinga sai 0. O 3 é o
+        código de caminho inexistente ACIMA do alvo - e pai inexistente é o caso comum desta lista,
+        porque a caminhada da fase 2 desce em toda pasta e indexa pai e filho.
 
         Sem '/L': a caminhada da fase 2 NÃO indexa ponto de reanálise, então nenhuma entrada desta
         lista é junção. O '/L' existe para não seguir o link, e aqui não há link para seguir.
@@ -2883,6 +2888,55 @@ function Get-WinForgeAclInheritSteps {
         }
     }
     return @($passos)
+}
+
+function Get-WinForgeAclInheritOutcome {
+    <#
+    .SYNOPSIS
+        Classifica o resultado de UMA chamada de icacls da fase 5: deu certo, a pasta sumiu desde o
+        backup, ou falhou. Só lê.
+    .DESCRIPTION
+        A pergunta é pela EXISTÊNCIA da pasta, e não pelo CÓDIGO de saída. A diferença entre as duas
+        é um reparo que correu bem terminando numa lista de erros.
+
+        A versão anterior classificava pelo código: 2 era "sumiu" (aviso) e qualquer outro código
+        diferente de zero era erro. MEDIDO na forma exata desta chamada
+        ('icacls <alvo> /inheritance:e /Q', sem elevação e sem curinga): pasta inexistente com o pai
+        no lugar sai 2, mas PAI inexistente sai 3, pai inexistente a dois níveis sai 3 e unidade
+        inexistente sai 3.
+
+        E pai e filho estão os DOIS nesta lista, porque a caminhada da fase 2 desce em toda pasta
+        com herança bloqueada: 'AppData\Local\Packages\<app>' com '...\<app>\LocalCache' é o arranjo
+        normal de aplicativo da Loja. Desinstalado o aplicativo entre a fase 2 e a fase 5, a ordem
+        ordinal manda o pai primeiro - o pai sai com 2 e vira aviso, e cada descendente sai com 3 e
+        vira erro. Um perfil com algumas dezenas dessas pastas terminaria com dezenas de erros num
+        reparo que não errou nada, que é exatamente o que o ramo do aviso existe para evitar.
+
+        Código 0 responde antes de qualquer pergunta ao disco. Ele é a resposta do próprio icacls,
+        que acabou de ligar a herança ali: perguntar primeiro custaria um acesso a disco por pasta,
+        em centenas delas, e faria uma pasta de cache apagada um instante DEPOIS de uma chamada bem
+        sucedida contar como sumida.
+
+        A existência é perguntada pelo CAMINHO LONGO ('\\?\'), como no resto deste arquivo. Sem o
+        prefixo, a API normaliza o nome antes de olhar o disco - corta espaço no fim, corta ponto no
+        fim - e responde "não existe" para pasta que está lá: a falha de verdade sairia como aviso,
+        calada, e é dentro do perfil que nomes assim aparecem.
+
+        Caminho vazio é 'falha', e não 'sumida': não dá para AFIRMAR que sumiu o que não foi
+        nomeado, e o lado seguro do erro aqui é o que aparece no log.
+    .OUTPUTS
+        'ok', 'sumida' ou 'falha'.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
+        [Parameter(Mandatory)][int]$ExitCode
+    )
+
+    if ($ExitCode -eq 0) { return 'ok' }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return 'falha' }
+    $longo = if ([string]$Path -like '\\?\*') { [string]$Path } else { '\\?\' + [string]$Path }
+    if ([System.IO.Directory]::Exists($longo)) { return 'falha' }
+    return 'sumida'
 }
 
 function Get-WinForgeAclRestorePlan {
@@ -3663,20 +3717,19 @@ function Invoke-WinForgeAclRestore {
             # nada. O que interessa é o que FALHOU, e essa sai na hora, com a pasta e o código.
             #
             # O código de saída só existe porque o '/C' saiu do vetor - com ele, MEDIDO, uma pasta
-            # que não existe mais sai com 0 e este 'if' seria código morto. Os dois casos que sobram
-            # não são a mesma coisa: 2 é "a pasta sumiu desde o backup", e entre a caminhada da fase
-            # 2 e esta fase passam minutos em que pasta de cache dentro de um perfil some o tempo
-            # todo - isso é AVISO, e transformá-lo em erro faria um reparo que correu bem terminar
-            # numa lista de erros. Qualquer outro código é erro de verdade.
+            # que não existe mais sai com 0 e este laço não teria sinal nenhum. Mas ele NÃO separa
+            # "sumiu" de "falhou": pasta inexistente sai 2, pai inexistente sai 3, e a caminhada da
+            # fase 2 põe pai e filho os DOIS nesta lista. Quem separa é a EXISTÊNCIA da pasta -
+            # Get-WinForgeAclInheritOutcome, com o porquê medido lá.
             $falhas5 = 0
             $sumidas5 = 0
             foreach ($p5 in $passos5) {
                 $r5 = Invoke-WinForgeNativeCommand -FilePath ([string]$p5.FilePath) -Arguments @($p5.Arguments)
-                $c5 = [int]$r5.ExitCode
-                if ($c5 -eq 0) { continue }
-                if ($c5 -eq 2) { $sumidas5++; continue }
+                $veredito5 = [string](Get-WinForgeAclInheritOutcome -Path ([string]$p5.Path) -ExitCode ([int]$r5.ExitCode))
+                if ($veredito5 -eq 'ok') { continue }
+                if ($veredito5 -eq 'sumida') { $sumidas5++; continue }
                 $falhas5++
-                Write-Host ("  '{0}': código {1}. {2}" -f $p5.Path, $c5, ([string]$r5.Text).Trim())
+                Write-Host ("  '{0}': código {1}. {2}" -f $p5.Path, [int]$r5.ExitCode, ([string]$r5.Text).Trim())
             }
             $resumo5 = "Herança ligada em $($passos5.Count - $falhas5 - $sumidas5) de $($passos5.Count) pasta(s) que o backup cobre."
             if ($sumidas5) { $resumo5 += " $sumidas5 já não existia(m) desde a cópia das permissões - não havia o que ligar nelas." }

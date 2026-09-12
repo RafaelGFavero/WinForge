@@ -4757,14 +4757,72 @@ if ($SelfTest) {
         # sozinha: um mutante que trocasse a chamada por um laço à mão sobreviveria. É a mesma trava
         # que a fase 4 já usa para Invoke-WinForgeAclOwnerFallback.
         if ($wfF5Fonte.IndexOf('Get-WinForgeAclInheritSteps -Root', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 CITA Get-WinForgeAclInheritSteps mas não a chama - a lista da fase 2 não está virando chamada nenhuma" -ForegroundColor Red; $wbErrors++ }
-        # Com o '/C' fora, o código de saída volta a dizer alguma coisa - e os dois casos não são a
-        # mesma coisa. 2 é "a pasta sumiu desde o backup", e pasta de cache dentro de um perfil some
-        # entre a fase 2 e a fase 5 o tempo todo: virar erro faria um reparo que correu bem terminar
-        # numa lista de erros. Sem esta trava, tirar o '/C' trocaria um defeito por outro.
-        if ($wfF5Fonte -notmatch '\$c5\s*-eq\s*2') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não separa o código 2 (pasta que sumiu desde o backup) dos demais - cada pasta de cache apagada viraria erro" -ForegroundColor Red; $wbErrors++ }
+        # Com o '/C' fora, o código de saída volta a dizer alguma coisa - mas ele NÃO serve para
+        # separar "sumiu" de "falhou", e foi esse o defeito. MEDIDO nesta forma exata de chamada
+        # ('icacls <alvo> /inheritance:e /Q', sem elevação e sem curinga): pasta inexistente com o
+        # pai no lugar sai 2, mas PAI inexistente sai 3, pai inexistente a dois níveis sai 3 e
+        # unidade inexistente sai 3 - e o curinga sem correspondência, que a descrição antiga
+        # culpava pelo 3, sai 0.
+        #
+        # E pai e filho estão os DOIS nesta lista: a caminhada da fase 2 desce em toda pasta com
+        # herança bloqueada, e 'AppData\Local\Packages\<app>' com '...\<app>\LocalCache' é o arranjo
+        # normal de aplicativo da Loja. Desinstalado o aplicativo entre as fases, a ordem ordinal
+        # manda o pai primeiro: o pai sai com 2 (aviso) e cada descendente com 3 (erro) - um reparo
+        # que correu bem terminando numa lista de erros, que é o oposto do que o ramo existe para
+        # fazer. Por isso a classificação é pela EXISTÊNCIA da pasta.
+        $wfF5Existe = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-fase5-existe'
+        $wfF5Espaco = ''
+        try {
+            if (Test-Path -LiteralPath $wfF5Existe) { Remove-Item -LiteralPath $wfF5Existe -Recurse -Force -ErrorAction SilentlyContinue }
+            New-Item -ItemType Directory -Path $wfF5Existe -Force | Out-Null
+            $wfF5Sumiu = Join-Path $wfF5Existe 'nunca-existiu\mais-fundo'
+            foreach ($wfF5Caso in @(
+                @{ Path = $wfF5Existe; Code = 0; Esperado = 'ok';     Porque = 'chamada que deu certo' },
+                @{ Path = $wfF5Existe; Code = 2; Esperado = 'falha';  Porque = 'a pasta está no lugar - código 2 aqui é falha de verdade' },
+                @{ Path = $wfF5Existe; Code = 3; Esperado = 'falha';  Porque = 'a pasta está no lugar' },
+                @{ Path = $wfF5Existe; Code = 5; Esperado = 'falha';  Porque = 'acesso negado numa pasta que existe' },
+                @{ Path = $wfF5Sumiu;  Code = 2; Esperado = 'sumida'; Porque = 'a pasta foi apagada desde o backup' },
+                @{ Path = $wfF5Sumiu;  Code = 3; Esperado = 'sumida'; Porque = 'o PAI foi apagado desde o backup - o 3 que o ramo antigo tratava como erro' },
+                @{ Path = $wfF5Sumiu;  Code = 0; Esperado = 'ok';     Porque = 'código 0 responde antes de qualquer pergunta ao disco' },
+                @{ Path = '';          Code = 3; Esperado = 'falha';  Porque = 'sem caminho não dá para AFIRMAR que sumiu' }
+            )) {
+                $wfF5Ver = [string](Get-WinForgeAclInheritOutcome -Path ([string]$wfF5Caso.Path) -ExitCode ([int]$wfF5Caso.Code))
+                if ($wfF5Ver -ne [string]$wfF5Caso.Esperado) { Write-Host "  [ERRO] Permissões (fase 5): '$($wfF5Caso.Path)' com código $($wfF5Caso.Code) deu '$wfF5Ver', esperado '$($wfF5Caso.Esperado)' ($($wfF5Caso.Porque))" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Pasta com ESPAÇO no fim do nome. Ela existe (o Windows cria por '\\?\'), e é a pergunta
+            # pelo caminho longo que a enxerga: sem o prefixo, a API normaliza o nome, corta o espaço
+            # e responde que não existe - a pasta viraria "sumiu desde o backup" e a falha de verdade
+            # sairia como aviso, calada. O mesmo prefixo que a caminhada da fase 2 já usa.
+            $wfF5Espaco = (Join-Path $wfF5Existe 'com espaco ')
+            try { [void][System.IO.Directory]::CreateDirectory('\\?\' + $wfF5Espaco) } catch { $wfF5Espaco = '' }
+            if ([string]::IsNullOrEmpty($wfF5Espaco)) { Write-Host "  [ERRO] Permissões (fase 5): a pasta com espaço no fim não pôde ser criada - o caso do caminho longo não foi exercitado" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string](Get-WinForgeAclInheritOutcome -Path $wfF5Espaco -ExitCode 5) -ne 'falha') { Write-Host "  [ERRO] Permissões (fase 5): pasta com espaço no fim do nome foi dada como sumida - a existência tem de ser perguntada pelo caminho longo ('\\?\')" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            if (-not [string]::IsNullOrEmpty($wfF5Espaco)) { try { [System.IO.Directory]::Delete('\\?\' + $wfF5Espaco) } catch { } }
+            Remove-Item -LiteralPath $wfF5Existe -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # E a fase 5 CHAMA a classificação, em vez de só citá-la: o nome também aparece no bloco de
+        # ajuda, que entra no ScriptBlock. A cobrança é pela chamada, com o parâmetro junto.
+        if ($wfF5Fonte.IndexOf('Get-WinForgeAclInheritOutcome -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não classifica o resultado por Get-WinForgeAclInheritOutcome" -ForegroundColor Red; $wbErrors++ }
+        # E o veredito está LIGADO aos contadores. Chamar a classificação e depois ignorar o que ela
+        # respondeu daria o mesmo resultado de não chamar - e a linha acima passaria. As duas agulhas
+        # são montadas por concatenação: escritas inteiras, elas contêm o próprio '$sumidas5' e
+        # ficariam sujeitas à expansão de variável na hora do teste.
+        foreach ($wfF5Fio in @(("'ok'" + ') { continue }'), ("'sumida'" + ') { $sumidas5++'))) {
+            if ($wfF5Fonte.IndexOf($wfF5Fio, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): o veredito da classificação não está ligado aos contadores (falta ""$wfF5Fio"")" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A medição errada não pode voltar à descrição: era ela que atribuía o código 3 ao curinga, e
+        # foi por ela que se concluiu que o 3 não era produzível nesta forma de chamada. MEDIDO aqui:
+        # o curinga sem correspondência sai 0, e quem sai 3 é caminho inexistente ACIMA do alvo.
+        $wfF5FonteP = [string](Get-Command Get-WinForgeAclInheritSteps).ScriptBlock
+        if ($wfF5FonteP -match "curinga sem correspond.ncia\s*->\s*0 com '/C' e 3 sem") { Write-Host "  [ERRO] Permissões (fase 5): a descrição voltou a atribuir o código 3 ao curinga - medido, o curinga sem correspondência sai 0" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF5FonteP -notmatch 'PAI da pasta não existe') { Write-Host "  [ERRO] Permissões (fase 5): a descrição não registra que PAI inexistente sai 3 - foi a falta dessa linha que fez o código 3 parecer improduzível aqui" -ForegroundColor Red; $wbErrors++ }
+        # E o ramo antigo não volta: separar aviso de erro por um código de saída, qualquer que seja
+        # ele, reintroduz o defeito que esta trava existe para prender.
+        if ($wfF5Fonte -match '\$c5\s*-eq\s*\d') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 voltou a separar aviso de erro pelo CÓDIGO de saída do icacls" -ForegroundColor Red; $wbErrors++ }
         if ($wfF5Fonte -notmatch 'sumidas5') { Write-Host "  [ERRO] Permissões (fase 5): o resumo não conta quantas pastas já não existiam" -ForegroundColor Red; $wbErrors++ }
         if ($wfF5Fonte -notmatch 'WinForgeAclScope') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não lê o escopo guardado pela fase 2 - guardado e alterado divergiriam" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Permissões (fase 5): $($wfF5Passos.Count) chamada(s) '/inheritance:e' por entrada, pai antes de filho, nenhum '/T'"
+        Write-Host "  Permissões (fase 5): $($wfF5Passos.Count) chamada(s) '/inheritance:e' por entrada, pai antes de filho, nenhum '/T'; aviso e erro separados pela existência da pasta, não pelo código"
     } catch {
         Write-Host "  [ERRO] Permissões (fase 5): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
