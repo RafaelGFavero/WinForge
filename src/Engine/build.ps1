@@ -1115,7 +1115,39 @@ if ($SelfTest) {
     # (C:\Users\RUNNER~1\...), e as funções devolvem caminhos longos (GetFullPath/Get-Item).
     # Comparar os dois como texto falhava só lá. Get-Item resolve o nome curto para o longo.
     $wbSelfTestTemp = try { (Get-Item -LiteralPath ([System.IO.Path]::GetTempPath().TrimEnd('\'))).FullName } catch { $env:TEMP }
+    # A raiz dos fixtures é POR PROCESSO, e não uma pasta fixa. Duas causas de falso vermelho moram
+    # aqui, e as duas foram vistas no mesmo dia: um -SelfTest interrompido no meio deixava a pasta
+    # para trás e o seguinte achava fixture de outra rodada (seis erros em código que a mudança nem
+    # tocava); e dois -SelfTest ao mesmo tempo - o normal quando há revisão em paralelo - escreviam
+    # na MESMA pasta, um apagando o fixture que o outro estava lendo.
+    #
+    # O $PID separa as rodadas concorrentes; a varredura abaixo limpa o que uma rodada morta deixou.
+    # Ela só apaga raiz de PID que NÃO está mais vivo (ou que nem parece um PID, como a pasta fixa
+    # das versões anteriores): sem essa pergunta, a varredura de uma rodada apagaria a pasta da
+    # outra, que é o problema que ela existe para resolver.
+    function Clear-WinForgeSelfTestRoots {
+        param(
+            [Parameter(Mandatory)][string]$Temp,
+            [Parameter(Mandatory)][string]$Keep
+        )
+        $apagadas = @()
+        foreach ($velha in @(Get-ChildItem -LiteralPath $Temp -Directory -Filter 'WinForge-SelfTest*' -ErrorAction SilentlyContinue)) {
+            if ([string]$velha.FullName -eq $Keep) { continue }
+            $pidVelho = 0
+            if ([string]$velha.Name -match '^WinForge-SelfTest-(\d+)$') { $pidVelho = [int]$Matches[1] }
+            if ($pidVelho -gt 0 -and (Get-Process -Id $pidVelho -ErrorAction SilentlyContinue)) { continue }
+            Remove-Item -LiteralPath $velha.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $velha.FullName)) { $apagadas += [string]$velha.Name }
+        }
+        return @{ Removed = @($apagadas) }
+    }
+    $wbSelfTestRaiz = Join-Path $wbSelfTestTemp ("WinForge-SelfTest-{0}" -f $PID)
+    [void](Clear-WinForgeSelfTestRoots -Temp $wbSelfTestTemp -Keep $wbSelfTestRaiz)
+    New-Item -ItemType Directory -Path $wbSelfTestRaiz -Force -ErrorAction SilentlyContinue | Out-Null
     $wbErrors = 0
+    # O 'finally' lá embaixo é a única saída: sem ele, um erro terminante no meio de um bloco - fora
+    # de todos os try/catch daqui - deixaria a raiz desta rodada no disco para a próxima encontrar.
+    try {
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
         foreach ($k in @($p.Value)) {
             $known = ($null -ne $sync.configs.tweaks.PSObject.Properties[$k]) -or $sync.configs.appxHashtable.ContainsKey($k) -or ($null -ne $sync.configs.feature.PSObject.Properties[$k]) -or $sync.configs.applicationsHashtable.ContainsKey($k)
@@ -1717,7 +1749,7 @@ if ($SelfTest) {
     # voltar. Numa máquina sem IIS dá para provar duas coisas, e são as duas cobradas aqui: o
     # round-trip do arquivo (numa raiz temporária, nunca em %ProgramData%) e a recusa limpa de
     # Invoke-WinForgeIisTweak quando o módulo WebAdministration não existe.
-    $wbIisRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup'
+    $wbIisRoot = Join-Path $wbSelfTestRaiz 'iis-backup'
     try {
         if (Test-Path $wbIisRoot) { Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbIisFile = New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'pool:A:startMode' = 'OnDemand'; 'pool:A:autoStart' = 'False' } -Root $wbIisRoot
@@ -1733,7 +1765,7 @@ if ($SelfTest) {
         $wbIisTrust = Test-WinForgeSnapshotRootTrusted -Root $wbIisRoot -ExplicitRoot
         if (-not $wbIisTrust.Trusted) { Write-Host "  [ERRO] IIS: a pasta recém-criada não passou na checagem de confiança ('$($wbIisTrust.Reason)')" -ForegroundColor Red; $wbErrors++ }
         # Pasta com escrita para 'Todos' (Everyone, S-1-1-0) é o cenário do ataque: tem de ser recusada.
-        $wbIisRootMau = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup-aberto'
+        $wbIisRootMau = Join-Path $wbSelfTestRaiz 'iis-backup-aberto'
         New-Item -ItemType Directory -Path $wbIisRootMau -Force | Out-Null
         $wbIisAclMau = Get-Acl -LiteralPath $wbIisRootMau
         $wbIisAclMau.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -1778,7 +1810,10 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] IIS (backup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Split-Path -Parent $wbIisRoot) -Recurse -Force -ErrorAction SilentlyContinue
+        # A PRÓPRIA pasta deste bloco, e não a de cima: subir um nível daqui é apagar a raiz de
+        # fixtures da rodada inteira - inclusive o que os blocos seguintes ainda vão usar. Quem
+        # apaga a raiz é o 'finally' que fecha o -SelfTest.
+        Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- backup: forma do valor, dono da pasta, crivo inteiro
     # Segunda rodada de revisão de segurança. Os três buracos fechados aqui tinham o mesmo fim -
@@ -1829,7 +1864,7 @@ if ($SelfTest) {
     $wbSecOc = Get-WinForgeIisAllowedKey -Name OutputCache
     if (Test-WinForgeSnapshotKey -Key 'server:system.webServer/directoryBrowse:enabled' -AllowedKey $wbSecOc) { Write-Host "  [ERRO] Backup (crivo): OutputCache aceitou 'server:system.webServer/directoryBrowse:enabled' (forma curta)" -ForegroundColor Red; $wbErrors++ }
     if (-not (Test-WinForgeSnapshotKey -Key 'server:system.webServer/caching:enabled' -AllowedKey $wbSecOc)) { Write-Host "  [ERRO] Backup (crivo): OutputCache recusou a própria chave 'server:system.webServer/caching:enabled'" -ForegroundColor Red; $wbErrors++ }
-    $wbSecRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seguranca'
+    $wbSecRoot = Join-Path $wbSelfTestRaiz 'seguranca'
     try {
         if (Test-Path $wbSecRoot) { Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue }
         # Backup plantado com um GUID que não é GUID: a chave sai da leitura (vai para Ignored) e o
@@ -1950,7 +1985,7 @@ if ($SelfTest) {
     #   2. o ponto de reanálise era conferido só na ÚLTIMA pasta. Uma junção em %ProgramData%\WinForge
     #      fazia a pasta de backup nascer fora de %ProgramData%, com a DACL de onde a junção aponta.
     #      Agora o caminho é normalizado uma vez e TODA a cadeia de ancestrais é conferida.
-    $wb3Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada3'
+    $wb3Base = Join-Path $wbSelfTestRaiz 'rodada3'
     $wb3Root = Join-Path $wb3Base 'backup'
     try {
         if (Test-Path $wb3Base) { Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue }
@@ -2000,7 +2035,7 @@ if ($SelfTest) {
     #      implícito entre a gravação e o Protect - a janela que a ACE existe para fechar.
     #   2. a checagem do ARQUIVO olhava só o dono: um backup com ACE de escrita para 'Todos' passava
     #      mesmo com o dono certo.
-    $wb4Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada4'
+    $wb4Base = Join-Path $wbSelfTestRaiz 'rodada4'
     try {
         if (Test-Path $wb4Base) { Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue }
         $wb4Root = Join-Path $wb4Base 'backup'
@@ -2088,7 +2123,7 @@ if ($SelfTest) {
     # build - é um cliente, e mexer no SMB ou no plano de energia de quem compila seria estrago. As
     # duas coisas cobradas são exatamente essas: numa máquina que não é servidor, aplicar recusa
     # limpo; e a captura (-CaptureOnly, que nunca escreve) traz valor de verdade onde o cmdlet existe.
-    $wbSrvRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\server-backup'
+    $wbSrvRoot = Join-Path $wbSelfTestRaiz 'server-backup'
     try {
         if (Test-Path $wbSrvRoot) { Remove-Item -Path $wbSrvRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbSrvItens = @(
@@ -2135,7 +2170,8 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Servidor (ajustes com captura): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Split-Path -Parent $wbSrvRoot) -Recurse -Force -ErrorAction SilentlyContinue
+        # A própria pasta, e não a de cima - ver o mesmo 'finally' do bloco do IIS.
+        Remove-Item -Path $wbSrvRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- comandos de leitura da aba Servidor
     # Nada aqui exige servidor: a tabela de comandos é dado puro, o núcleo é síncrono e o netsh
@@ -3324,11 +3360,69 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Correções (ferramenta): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # ---------------------------------------------------------------- Fixtures: raiz por processo
+    # Higiene do próprio -SelfTest, e não do produto. A raiz era FIXA ('%TEMP%\WinForge-SelfTest') e
+    # não era apagada no fim: rodada interrompida no meio contaminava a seguinte, e duas rodadas ao
+    # mesmo tempo - o normal quando há revisão em paralelo - escreviam na mesma pasta. Deu falso
+    # vermelho duas vezes no mesmo dia, em código que a mudança nem tocava.
+    try {
+        if ($wbSelfTestRaiz -ne (Join-Path $wbSelfTestTemp ("WinForge-SelfTest-{0}" -f $PID))) { Write-Host "  [ERRO] Fixtures: a raiz desta rodada não é a do PID ('$wbSelfTestRaiz')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wbSelfTestRaiz -PathType Container)) { Write-Host "  [ERRO] Fixtures: a raiz '$wbSelfTestRaiz' não existe" -ForegroundColor Red; $wbErrors++ }
+        # A pasta FIXA não pode voltar a nascer: é ela que atravessa rodadas.
+        if (Test-Path -LiteralPath (Join-Path $wbSelfTestTemp 'WinForge-SelfTest')) { Write-Host "  [ERRO] Fixtures: a pasta fixa '%TEMP%\WinForge-SelfTest' voltou a ser criada" -ForegroundColor Red; $wbErrors++ }
+        # A varredura, contra um %TEMP% de mentira. Três regras, uma por pasta: PID VIVO fica (é a
+        # rodada concorrente, e apagá-la é o defeito que a varredura poderia criar), PID morto sai,
+        # nome sem PID - a pasta fixa das versões anteriores - sai.
+        $wfIsoTmp = Join-Path $wbSelfTestRaiz 'isolamento'
+        New-Item -ItemType Directory -Path $wfIsoTmp -Force | Out-Null
+        $wfIsoViva = Join-Path $wfIsoTmp ("WinForge-SelfTest-{0}" -f $PID)
+        $wfIsoMorta = Join-Path $wfIsoTmp 'WinForge-SelfTest-999999998'
+        $wfIsoFixa = Join-Path $wfIsoTmp 'WinForge-SelfTest'
+        $wfIsoMinha = Join-Path $wfIsoTmp 'WinForge-SelfTest-guardada'
+        foreach ($wfIsoPasta in @($wfIsoViva, $wfIsoMorta, $wfIsoFixa, $wfIsoMinha)) {
+            New-Item -ItemType Directory -Path $wfIsoPasta -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfIsoPasta 'fixture.txt') -Value 'x' -Encoding UTF8
+        }
+        $wfIsoRes = Clear-WinForgeSelfTestRoots -Temp $wfIsoTmp -Keep $wfIsoMinha
+        if (-not (Test-Path -LiteralPath $wfIsoViva)) { Write-Host "  [ERRO] Fixtures: a varredura apagou a raiz de um PID VIVO - é a rodada concorrente" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wfIsoMinha)) { Write-Host "  [ERRO] Fixtures: a varredura apagou a raiz da própria rodada" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfIsoMorta) { Write-Host "  [ERRO] Fixtures: a raiz de um PID morto ficou para trás" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfIsoFixa) { Write-Host "  [ERRO] Fixtures: a pasta fixa antiga não foi varrida" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfIsoRes.Removed).Count -ne 2) { Write-Host "  [ERRO] Fixtures: a varredura relatou $(@($wfIsoRes.Removed).Count) remoção(ões), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        # E a limpeza do fim roda DÊ NO QUE DER: ela mora no 'finally' que fecha o -SelfTest, depois
+        # da linha '== SelfTest concluído ==' - e não solta no fim do bloco, onde um erro terminante
+        # num teste qualquer passaria por cima dela. A busca é pela FORMA: o 'finally' mais próximo
+        # ANTES da chamada tem de ser um que venha DEPOIS do fim do -SelfTest.
+        $wfIsoFonte = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfIsoFonte = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfIsoFonte = '' }
+        # As duas buscas partem do FIM do -SelfTest, e não do começo do arquivo: as mesmas duas
+        # cadeias aparecem aqui em cima, dentro deste próprio teste, e uma busca do começo acharia a
+        # linha do teste em vez da linha que ele existe para prender.
+        $wfIsoPosFim = $wfIsoFonte.LastIndexOf('== SelfTest concluído:', [StringComparison]::Ordinal)
+        $wfIsoPosLimpa = if ($wfIsoPosFim -ge 0) { $wfIsoFonte.IndexOf('Remove-Item -LiteralPath $wbSelfTestRaiz -Recurse', $wfIsoPosFim, [StringComparison]::Ordinal) } else { -1 }
+        if ([string]::IsNullOrWhiteSpace($wfIsoFonte)) { Write-Host "  [ERRO] Fixtures: o próprio arquivo do WinForge não pôde ser lido para conferir a limpeza" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIsoPosLimpa -lt 0) { Write-Host "  [ERRO] Fixtures: ninguém apaga a raiz desta rodada no fim" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfIsoPosFin = $wfIsoFonte.LastIndexOf('} finally {', $wfIsoPosLimpa, [StringComparison]::Ordinal)
+            if ($wfIsoPosFin -lt 0 -or $wfIsoPosFin -lt $wfIsoPosFim) { Write-Host "  [ERRO] Fixtures: a limpeza da raiz não está no 'finally' que fecha o -SelfTest - um erro terminante no meio a pularia" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E nenhum bloco apaga a pasta de CIMA da sua, subindo um nível com Split-Path. Era assim que
+        # dois deles limpavam - o do IIS e o da aba Servidor -, e com a raiz por processo isso virou
+        # "apagar a rodada inteira no meio dela". MEDIDO ao restaurar a forma antiga: três erros em
+        # 'Permissões (SDDL)' e 'Permissões (Consumed)', blocos que a mudança nem tocava - o falso
+        # vermelho que este bloco existe para acabar. A trava pesca a FORMA da chamada, e o padrão
+        # abaixo é o único lugar do arquivo onde ela aparece escrita.
+        if ($wfIsoFonte -match 'Remove-Item -Path \(Split-Path -Parent') { Write-Host "  [ERRO] Fixtures: algum bloco apaga a pasta de cima da sua - com a raiz por processo, isso apaga os fixtures dos blocos seguintes" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath $wfIsoTmp -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  Fixtures: raiz por processo ('WinForge-SelfTest-$PID'), varredura poupa PID vivo e apaga PID morto, limpeza no 'finally' do fim"
+    } catch {
+        Write-Host "  [ERRO] Fixtures: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     # ---------------------------------------------------------------- Janela de saída: memória
     # Não é o TextBox. As fases 2 a 5 chamavam Invoke-WinForgeNativeCommand SEM -StreamTo, caíam no
     # 'Out-String -Width 4096' e o Write-Host seguinte virava UMA linha de centenas de MB: medido,
     # 135 MB de saída viraram 1.575 MB de pico (11,7x).
-    $wfMemRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\stream'
+    $wfMemRaiz = Join-Path $wbSelfTestRaiz 'stream'
     try {
         if (Test-Path -LiteralPath $wfMemRaiz) { Remove-Item -LiteralPath $wfMemRaiz -Recurse -Force -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Path $wfMemRaiz -Force | Out-Null
@@ -3775,7 +3869,7 @@ if ($SelfTest) {
     # dono é a própria identidade. O '/restore' do CONTEÚDO do perfil continua fora do SelfTest -
     # ele precisa de SeRestorePrivilege e mora no plano, que o -DryRun lista sem rodar.
     try {
-        $wfAclRtRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\sddl-ida-e-volta'
+        $wfAclRtRaiz = Join-Path $wbSelfTestRaiz 'sddl-ida-e-volta'
         New-Item -ItemType Directory -Path $wfAclRtRaiz -Force | Out-Null
         $wfAclRtSeg = Get-WinForgeAclFolderSecurity -Path $wfAclRtRaiz
         if (-not $wfAclRtSeg.Ok) { Write-Host "  [ERRO] Permissões (SDDL): a lista da pasta de teste não pôde ser lida ($($wfAclRtSeg.Reason))" -ForegroundColor Red; $wbErrors++ }
@@ -3856,7 +3950,7 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Permissões (SDDL): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        $wfAclRtLimpa = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\sddl-ida-e-volta'
+        $wfAclRtLimpa = Join-Path $wbSelfTestRaiz 'sddl-ida-e-volta'
         if (Test-Path -LiteralPath $wfAclRtLimpa) {
             Remove-Item -LiteralPath $wfAclRtLimpa -Recurse -Force -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $wfAclRtLimpa) { Write-Host "  [ERRO] Permissões (SDDL): a pasta de teste '$wfAclRtLimpa' não pôde ser apagada" -ForegroundColor Red; $wbErrors++ }
@@ -3869,7 +3963,7 @@ if ($SelfTest) {
     # sintaxe e custa tempo. Quem paga a conta desta trava é o 'AD' que precisava ser '(AD)': o
     # plano inteiro passava na revisão por leitura e o icacls respondia 87 na máquina do usuário.
     try {
-        $wfAclSintRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\icacls-syntax'
+        $wfAclSintRaiz = Join-Path $wbSelfTestRaiz 'icacls-syntax'
         $wfAclSintExe = Get-WinForgeSystemExe -Name 'icacls.exe'
         # O plano do teste de sintaxe usa o SID REAL desta identidade: o icacls recusa um SID que
         # não existe na máquina com 1332 ("nenhum mapeamento"), e isso não é erro de sintaxe.
@@ -3899,7 +3993,7 @@ if ($SelfTest) {
     } finally {
         # As concessões tiram o acesso desta identidade das pastas de teste; sem devolver a herança
         # do %TEMP% antes, o Remove-Item deixaria a sujeira plantada (dono não é quem apaga).
-        $wfAclSintLimpa = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\icacls-syntax'
+        $wfAclSintLimpa = Join-Path $wbSelfTestRaiz 'icacls-syntax'
         if (Test-Path -LiteralPath $wfAclSintLimpa) {
             & (Get-WinForgeSystemExe -Name 'icacls.exe') $wfAclSintLimpa '/reset' '/T' '/L' '/C' '/Q' | Out-Null
             Remove-Item -LiteralPath $wfAclSintLimpa -Recurse -Force -ErrorAction SilentlyContinue
@@ -3985,7 +4079,7 @@ if ($SelfTest) {
         # compila normalmente não tem nenhum), lido por Get-WinForgeAclBackupSet e transformado em
         # plano pelo -DryRun. É o que prova que os dois tipos de item sobrevivem ao JSON e que cada
         # um vira a ação certa - SDDL na pasta, '/restore /C /L' no conteúdo do perfil.
-        $wfAclIdxRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-indice'
+        $wfAclIdxRaiz = Join-Path $wbSelfTestRaiz 'acl-indice'
         try {
             New-Item -ItemType Directory -Path $wfAclIdxRaiz -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $wfAclIdxRaiz 'acl-perfil-teste-20260911-120000.txt') -Value '' -Encoding Unicode
@@ -4078,7 +4172,7 @@ if ($SelfTest) {
     # o -Probe (que responde à primeira porta e volta, sem tocar em nada), a ordem no fonte e a
     # lista de coisas que NÃO podem aparecer antes da checagem.
     try {
-        $wfAclRaizFantasma = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-nao-deve-nascer'
+        $wfAclRaizFantasma = Join-Path $wbSelfTestRaiz 'acl-backup-nao-deve-nascer'
         foreach ($wfAclFn in @('Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo', 'Invoke-WinForgeAclCleanup')) {
             $wfAclFonteEl = [string](Get-Command $wfAclFn).ScriptBlock
             # A âncora é a trava de SelfTest, e não o começo da função: acima dela ficam o -DryRun
@@ -4118,7 +4212,7 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Permissões (elevação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-nao-deve-nascer') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'acl-backup-nao-deve-nascer') -Recurse -Force -ErrorAction SilentlyContinue
     }
     # 5. A pasta de backup e o arquivo que o Desfazer aceita. Valem as regras da pasta PADRÃO, sem o
     # afrouxamento de -ExplicitRoot: o /restore reescreve permissões do disco inteiro a partir do que
@@ -4130,7 +4224,7 @@ if ($SelfTest) {
         $wfAclFonteRaiz = [string](Get-Command Get-WinForgeAclBackupRoot).ScriptBlock
         if ($wfAclFonteRaiz.IndexOf('$env:', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (pasta): a pasta de backup não pode sair de variável de ambiente" -ForegroundColor Red; $wbErrors++ }
         if ((Get-WinForgeAclBackupRoot) -notlike '*\WinForge\acl-backup') { Write-Host "  [ERRO] Permissões (pasta): o padrão deveria terminar em 'WinForge\acl-backup', veio '$(Get-WinForgeAclBackupRoot)'" -ForegroundColor Red; $wbErrors++ }
-        $wfAclRaizAberta = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-aberto'
+        $wfAclRaizAberta = Join-Path $wbSelfTestRaiz 'acl-backup-aberto'
         New-Item -ItemType Directory -Path $wfAclRaizAberta -Force | Out-Null
         $wfAclAclAberta = Get-Acl -LiteralPath $wfAclRaizAberta
         $wfAclAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -4139,7 +4233,7 @@ if ($SelfTest) {
         if ($wfAclConf.Ok) { Write-Host "  [ERRO] Permissões (pasta): uma pasta em %TEMP% com escrita para 'Todos' foi aceita" -ForegroundColor Red; $wbErrors++ }
         elseif ([string]::IsNullOrWhiteSpace([string]$wfAclConf.Reason)) { Write-Host "  [ERRO] Permissões (pasta): recusou sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
         # E o arquivo: fora da pasta protegida, recusado antes de qualquer leitura de conteúdo.
-        $wfAclFora = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-fora-da-pasta.txt'
+        $wfAclFora = Join-Path $wbSelfTestRaiz 'acl-fora-da-pasta.txt'
         Set-Content -LiteralPath $wfAclFora -Value 'D:PAI(A;;FA;;;WD)' -Encoding UTF8
         $wfAclJulg = Test-WinForgeAclBackupFile -Path $wfAclFora -Root (Get-WinForgeAclBackupRoot)
         if ($wfAclJulg.Trusted) { Write-Host "  [ERRO] Permissões (arquivo): um arquivo em %TEMP% foi aceito como backup" -ForegroundColor Red; $wbErrors++ }
@@ -4152,8 +4246,8 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Permissões (pasta): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-aberto') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-fora-da-pasta.txt') -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'acl-backup-aberto') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'acl-fora-da-pasta.txt') -Force -ErrorAction SilentlyContinue
     }
     # 6. As três linhas da tabela, a entrada da config e a pergunta antes de agir.
     try {
@@ -4243,7 +4337,7 @@ if ($SelfTest) {
     # de reparse - não o MAX_PATH. A caminhada nova não desce em ponto de reanálise E não o indexa:
     # o .NET lê a ACL do ALVO e o '/restore /L' a devolveria ao LINK, trocando permissão por
     # permissão. As duas coisas, e é isto que o teste cobra.
-    $wfCamRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-caminhada'
+    $wfCamRaiz = Join-Path $wbSelfTestRaiz 'acl-caminhada'
     try {
         if (Test-Path -LiteralPath $wfCamRaiz) { Remove-Item -LiteralPath $wfCamRaiz -Recurse -Force -ErrorAction SilentlyContinue }
         $wfCamPerfil = Join-Path $wfCamRaiz 'perfil'
@@ -4423,7 +4517,7 @@ if ($SelfTest) {
     # escreve para a MESMA árvore tem de trazer o mesmo nome relativo, o mesmo SDDL e o mesmo
     # encoding que o nosso. Um '/restore' que aceitasse o arquivo diria menos: ele aceita em
     # silêncio o que decodificar, e é justo o encoding que precisa ser cobrado.
-    $wfArqRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-arquivo'
+    $wfArqRaiz = Join-Path $wbSelfTestRaiz 'acl-arquivo'
     $wfArqSelfAntes = $sync.SelfTest
     try {
         if (Test-Path -LiteralPath $wfArqRaiz) { Remove-Item -LiteralPath $wfArqRaiz -Recurse -Force -ErrorAction SilentlyContinue }
@@ -4646,7 +4740,7 @@ if ($SelfTest) {
     }
     # ---------------------------------------------------------------- Permissões: a fase 2 no plano
     try {
-        $wfF2Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-plano') -Stamp '20260912-101010')
+        $wfF2Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestRaiz 'acl-plano') -Stamp '20260912-101010')
         $wfF2Save = @($wfF2Plano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'save' })
         if ($wfF2Save.Count) { Write-Host "  [ERRO] Permissões (fase 2): o passo 'save' com 'icacls /T' continua no plano - ele é o laço que encheu o disco" -ForegroundColor Red; $wbErrors++ }
         $wfF2Escopo = @($wfF2Plano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })
@@ -4715,7 +4809,7 @@ if ($SelfTest) {
     # icacls. Aqui a pasta é criada em %TEMP%, com uma negação de verdade, e o que a função devolve
     # é comparado com o que o icacls escreve por fora - sem elevação: 'icacls /save' não precisa
     # dela numa pasta cuja dona é a própria identidade.
-    $wfOrdRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-ordem'
+    $wfOrdRaiz = Join-Path $wbSelfTestRaiz 'acl-ordem'
     $wfOrdRegra = $null
     $wfOrdDi = $null
     try {
@@ -4821,7 +4915,7 @@ if ($SelfTest) {
             if ([string]$wfF5P.FilePath -ne (Get-WinForgeSystemExe -Name 'icacls.exe')) { Write-Host "  [ERRO] Permissões (fase 5): o executável não é o icacls do System32 ('$($wfF5P.FilePath)')" -ForegroundColor Red; $wbErrors++ }
         }
         # O conjunto coberto é o conjunto alterado: mesma lista, mesma contagem.
-        $wfF5Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-plano') -Stamp '20260912-101010')
+        $wfF5Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestRaiz 'acl-plano') -Stamp '20260912-101010')
         $wfF5Velho = @($wfF5Plano | Where-Object { [int]$_.Phase -eq 5 -and [string]$_.Kind -eq 'inherit' })
         if ($wfF5Velho.Count) { Write-Host "  [ERRO] Permissões (fase 5): o passo 'inherit' com '/T' continua no plano" -ForegroundColor Red; $wbErrors++ }
         $wfF5Lista = @($wfF5Plano | Where-Object { [int]$_.Phase -eq 5 -and [string]$_.Kind -eq 'inherit-list' })
@@ -4846,7 +4940,7 @@ if ($SelfTest) {
         # manda o pai primeiro: o pai sai com 2 (aviso) e cada descendente com 3 (erro) - um reparo
         # que correu bem terminando numa lista de erros, que é o oposto do que o ramo existe para
         # fazer. Por isso a classificação é pela EXISTÊNCIA da pasta.
-        $wfF5Existe = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-fase5-existe'
+        $wfF5Existe = Join-Path $wbSelfTestRaiz 'acl-fase5-existe'
         $wfF5Espaco = ''
         try {
             if (Test-Path -LiteralPath $wfF5Existe) { Remove-Item -LiteralPath $wfF5Existe -Recurse -Force -ErrorAction SilentlyContinue }
@@ -4907,7 +5001,7 @@ if ($SelfTest) {
     # Na 2ª execução a fase 5 da 1ª já tinha removido a proteção de herança, o escopo caía para perto
     # de zero e o índice novo - que continua com os itens 'sddl' das fases 3 e 4 - virava o único
     # visível. As 338 originais ficavam irrecuperáveis.
-    $wfIdxRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-indices'
+    $wfIdxRaiz = Join-Path $wbSelfTestRaiz 'acl-indices'
     try {
         if (Test-Path -LiteralPath $wfIdxRaiz) { Remove-Item -LiteralPath $wfIdxRaiz -Recurse -Force -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Path $wfIdxRaiz -Force | Out-Null
@@ -5050,7 +5144,7 @@ if ($SelfTest) {
     # Administradores apagam. É também a outra metade da guarda da segunda restauração: numa máquina
     # que já rodou a 1.7.0 o índice antigo não tem a marca de consumido, conta como pendente e
     # recusa toda restauração nova - a recusa manda usar este botão, e sem ele não havia saída.
-    $wfLimpRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-limpeza'
+    $wfLimpRaiz = Join-Path $wbSelfTestRaiz 'acl-limpeza'
     try {
         if (Test-Path -LiteralPath $wfLimpRaiz) { Remove-Item -LiteralPath $wfLimpRaiz -Recurse -Force -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Path $wfLimpRaiz -Force | Out-Null
@@ -5191,7 +5285,7 @@ if ($SelfTest) {
         # ---- O arquivo de conteúdo que a Tarefa 7 manda para OUTRO disco. A limpeza não o enxergava:
         # ele não está na pasta protegida, e o inventário só olhava a pasta. Ficava metade do backup
         # apagada e metade esquecida num pen drive, sem uma linha dizendo isso.
-        $wfLimpExtDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-limpeza-externo'
+        $wfLimpExtDir = Join-Path $wbSelfTestRaiz 'acl-limpeza-externo'
         if (Test-Path -LiteralPath $wfLimpExtDir) { Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Path $wfLimpExtDir -Force | Out-Null
         $wfLimpExtArq = Join-Path $wfLimpExtDir 'acl-perfil-externo-20270101-000000.txt'
@@ -5304,7 +5398,7 @@ if ($SelfTest) {
     # por COMPORTAMENTO - reler a lista de algumas pastas e comparar com o descritor do arquivo -, e
     # nunca pela frase de resumo do icacls: a integração contínua deste projeto roda em inglês e uma
     # asserção presa ao idioma já quebrou antes.
-    $wfAmRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-amostra'
+    $wfAmRaiz = Join-Path $wbSelfTestRaiz 'acl-amostra'
     try {
         if (Test-Path -LiteralPath $wfAmRaiz) { Remove-Item -LiteralPath $wfAmRaiz -Recurse -Force -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Path $wfAmRaiz -Force | Out-Null
@@ -5410,7 +5504,7 @@ if ($SelfTest) {
     # O backup de conteúdo é OBRIGATÓRIO (103,4 KB: não há o que economizar). O que é opcional é o
     # DESTINO. As sete recusas abaixo existem porque o que sai desta pasta volta por um /restore
     # elevado sobre o perfil inteiro.
-    $wfDestRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-destino'
+    $wfDestRaiz = Join-Path $wbSelfTestRaiz 'acl-destino'
     try {
         if (Test-Path -LiteralPath $wfDestRaiz) { Remove-Item -LiteralPath $wfDestRaiz -Recurse -Force -ErrorAction SilentlyContinue }
         $wfDestPerfil = Join-Path $wfDestRaiz 'perfil'
@@ -5876,7 +5970,7 @@ if ($SelfTest) {
         # anterior. O que se prova aqui é a ESCOLHA - só 'nvidia-*.exe', nunca o recém-aberto,
         # nunca um arquivo que o WinForge não pôs ali - primeiro em simulação e depois apagando de
         # verdade, numa pasta de teste com arquivos criados aqui mesmo.
-        $wfLimpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza'
+        $wfLimpDir = Join-Path $wbSelfTestRaiz 'limpeza'
         New-Item -ItemType Directory -Path $wfLimpDir -Force | Out-Null
         $wfLimpNovo = Join-Path $wfLimpDir 'nvidia-616.92.exe'
         $wfLimpVelho = Join-Path $wfLimpDir 'nvidia-566.36.exe'
@@ -5919,7 +6013,7 @@ if ($SelfTest) {
         }
         # Assinatura: arquivo sem assinatura nenhuma é recusado, e o nome da organização é comparado
         # por igualdade EXATA - 'NVIDIA Corporation Ltd' não é 'NVIDIA Corporation'.
-        $wfAcTmpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura'
+        $wfAcTmpDir = Join-Path $wbSelfTestRaiz 'assinatura'
         New-Item -ItemType Directory -Path $wfAcTmpDir -Force | Out-Null
         $wfAcTmpExe = Join-Path $wfAcTmpDir 'sem-assinatura.exe'
         Set-Content -LiteralPath $wfAcTmpExe -Value 'MZ este arquivo nao e um executavel assinado' -Encoding Ascii
@@ -5961,7 +6055,7 @@ if ($SelfTest) {
         # Pasta de downloads: as MESMAS regras da pasta de backup padrão, e sem o afrouxamento de
         # -ExplicitRoot. O instalador baixado é aberto com a elevação do WinForge - uma pasta que um
         # processo de integridade média escreve trocaria o arquivo entre a conferência e a abertura.
-        $wfAcRaizAberta = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto'
+        $wfAcRaizAberta = Join-Path $wbSelfTestRaiz 'downloads-aberto'
         New-Item -ItemType Directory -Path $wfAcRaizAberta -Force | Out-Null
         $wfAcAclAberta = Get-Acl -LiteralPath $wfAcRaizAberta
         $wfAcAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -5979,7 +6073,7 @@ if ($SelfTest) {
         if ($wfAcEu.Value -eq $wfAcSystemSid.Value -or $wfAcEu.Value -eq $wfAcAdminSid.Value) {
             Write-Host "  Pasta de downloads (dono): teste pulado - este build roda como SYSTEM ou como o próprio grupo Administradores"
         } else {
-            $wfAcRaizDono = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono'
+            $wfAcRaizDono = Join-Path $wbSelfTestRaiz 'downloads-dono'
             New-Item -ItemType Directory -Path $wfAcRaizDono -Force | Out-Null
             $wfAcAclDono = New-Object System.Security.AccessControl.DirectorySecurity
             $wfAcAclDono.SetAccessRuleProtection($true, $false)
@@ -6002,10 +6096,10 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] ações de driver: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'assinatura') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'limpeza') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
@@ -6049,7 +6143,7 @@ if ($SelfTest) {
             }
         }
     }
-    $wfCatRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\catalogo'
+    $wfCatRaiz = Join-Path $wbSelfTestRaiz 'catalogo'
     try {
         $wfCatVeneno = 'https://us.download.nvidia.com/Windows/999.99/veneno.exe'
         $wfCatVersaoViva = '616.92'
@@ -6187,7 +6281,7 @@ if ($SelfTest) {
     # Então: a cadeia inteira nasce protegida (New-WinForgeSnapshotRoot) e a cadeia inteira é
     # conferida (Test-WinForgeSnapshotRootTrusted), de %ProgramData%/%TEMP% (exclusive) até a última
     # pasta (inclusive).
-    $wfCadBase = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seg'
+    $wfCadBase = Join-Path $wbSelfTestRaiz 'seg'
     try {
         Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
         $wfCadMeio = Join-Path $wfCadBase 'WinForge'
@@ -6348,7 +6442,7 @@ if ($SelfTest) {
         if ($wfPinRenomeou) { try { [System.IO.File]::Move($wfPinOutro, $Path) } catch { } }
         return (-not $wfPinRenomeou)
     }
-    $wfPinDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\pino'
+    $wfPinDir = Join-Path $wbSelfTestRaiz 'pino'
     try {
         New-Item -ItemType Directory -Path $wfPinDir -Force | Out-Null
         $wfPinArq = Join-Path $wfPinDir 'instalador.exe'
@@ -7419,7 +7513,12 @@ if ($SelfTest) {
         Write-Host "  [ERRO] XAML: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     Write-Host "== SelfTest concluído: $wbErrors erro(s) =="
-    Stop-Transcript | Out-Null
+    } finally {
+        # Roda dê no que der - inclusive quando um bloco estoura fora de um try/catch e o
+        # '== SelfTest concluído ==' acima nem chega a ser escrito.
+        Remove-Item -LiteralPath $wbSelfTestRaiz -Recurse -Force -ErrorAction SilentlyContinue
+        Stop-Transcript | Out-Null
+    }
     exit $wbErrors
 }
 
