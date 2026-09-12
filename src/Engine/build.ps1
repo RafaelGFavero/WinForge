@@ -4918,7 +4918,16 @@ if ($SelfTest) {
         # Ancorado no INDEXADOR, e não em 'Count - 1': essa string casa com qualquer comentário que
         # explique o defeito antigo, e o teste ficaria vermelho justamente na implementação correta.
         if ($wfIdxFonteU -match '\$indices\[\s*\$indices\.Count\s*-\s*1\s*\]') { Write-Host "  [ERRO] Permissões (Desfazer): ainda existe a escolha pelo índice mais novo (`$indices[`$indices.Count-1])" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Permissões (índices): Desfazer no mais antigo não consumido, Consumed avança a fila, origem por MachineGuid+SID, restauração recusada com pendente"
+        # AVISO INOFENSIVO NÃO É RECUSA. Os dois casos de "a pasta não existe mais" são pulos, não
+        # falhas: a pasta sumiu entre o backup e o Desfazer, não há o que devolver nela, e o resto do
+        # conjunto voltou inteiro. Contá-los como recusa prendia o conjunto na fila para sempre - a
+        # restauração seguia recusada e o Desfazer repetia a mesma pasta sumida, sem saída.
+        if (([regex]::Matches($wfIdxFonteU, '\$pulados\+\+')).Count -ne 2) { Write-Host "  [ERRO] Permissões (Desfazer): os dois casos de 'a pasta não existe mais' têm de contar como PULADOS, não como recusa ($(([regex]::Matches($wfIdxFonteU, '\$pulados\+\+')).Count) de 2)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'pulada\(s\)') { Write-Host "  [ERRO] Permissões (Desfazer): o resumo não diz quantas pastas foram puladas" -ForegroundColor Red; $wbErrors++ }
+        # E a porta que marca o conjunto como consumido continua sendo recusa + amostra, e não pulo.
+        if ($wfIdxFonteU -notmatch '\$recusados -eq 0 -and \$amostraFora -eq 0') { Write-Host "  [ERRO] Permissões (Desfazer): a porta da marca de consumido deixou de ser 'nenhuma recusa e nenhuma divergência de amostra'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -match '\$pulados -eq 0') { Write-Host "  [ERRO] Permissões (Desfazer): a porta da marca de consumido voltou a prender o conjunto por causa de pasta que sumiu" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (índices): Desfazer no mais antigo não consumido, Consumed avança a fila, origem por MachineGuid+SID, restauração recusada com pendente, pasta sumida é pulo e não recusa"
     } catch {
         Write-Host "  [ERRO] Permissões (índices): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
@@ -4988,7 +4997,68 @@ if ($SelfTest) {
         if ($wfLimpCego.Count) { Write-Host "  [ERRO] Permissões (limpeza): com um índice ilegível na pasta, $($wfLimpCego.Count) arquivo(s) foram marcados como órfãos - não há como saber o que ele referenciava" -ForegroundColor Red; $wbErrors++ }
         $wfLimpSecoCego = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*acl-perfil-fulano-19990101*' })
         if ($wfLimpSecoCego.Count) { Write-Host "  [ERRO] Permissões (limpeza): a simulação apagaria um arquivo que um índice ilegível pode referenciar" -ForegroundColor Red; $wbErrors++ }
+        # Mas o ÍNDICE ilegível em si é alvo SEMPRE, e essa era a outra ponta do beco sem saída: o
+        # Desfazer não consegue aplicá-lo (Get-WinForgeAclBackupSet devolve zero item para ele), a
+        # restauração fica recusada porque ele conta como pendente, e a limpeza respondia que não
+        # havia nada para apagar. Decidir isso NÃO depende de interpretar o conteúdo dele.
+        $wfLimpInvCego = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { [string]$_.Name -eq 'acl-index-19990101-000000.json' })
+        if ($wfLimpInvCego.Count -ne 1) { Write-Host "  [ERRO] Permissões (limpeza): o índice ilegível não apareceu no inventário" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not $wfLimpInvCego[0].Unreadable) { Write-Host "  [ERRO] Permissões (limpeza): o índice ilegível não foi marcado com Unreadable" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSecoIleg = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*acl-index-19990101-000000.json*' })
+        if (-not $wfLimpSecoIleg.Count) { Write-Host "  [ERRO] Permissões (limpeza): o índice ILEGÍVEL não entra na limpeza - a recusa da restauração manda limpar e a limpeza não acha nada, que é o beco sem saída" -ForegroundColor Red; $wbErrors++ }
         Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-19990101-000000.json') -Force -ErrorAction SilentlyContinue
+        # ---- O beco sem saída medido pelo revisor: um índice PENDENTE no formato da 1.7.0, sem as
+        # marcas novas. A restauração é recusada por causa dele, e antes deste conserto a limpeza
+        # respondia "nada a apagar". Basta uma pasta que sumiu, um hash divergente ou um índice
+        # ilegível para o conjunto ficar pendente para sempre.
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20250101-000000.json') -Value (([pscustomobject]@{
+            Stamp = '20250101-000000'
+            Items = @([pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = 'D:P(A;;FA;;;SY)'; Owner = ''; OwnerSid = ''; File = ''; Target = ''; Sha256 = ''; ExternalPath = '' })
+        } | ConvertTo-Json -Depth 5)) -Encoding UTF8
+        $wfLimpBeco = Test-WinForgeAclRestoreAllowed -Root $wfLimpRaiz
+        if ($wfLimpBeco.Ok) { Write-Host "  [ERRO] Permissões (limpeza): com um índice da 1.7.0 na pasta a restauração deveria ser recusada" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpBeco.Reason).IndexOf('inclusive os pendentes', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (limpeza): a recusa manda limpar sem dizer que a limpeza alcança conjunto pendente - foi essa a saída que não existia ('$($wfLimpBeco.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSemDesc = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*20250101*' })
+        if ($wfLimpSemDesc.Count) { Write-Host "  [ERRO] Permissões (limpeza): sem o descarte pedido, a limpeza apagaria um conjunto que ninguém desfez" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpComDesc = @(Invoke-WinForgeAclCleanup -DryRun -DiscardPending -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*20250101*' })
+        if (-not $wfLimpComDesc.Count) { Write-Host "  [ERRO] Permissões (limpeza): com o descarte pedido o conjunto pendente continua fora - o beco sem saída volta inteiro" -ForegroundColor Red; $wbErrors++ }
+        # A confirmação do descarte é DIGITADA, e distinta da caixa Sim/Não do clique.
+        foreach ($wfLimpFrase in @(
+            @{ Texto = 'APAGAR';      Vale = $true },
+            @{ Texto = 'apagar';      Vale = $true },
+            @{ Texto = '  APAGAR  ';  Vale = $true },
+            @{ Texto = 'APAGA';       Vale = $false },
+            @{ Texto = 'APAGAR TUDO'; Vale = $false },
+            @{ Texto = '';            Vale = $false },
+            @{ Texto = 'sim';         Vale = $false }
+        )) {
+            if ([bool](Test-WinForgeAclCleanupPhrase -Typed ([string]$wfLimpFrase.Texto)) -ne [bool]$wfLimpFrase.Vale) { Write-Host "  [ERRO] Permissões (descarte): '$($wfLimpFrase.Texto)' deveria $(if ($wfLimpFrase.Vale) { 'valer' } else { 'NÃO valer' }) como confirmação digitada" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfLimpJanela = Show-WinForgeAclCleanupConfirm -Stamps @('20250101-000000') -Bytes 1234 -NoShow
+        if ($wfLimpJanela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Permissões (descarte): Show-WinForgeAclCleanupConfirm -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfLimpOk = $wfLimpJanela.FindName('WFAclCleanupOk')
+            $wfLimpCaixa = $wfLimpJanela.FindName('WFAclCleanupPhrase')
+            $wfLimpTexto = $wfLimpJanela.FindName('WFAclCleanupText')
+            if ($null -eq $wfLimpOk -or $null -eq $wfLimpCaixa -or $null -eq $wfLimpTexto) { Write-Host "  [ERRO] Permissões (descarte): a caixa de confirmação não registrou o botão, a caixa de texto ou a mensagem" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ($wfLimpOk.IsEnabled) { Write-Host "  [ERRO] Permissões (descarte): o botão de descartar nasce HABILITADO - a confirmação digitada não segura nada" -ForegroundColor Red; $wbErrors++ }
+                $wfLimpCaixa.Text = 'APAGAR'
+                if (-not $wfLimpOk.IsEnabled) { Write-Host "  [ERRO] Permissões (descarte): digitada a palavra, o botão continua desabilitado" -ForegroundColor Red; $wbErrors++ }
+                $wfLimpCaixa.Text = 'APAG'
+                if ($wfLimpOk.IsEnabled) { Write-Host "  [ERRO] Permissões (descarte): apagada a palavra, o botão continua habilitado" -ForegroundColor Red; $wbErrors++ }
+                if (([string]$wfLimpTexto.Text).IndexOf('20250101-000000', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (descarte): a caixa não diz QUAIS conjuntos vão embora ('$($wfLimpTexto.Text)')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # E a limpeza de verdade PEDE essa confirmação antes de descartar pendente. A busca é pela
+        # forma da CHAMADA, e não pelo nome: o nome também aparece no bloco de ajuda, que entra no
+        # ScriptBlock - foi essa fresta que já pegou três implementadores desta leva.
+        $wfLimpFonteC = [string](Get-Command Invoke-WinForgeAclCleanup).ScriptBlock
+        if ($wfLimpFonteC.IndexOf('Request-WinForgeAclCleanupDiscard -Stamps', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (descarte): a limpeza não CHAMA a confirmação digitada antes de descartar conjunto pendente" -ForegroundColor Red; $wbErrors++ }
+        # O salto para a thread da janela precisa do callback nascido na runspace PRINCIPAL. Sem ele
+        # no lugar, o pedido morre no Dispatcher e o descarte nunca acontece - calado.
+        if ($sync.WinForgeAclCleanupConfirmCallback -isnot [scriptblock]) { Write-Host "  [ERRO] Permissões (descarte): `$sync.WinForgeAclCleanupConfirmCallback não é um scriptblock - o pedido não chega à thread da janela" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20250101-000000.json') -Force -ErrorAction SilentlyContinue
         # E a linha recusa despacho sem ninguém para confirmar.
         $wfLimpDesp = Invoke-WinForgeRepairCommand -Name 'AclCleanup' -NoUI
         if ($wfLimpDesp.Dispatched) { Write-Host "  [ERRO] Permissões (limpeza): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }

@@ -4530,7 +4530,10 @@ function Test-WinForgeAclRestoreAllowed {
         irrecuperáveis.
 
         Com a guarda, a segunda restauração nem começa: ou o usuário desfaz o que está pendente, ou
-        descarta o backup antigo pelo botão de limpeza. A recusa nomeia os dois caminhos.
+        descarta o backup antigo pelo botão de limpeza. A recusa nomeia os dois caminhos, e diz que
+        a limpeza alcança TAMBÉM o pendente - sem essa frase ela mandaria para uma saída que, até o
+        conserto do beco sem saída, não existia: a limpeza só apagava órfão e consumido, e respondia
+        "nada a apagar" justamente para quem estava preso aqui.
 
         Índice sem 'Consumed' - o da 1.7.0 - conta como PENDENTE, e é o certo: ele é mesmo um backup
         que ninguém desfez.
@@ -4545,7 +4548,7 @@ function Test-WinForgeAclRestoreAllowed {
     if ($r.Pending -lt 1) { return $r }
     $r.Ok = $false
     $carimbos = @($pendentes | ForEach-Object { [string]$_.Stamp }) -join ', '
-    $r.Reason = "já existe backup de permissões que ninguém desfez ($($r.Pending) conjunto(s): $carimbos). Restaurar de novo gravaria um backup do disco JÁ alterado, e o backup bom deixaria de ser alcançável - foi assim que a versão anterior destruiu a cópia que interessava. Use 'Permissões do disco C: - Desfazer (restaurar backup)' para voltar ao que estava, ou 'Permissões do disco C: - Limpar backups antigos' para descartar o que não interessa mais, e então tente outra vez."
+    $r.Reason = "já existe backup de permissões que ninguém desfez ($($r.Pending) conjunto(s): $carimbos). Restaurar de novo gravaria um backup do disco JÁ alterado, e o backup bom deixaria de ser alcançável - foi assim que a versão anterior destruiu a cópia que interessava. Use 'Permissões do disco C: - Desfazer (restaurar backup)' para voltar ao que estava, ou 'Permissões do disco C: - Limpar backups antigos' para descartar o que não interessa mais - ela alcança inclusive os pendentes como estes, sob confirmação digitada -, e então tente outra vez."
     return $r
 }
 
@@ -4956,6 +4959,12 @@ function Invoke-WinForgeAclUndo {
 
     $aplicados = 0
     $recusados = 0
+    # Duas contagens, e a diferença entre elas decide se o conjunto sai da fila. RECUSA é problema
+    # (backup adulterado, hash que não confere, '/restore' com erro); PULO é a pasta que sumiu desde
+    # o backup, que não é problema de ninguém. Enquanto os dois eram a mesma coisa, uma pasta de
+    # cache apagada prendia o conjunto para sempre: a restauração seguia recusada, o Desfazer
+    # repetia a mesma pasta sumida e a limpeza não alcançava o conjunto.
+    $pulados = 0
     $donosFora = @()
     # A conferência por amostragem do conteúdo, somada entre os itens. Ver
     # Test-WinForgeAclRestoreSample: o código de saída do '/restore' com '/C' não serve de sinal.
@@ -4973,8 +4982,11 @@ function Invoke-WinForgeAclUndo {
                 continue
             }
             if (-not (Test-Path -LiteralPath ([string]$item.Path) -PathType Container)) {
+                # PULO, e não recusa. A pasta sumiu entre o backup e agora: não há o que devolver
+                # nela, e o resto do conjunto volta inteiro. Contar isto como recusa prendia o
+                # conjunto na fila para sempre - ver a porta da marca de consumido, no fim.
                 Write-Warning "A pasta '$($item.Path)' não existe mais; fica de fora."
-                $recusados++
+                $pulados++
                 continue
             }
             Write-Host ''
@@ -5069,8 +5081,10 @@ function Invoke-WinForgeAclUndo {
             }
         }
         if (-not (Test-Path -LiteralPath ([string]$item.Target) -PathType Container)) {
+            # Mesmo caso da pasta acima: PULO. O '/restore' precisa da pasta de onde os nomes são
+            # relativos, e sem ela não há o que restaurar - o que não é falha de ninguém.
             Write-Warning "A pasta '$($item.Target)' não existe mais; '$(Split-Path -Leaf $arquivoUsado)' fica de fora."
-            $recusados++
+            $pulados++
             continue
         }
         Write-Host ''
@@ -5117,7 +5131,7 @@ function Invoke-WinForgeAclUndo {
         }
     }
     Write-Host ''
-    Write-Host "Desfazer concluído: $aplicados item(ns) processados, $recusados fora."
+    Write-Host "Desfazer concluído: $aplicados item(ns) processados, $recusados recusado(s), $pulados pulada(s) por já não existirem."
     # O resumo diz o que foi CONFERIDO, e não "restaurado": o '/restore' com '/C' não garante que
     # todas as entradas foram aplicadas, e prometer isso seria a mesma mentira que o código de saída
     # conta. A amostra também não promete o arquivo inteiro, e o texto diz isso.
@@ -5133,6 +5147,11 @@ function Invoke-WinForgeAclUndo {
     # A marca de consumido é o que tira este conjunto da fila e deixa a próxima restauração começar.
     # Ela só vem quando NÃO houve recusa nem divergência na amostra: marcar um Desfazer que falhou
     # pela metade esconderia o backup que o usuário ainda precisa.
+    #
+    # PULO não entra nessa conta, e essa é a diferença que faltava. Pasta que sumiu desde o backup é
+    # o caso mais comum do mundo dentro de um perfil, e enquanto ela contava como recusa o conjunto
+    # ficava pendente para sempre - com a restauração recusada por causa dele e o Desfazer batendo
+    # na mesma pasta inexistente a cada tentativa.
     if ($recusados -eq 0 -and $amostraFora -eq 0) {
         $marca = Set-WinForgeAclIndexConsumed -Path ([string]$conjunto.Index)
         if ($marca.Ok) { Write-Host "O conjunto $($conjunto.Stamp) sai da fila do Desfazer; a pasta e o arquivo continuam no disco até você usar 'Limpar backups antigos'." }
@@ -5165,8 +5184,16 @@ function Get-WinForgeAclBackupInventory {
 
         Índice que NÃO PÔDE SER LIDO cega a pasta, e aqui isso é decisivo: sem saber o que ele
         referenciava, chamar de órfão qualquer arquivo de conteúdo seria apagar justamente o backup
-        que ele cobre. Com um ilegível na pasta, NENHUM arquivo é marcado como órfão - a limpeza
-        fica sem alvo, que é o lado seguro do erro.
+        que ele cobre. Com um ilegível na pasta, NENHUM arquivo de conteúdo é marcado como órfão -
+        que é o lado seguro do erro.
+
+        O ÍNDICE ilegível em si, ao contrário, sai marcado com 'Unreadable' e é alvo de limpeza
+        sempre. Não é generosidade: o Desfazer não consegue aplicá-lo (Get-WinForgeAclBackupSet
+        devolve zero item para um índice que não abre), ele conta como PENDENTE na guarda da segunda
+        restauração, e enquanto ele fica na pasta a restauração está recusada e a pasta está cega.
+        Era um beco sem saída - a recusa mandava limpar e a limpeza respondia "nada a apagar".
+        Reparar que ele é ilegível não depende de interpretar o conteúdo dele, que é justamente o
+        que não dá para fazer.
 
         A ordem é ORDINAL, por CompareOrdinal, como no resto deste arquivo: 'Sort-Object' ordena
         pela CULTURA, e '-Culture' recebe uma STRING - passar um objeto de cultura vira '' em
@@ -5174,8 +5201,8 @@ function Get-WinForgeAclBackupInventory {
     .PARAMETER Root
         Pasta de backup alternativa, para o teste. A padrão é Get-WinForgeAclBackupRoot.
     .OUTPUTS
-        @(@{ Name; Path; Bytes; Date; Kind = 'indice'|'conteudo'; Orphan = <bool>; Consumed = <bool> }),
-        em ordem ordinal por nome.
+        @(@{ Name; Path; Bytes; Date; Kind = 'indice'|'conteudo'; Orphan = <bool>; Consumed = <bool>;
+        Unreadable = <bool> }), em ordem ordinal por nome.
     #>
     param([string]$Root)
 
@@ -5214,22 +5241,27 @@ function Get-WinForgeAclBackupInventory {
         $tipo = if ($nome -match '^acl-index-.+\.json$') { 'indice' } else { 'conteudo' }
         $consumido = $false
         $orfao = $false
+        $ilegivel = $false
         if ($tipo -eq 'indice') {
             $meu = @($indices | Where-Object { [string]$_.Path -eq [string]$f.FullName })
-            if ($meu.Count) { $consumido = [bool]$meu[0].Consumed }
+            if ($meu.Count) {
+                $consumido = [bool]$meu[0].Consumed
+                $ilegivel = -not [bool]$meu[0].Readable
+            }
         } elseif ($citados.ContainsKey($nome)) {
             $consumido = [bool]$citados[$nome]
         } else {
             $orfao = -not $cego
         }
         $saida.Add(@{
-            Name     = $nome
-            Path     = [string]$f.FullName
-            Bytes    = [long]$f.Length
-            Date     = $f.LastWriteTime
-            Kind     = $tipo
-            Orphan   = $orfao
-            Consumed = $consumido
+            Name       = $nome
+            Path       = [string]$f.FullName
+            Bytes      = [long]$f.Length
+            Date       = $f.LastWriteTime
+            Kind       = $tipo
+            Orphan     = $orfao
+            Consumed   = $consumido
+            Unreadable = $ilegivel
         })
     }
     $arr = $saida.ToArray()
@@ -5305,6 +5337,185 @@ function Show-WinForgeAclBackupSizeWarning {
     }
 }
 
+function Test-WinForgeAclCleanupPhrase {
+    <#
+    .SYNOPSIS
+        Diz se o que o usuário digitou vale como confirmação do descarte de backup pendente. Função
+        pura, só texto.
+    .DESCRIPTION
+        Descartar conjunto que ninguém desfez é a única ação destes botões que joga fora um backup
+        bom, e por isso ela não se confirma com um clique em "Sim": pede a palavra digitada. A caixa
+        de Sim/Não do clique continua existindo e é outra coisa - ela autoriza a limpeza, esta
+        autoriza o descarte.
+
+        As folgas são as que um humano comete e que não mudam a intenção: espaço em volta e
+        maiúscula/minúscula. O resto não passa - 'APAGA' não é 'APAGAR', e 'APAGAR TUDO' também não:
+        quem digitou a mais não digitou a palavra pedida, e aceitar um prefixo ou um superconjunto
+        seria transformar a trava em decoração.
+
+        A palavra é ASCII de propósito. Uma palavra acentuada num teclado que o usuário pode não ter
+        configurado, ou numa sessão com outra página de código, viraria uma trava impossível de
+        passar em vez de uma trava deliberada.
+    .PARAMETER Phrase
+        A palavra exigida. Existe para o teste; o padrão é a de verdade.
+    .OUTPUTS
+        $true ou $false.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Typed,
+        [string]$Phrase = 'APAGAR'
+    )
+
+    if ($null -eq $Typed) { return $false }
+    return [string]::Equals(([string]$Typed).Trim(), ([string]$Phrase).Trim(), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Show-WinForgeAclCleanupConfirm {
+    <#
+    .SYNOPSIS
+        A caixa que pede a palavra digitada antes de descartar backup que ninguém desfez.
+    .DESCRIPTION
+        Montada em código, e não em XAML, pelo mesmo motivo de Show-WinForgeOutputWindow: ela nasce
+        de um caminho que o -SelfTest precisa exercitar sem abrir nada na tela, e o '-NoShow'
+        devolve a janela pronta para o teste ler os controles por nome.
+
+        O botão de descartar nasce DESABILITADO e só liga quando o que está na caixa passa por
+        Test-WinForgeAclCleanupPhrase. É a diferença entre uma trava e um aviso: com o botão sempre
+        ligado, a palavra digitada seria enfeite.
+
+        A mensagem nomeia os conjuntos que vão embora, um por linha. Quem chegou aqui tem um backup
+        pendente e precisa saber QUAL, porque a resposta certa muitas vezes é fechar esta caixa e
+        usar o Desfazer.
+    .PARAMETER NoShow
+        Devolve a janela sem mostrar. É o que o -SelfTest usa.
+    .OUTPUTS
+        Com -NoShow, a janela ([System.Windows.Window]). Sem ele, $true se o usuário confirmou.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Stamps,
+        [long]$Bytes = 0,
+        [switch]$NoShow
+    )
+
+    # Em uso normal o WPF já está carregado desde a montagem da janela principal. No -SelfTest não:
+    # sem os dois assemblies o primeiro [System.Windows.*] do corpo falharia.
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationcore')
+
+    $janela = New-Object System.Windows.Window
+    $janela.Title = 'WinForge - Descartar backup de permissões'
+    $janela.Width = 620
+    $janela.SizeToContent = [System.Windows.SizeToContent]::Height
+    $janela.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+    if ($null -ne $sync -and $null -ne $sync.Form -and $sync.Form.IsVisible) {
+        try {
+            $janela.Owner = $sync.Form
+            $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+        } catch { }
+    }
+
+    $pilha = New-Object System.Windows.Controls.StackPanel
+    $pilha.Margin = New-Object System.Windows.Thickness 14
+
+    $tamanho = if ($Bytes -ge 1GB) { '{0:N1} GB' -f ($Bytes / 1GB) } else { '{0:N1} MB' -f ($Bytes / 1MB) }
+    $aviso = New-Object System.Windows.Controls.TextBlock
+    $aviso.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $aviso.Text = "Estes backups de permissões NÃO foram desfeitos, e descartá-los é definitivo: depois disso o botão Desfazer não tem mais o que devolver.`r`n`r`nConjunto(s): $(@($Stamps) -join ', ')`r`nTotal a apagar: $tamanho`r`n`r`nSe você ainda quer as permissões antigas de volta, feche esta caixa e use 'Permissões do disco C: - Desfazer (restaurar backup)' primeiro.`r`n`r`nPara descartar mesmo assim, digite APAGAR abaixo."
+    $pilha.Children.Add($aviso) | Out-Null
+
+    $caixa = New-Object System.Windows.Controls.TextBox
+    $caixa.Margin = New-Object System.Windows.Thickness (0, 12, 0, 0)
+    $caixa.FontSize = 14
+    $pilha.Children.Add($caixa) | Out-Null
+
+    $barra = New-Object System.Windows.Controls.StackPanel
+    $barra.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $barra.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+    $barra.Margin = New-Object System.Windows.Thickness (0, 14, 0, 0)
+    $pilha.Children.Add($barra) | Out-Null
+
+    $btnDescartar = New-Object System.Windows.Controls.Button
+    $btnDescartar.Content = 'Descartar'
+    $btnDescartar.MinWidth = 120
+    $btnDescartar.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+    $btnDescartar.IsEnabled = $false
+    $barra.Children.Add($btnDescartar) | Out-Null
+
+    $btnCancelar = New-Object System.Windows.Controls.Button
+    $btnCancelar.Content = 'Cancelar'
+    $btnCancelar.MinWidth = 120
+    $btnCancelar.Margin = New-Object System.Windows.Thickness (8, 0, 0, 0)
+    $btnCancelar.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+    $btnCancelar.IsCancel = $true
+    $barra.Children.Add($btnCancelar) | Out-Null
+
+    $caixa.Add_TextChanged({ $btnDescartar.IsEnabled = [bool](Test-WinForgeAclCleanupPhrase -Typed ([string]$caixa.Text)) }.GetNewClosure())
+    $btnDescartar.Add_Click({ $janela.DialogResult = $true }.GetNewClosure())
+
+    $janela.Content = $pilha
+    [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
+    $janela.RegisterName('WFAclCleanupText', $aviso)
+    $janela.RegisterName('WFAclCleanupPhrase', $caixa)
+    $janela.RegisterName('WFAclCleanupOk', $btnDescartar)
+
+    if ($NoShow) { return $janela }
+    return [bool]($janela.ShowDialog() -eq $true)
+}
+
+# O pedido de descarte esperando a thread da janela: quem escreve é o runspace do fluxo ao vivo,
+# quem lê é o callback abaixo. Mesmo desenho de $sync.WinForgeDriverConfirm, e pela mesma razão -
+# um scriptblock criado numa runspace do pool e executado pelo Dispatcher trava na primeira
+# pipeline, porque a thread da janela pede a runspace de origem, que está parada esperando o
+# Dispatcher terminar.
+$sync.WinForgeAclCleanupConfirm = $null
+
+$sync.WinForgeAclCleanupConfirmCallback = {
+    $pedido = $sync.WinForgeAclCleanupConfirm
+    if ($null -eq $pedido) { return }
+    try {
+        $pedido.Answer = [bool](Show-WinForgeAclCleanupConfirm -Stamps @($pedido.Stamps) -Bytes ([long]$pedido.Bytes))
+    } catch {
+        $pedido.Answer = $false
+        Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "A confirmação do descarte de backups pendentes falhou: $($_.Exception.Message)"
+    }
+}
+
+function Request-WinForgeAclCleanupDiscard {
+    <#
+    .SYNOPSIS
+        Leva o pedido de descarte de backup pendente até a thread da janela e volta com a resposta.
+    .DESCRIPTION
+        A limpeza roda num runspace do pool, e caixa de diálogo é da thread da janela. O salto é o
+        mesmo de $sync.WinForgeDriverConfirm: o pedido viaja por um slot de $sync e o callback, que
+        nasceu na runspace principal, é chamado por Invoke-WPFUIThread.
+
+        Sem janela (uma sessão sem interface) a resposta é NÃO, e não "sim por omissão": não há quem
+        digite a palavra, e descartar backup bom porque ninguém estava lá para recusar é exatamente
+        o estrago que a palavra digitada existe para impedir.
+    .OUTPUTS
+        $true só quando alguém digitou a palavra e clicou em Descartar.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Stamps,
+        [long]$Bytes = 0
+    )
+
+    if ($null -eq $sync -or $null -eq $sync.Form) { return $false }
+    $sync.WinForgeAclCleanupConfirm = @{ Stamps = @($Stamps); Bytes = [long]$Bytes; Answer = $false }
+    try {
+        Invoke-WPFUIThread $sync.WinForgeAclCleanupConfirmCallback
+    } catch {
+        Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "O pedido de descarte não chegou à janela: $($_.Exception.Message)"
+        $sync.WinForgeAclCleanupConfirm = $null
+        return $false
+    }
+    $resposta = $false
+    try { $resposta = [bool]$sync.WinForgeAclCleanupConfirm.Answer } catch { $resposta = $false }
+    $sync.WinForgeAclCleanupConfirm = $null
+    return $resposta
+}
+
 function Invoke-WinForgeAclCleanup {
     <#
     .SYNOPSIS
@@ -5323,20 +5534,32 @@ function Invoke-WinForgeAclCleanup {
           e o único que não serve para desfazer coisa alguma.
         - CONJUNTO JÁ DESFEITO: o índice marcado como consumido e o arquivo de conteúdo que só ele
           referencia. O Desfazer já aplicou aquilo; guardar de novo não devolve nada.
+        - ÍNDICE ILEGÍVEL: o que não abre. O Desfazer não consegue aplicá-lo, ele conta como
+          pendente na guarda da segunda restauração e cega o inventário. Enquanto ele fica, a
+          restauração está recusada e a pasta não pode ser limpa - era um beco sem saída.
 
-        NÃO sai, em hipótese nenhuma, backup que ninguém desfez - é dele que o botão Desfazer
-        depende, e apagá-lo por engano é o estrago que todo este conjunto de botões existe para
-        evitar. Índice ilegível cega a conta e deixa a limpeza sem alvo (ver o inventário).
+        Backup que ninguém desfez só sai com -DiscardPending, e essa é a saída que faltava. Sem ela,
+        um conjunto pendente por qualquer motivo - uma pasta que sumiu desde o backup, um arquivo de
+        conteúdo ausente, um hash divergente, um '/restore' com código diferente de zero, uma
+        divergência na amostra - prendia a máquina: a restauração recusada, a limpeza sem alvo e o
+        Desfazer repetindo a mesma falha. No cenário que originou tudo isto, duas execuções da
+        1.7.0, o usuário saía obrigado a aplicar justamente o conjunto ruim para se livrar dele.
 
-        A confirmação é a do clique, com o texto da aba Config, e a LISTA vai para a tela antes do
-        primeiro arquivo sair: é fluxo ao vivo, e quem está olhando vê nome, tamanho e motivo de
-        cada um. A lista é montada UMA vez e é a mesma nos três caminhos - simulação, conferência de
-        elevação e execução -, para a simulação não prometer uma coisa e a execução apagar outra.
+        O preço de -DiscardPending é uma confirmação DIGITADA, e não mais um clique em "Sim":
+        Request-WinForgeAclCleanupDiscard leva o pedido até a thread da janela e a pessoa tem de
+        escrever a palavra. É a única ação destes botões que joga fora backup bom.
+
+        A confirmação do CLIQUE (a caixa Sim/Não com o texto da aba Config) continua valendo para a
+        limpeza toda, e a LISTA vai para a tela antes do primeiro arquivo sair: é fluxo ao vivo, e
+        quem está olhando vê nome, tamanho e motivo de cada um.
     .PARAMETER DryRun
         Lista o que seria apagado, prefixado com '[simulação] ', sem apagar nada e sem criar a pasta
         de backup.
     .PARAMETER Probe
         Responde só à primeira porta, a elevação, e volta. Ver Invoke-WinForgeAclRestore.
+    .PARAMETER DiscardPending
+        Inclui os conjuntos que ninguém desfez. No caminho de verdade quem liga isto é a confirmação
+        digitada; no -DryRun é o teste, que precisa provar a seleção sem abrir janela nenhuma.
     .PARAMETER BackupRoot
         Pasta de backup alternativa, para o teste. Vale a conferência da pasta padrão.
     .OUTPUTS
@@ -5346,14 +5569,22 @@ function Invoke-WinForgeAclCleanup {
     param(
         [switch]$DryRun,
         [switch]$Probe,
+        [switch]$DiscardPending,
         [string]$BackupRoot
     )
 
+    # 'Descartável sem perguntar mais nada': o que não serve para desfazer coisa alguma. O que sobra
+    # é backup pendente, e ele só sai pela confirmação digitada.
+    $solto = {
+        param($item)
+        [bool]($item.Orphan -or $item.Consumed -or $item.Unreadable)
+    }
     $motivo = {
         param($item)
+        if ($item.Unreadable) { return 'índice ilegível - o Desfazer não consegue aplicá-lo' }
         if ($item.Orphan) { return 'nenhum índice o referencia' }
-        if ([string]$item.Kind -eq 'indice') { return 'conjunto já desfeito' }
-        return 'conteúdo de conjunto já desfeito'
+        if ($item.Consumed) { if ([string]$item.Kind -eq 'indice') { return 'conjunto já desfeito' } else { return 'conteúdo de conjunto já desfeito' } }
+        return 'DESCARTADO a pedido - ninguém desfez este backup'
     }
     $linha = {
         param($item)
@@ -5361,7 +5592,7 @@ function Invoke-WinForgeAclCleanup {
     }
 
     if ($DryRun) {
-        $secos = @(Get-WinForgeAclBackupInventory -Root $BackupRoot | Where-Object { $_.Orphan -or $_.Consumed })
+        $secos = @(Get-WinForgeAclBackupInventory -Root $BackupRoot | Where-Object { (& $solto $_) -or $DiscardPending })
         if (-not $secos.Count) { return @('[simulação] nada a apagar: todo arquivo desta pasta pertence a um backup que ninguém desfez.') }
         return @($secos | ForEach-Object { "[simulação] apagar $(& $linha $_)" })
     }
@@ -5391,13 +5622,29 @@ function Invoke-WinForgeAclCleanup {
     Write-Host "Pasta de backup de permissões: '$($conf.Path)' - $($todos.Count) arquivo(s), $([math]::Round($bytesTodos / 1MB, 1)) MB."
     Write-Host ''
     foreach ($t in $todos) {
-        $estado = if ($t.Orphan) { 'órfão' } elseif ($t.Consumed) { 'já desfeito' } else { 'EM USO (backup pendente)' }
+        $estado = if ($t.Unreadable) { 'ILEGÍVEL' } elseif ($t.Orphan) { 'órfão' } elseif ($t.Consumed) { 'já desfeito' } else { 'EM USO (backup pendente)' }
         Write-Host ("  [{0}] '{1}' - {2} byte(s), {3} - {4}" -f $t.Kind, $t.Name, $t.Bytes, ([datetime]$t.Date).ToString('dd/MM/yyyy HH:mm'), $estado)
     }
     Write-Host ''
-    $alvos = @($todos | Where-Object { $_.Orphan -or $_.Consumed })
+    $alvos = @($todos | Where-Object { (& $solto $_) -or $DiscardPending })
+    # Os pendentes, e a saída que faltava. Sem esta porta, um conjunto que ficou pendente por um
+    # aviso qualquer trancava a máquina: restauração recusada, limpeza sem alvo, Desfazer repetindo.
+    $presos = @($todos | Where-Object { -not (& $solto $_) })
+    if ($presos.Count -and -not $DiscardPending) {
+        $carimbosPresos = @($presos | Where-Object { [string]$_.Kind -eq 'indice' } | ForEach-Object { ([string]$_.Name) -replace '^acl-index-', '' -replace '\.json$', '' })
+        if (-not $carimbosPresos.Count) { $carimbosPresos = @($presos | ForEach-Object { [string]$_.Name }) }
+        $bytesPresos = [long]0
+        foreach ($p in $presos) { $bytesPresos += [long]$p.Bytes }
+        Write-Host "$($presos.Count) arquivo(s) pertencem a backup que ninguém desfez ($($carimbosPresos -join ', ')). O caminho normal é usar o Desfazer; descartar sem desfazer é definitivo."
+        if (Request-WinForgeAclCleanupDiscard -Stamps @($carimbosPresos) -Bytes $bytesPresos) {
+            Write-Host 'Descarte confirmado por escrito: os conjuntos pendentes vão junto.'
+            $alvos = @($todos)
+        } else {
+            Write-Host 'Descarte NÃO confirmado: os conjuntos pendentes ficam onde estão.'
+        }
+    }
     if (-not $alvos.Count) {
-        Write-Host 'Nada a apagar: todo arquivo desta pasta pertence a um backup que ninguém desfez. Use o botão Desfazer antes, ou deixe como está.'
+        Write-Host 'Nada a apagar: todo arquivo desta pasta pertence a um backup que ninguém desfez. Use o botão Desfazer antes, ou peça o descarte e confirme por escrito.'
         return
     }
     Write-Host "$($alvos.Count) arquivo(s) para apagar:"
@@ -5417,8 +5664,8 @@ function Invoke-WinForgeAclCleanup {
     Write-Host ''
     Write-Host "Limpeza concluída: $apagados de $($alvos.Count) arquivo(s) apagados, $([math]::Round($liberados / 1MB, 1)) MB liberados."
     if ($falhas.Count) { Write-Error ("Não foi possível apagar: {0}." -f ($falhas -join '; ')) }
-    $sobrando = @($todos | Where-Object { -not ($_.Orphan -or $_.Consumed) }).Count
-    if ($sobrando) { Write-Host "$sobrando arquivo(s) ficaram: eles pertencem a backup que ninguém desfez, e é deles que o botão Desfazer depende." }
+    $sobrando = @($todos | Where-Object { $_.Path -notin @($alvos | ForEach-Object { [string]$_.Path }) }).Count
+    if ($sobrando) { Write-Host "$sobrando arquivo(s) ficaram: eles pertencem a backup que ninguém desfez, e é deles que o botão Desfazer depende. Para descartá-los, rode a limpeza de novo e confirme o descarte por escrito." }
 }
 
 #endregion
