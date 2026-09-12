@@ -41,8 +41,20 @@ function Get-WinForgeRepairCommand {
         'Confirm' é a RESERVA do texto da caixa: quem manda é a descrição da config (a mesma frase do
         botão na tela), e este campo entra só se a entrada da config sumir. Nenhum dos dois termina
         com a pergunta - "Continuar?" é acrescentado uma única vez por Get-WinForgeRepairConfirmText.
+
+        'ExpectMinutes' é quanto a linha COSTUMA levar, e é o que deixa o cabeçalho da janela ficar
+        âmbar a 1,5x e urgente a 3x (Get-WinForgeFollowHeader). Existe porque a queixa que abriu esta
+        leva foram 404 minutos olhando um contador subir sem saber se aquilo era normal.
+
+        OS NÚMEROS ABAIXO SÃO ESTIMATIVAS A CALIBRAR. Eles saíram de máquina de desenvolvimento e de
+        ordem de grandeza conhecida (um DISM baixa da internet, um agendamento de disco é instantâneo,
+        uma restauração de permissões caminha o perfil inteiro), e não de telemetria: disco lento,
+        perfil de 300 GB ou link ruim mudam cada um deles. Errar para MAIS é o lado seguro - um âmbar
+        cedo demais treina o usuário a ignorar a cor, que é exatamente o que este campo combate.
+        Toda linha que altera a máquina declara o campo; as que só leem declaram quando demoram
+        (ChkdskScan varre o disco inteiro).
     .OUTPUTS
-        Hashtable com Title, Command, Requires, Native, Kind e (fora de 'read') Confirm.
+        Hashtable com Title, Command, Requires, Native, Kind, ExpectMinutes e (fora de 'read') Confirm.
     #>
     param([Parameter(Mandatory)][string]$Name)
 
@@ -79,61 +91,69 @@ function Get-WinForgeRepairCommand {
             # Windows rodando e não repara nada. Demora minutos num disco cheio - por isso roda em
             # runspace, como todo comando desta máquina.
             return @{
-                Title    = 'Verificar disco do sistema agora (chkdsk /scan)'
-                Command  = 'Invoke-WinForgeChkdskScan'
-                Requires = (Get-WinForgeSystemExe -Name 'chkdsk.exe')
-                Native   = $false
-                Kind     = 'read'
+                Title         = 'Verificar disco do sistema agora (chkdsk /scan)'
+                Command       = 'Invoke-WinForgeChkdskScan'
+                Requires      = (Get-WinForgeSystemExe -Name 'chkdsk.exe')
+                Native        = $false
+                Kind          = 'read'
+                ExpectMinutes = 10
             }
         }
         'WmiRepair' {
             return @{
-                Title    = 'Repositório WMI: verificar e recuperar'
-                Command  = 'Invoke-WinForgeWmiRepair'
-                Requires = (Get-WinForgeSystemExe -Name 'wbem\winmgmt.exe')
-                Native   = $false
-                Kind     = 'repair'
-                Confirm  = 'Verificar o repositório WMI e, se ele estiver inconsistente, tentar recuperá-lo. Programas que consultam o WMI podem falhar durante a recuperação. Exige o WinForge aberto como administrador: sem elevação a verificação responde "acesso negado" e nada é recuperado.'
+                Title         = 'Repositório WMI: verificar e recuperar'
+                Command       = 'Invoke-WinForgeWmiRepair'
+                Requires      = (Get-WinForgeSystemExe -Name 'wbem\winmgmt.exe')
+                Native        = $false
+                Kind          = 'repair'
+                ExpectMinutes = 5
+                Confirm       = 'Verificar o repositório WMI e, se ele estiver inconsistente, tentar recuperá-lo. Programas que consultam o WMI podem falhar durante a recuperação. Exige o WinForge aberto como administrador: sem elevação a verificação responde "acesso negado" e nada é recuperado.'
             }
         }
         'StoreReregister' {
             return @{
-                Title    = 'Microsoft Store e App Installer: registrar de novo'
-                Command  = 'Invoke-WinForgeStoreReregister'
-                Requires = 'Get-AppxPackage'
-                Native   = $false
-                Kind     = 'repair'
-                Confirm  = 'Registrar de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App PARA O USUÁRIO ATUAL, a partir dos arquivos que já estão no disco. Os aplicativos fecham durante o registro. Outros usuários desta máquina não são afetados: cada um precisa rodar isto no próprio logon.'
+                Title         = 'Microsoft Store e App Installer: registrar de novo'
+                Command       = 'Invoke-WinForgeStoreReregister'
+                Requires      = 'Get-AppxPackage'
+                Native        = $false
+                Kind          = 'repair'
+                ExpectMinutes = 5
+                Confirm       = 'Registrar de novo a Microsoft Store, o App Installer (winget) e o Store Purchase App PARA O USUÁRIO ATUAL, a partir dos arquivos que já estão no disco. Os aplicativos fecham durante o registro. Outros usuários desta máquina não são afetados: cada um precisa rodar isto no próprio logon.'
             }
         }
         'ChkdskSchedule' {
             return @{
-                Title    = 'Agendar chkdsk /f na próxima reinicialização'
-                Command  = 'Invoke-WinForgeChkdskSchedule'
-                Requires = (Get-WinForgeSystemExe -Name 'fsutil.exe')
-                Native   = $false
-                Kind     = 'repair'
-                Confirm  = 'Marcar o disco do sistema como "sujo" (fsutil dirty set): na próxima reinicialização o Windows roda o chkdsk com reparo antes de carregar, e isso pode demorar bastante. NÃO TEM DESFAZER: quem limpa a marca é o próprio chkdsk, e só quando concluir que o volume está íntegro - até lá a verificação se repete a cada reinicialização.'
+                Title         = 'Agendar chkdsk /f na próxima reinicialização'
+                Command       = 'Invoke-WinForgeChkdskSchedule'
+                Requires      = (Get-WinForgeSystemExe -Name 'fsutil.exe')
+                Native        = $false
+                Kind          = 'repair'
+                # Dois minutos para um 'fsutil dirty set', que responde na hora: o que demora é o
+                # chkdsk da PRÓXIMA inicialização, e esse não roda dentro do WinForge.
+                ExpectMinutes = 2
+                Confirm       = 'Marcar o disco do sistema como "sujo" (fsutil dirty set): na próxima reinicialização o Windows roda o chkdsk com reparo antes de carregar, e isso pode demorar bastante. NÃO TEM DESFAZER: quem limpa a marca é o próprio chkdsk, e só quando concluir que o volume está íntegro - até lá a verificação se repete a cada reinicialização.'
             }
         }
         'MemoryDiag' {
             return @{
-                Title    = 'Diagnóstico de memória na próxima reinicialização'
-                Command  = 'Invoke-WinForgeMemoryDiagSchedule'
-                Requires = (Get-WinForgeSystemExe -Name 'bcdedit.exe')
-                Native   = $false
-                Kind     = 'repair'
-                Confirm  = 'Colocar o Diagnóstico de Memória do Windows na sequência de inicialização: a próxima reinicialização vai testar a memória antes de carregar o Windows.'
+                Title         = 'Diagnóstico de memória na próxima reinicialização'
+                Command       = 'Invoke-WinForgeMemoryDiagSchedule'
+                Requires      = (Get-WinForgeSystemExe -Name 'bcdedit.exe')
+                Native        = $false
+                Kind          = 'repair'
+                ExpectMinutes = 2
+                Confirm       = 'Colocar o Diagnóstico de Memória do Windows na sequência de inicialização: a próxima reinicialização vai testar a memória antes de carregar o Windows.'
             }
         }
         'DotNet35Enable' {
             return @{
-                Title    = '.NET Framework 3.5: habilitar (DISM)'
-                Command  = 'Enable-WinForgeDotNet35'
-                Requires = $null
-                Native   = $false
-                Kind     = 'install'
-                Confirm  = 'Habilitar o recurso NetFx3 (.NET Framework 3.5) pelo DISM. Os arquivos vêm do Windows Update: precisa de internet e pode demorar.'
+                Title         = '.NET Framework 3.5: habilitar (DISM)'
+                Command       = 'Enable-WinForgeDotNet35'
+                Requires      = $null
+                Native        = $false
+                Kind          = 'install'
+                ExpectMinutes = 20
+                Confirm       = 'Habilitar o recurso NetFx3 (.NET Framework 3.5) pelo DISM. Os arquivos vêm do Windows Update: precisa de internet e pode demorar.'
             }
         }
         'VcRedist' {
@@ -142,22 +162,24 @@ function Get-WinForgeRepairCommand {
             # 'Requires = winget.exe' recusaria o botão justamente nessa máquina, que é onde ele mais
             # serve. Winget ausente vira texto na janela, com o que fazer a respeito.
             return @{
-                Title    = 'Visual C++ 2005–2022 (x86/x64) via winget'
-                Command  = 'Install-WinForgeVcRedist'
-                Requires = $null
-                Native   = $false
-                Kind     = 'install'
-                Confirm  = 'Instalar (ou atualizar) os pacotes redistribuíveis do Visual C++ de 2005 a 2022, x86 e x64, pelo winget. São vários downloads e pode demorar.'
+                Title         = 'Visual C++ 2005–2022 (x86/x64) via winget'
+                Command       = 'Install-WinForgeVcRedist'
+                Requires      = $null
+                Native        = $false
+                Kind          = 'install'
+                ExpectMinutes = 20
+                Confirm       = 'Instalar (ou atualizar) os pacotes redistribuíveis do Visual C++ de 2005 a 2022, x86 e x64, pelo winget. São vários downloads e pode demorar.'
             }
         }
         'PowerShell7' {
             return @{
-                Title    = 'PowerShell 7 via winget'
-                Command  = 'Install-WinForgePowerShell7'
-                Requires = $null
-                Native   = $false
-                Kind     = 'install'
-                Confirm  = 'Instalar o PowerShell 7 (Microsoft.PowerShell) pelo winget. O Windows PowerShell 5.1 continua instalado e é ele que o WinForge usa.'
+                Title         = 'PowerShell 7 via winget'
+                Command       = 'Install-WinForgePowerShell7'
+                Requires      = $null
+                Native        = $false
+                Kind          = 'install'
+                ExpectMinutes = 10
+                Confirm       = 'Instalar o PowerShell 7 (Microsoft.PowerShell) pelo winget. O Windows PowerShell 5.1 continua instalado e é ele que o WinForge usa.'
             }
         }
         # ------------------------------------------------------------------ Correções (vindas da base)
@@ -177,11 +199,12 @@ function Get-WinForgeRepairCommand {
         # que a dica do botão mostra na aba Config.
         'NetworkReset' {
             return @{
-                Title     = 'Rede - Redefinir'
-                ConfigKey = 'WPFFixesNetwork'
-                Requires  = (Get-WinForgeSystemExe -Name 'netsh.exe')
-                Kind      = 'repair'
-                Stream    = $true
+                Title         = 'Rede - Redefinir'
+                ConfigKey     = 'WPFFixesNetwork'
+                Requires      = (Get-WinForgeSystemExe -Name 'netsh.exe')
+                Kind          = 'repair'
+                ExpectMinutes = 2
+                Stream        = $true
                 # 'utf8' no netsh: medido, ele escreve UTF-8 quando a saída é redirecionada (o 'ç'
                 # sai como 0xC3 0xA7, dois bytes). É a mesma medição que já estava anotada no
                 # levantamento do perfil e na aba Servidor; aqui a dica dizia OEM.
@@ -198,11 +221,12 @@ function Get-WinForgeRepairCommand {
             # cmdlets: 'net start w32time' faria a mesma coisa chamando um executável a mais e
             # perdendo a mensagem de erro em português do próprio PowerShell.
             return @{
-                Title     = 'Servidor NTP - Ativar'
-                ConfigKey = 'WPFFixesNTPPool'
-                Requires  = (Get-WinForgeSystemExe -Name 'w32tm.exe')
-                Kind      = 'repair'
-                Stream    = $true
+                Title         = 'Servidor NTP - Ativar'
+                ConfigKey     = 'WPFFixesNTPPool'
+                Requires      = (Get-WinForgeSystemExe -Name 'w32tm.exe')
+                Kind          = 'repair'
+                ExpectMinutes = 2
+                Stream        = $true
                 Steps     = @(
                     @{ Function = 'Start-WinForgeTimeService' }
                     @{ FilePath = (Get-WinForgeSystemExe -Name 'w32tm.exe'); Arguments = @('/config', '/update', '/manualpeerlist:pool.ntp.org,0x8', '/syncfromflags:MANUAL'); Encoding = 'oem' }
@@ -230,11 +254,14 @@ function Get-WinForgeRepairCommand {
             #   "Permissões" sai como 0xE4 e o 'ó' de "obrigatórias" como 0xA2, que são os bytes da
             #   code page 850.
             return @{
-                Title     = 'Verificação de corrupção do sistema - Executar'
-                ConfigKey = 'WPFPanelDISM'
-                Requires  = (Get-WinForgeSystemExe -Name 'sfc.exe')
-                Kind      = 'repair'
-                Stream    = $true
+                Title         = 'Verificação de corrupção do sistema - Executar'
+                ConfigKey     = 'WPFPanelDISM'
+                Requires      = (Get-WinForgeSystemExe -Name 'sfc.exe')
+                Kind          = 'repair'
+                # A mais demorada da tabela, e a própria confirmação já dizia isso: "de vários
+                # minutos a mais de uma hora". Uma hora é a estimativa; o âmbar só aparece na segunda.
+                ExpectMinutes = 60
+                Stream        = $true
                 Steps     = @(
                     # O volume sai de Get-WinForgeSystemDriveRoot (que nasce de
                     # [Environment]::SystemDirectory), e não de $env:SystemDrive: variável de
@@ -250,11 +277,12 @@ function Get-WinForgeRepairCommand {
         }
         'WindowsUpdateReset' {
             return @{
-                Title     = 'Windows Update - Redefinir'
-                ConfigKey = 'WPFFixesUpdate'
-                Requires  = $null
-                Kind      = 'repair'
-                Stream    = $true
+                Title         = 'Windows Update - Redefinir'
+                ConfigKey     = 'WPFFixesUpdate'
+                Requires      = $null
+                Kind          = 'repair'
+                ExpectMinutes = 20
+                Stream        = $true
                 Steps     = @(
                     @{ Function = 'Invoke-WPFFixesUpdate' }
                 )
@@ -264,11 +292,12 @@ function Get-WinForgeRepairCommand {
         }
         'WingetReinstall' {
             return @{
-                Title     = 'WinGet - Reinstalar'
-                ConfigKey = 'WPFFixesWinget'
-                Requires  = $null
-                Kind      = 'repair'
-                Stream    = $true
+                Title         = 'WinGet - Reinstalar'
+                ConfigKey     = 'WPFFixesWinget'
+                Requires      = $null
+                Kind          = 'repair'
+                ExpectMinutes = 10
+                Stream        = $true
                 Steps     = @(
                     @{ Function = 'Invoke-WPFFixesWinget' }
                 )
@@ -322,24 +351,29 @@ function Get-WinForgeRepairCommand {
         }
         'AclRestore' {
             return @{
-                Title    = 'Permissões do disco C: - Restaurar padrões'
-                Requires = (Get-WinForgeSystemExe -Name 'icacls.exe')
-                Kind     = 'repair'
-                Stream   = $true
-                Steps    = @(@{ Function = 'Invoke-WinForgeAclRestore' })
-                Final    = 'Reinicie o computador: serviços e programas já abertos continuam com as permissões antigas em cache até o próximo logon.'
-                Confirm  = 'Devolve as permissões do disco do Windows ao padrão de fábrica, em fases: chkdsk de verificação do volume, backup das listas atuais (a lista e o dono de cada pasta em SDDL, mais um arquivo de icacls com o conteúdo da sua pasta de usuário), a raiz do disco, as pastas do sistema uma a uma e a sua pasta de usuário. Leva minutos e pede reinicialização no fim.'
+                Title         = 'Permissões do disco C: - Restaurar padrões'
+                Requires      = (Get-WinForgeSystemExe -Name 'icacls.exe')
+                Kind          = 'repair'
+                # A linha da queixa: 404 minutos numa execução real, contra estes 15 de estimativa.
+                # Ela caminha o perfil inteiro, então varia com o tamanho dele - o âmbar a 22:30 e o
+                # urgente a 45:00 são justamente o que faltou naquele dia.
+                ExpectMinutes = 15
+                Stream        = $true
+                Steps         = @(@{ Function = 'Invoke-WinForgeAclRestore' })
+                Final         = 'Reinicie o computador: serviços e programas já abertos continuam com as permissões antigas em cache até o próximo logon.'
+                Confirm       = 'Devolve as permissões do disco do Windows ao padrão de fábrica, em fases: chkdsk de verificação do volume, backup das listas atuais (a lista e o dono de cada pasta em SDDL, mais um arquivo de icacls com o conteúdo da sua pasta de usuário), a raiz do disco, as pastas do sistema uma a uma e a sua pasta de usuário. Leva minutos e pede reinicialização no fim.'
             }
         }
         'AclUndo' {
             return @{
-                Title    = 'Permissões do disco C: - Desfazer (restaurar backup)'
-                Requires = (Get-WinForgeSystemExe -Name 'icacls.exe')
-                Kind     = 'repair'
-                Stream   = $true
-                Steps    = @(@{ Function = 'Invoke-WinForgeAclUndo' })
-                Final    = 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
-                Confirm  = 'Reaplica as listas de permissão guardadas na última restauração de padrões, a partir da pasta protegida do WinForge, e tenta devolver também a posse de cada pasta. Sem backup gravado, não faz nada.'
+                Title         = 'Permissões do disco C: - Desfazer (restaurar backup)'
+                Requires      = (Get-WinForgeSystemExe -Name 'icacls.exe')
+                Kind          = 'repair'
+                ExpectMinutes = 10
+                Stream        = $true
+                Steps         = @(@{ Function = 'Invoke-WinForgeAclUndo' })
+                Final         = 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
+                Confirm       = 'Reaplica as listas de permissão guardadas na última restauração de padrões, a partir da pasta protegida do WinForge, e tenta devolver também a posse de cada pasta. Sem backup gravado, não faz nada.'
             }
         }
         # A terceira ação de permissões só APAGA arquivo, e mesmo assim é 'repair' com fluxo ao
@@ -349,12 +383,15 @@ function Get-WinForgeRepairCommand {
         # pendente e recusa toda restauração nova; sem este botão não havia saída dessa recusa.
         'AclCleanup' {
             return @{
-                Title    = 'Permissões do disco C: - Limpar backups antigos'
-                Requires = $null
-                Kind     = 'repair'
-                Stream   = $true
-                Steps    = @(@{ Function = 'Invoke-WinForgeAclCleanup' })
-                Final    = 'A pasta de backup continua protegida: o que ficou nela é backup que ninguém desfez, e é dele que o botão Desfazer depende.'
+                Title         = 'Permissões do disco C: - Limpar backups antigos'
+                Requires      = $null
+                Kind          = 'repair'
+                # Apagar centenas de GB de um disco lento não é instantâneo, e a lista do que vai
+                # sair aparece antes do primeiro Remove-Item.
+                ExpectMinutes = 10
+                Stream        = $true
+                Steps         = @(@{ Function = 'Invoke-WinForgeAclCleanup' })
+                Final         = 'A pasta de backup continua protegida: o que ficou nela é backup que ninguém desfez, e é dele que o botão Desfazer depende.'
                 Confirm  = 'Lista os arquivos da pasta protegida de backup de permissões com tamanho e data e apaga apenas os que nenhum backup pendente usa: os avulsos, que índice nenhum referencia, e os conjuntos que o Desfazer já aplicou. Backup que ninguém desfez nunca sai.'
             }
         }

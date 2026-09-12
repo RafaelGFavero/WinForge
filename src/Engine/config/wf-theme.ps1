@@ -157,6 +157,13 @@ $WinForgeTheme = [ordered]@{
 # hexadecimais são o extremo escuro (900) e o extremo claro (100) da mesma escala de verde e
 # vermelho, um para cada tema - o texto da linha continua sendo o MainForegroundColor, e é esse par
 # que o -SelfTest confere.
+#
+# HeaderWarningColor / HeaderUrgentColor são o cabeçalho da janela de saída quando o comando passa
+# de 1,5x e de 3x do tempo esperado daquela linha. Repetem, de propósito, os valores de
+# DiscouragedColor e DangerColor: é a mesma escala de "atenção" e "isto está errado", e reaproveitar
+# o hexadecimal já conferido evita um par novo que ninguém mediu. Nomes próprios porque o significado
+# é outro - um ajuste desaconselhado não é um comando demorado -, e porque o dia em que o âmbar do
+# cabeçalho precisar ficar mais claro que o de "evitar" não pode arrastar a aba Ajustes junto.
 $WinForgeThemeNovos = [ordered]@{
     Light = [ordered]@{
         ButtonForegroundSelectedColor = '#FFFFFF'
@@ -167,6 +174,8 @@ $WinForgeThemeNovos = [ordered]@{
         DangerColor                   = '#B91C1C'
         RowSuccessBackgroundColor     = '#DCFCE7'
         RowFailureBackgroundColor     = '#FEE2E2'
+        HeaderWarningColor            = '#B45309'
+        HeaderUrgentColor             = '#B91C1C'
     }
     Dark = [ordered]@{
         ButtonForegroundSelectedColor = '#FFFFFF'
@@ -177,5 +186,7 @@ $WinForgeThemeNovos = [ordered]@{
         DangerColor                   = '#EF4444'
         RowSuccessBackgroundColor     = '#14532D'
         RowFailureBackgroundColor     = '#7F1D1D'
+        HeaderWarningColor            = '#F59E0B'
+        HeaderUrgentColor             = '#EF4444'
     }
 }

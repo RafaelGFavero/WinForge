@@ -762,6 +762,10 @@ function Show-WinForgeOutputWindow {
         Meio segundo é o intervalo porque é o que separa "ao vivo" de "piscando": um DISM escreve
         dezenas de linhas de progresso por segundo, e um relógio de 100 ms faria a caixa de texto
         rolar mais do que ler.
+    .PARAMETER ExpectMinutes
+        Quanto a linha que está rodando costuma levar, em minutos. Vai para a Tag e é o que deixa o
+        cabeçalho ficar âmbar a 1,5x e urgente a 3x (Get-WinForgeFollowHeader). Zero desliga o aviso:
+        sem estimativa não há atraso a acusar.
     .PARAMETER NoShow
         Monta e devolve a janela sem mostrá-la, e NÃO liga o relógio do -FollowPath. É o que o
         -SelfTest usa: abrir janela durante o build deixaria um build sem ninguém na frente exibindo
@@ -775,6 +779,7 @@ function Show-WinForgeOutputWindow {
         [string]$Text = '',
         [string]$Path,
         [string]$FollowPath,
+        [int]$ExpectMinutes = 0,
         [string]$Component = 'Command',
         [switch]$NoShow
     )
@@ -908,22 +913,38 @@ function Show-WinForgeOutputWindow {
 
     if (-not [string]::IsNullOrWhiteSpace($FollowPath)) {
         $cabecalho.Visibility = [System.Windows.Visibility]::Visible
+        # As cores dos três níveis do cabeçalho, resolvidas UMA vez e guardadas na Tag: o tique bate
+        # de meio em meio segundo, e perguntar ao dicionário de recursos a cada batida é trabalho sem
+        # resposta nova. A reserva segue a mesma regra do fundo e do texto lá em cima - o -SelfTest
+        # monta esta janela antes de a janela principal existir, e sem ela o cabeçalho ficaria sem
+        # pincel nenhum justamente no teste que confere a troca de cor.
+        $aviso = $null
+        $urgente = $null
+        if ($null -ne $sync -and $null -ne $sync.Form) {
+            try { $aviso = $sync.Form.Resources['HeaderWarningColor'] } catch { $aviso = $null }
+            try { $urgente = $sync.Form.Resources['HeaderUrgentColor'] } catch { $urgente = $null }
+        }
+        if ($null -eq $aviso) { $aviso = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(245, 158, 11)) }
+        if ($null -eq $urgente) { $urgente = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(239, 68, 68)) }
         # Todo o estado do acompanhamento mora na Tag, e não em variáveis fechadas dentro de um
         # scriptblock: é o que deixa Invoke-WinForgeFollowTick ser uma função de arquivo, chamável
         # tanto pelo relógio quanto pelo -SelfTest, sem um scriptblock por janela.
         $janela.Tag = @{
-            Path   = $FollowPath
-            Offset = [long]0
-            Start  = (Get-Date)
-            Title  = $Title
-            Box    = $caixa
-            Header = $cabecalho
-            Timer  = $null
+            Path          = $FollowPath
+            Offset        = [long]0
+            Start         = (Get-Date)
+            Title         = $Title
+            Box           = $caixa
+            Header        = $cabecalho
+            Timer         = $null
+            # Quanto esta linha costuma levar. É daqui que sai o âmbar de 1,5x e o urgente de 3x.
+            ExpectMinutes = [int]$ExpectMinutes
+            Pinceis       = @{ normal = $frente; ambar = $aviso; urgente = $urgente }
             # Quantos caracteres a caixa tem, contados por nós. Ler '$caixa.Text' MATERIALIZA a
             # string inteira - até 4 MB -, e perguntar o tamanho a cada meio segundo seria copiar
             # 4 MB por tique só para descobrir que não precisa cortar nada. Com o contador, a caixa
             # só é lida no tique em que o corte acontece.
-            Chars  = [int]([string]$caixa.Text).Length
+            Chars         = [int]([string]$caixa.Text).Length
         }
         # Primeira leitura antes de mostrar: a janela abre já com o que o arquivo tem, e não em
         # branco por meio segundo.
@@ -1097,6 +1118,68 @@ function Remove-WinForgeOldCommandOutput {
     return @{ Removed = @($apagados) }
 }
 
+function Get-WinForgeFollowHeader {
+    <#
+    .SYNOPSIS
+        O texto e o nível do cabeçalho da janela que acompanha um comando. Só conta: função pura.
+    .DESCRIPTION
+        O caso que deu origem a isto: 404 minutos olhando um contador subir, sem nada na tela dizendo
+        se aquilo era normal. Um cronômetro sozinho não informa - ele só mede. O que informa é a
+        comparação com o que AQUELA linha costuma levar.
+
+        Os cortes são 1,5x e 3x do ESPERADO, e não um número fixo de minutos: um DISM de vinte
+        minutos e um Desfazer de dez não têm o mesmo "está demorando". Sem 'ExpectMinutes' o nível é
+        sempre 'normal' - comando sem estimativa não pode acusar atraso que ninguém sabe medir, e
+        inventar um teto fixo faria o botão mais lento da tabela viver em âmbar.
+
+        'Cancelado em mm:ss' vem ANTES de 'Concluído': quem apertou Parar sabe que parou, e ver
+        "Concluído" depois disso é o programa dizendo que fez o que não fez.
+
+        Tempo NEGATIVO existe de verdade aqui: 'Servidor NTP - Ativar' roda 'w32tm /resync' com esta
+        janela aberta, e a hora do sistema pode recuar no meio. Sem a guarda, o cabeçalho mostraria
+        '-1:59'. O relógio volta para 00:00 e segue - a alternativa seria guardar um contador
+        monotônico por janela para um caso que dura um tique.
+
+        Ser pura é o que permite provar os três níveis e os dois cortes com números, sem janela.
+    .PARAMETER ExpectMinutes
+        Quanto esta linha costuma levar, em minutos. Zero (ou ausente) desliga o âmbar.
+    .PARAMETER ExitCode
+        O código de saída, só com -Done. Nulo vira 'n/d': a runspace pode ter morrido antes de gravar
+        um, e 'código ' sozinho é pior do que dizer que não se sabe.
+    .OUTPUTS
+        @{ Text = <string>; Level = 'normal'|'ambar'|'urgente' }.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title,
+        [Parameter(Mandatory)][timespan]$Elapsed,
+        [int]$ExpectMinutes = 0,
+        [switch]$Done,
+        $ExitCode = $null,
+        [switch]$Cancelled
+    )
+
+    $minutos = [double]$Elapsed.TotalMinutes
+    $segundos = [int]$Elapsed.Seconds
+    if ($minutos -lt 0) { $minutos = 0; $segundos = 0 }
+    $mmss = '{0:00}:{1:00}' -f [int][math]::Floor($minutos), $segundos
+    if ($Cancelled) { return @{ Text = "Cancelado em $mmss"; Level = 'normal' } }
+    if ($Done) { return @{ Text = "Concluído em $mmss (código $(if ($null -ne $ExitCode) { $ExitCode } else { 'n/d' }))"; Level = 'normal' } }
+
+    $andamento = "Em andamento: $Title ($mmss)"
+    if ($ExpectMinutes -le 0) { return @{ Text = $andamento; Level = 'normal' } }
+    $vezes = $minutos / $ExpectMinutes
+    # A frase diz as três coisas que a pessoa na frente da tela precisa saber, nesta ordem: que está
+    # fora do normal, que mesmo assim continua andando, e o que fazer se quiser sair. Sem a segunda,
+    # o aviso vira "travou"; sem a terceira, vira "e agora?".
+    if ($vezes -ge 3) {
+        return @{ Text = "$andamento - Está demorando MUITO mais que o normal (o comum são $ExpectMinutes minutos, e já passou do triplo disso). Continua rodando: isto não é travamento. Não feche esta janela; se quiser interromper agora, use o botão Parar."; Level = 'urgente' }
+    }
+    if ($vezes -ge 1.5) {
+        return @{ Text = "$andamento - Está demorando mais que o normal (o comum são $ExpectMinutes minutos). Continua rodando: isto não é travamento. Não feche esta janela; para interromper, use o botão Parar."; Level = 'ambar' }
+    }
+    return @{ Text = $andamento; Level = 'normal' }
+}
+
 function Invoke-WinForgeFollowTick {
     <#
     .SYNOPSIS
@@ -1190,16 +1273,16 @@ function Invoke-WinForgeFollowTick {
         # pega a mesma coisa meio segundo depois. Uma exceção aqui mataria o relógio.
     }
 
-    $decorrido = (Get-Date) - [datetime]$estado.Start
-    $mmss = '{0:00}:{1:00}' -f [int][math]::Floor($decorrido.TotalMinutes), $decorrido.Seconds
-    if ($concluido) {
-        $codigo = $null
-        try { $codigo = $sync.WinForgeStreamExit[[string]$estado.Path] } catch { $codigo = $null }
-        $estado.Header.Text = "Concluído em $mmss (código $(if ($null -ne $codigo) { $codigo } else { 'n/d' }))"
-        if ($null -ne $estado.Timer) { try { $estado.Timer.Stop() } catch { } }
-    } else {
-        $estado.Header.Text = "Em andamento: $($estado.Title) ($mmss)"
-    }
+    # O tique só PINTA: quem decide o texto e o nível é Get-WinForgeFollowHeader, que é pura e cabe
+    # num teste sem janela. Os três pincéis foram resolvidos uma vez, na montagem - perguntar ao
+    # dicionário de recursos de meio em meio segundo é trabalho sem resposta nova.
+    $codigo = $null
+    if ($concluido) { try { $codigo = $sync.WinForgeStreamExit[[string]$estado.Path] } catch { $codigo = $null } }
+    $cabecalho = Get-WinForgeFollowHeader -Title ([string]$estado.Title) -Elapsed ((Get-Date) - [datetime]$estado.Start) -ExpectMinutes ([int]$estado.ExpectMinutes) -Done:$concluido -ExitCode $codigo
+    $estado.Header.Text = [string]$cabecalho.Text
+    $pincel = $estado.Pinceis[[string]$cabecalho.Level]
+    if ($null -ne $pincel) { $estado.Header.Foreground = $pincel }
+    if ($concluido -and $null -ne $estado.Timer) { try { $estado.Timer.Stop() } catch { } }
 }
 
 # Saída pendente de janela: um slot POR CHAMADA, com chave própria, e não um único global. O slot
@@ -1666,7 +1749,9 @@ function Start-WinForgeStreamedCommand {
         $sync.WinForgeStreamDone[$caminho] = $false
         $sync.WinForgeStreamExit[$caminho] = $null
 
-        Show-WinForgeOutputWindow -Title $Spec.Title -FollowPath $caminho -Component 'Repair' | Out-Null
+        # A estimativa vem da LINHA, e é ela que deixa o cabeçalho ficar âmbar a 1,5x e urgente a 3x.
+        # Linha sem 'ExpectMinutes' vira zero, e zero desliga o aviso em vez de inventar um teto.
+        Show-WinForgeOutputWindow -Title $Spec.Title -FollowPath $caminho -ExpectMinutes ([int]$Spec.ExpectMinutes) -Component 'Repair' | Out-Null
 
         Write-WinForgeLog -Component "Repair" -Message "$Name iniciado: $($passos.Count) passo(s), saída ao vivo em $caminho"
         Invoke-WPFRunspace -ScriptBlock $sync.WinForgeStreamBody -ArgumentList @{ Name = $Name; Path = $caminho; Steps = $passos; Final = $Spec.Final } | Out-Null

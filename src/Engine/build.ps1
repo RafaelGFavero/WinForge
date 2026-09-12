@@ -1216,8 +1216,12 @@ if ($SelfTest) {
     # e dica. É produto cartesiano de propósito - a lista escrita à mão sempre esquece a
     # combinação que aparece numa aba só, e foi assim que o verde de "recomendado" ficou em 3,6:1
     # sobre o fundo escuro sem ninguém notar.
+    # HeaderWarningColor/HeaderUrgentColor entram na MESMA lista de textos, e não num par avulso
+    # contra o fundo da janela: o cabeçalho da janela de saída cai sobre MainBackgroundColor hoje,
+    # mas quem repetir o hexadecimal num cartão ou numa dica amanhã não vai lembrar de acrescentar o
+    # par. O produto cartesiano é o que garante que a conta já foi feita.
     $wfTemaFundos = @('MainBackgroundColor', 'CardBackgroundColor', 'ToolTipBackgroundColor')
-    $wfTemaTextos = @('MainForegroundColor', 'LabelboxForegroundColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor')
+    $wfTemaTextos = @('MainForegroundColor', 'LabelboxForegroundColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor', 'HeaderWarningColor', 'HeaderUrgentColor')
     $wfTemaPares = @()
     foreach ($wfBgNome in $wfTemaFundos) {
         foreach ($wfFgNome in $wfTemaTextos) { $wfTemaPares += @{ Fg = $wfFgNome; Bg = $wfBgNome; Nome = "$wfFgNome sobre $wfBgNome" } }
@@ -3616,6 +3620,130 @@ if ($SelfTest) {
         Write-Host "  [ERRO] Tetos: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
         Remove-Item -LiteralPath (Join-Path $wbSelfTestRaiz 'tetos') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Janela de saída: cabeçalho
+    # O caso que abriu esta leva: 404 minutos olhando um contador subir, sem nada na tela dizendo se
+    # aquilo era normal. O cabeçalho passa a ter a noção do que é normal PARA AQUELA LINHA, e a cor
+    # muda quando o relógio passa de 1,5x e de 3x da estimativa dela.
+    try {
+        $wfCabN = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(5)) -ExpectMinutes 15
+        if ([string]$wfCabN.Level -ne 'normal') { Write-Host "  [ERRO] Cabeçalho: 5 de 15 minutos deu '$($wfCabN.Level)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCabN.Text -notmatch '^Em andamento: Restaurar padrões \(05:00\)$') { Write-Host "  [ERRO] Cabeçalho: '$($wfCabN.Text)'" -ForegroundColor Red; $wbErrors++ }
+        $wfCabA = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(23)) -ExpectMinutes 15
+        if ([string]$wfCabA.Level -ne 'ambar') { Write-Host "  [ERRO] Cabeçalho: 23 de 15 minutos (1,53x) deu '$($wfCabA.Level)', esperado 'ambar'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfCabF in @('Está demorando mais que o normal (o comum são 15 minutos)', 'Continua rodando', 'Não feche esta janela', 'use o botão Parar')) {
+            if ([string]$wfCabA.Text -notmatch [regex]::Escape($wfCabF)) { Write-Host "  [ERRO] Cabeçalho (âmbar): falta '$wfCabF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfCabU = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(46)) -ExpectMinutes 15
+        if ([string]$wfCabU.Level -ne 'urgente') { Write-Host "  [ERRO] Cabeçalho: 46 de 15 minutos (3,06x) deu '$($wfCabU.Level)', esperado 'urgente'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCabU.Text -notmatch 'Parar') { Write-Host "  [ERRO] Cabeçalho (urgente): o Parar não está em destaque" -ForegroundColor Red; $wbErrors++ }
+        # O urgente tem de DIZER algo que o âmbar não diz, e as duas metades são necessárias. MEDIDO:
+        # um mutante que copiava a frase do âmbar para o ramo do triplo SOBREVIVEU a uma comparação
+        # de textos inteiros - eles nunca são iguais, porque o mm:ss do começo é outro. Só a frase,
+        # cobrada dos dois lados (presente lá, ausente aqui), separa 'demorando' de 'demorando muito'.
+        foreach ($wfCabF in @('MUITO mais que o normal', 'passou do triplo')) {
+            if ([string]$wfCabU.Text -notmatch [regex]::Escape($wfCabF)) { Write-Host "  [ERRO] Cabeçalho (urgente): falta '$wfCabF' - passar do triplo não está dizendo nada de novo" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabA.Text -match [regex]::Escape($wfCabF)) { Write-Host "  [ERRO] Cabeçalho (âmbar): ele já diz '$wfCabF' - os dois níveis viraram o mesmo aviso" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfCabD = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(7)) -Done -ExitCode 0
+        if ([string]$wfCabD.Text -ne 'Concluído em 07:00 (código 0)') { Write-Host "  [ERRO] Cabeçalho (fim): '$($wfCabD.Text)'" -ForegroundColor Red; $wbErrors++ }
+        $wfCabC = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(3)) -Done -ExitCode 0 -Cancelled
+        if ([string]$wfCabC.Text -ne 'Cancelado em 03:00') { Write-Host "  [ERRO] Cabeçalho (cancelado): '$($wfCabC.Text)', esperado 'Cancelado em 03:00' - nunca 'Concluído'" -ForegroundColor Red; $wbErrors++ }
+        # Sem ExpectMinutes não há âmbar: um comando sem estimativa não pode inventar atraso.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromHours(3))).Level -ne 'normal') { Write-Host "  [ERRO] Cabeçalho: sem ExpectMinutes o nível mudou" -ForegroundColor Red; $wbErrors++ }
+        # A FAIXA, e não só os três pontos de cima. 23/15 é 1,53x e 46/15 é 3,06x: com esses dois
+        # sozinhos, QUALQUER corte entre 1,0x e 1,53x (ou entre 1,54x e 3,06x) fica verde. Os quatro
+        # abaixo prendem os dois cortes onde eles estão - 1,4x normal, 1,5x cravado âmbar, 2,9x ainda
+        # âmbar, 3,0x cravado urgente.
+        foreach ($wfCabFaixa in @(@(14, 'normal'), @(15, 'ambar'), @(29, 'ambar'), @(30, 'urgente'))) {
+            $wfCabNivel = [string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes($wfCabFaixa[0])) -ExpectMinutes 10).Level
+            if ($wfCabNivel -ne [string]$wfCabFaixa[1]) { Write-Host "  [ERRO] Cabeçalho (faixa): $($wfCabFaixa[0]) de 10 minutos deu '$wfCabNivel', esperado '$($wfCabFaixa[1])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E é RAZÃO, não minuto fixo: os mesmos 23 minutos são âmbar contra 15 esperados e normais
+        # contra 20. Um corte escrito em minutos absolutos passaria nas linhas de cima.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(23)) -ExpectMinutes 20).Level -ne 'normal') { Write-Host "  [ERRO] Cabeçalho: 23 de 20 minutos (1,15x) deveria ser 'normal' - o corte está em minutos fixos, não na razão" -ForegroundColor Red; $wbErrors++ }
+        # O número que aparece na frase é o da LINHA, e não um 15 escrito à mão.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(31)) -ExpectMinutes 20).Text -notmatch [regex]::Escape('o comum são 20 minutos')) { Write-Host "  [ERRO] Cabeçalho: a estimativa da frase não vem de ExpectMinutes" -ForegroundColor Red; $wbErrors++ }
+        # Fim sem código (a runspace morreu antes de gravar um): 'n/d', e não 'código '.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(2)) -Done).Text -ne 'Concluído em 02:00 (código n/d)') { Write-Host "  [ERRO] Cabeçalho (fim): sem código de saída o texto deveria dizer 'n/d'" -ForegroundColor Red; $wbErrors++ }
+        # Os segundos, e o caso de 404 minutos: 'mm' passa de 60 e NÃO zera. Um contador que voltasse
+        # a 44:00 depois de uma hora seria pior do que não ter contador.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromSeconds(65))).Text -ne 'Em andamento: X (01:05)') { Write-Host "  [ERRO] Cabeçalho: 65 segundos não viraram '01:05'" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(404)) -ExpectMinutes 15).Text -notmatch '\(404:00\)') { Write-Host "  [ERRO] Cabeçalho: 404 minutos não apareceram como '404:00' - o contador está zerando na hora cheia" -ForegroundColor Red; $wbErrors++ }
+        # Relógio que ANDA PARA TRÁS no meio do comando não é hipótese: 'Servidor NTP - Ativar' roda
+        # 'w32tm /resync' com a janela aberta, e a hora do sistema pode recuar. Sem guarda, o
+        # cabeçalho mostra '-1:59'.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text -ne 'Em andamento: X (00:00)') { Write-Host "  [ERRO] Cabeçalho: tempo negativo (o w32tm /resync recuou o relógio) virou '$([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text)'" -ForegroundColor Red; $wbErrors++ }
+        # Toda linha que ALTERA a máquina declara ExpectMinutes. A varredura usa as listas canônicas
+        # das outras travas, e não uma cópia à mão: linha nova numa delas entra aqui sozinha.
+        foreach ($wfCabNome in @(@($wfRepNomes) + @($wfStrNomes) + @('AclRestore', 'AclUndo', 'AclCleanup'))) {
+            $wfCabCmd = Get-WinForgeRepairCommand -Name $wfCabNome
+            if ([string]$wfCabCmd.Kind -eq 'read') { continue }
+            if (-not ([int]$wfCabCmd.ExpectMinutes -gt 0)) { Write-Host "  [ERRO] Cabeçalho: a linha '$wfCabNome' não declara ExpectMinutes" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ([int](Get-WinForgeRepairCommand -Name 'AclRestore').ExpectMinutes -ne 15) { Write-Host "  [ERRO] Cabeçalho: AclRestore deveria estimar 15 minutos" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Get-WinForgeRepairCommand -Name 'AclUndo').ExpectMinutes -ne 10) { Write-Host "  [ERRO] Cabeçalho: AclUndo deveria estimar 10 minutos" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Get-WinForgeRepairCommand -Name 'DotNet35Enable').ExpectMinutes -ne 20) { Write-Host "  [ERRO] Cabeçalho: DotNet35Enable deveria estimar 20 minutos" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Get-WinForgeRepairCommand -Name 'WindowsUpdateReset').ExpectMinutes -ne 20) { Write-Host "  [ERRO] Cabeçalho: WindowsUpdateReset (WPFFixesUpdate) deveria estimar 20 minutos" -ForegroundColor Red; $wbErrors++ }
+        # 'ChkdskScan' é 'read' e estima assim mesmo: ele varre o disco inteiro, e é o outro botão que
+        # deixa alguém olhando o contador sem saber se aquilo é normal.
+        if ([int](Get-WinForgeRepairCommand -Name 'ChkdskScan').ExpectMinutes -ne 10) { Write-Host "  [ERRO] Cabeçalho: ChkdskScan deveria estimar 10 minutos" -ForegroundColor Red; $wbErrors++ }
+        # Os dois tokens novos existem nos dois temas (o contraste é cobrado pela conferência de tema).
+        foreach ($wfCabTema in @('Light', 'Dark')) {
+            foreach ($wfCabTok in @('HeaderWarningColor', 'HeaderUrgentColor')) {
+                if ([string]::IsNullOrWhiteSpace([string]$sync.configs.themes.$wfCabTema.$wfCabTok)) { Write-Host "  [ERRO] Cabeçalho: token '$wfCabTok' ausente no tema $wfCabTema" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # ...e ENTRAM na conferência de contraste, que é outra coisa de existir. Sem esta linha, tirar
+        # os dois da lista de textos não acusa nada e um hexadecimal ilegível volta a caber no
+        # cabeçalho - o piso de 4,5:1 deixaria de valer justamente para o aviso que precisa ser lido.
+        foreach ($wfCabTok in @('HeaderWarningColor', 'HeaderUrgentColor')) {
+            if ($wfCabTok -notin @($wfTemaTextos)) { Write-Host "  [ERRO] Cabeçalho: '$wfCabTok' está fora da conferência de contraste dos temas" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o COMPORTAMENTO, com janela de verdade e tiques à mão: a estimativa chega à Tag, o tique
+        # troca o texto E A COR nos três níveis. As travas de fonte abaixo ficariam verdes com uma
+        # função pura que ninguém chama; estas três cores provam que o cabeçalho muda na tela.
+        $wfCabDir = Join-Path $wbSelfTestRaiz 'cabecalho'
+        New-Item -ItemType Directory -Path $wfCabDir -Force | Out-Null
+        $wfCabArq = Join-Path $wfCabDir 'follow.txt'
+        [System.IO.File]::WriteAllText($wfCabArq, "primeira linha`r`n", (New-Object System.Text.UTF8Encoding($true)))
+        $sync.WinForgeStreamDone[$wfCabArq] = $false
+        $wfCabJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfCabArq -ExpectMinutes 15 -Component 'Repair' -NoShow
+        if ($wfCabJan -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Cabeçalho (janela): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if ([int]$wfCabJan.Tag.ExpectMinutes -ne 15) { Write-Host "  [ERRO] Cabeçalho (janela): a estimativa não chegou à Tag (veio '$($wfCabJan.Tag.ExpectMinutes)')" -ForegroundColor Red; $wbErrors++ }
+            $wfCabBloco = $wfCabJan.FindName('WFOutputHeader')
+            $wfCabCores = @{}
+            foreach ($wfCabCaso in @(@('normal', 1), @('ambar', 23), @('urgente', 46))) {
+                $wfCabJan.Tag.Start = (Get-Date).AddMinutes(-[int]$wfCabCaso[1])
+                Invoke-WinForgeFollowTick -Window $wfCabJan
+                $wfCabCores[[string]$wfCabCaso[0]] = [string]$wfCabBloco.Foreground.Color
+            }
+            if ([string]$wfCabBloco.Text -notmatch 'Parar') { Write-Host "  [ERRO] Cabeçalho (janela): com 46 de 15 minutos o texto na tela não fala do Parar ('$($wfCabBloco.Text)')" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfCabPar in @(@('normal', 'ambar'), @('normal', 'urgente'), @('ambar', 'urgente'))) {
+                if ([string]$wfCabCores[[string]$wfCabPar[0]] -eq [string]$wfCabCores[[string]$wfCabPar[1]]) { Write-Host "  [ERRO] Cabeçalho (cor): '$($wfCabPar[0])' e '$($wfCabPar[1])' pintam igual ('$($wfCabCores[[string]$wfCabPar[0]])') - o tique não troca a cor" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Concluído volta ao normal e para o relógio: 'Concluído em mm:ss' em âmbar seria o
+            # programa dizendo que ainda há algo errado depois de terminar.
+            $sync.WinForgeStreamDone[$wfCabArq] = $true
+            $sync.WinForgeStreamExit[$wfCabArq] = 0
+            Invoke-WinForgeFollowTick -Window $wfCabJan
+            if ([string]$wfCabBloco.Text -notmatch '^Concluído em \d+:\d\d \(código 0\)$') { Write-Host "  [ERRO] Cabeçalho (janela): o fim não virou 'Concluído em mm:ss (código 0)' ('$($wfCabBloco.Text)')" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabBloco.Foreground.Color -ne [string]$wfCabCores['normal']) { Write-Host "  [ERRO] Cabeçalho (cor): depois de concluído a cor não voltou ao normal" -ForegroundColor Red; $wbErrors++ }
+        }
+        # As travas de FORMA DE CHAMADA, com o argumento junto: o nome solto seria satisfeito pela
+        # prosa do bloco de ajuda, que entra no .ScriptBlock.
+        $wfCabFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
+        if ($wfCabFonteT.IndexOf('Get-WinForgeFollowHeader -Title', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Cabeçalho: o tique não chama Get-WinForgeFollowHeader - ele voltou a montar o texto sozinho" -ForegroundColor Red; $wbErrors++ }
+        $wfCabFonteJ = [string](Get-Command Show-WinForgeOutputWindow).ScriptBlock
+        if ($wfCabFonteJ.IndexOf('ExpectMinutes = [int]$ExpectMinutes', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Cabeçalho: a janela não guarda ExpectMinutes na Tag" -ForegroundColor Red; $wbErrors++ }
+        $wfCabFonteS = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        if ($wfCabFonteS.IndexOf('-ExpectMinutes ([int]$Spec.ExpectMinutes)', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Cabeçalho: quem abre a janela do fluxo ao vivo não passa a estimativa da linha" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Cabeçalho: normal/âmbar (1,5x)/urgente (3x), 'Cancelado em mm:ss' nunca vira 'Concluído', ExpectMinutes em toda linha repair"
+    } catch {
+        Write-Host "  [ERRO] Cabeçalho: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath (Join-Path $wbSelfTestRaiz 'cabecalho') -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- Permissões do disco do sistema
     # O caso real: uma atualização de fabricante derrubou a cadeia de permissões do disco do Windows,
