@@ -5084,16 +5084,29 @@ if ($SelfTest) {
         $wfLimpDesp = Invoke-WinForgeRepairCommand -Name 'AclCleanup' -NoUI
         if ($wfLimpDesp.Dispatched) { Write-Host "  [ERRO] Permissões (limpeza): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
         if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepAclCleanup.Description)) { Write-Host "  [ERRO] Permissões (limpeza): WPFWFRepAclCleanup sem Description na config" -ForegroundColor Red; $wbErrors++ }
-        # A varredura de abertura está PENDURADA no gancho da janela. Exercitá-la solta prova que ela
-        # sabe responder, não que alguém pergunta - e ninguém perguntando é a pasta crescendo calada.
+        # A varredura NÃO fica mais pendurada no gancho da janela. Ali ela escrevia na barra logo
+        # depois de o job de diagnóstico começar, e o job cobria o texto em milissegundos: quem tinha
+        # trezentos gigabytes presos não via nada, e o aviso ia só para o arquivo de log. Agora ela é
+        # ENCADEADA depois da mensagem "Diagnóstico pronto", que é a última coisa que o job escreve
+        # na barra - a posição é o conserto, não a prioridade.
+        #
+        # A cobrança é pela forma da CHAMADA ('$null = ' junto), e não pelo nome solto: o nome
+        # aparece também no bloco de ajuda, que entra no ScriptBlock, e essa fresta já pegou três
+        # implementadores desta leva.
+        $wfLimpFonteJ = [string](Get-Command Start-WinForgeProfileJob).ScriptBlock
+        $wfLimpPosJ = $wfLimpFonteJ.IndexOf('$null = Show-WinForgeAclBackupSizeWarning', [StringComparison]::Ordinal)
+        $wfLimpPosD = $wfLimpFonteJ.IndexOf('Set-WinForgeProfileProgress -Label $wfDone', [StringComparison]::Ordinal)
+        if ($wfLimpPosJ -lt 0) { Write-Host "  [ERRO] Permissões (varredura): o diagnóstico não CHAMA a varredura no fim - a pasta cresceria calada" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosD -lt 0) { Write-Host "  [ERRO] Permissões (varredura): a mensagem final do diagnóstico mudou de forma e a trava de ordem deixou de valer" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosJ -lt $wfLimpPosD) { Write-Host "  [ERRO] Permissões (varredura): a varredura é chamada ANTES da mensagem 'Diagnóstico pronto' - o job cobre o aviso na barra em milissegundos" -ForegroundColor Red; $wbErrors++ }
         $wfLimpFonteG = ''
         try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfLimpFonteG = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfLimpFonteG = '' }
         # A agulha é MONTADA, e não escrita inteira: esta linha mora no mesmo arquivo que ela
-        # procura, e um literal contíguo casaria consigo mesmo - um mutante que apagasse o gancho
-        # sobreviveria com o teste verde. Medido: com a busca escrita inteira, ele sobreviveu.
+        # procura, e um literal contíguo casaria consigo mesmo. Medido na Tarefa 6: com a busca
+        # escrita inteira, o mutante que mexia no gancho sobrevivia.
         $wfLimpAlvoG = '::Background, [action]{ Show-WinForgeAcl' + 'BackupSizeWarning }'
         if ([string]::IsNullOrWhiteSpace($wfLimpFonteG)) { Write-Host "  [ERRO] Permissões (varredura): o próprio arquivo do WinForge não pôde ser lido para conferir o gancho de abertura" -ForegroundColor Red; $wbErrors++ }
-        elseif ($wfLimpFonteG.IndexOf($wfLimpAlvoG, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (varredura): o gancho de abertura não chama Show-WinForgeAclBackupSizeWarning em DispatcherPriority::Background - a pasta cresceria calada" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpFonteG.IndexOf($wfLimpAlvoG, [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (varredura): o gancho antigo voltou ao arranque - ali o aviso é coberto pelo job de diagnóstico" -ForegroundColor Red; $wbErrors++ }
         $wfLimpFonteS = [string](Get-Command Show-WinForgeAclBackupSizeWarning).ScriptBlock
         if ($wfLimpFonteS -match 'MessageBox') { Write-Host "  [ERRO] Permissões (varredura): a varredura de abertura abre caixa de mensagem - ela escreve no log e na barra, e nada mais" -ForegroundColor Red; $wbErrors++ }
         foreach ($wfLimpEsp in @('Write-WinForgeLog', 'Set-WinForgeProfileProgress')) {
@@ -7170,11 +7183,6 @@ $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windo
 
     # WinForge: diagnóstico do sistema em segundo plano (perfil + regras -> contornos e aba Diagnóstico)
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{ Start-WinForgeProfileJob }) | Out-Null
-
-    # WinForge: varredura da pasta de backup de permissões - acima de 1 GB ela RELATA, no log e na
-    # barra de status, e não apaga nada. Quem apaga é o botão "Limpar backups antigos", com a lista
-    # na tela e sob confirmação.
-    $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{ Show-WinForgeAclBackupSizeWarning }) | Out-Null
 
     # WinForge: pergunta (opcional) sobre ponto de restauração depois que a janela aparece
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null

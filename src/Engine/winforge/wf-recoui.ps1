@@ -298,6 +298,14 @@ function Start-WinForgeProfileJob {
             # para, quatro segundos mais tarde, apagar o texto de outro trabalho que tivesse começado
             $null = Set-WinForgeProfileProgress -Label $wfDone -Percent 100
             Write-WinForgeLog -Component "Profile" -Message $wfDone
+
+            # A varredura da pasta de backup de permissões vem ENCADEADA aqui, e não no gancho da
+            # abertura da janela, porque a barra é a MESMA. Pendurada lá, ela escrevia o aviso e o
+            # "Coletando informações do sistema..." deste job o cobria em milissegundos: quem tinha
+            # trezentos gigabytes presos numa pasta que só SYSTEM e Administradores apagam não via
+            # nada, e o aviso ia só para o arquivo de log. Aqui ela é a ÚLTIMA a escrever.
+            # Só relata - quem apaga é o botão, com a lista na tela e sob confirmação.
+            $null = Show-WinForgeAclBackupSizeWarning
         } catch {
             # a barra fica visível com o erro: o usuário precisa saber que não há recomendação nenhuma
             $null = Set-WinForgeProfileProgress -Label "Diagnóstico falhou: $($_.Exception.Message)" -Percent 0
