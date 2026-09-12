@@ -4480,10 +4480,22 @@ function Set-WinForgeAclIndexConsumed {
         continuaria sendo o mais antigo não consumido e o Desfazer seguinte o aplicaria de novo, em
         cima de um disco que já voltou.
 
-        O arquivo é reescrito no lugar (Set-Content trunca, não recria), então o endurecimento de
-        Protect-WinForgeSnapshotFile - dono Administradores, DACL fechada - continua valendo sem
-        precisar ser refeito. Quem chama já está elevado; sem elevação a gravação falha e o motivo
-        volta em 'Reason'.
+        A gravação é por TROCA, e não por reescrita no lugar, e a diferença é o que acontece quando
+        a máquina morre no meio. 'Set-Content' TRUNCA o arquivo antes de escrever: interrompido ali
+        - queda de energia, disco cheio -, o índice fica pela metade e vira ILEGÍVEL, que é
+        exatamente o estado que prende o conjunto na fila e deixa a restauração recusada. O texto
+        novo vai para um temporário ao lado e [IO.File]::Replace() troca os dois de uma vez.
+
+        Replace mantém dono e lista do DESTINO - medido, lista idêntica antes e depois -, então o
+        endurecimento de Protect-WinForgeSnapshotFile continua valendo sem precisar ser refeito no
+        arquivo novo. O temporário nasce na MESMA pasta, por duas razões: Replace exige o mesmo
+        volume, e a pasta já é a protegida, então o arquivo intermediário nunca fica exposto.
+
+        Morrer ENTRE o '/restore' e a marca continua aceitável: a operação é idempotente e a
+        execução seguinte reaplica o mesmo conjunto. O que não era aceitável é morrer DENTRO da
+        marca e perder o índice.
+
+        Quem chama já está elevado; sem elevação a gravação falha e o motivo volta em 'Reason'.
 
         O NOME é conferido antes da abertura: esta função escreve, e o caminho vem de um arquivo de
         índice. 'acl-index-*.json' é a única forma que ela aceita.
@@ -4503,15 +4515,25 @@ function Set-WinForgeAclIndexConsumed {
         $r.Reason = "o índice '$Path' não existe"
         return $r
     }
+    $temporario = ([string]$Path + '.tmp')
     try {
         $dados = Get-Content -LiteralPath ([string]$Path) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
         if ($null -eq $dados) { throw "o índice '$Path' não pôde ser lido" }
         # '-Force' porque o índice da 1.7.0 não TEM o campo: ali a marca é criada, não atualizada.
         $dados | Add-Member -NotePropertyName 'Consumed' -NotePropertyValue $true -Force
-        Set-Content -LiteralPath ([string]$Path) -Value ($dados | ConvertTo-Json -Depth 5) -Encoding UTF8 -ErrorAction Stop
+        Set-Content -LiteralPath $temporario -Value ($dados | ConvertTo-Json -Depth 5) -Encoding UTF8 -ErrorAction Stop
+        # '[NullString]::Value', e não '$null'. MEDIDO: '$null' num parâmetro [string] de método .NET
+        # chega como STRING VAZIA, e '' não é caminho - a chamada morre com "O caminho tem um formato
+        # inválido" e a marca nunca é gravada. '[NullString]::Value' existe exatamente para isso, e é
+        # o que faz o Replace rodar sem deixar arquivo de reserva para trás.
+        [System.IO.File]::Replace($temporario, [string]$Path, [NullString]::Value)
         $r.Ok = $true
     } catch {
         $r.Reason = $_.Exception.Message
+    } finally {
+        # O temporário só sobrevive a uma troca que não aconteceu. Deixá-lo na pasta daria um órfão
+        # para a limpeza apagar e um arquivo a mais na conta do aviso de tamanho.
+        if (Test-Path -LiteralPath $temporario) { Remove-Item -LiteralPath $temporario -Force -ErrorAction SilentlyContinue }
     }
     return $r
 }

@@ -4857,8 +4857,29 @@ if ($SelfTest) {
         $wfIdxConj = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
         if ([string]$wfIdxConj.Stamp -ne '20260101-000000') { Write-Host "  [ERRO] Permissões (Desfazer): o conjunto escolhido é '$($wfIdxConj.Stamp)', esperado o MAIS ANTIGO não consumido '20260101-000000'" -ForegroundColor Red; $wbErrors++ }
         if ([int]$wfIdxConj.Pending -ne 2) { Write-Host "  [ERRO] Permissões (Desfazer): Pending=$($wfIdxConj.Pending), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        # ---- A marca é gravada por TROCA, e não por reescrita no lugar. 'Set-Content' trunca o
+        # arquivo antes de escrever: interrompido no meio - queda de energia, disco cheio - o índice
+        # vira ILEGÍVEL, que é exatamente a armadilha que prende o conjunto para sempre. O que a
+        # troca precisa manter é o endurecimento do DESTINO, e isso aqui é medido, não suposto: a
+        # lista de permissões do arquivo antes e depois tem de ser a MESMA.
+        $wfIdxAlvoM = Join-Path $wfIdxRaiz 'acl-index-20260101-000000.json'
+        $wfIdxSddlAntes = ''
+        try { $wfIdxSddlAntes = [string](Get-Acl -LiteralPath $wfIdxAlvoM).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access) } catch { $wfIdxSddlAntes = '' }
         # Consumido some da fila; o seguinte assume.
-        if (-not (Set-WinForgeAclIndexConsumed -Path (Join-Path $wfIdxRaiz 'acl-index-20260101-000000.json')).Ok) { Write-Host "  [ERRO] Permissões (Consumed): a marcação falhou" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Set-WinForgeAclIndexConsumed -Path $wfIdxAlvoM).Ok) { Write-Host "  [ERRO] Permissões (Consumed): a marcação falhou" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxSddlDepois = ''
+        try { $wfIdxSddlDepois = [string](Get-Acl -LiteralPath $wfIdxAlvoM).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access) } catch { $wfIdxSddlDepois = '' }
+        if ([string]::IsNullOrWhiteSpace($wfIdxSddlAntes)) { Write-Host "  [ERRO] Permissões (Consumed): a lista do índice não pôde ser lida antes da marcação" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIdxSddlAntes -cne $wfIdxSddlDepois) { Write-Host "  [ERRO] Permissões (Consumed): a troca do arquivo NÃO preservou a lista de permissões do destino`n    antes:  $wfIdxSddlAntes`n    depois: $wfIdxSddlDepois" -ForegroundColor Red; $wbErrors++ }
+        # E o temporário não fica no disco: um '.tmp' esquecido na pasta vira órfão para a limpeza e
+        # entra na conta do aviso de tamanho.
+        $wfIdxSobra = @(Get-ChildItem -LiteralPath $wfIdxRaiz -Filter '*.tmp' -File -ErrorAction SilentlyContinue)
+        if ($wfIdxSobra.Count) { Write-Host "  [ERRO] Permissões (Consumed): sobrou $($wfIdxSobra.Count) arquivo(s) temporário(s) na pasta ('$(@($wfIdxSobra | ForEach-Object { $_.Name }) -join ', ')')" -ForegroundColor Red; $wbErrors++ }
+        # A busca é pela forma da CHAMADA: o nome solto apareceria também no bloco de ajuda, que
+        # entra no ScriptBlock, e um mutante que voltasse ao Set-Content no lugar sobreviveria.
+        $wfIdxFonteM = [string](Get-Command Set-WinForgeAclIndexConsumed).ScriptBlock
+        if ($wfIdxFonteM.IndexOf('[System.IO.File]::Replace(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): a marca não é gravada por troca ([System.IO.File]::Replace) - truncado no meio, o índice vira ilegível" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteM -match "Set-Content -LiteralPath \(\[string\]\`$Path\)") { Write-Host "  [ERRO] Permissões (Consumed): a reescrita no lugar voltou - é ela que transforma uma interrupção em índice ilegível" -ForegroundColor Red; $wbErrors++ }
         $wfIdxConj2 = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
         if ([string]$wfIdxConj2.Stamp -ne '20260202-000000') { Write-Host "  [ERRO] Permissões (Consumed): depois de consumido o primeiro, o conjunto é '$($wfIdxConj2.Stamp)', esperado '20260202-000000'" -ForegroundColor Red; $wbErrors++ }
         if ([int]$wfIdxConj2.Pending -ne 1) { Write-Host "  [ERRO] Permissões (Consumed): Pending=$($wfIdxConj2.Pending), esperado 1" -ForegroundColor Red; $wbErrors++ }
