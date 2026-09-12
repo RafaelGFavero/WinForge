@@ -5235,6 +5235,11 @@ if ($SelfTest) {
         $wfLimpSecoExt = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
         $wfLimpApagaExt = @($wfLimpSecoExt | Where-Object { ([string]$_).StartsWith('[simulação] apagar ', [StringComparison]::Ordinal) -and ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
         if ($wfLimpApagaExt.Count) { Write-Host "  [ERRO] Permissões (externo): um caminho vindo de índice NÃO confiável virou alvo de remoção elevada ('$($wfLimpApagaExt[0])')" -ForegroundColor Red; $wbErrors++ }
+        # E o que está DENTRO da pasta continua apagável: a porta de confiança é sobre caminho que
+        # veio de dentro de um arquivo de texto, não sobre a pasta já conferida. Sem esta trava,
+        # marcar todo item da pasta como não confiável passaria batido - medido, o mutante sobreviveu.
+        $wfLimpDentro = @($wfLimpSecoExt | Where-Object { ([string]$_).StartsWith('[simulação] apagar ', [StringComparison]::Ordinal) })
+        if (-not $wfLimpDentro.Count) { Write-Host "  [ERRO] Permissões (externo): nenhuma linha da simulação é de remoção - os arquivos da própria pasta deixaram de ser apagáveis" -ForegroundColor Red; $wbErrors++ }
         # Mas ele continua APARECENDO: omitir em silêncio é o defeito que a rodada passada consertou.
         # O que muda é a instrução - apagar à mão, com o caminho completo na frente.
         $wfLimpAvisaExt = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
