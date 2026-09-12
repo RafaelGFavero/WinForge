@@ -3435,17 +3435,17 @@ if ($SelfTest) {
         }
         foreach ($wfAclPasso in $wfAclPlano) {
             if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Title)) { Write-Host "  [ERRO] Permissões (plano): passo da fase $($wfAclPasso.Phase) sem título" -ForegroundColor Red; $wbErrors++ }
-            # O passo 'sddl' não chama executável nenhum: ele lê a DACL e o dono da pasta com
-            # Get-Acl e grava o resultado no índice. É o ÚNICO tipo sem FilePath, e a trava cobra
-            # isso dos dois lados - sem FilePath tem de ser 'sddl', e 'sddl' não pode ter FilePath.
-            if ([string]$wfAclPasso.Kind -eq 'sddl') {
-                if (-not [string]::IsNullOrWhiteSpace([string]$wfAclPasso.FilePath)) { Write-Host "  [ERRO] Permissões (plano): o passo 'sddl' de '$($wfAclPasso.Path)' traz um executável ('$($wfAclPasso.FilePath)')" -ForegroundColor Red; $wbErrors++ }
-                if ($null -ne $wfAclPasso.Arguments) { Write-Host "  [ERRO] Permissões (plano): o passo 'sddl' de '$($wfAclPasso.Path)' traz argumentos" -ForegroundColor Red; $wbErrors++ }
-                if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Path)) { Write-Host "  [ERRO] Permissões (plano): passo 'sddl' sem pasta" -ForegroundColor Red; $wbErrors++ }
+            # Dois passos não chamam executável nenhum: o 'sddl' lê a DACL e o dono da pasta e grava
+            # no índice, e o 'scope' é a caminhada que o MOTOR faz. A trava cobra isso dos dois
+            # lados - sem FilePath tem de ser um desses dois, e nenhum deles pode ter FilePath.
+            if (@('sddl', 'scope') -contains [string]$wfAclPasso.Kind) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$wfAclPasso.FilePath)) { Write-Host "  [ERRO] Permissões (plano): o passo '$($wfAclPasso.Kind)' de '$($wfAclPasso.Path)' traz um executável ('$($wfAclPasso.FilePath)')" -ForegroundColor Red; $wbErrors++ }
+                if ($null -ne $wfAclPasso.Arguments) { Write-Host "  [ERRO] Permissões (plano): o passo '$($wfAclPasso.Kind)' de '$($wfAclPasso.Path)' traz argumentos" -ForegroundColor Red; $wbErrors++ }
+                if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Path)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Kind)' sem pasta" -ForegroundColor Red; $wbErrors++ }
                 continue
             }
             $wfAclExe = [string]$wfAclPasso.FilePath
-            if ([string]::IsNullOrWhiteSpace($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Title)' sem executável e sem ser do tipo 'sddl'" -ForegroundColor Red; $wbErrors++; continue }
+            if ([string]::IsNullOrWhiteSpace($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Title)' sem executável e sem ser do tipo 'sddl' ou 'scope'" -ForegroundColor Red; $wbErrors++; continue }
             if (-not [System.IO.Path]::IsPathRooted($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' não é caminho completo" -ForegroundColor Red; $wbErrors++ }
             elseif (-not $wfAclExe.StartsWith($wfAclSys, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' fora de '$wfAclSys'" -ForegroundColor Red; $wbErrors++ }
             elseif (-not (Test-Path -LiteralPath $wfAclExe -PathType Leaf)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' não existe nesta máquina" -ForegroundColor Red; $wbErrors++ }
@@ -3482,17 +3482,17 @@ if ($SelfTest) {
         # índice, e existe para toda pasta do conjunto - foi medido, elevado, que
         # 'icacls <pasta>\ /save' grava a entrada da própria pasta com o NOME VAZIO e que o
         # '/restore' NÃO a aplica (procura '<pasta>\<sddl>' e responde "arquivo não encontrado").
-        # O 'save' guarda o CONTEÚDO num arquivo de icacls, e só o perfil tem um: é a única pasta
-        # em que a restauração desce a árvore ('/inheritance:e /T /L' na fase 5).
+        # O 'scope' guarda o CONTEÚDO num arquivo no formato do icacls, escrito pelo MOTOR, e só o
+        # perfil tem um: é a única pasta em que a restauração mexe no que está DENTRO (fase 5).
         $wfAclSddl = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'sddl' })
-        $wfAclBk = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'save' })
-        $wfAclF2Outros = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and @('sddl', 'save') -notcontains [string]$_.Kind })
+        $wfAclBk = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })
+        $wfAclF2Outros = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and @('sddl', 'scope') -notcontains [string]$_.Kind })
         if ($wfAclF2Outros.Count) { Write-Host "  [ERRO] Permissões (plano): a fase 2 tem $($wfAclF2Outros.Count) passo(s) de tipo desconhecido ('$(@($wfAclF2Outros | ForEach-Object { [string]$_.Kind }) -join ', ')')" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclSddl.Count -lt 2) { Write-Host "  [ERRO] Permissões (plano): a fase 2 guarda $($wfAclSddl.Count) lista(s) em SDDL, esperado a raiz, as pastas de primeiro nível, as aninhadas e o perfil" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclBk.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): a fase 2 deveria ter exatamente um backup de conteúdo (o do perfil), tem $($wfAclBk.Count)" -ForegroundColor Red; $wbErrors++ }
-        # A raiz NÃO pode ter arquivo de icacls: o '/restore' dela nunca aplicou nada, e manter o
+        # A raiz NÃO pode ter arquivo de conteúdo: o '/restore' dela nunca aplicou nada, e manter o
         # passo era prometer um desfazer que não existe.
-        if (@($wfAclBk | Where-Object { ([string]$_.Path).TrimEnd('\') -eq $wfAclRaiz.TrimEnd('\') }).Count) { Write-Host "  [ERRO] Permissões (plano): a raiz voltou a ter '/save' - o '/restore' da raiz não aplica a entrada de nome vazio" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfAclBk | Where-Object { ([string]$_.Path).TrimEnd('\') -eq $wfAclRaiz.TrimEnd('\') }).Count) { Write-Host "  [ERRO] Permissões (plano): a raiz voltou a ter backup de conteúdo - o '/restore' da raiz não aplica a entrada de nome vazio" -ForegroundColor Red; $wbErrors++ }
         foreach ($wfAclPasso in $wfAclBk) {
             if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Backup)) { Write-Host "  [ERRO] Permissões (plano): passo de backup sem arquivo de destino" -ForegroundColor Red; $wbErrors++ }
             elseif (-not ([string]$wfAclPasso.Backup).StartsWith('C:\ProgramData\WinForge\acl-backup\', [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Permissões (plano): backup fora da pasta protegida ('$($wfAclPasso.Backup)')" -ForegroundColor Red; $wbErrors++ }
@@ -3505,13 +3505,6 @@ if ($SelfTest) {
         $wfAclAlvoPerfil = @($wfAclBk | Where-Object { [string]$_.Path -eq 'C:\Users\PerfilDeTeste' })
         if ($wfAclAlvoPerfil.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): o perfil deveria ter exatamente um backup de conteúdo, tem $($wfAclAlvoPerfil.Count)" -ForegroundColor Red; $wbErrors++ }
         elseif ([string]$wfAclAlvoPerfil[0].Target -ne 'C:\Users') { Write-Host "  [ERRO] Permissões (plano): o /restore do perfil deveria mirar 'C:\Users', mira '$($wfAclAlvoPerfil[0].Target)'" -ForegroundColor Red; $wbErrors++ }
-        elseif (@($wfAclAlvoPerfil[0].Arguments) -notcontains '/T') { Write-Host "  [ERRO] Permissões (plano): o backup do perfil deveria ser recursivo (/T)" -ForegroundColor Red; $wbErrors++ }
-        # '/Q' em todo '/save': sem ele o icacls escreve 'arquivo processado: <caminho>' por ARQUIVO,
-        # e um perfil tem centenas de milhares deles. Esse texto ia inteiro para o arquivo de saída
-        # e daí para a caixa de texto da janela, num bloco só.
-        foreach ($wfAclPasso in $wfAclBk) {
-            if (@($wfAclPasso.Arguments | ForEach-Object { [string]$_ }) -notcontains '/Q') { Write-Host "  [ERRO] Permissões (plano): o '/save' de '$($wfAclPasso.Path)' sem '/Q' - uma linha por arquivo do perfil na janela" -ForegroundColor Red; $wbErrors++ }
-        }
         # Toda pasta que a fase 3 ou a fase 4 reescreve TEM de ter a lista DELA MESMA guardada na
         # fase 2, e é isso que o Desfazer reaplica. 'Users\Public' é o caso que a listagem de
         # primeiro nível não alcança; a raiz é o caso que o '/save' nunca soube desfazer.
@@ -3680,7 +3673,7 @@ if ($SelfTest) {
         if ((Get-WinForgeAclSlug -Text 'abc123') -ne 'abc123') { Write-Host "  [ERRO] Permissões (apelido): texto já seguro não deveria mudar ('$(Get-WinForgeAclSlug -Text 'abc123')')" -ForegroundColor Red; $wbErrors++ }
         if ((Get-WinForgeAclSlug -Text '') -ne '') { Write-Host "  [ERRO] Permissões (apelido): texto vazio deveria dar apelido vazio" -ForegroundColor Red; $wbErrors++ }
         # E o plano gerado com um perfil de nome ruim continua gravando dentro da pasta protegida.
-        $wfAclSlugPlano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\Fulano de Tal' -UserSid 'S-1-5-21-11-22-33-1001' -BackupRoot 'C:\ProgramData\WinForge\acl-backup' -Stamp '20260911-120000' | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'save' })
+        $wfAclSlugPlano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\Fulano de Tal' -UserSid 'S-1-5-21-11-22-33-1001' -BackupRoot 'C:\ProgramData\WinForge\acl-backup' -Stamp '20260911-120000' | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })
         if ($wfAclSlugPlano.Count -ne 1) { Write-Host "  [ERRO] Permissões (apelido): o perfil 'Fulano de Tal' deveria dar um backup de conteúdo, deu $($wfAclSlugPlano.Count)" -ForegroundColor Red; $wbErrors++ }
         elseif ((Split-Path -Leaf ([string]$wfAclSlugPlano[0].Backup)) -notmatch '^acl-perfil-[A-Za-z0-9%]+-20260911-120000\.txt$') { Write-Host "  [ERRO] Permissões (apelido): o nome do backup do perfil saiu '$(Split-Path -Leaf ([string]$wfAclSlugPlano[0].Backup))'" -ForegroundColor Red; $wbErrors++ }
         if (-not $wfAclSlugRuins) { Write-Host "  Permissões (apelido): $($wfAclSlugPares.Count) par(es) que colidiam no apelido antigo dão apelidos distintos" }
@@ -3864,24 +3857,30 @@ if ($SelfTest) {
         $wfAclFonteUndo = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
         if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/C', '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não traz '/L'" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclFonteUndo.IndexOf('Restore-WinForgeAclSddl -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o Desfazer não reaplica a lista da pasta em si (SDDL)" -ForegroundColor Red; $wbErrors++ }
-        # E a outra ponta: o que a fase 2 indexa. Um '/save' que termina em acesso negado AINDA
-        # deixa arquivo no disco - indexá-lo pela simples existência inflava o "N pasta(s)
-        # guardadas" com rede de segurança que não existe. Entre o '/save' e o endurecimento do
-        # arquivo têm de estar as duas conferências: o CÓDIGO e o número de ENTRADAS.
+        # E a outra ponta: o que a fase 2 indexa. O arquivo do conteúdo só pode ser endurecido - e
+        # daí indexado - depois de a caminhada ter terminado inteira, do espaço ter sido conferido
+        # e de a gravação ter dito Ok. A ORDEM é a trava: um endurecimento antes da conferência
+        # indexaria um arquivo que ninguém garantiu.
         $wfAclFonteRest = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
         if ($wfAclFonteRest.IndexOf('Get-WinForgeAclFolderSecurity -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): a fase 2 não guarda a lista da pasta em si (SDDL)" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclFonteRest.IndexOf('ConvertTo-Json', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o índice não é gravado em JSON" -ForegroundColor Red; $wbErrors++ }
         $wfAclPosSave = $wfAclFonteRest.IndexOf('Fase 2 de 6 - $($passo.Title)', [StringComparison]::Ordinal)
-        $wfAclPosProt = $wfAclFonteRest.IndexOf('Protect-WinForgeSnapshotFile -Path ([string]$passo.Backup)', [StringComparison]::Ordinal)
+        $wfAclPosProt = $wfAclFonteRest.IndexOf('Protect-WinForgeSnapshotFile -Path $parcial', [StringComparison]::Ordinal)
         if ($wfAclPosSave -lt 0 -or $wfAclPosProt -le $wfAclPosSave) { Write-Host "  [ERRO] Permissões (desfazer): não dá para achar o trecho da fase 2 que grava o backup do conteúdo" -ForegroundColor Red; $wbErrors++ }
         else {
             $wfAclTrechoF2 = $wfAclFonteRest.Substring($wfAclPosSave, $wfAclPosProt - $wfAclPosSave)
             foreach ($wfAclF2Esp in @(
-                @('if ([int]$r.ExitCode -ne 0) {', 'o código do ''/save'' não é conferido antes de o arquivo ser indexado'),
-                @('Measure-WinForgeAclSaveEntry -Path', 'o número de entradas do arquivo não é conferido antes de ele ser indexado')
+                @('Get-WinForgeAclContentScope -Path', 'a caminhada não roda antes de o arquivo ser endurecido e indexado'),
+                @('Test-WinForgeAclFreeSpace -Path', 'o espaço livre não é conferido antes de a gravação começar'),
+                @('Write-WinForgeAclContentBackup -Path', 'o arquivo não é gravado pelo motor antes de ser endurecido')
             )) {
                 if ($wfAclTrechoF2.IndexOf($wfAclF2Esp[0], [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): $($wfAclF2Esp[1])" -ForegroundColor Red; $wbErrors++ }
             }
+            # O espaço vem ANTES da gravação, e não depois: conferir com o arquivo já escrito é
+            # conferir o que não adianta mais.
+            $wfAclPosEsp = $wfAclTrechoF2.IndexOf('Test-WinForgeAclFreeSpace -Path', [StringComparison]::Ordinal)
+            $wfAclPosGrav = $wfAclTrechoF2.IndexOf('Write-WinForgeAclContentBackup -Path', [StringComparison]::Ordinal)
+            if ($wfAclPosEsp -ge 0 -and $wfAclPosGrav -ge 0 -and $wfAclPosEsp -gt $wfAclPosGrav) { Write-Host "  [ERRO] Permissões (desfazer): o espaço livre é conferido DEPOIS de a gravação começar" -ForegroundColor Red; $wbErrors++ }
         }
         # O índice de verdade, ida e volta: um conjunto MONTADO em %TEMP% (a máquina de quem
         # compila normalmente não tem nenhum), lido por Get-WinForgeAclBackupSet e transformado em
@@ -4507,6 +4506,141 @@ if ($SelfTest) {
         # de 250 caracteres criado aqui e deixaria a árvore plantada em %TEMP% para sempre.
         try { [System.IO.Directory]::Delete('\\?\' + $wfArqRaiz, $true) } catch { }
         Remove-Item -LiteralPath $wfArqRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: a fase 2 no plano
+    try {
+        $wfF2Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-plano') -Stamp '20260912-101010')
+        $wfF2Save = @($wfF2Plano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'save' })
+        if ($wfF2Save.Count) { Write-Host "  [ERRO] Permissões (fase 2): o passo 'save' com 'icacls /T' continua no plano - ele é o laço que encheu o disco" -ForegroundColor Red; $wbErrors++ }
+        $wfF2Escopo = @($wfF2Plano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })
+        if ($wfF2Escopo.Count -ne 1) { Write-Host "  [ERRO] Permissões (fase 2): esperava 1 passo 'scope', veio $($wfF2Escopo.Count)" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if ($wfF2Escopo[0].FilePath) { Write-Host "  [ERRO] Permissões (fase 2): o passo 'scope' não pode ter executável - quem caminha é o motor" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfF2Escopo[0].Target -ne 'C:\Users') { Write-Host "  [ERRO] Permissões (fase 2): Target='$($wfF2Escopo[0].Target)', esperado 'C:\Users' (a pasta de onde o /restore roda)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Nenhum passo do plano inteiro pode carregar '/T' sobre o perfil. A fase 5 é a única
+        # exceção, e é uma exceção ANOTADA, não esquecida: o '/inheritance:e /T' dela sai junto com
+        # o passo 'inherit-list', no commit seguinte a este. O pino abaixo cobra que ela seja
+        # exatamente UMA - quando o 'inherit' virar 'inherit-list' o pino fica vermelho e obriga a
+        # varredura a voltar a ser geral, em vez de a exceção virar moradia.
+        $wfF2Pinados = @()
+        foreach ($wfF2P in $wfF2Plano) {
+            $wfF2Args = @($wfF2P.Arguments | ForEach-Object { [string]$_ })
+            if (-not (($wfF2Args -contains '/T') -and ((@($wfF2Args) -join ' ') -like '*C:\Users\fulano*'))) { continue }
+            if ([int]$wfF2P.Phase -eq 5 -and [string]$wfF2P.Kind -eq 'inherit') { $wfF2Pinados += $wfF2P; continue }
+            Write-Host "  [ERRO] Permissões (plano): passo da fase $($wfF2P.Phase) ainda usa '/T' sobre a pasta de perfil ('$($wfF2Args -join ' ')')" -ForegroundColor Red; $wbErrors++
+        }
+        if ($wfF2Pinados.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): $($wfF2Pinados.Count) passo(s) 'inherit' da fase 5 com '/T', esperado 1 - se a fase 5 já foi trocada por 'inherit-list', tire esta exceção e deixe a varredura geral" -ForegroundColor Red; $wbErrors++ }
+        # Espaço livre conferido ANTES: pedir mais do que o disco tem recusa, e diz quanto há.
+        $wfF2Esp = Test-WinForgeAclFreeSpace -Path $wbSelfTestTemp -Bytes ([long]1PB)
+        if ($wfF2Esp.Ok) { Write-Host "  [ERRO] Permissões (espaço): 1 PB deveria ser recusado" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Esp.Reason -notmatch '\d') { Write-Host "  [ERRO] Permissões (espaço): a recusa não traz o número na tela ('$($wfF2Esp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclFreeSpace -Path $wbSelfTestTemp -Bytes 103400).Ok) { Write-Host "  [ERRO] Permissões (espaço): 103,4 KB foram recusados" -ForegroundColor Red; $wbErrors++ }
+        # 'Denied > 0' muda o VEREDITO: cabeçalho, contagem e as 20 primeiras pastas.
+        $wfF2Ver = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 3; DeniedPaths = @('C:\Users\fulano\A', 'C:\Users\fulano\B', 'C:\Users\fulano\C'); Entries = @(1, 2) }
+        if ([string]$wfF2Ver.Header -ne 'Concluído com ressalvas') { Write-Host "  [ERRO] Permissões (ressalvas): cabeçalho '$($wfF2Ver.Header)', esperado 'Concluído com ressalvas'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Ver.Text -notmatch 'não foram copiadas nem alteradas') { Write-Host "  [ERRO] Permissões (ressalvas): falta a frase de que essas pastas não foram copiadas nem alteradas" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Ver.Text -notmatch 'C:\\Users\\fulano\\A') { Write-Host "  [ERRO] Permissões (ressalvas): a lista de DeniedPaths não aparece no texto" -ForegroundColor Red; $wbErrors++ }
+        $wfF2Muitas = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 50; DeniedPaths = @(1..50 | ForEach-Object { "C:\p$_" }); Entries = @(1) }
+        if (@([regex]::Matches([string]$wfF2Muitas.Text, 'C:\\p\d+')).Count -ne 20) { Write-Host "  [ERRO] Permissões (ressalvas): o texto tem de listar as 20 PRIMEIRAS, veio $(@([regex]::Matches([string]$wfF2Muitas.Text, 'C:\\p\d+')).Count)" -ForegroundColor Red; $wbErrors++ }
+        $wfF2Limpo = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 0; DeniedPaths = @(); Entries = @(1) }
+        if ([string]$wfF2Limpo.Header -ne 'Concluído') { Write-Host "  [ERRO] Permissões (ressalvas): sem Denied o cabeçalho é 'Concluído', veio '$($wfF2Limpo.Header)'" -ForegroundColor Red; $wbErrors++ }
+        # O arquivo parcial some no 'finally', e não dentro do laço: hoje o descarte não roda se o
+        # processo morre no meio.
+        $wfF2Fonte = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfF2Fonte -notmatch '(?s)finally\s*\{[^}]*Remove-Item[^}]*parcial') { Write-Host "  [ERRO] Permissões (parcial): falta o 'finally' que apaga o arquivo de conteúdo pela metade" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF2Fonte -notmatch 'Get-WinForgeAclContentScope') { Write-Host "  [ERRO] Permissões (fase 2): Invoke-WinForgeAclRestore não usa a caminhada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF2Fonte -notmatch 'Get-WinForgeAclContentHash') { Write-Host "  [ERRO] Permissões (fase 2): o índice não recebe o SHA-256 do arquivo de conteúdo" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (fase 2): passo 'scope' sem icacls, nenhum '/T' sobre o perfil, espaço conferido antes, veredito com ressalvas e finally do parcial"
+    } catch {
+        Write-Host "  [ERRO] Permissões (fase 2): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Permissões: a ordem das ACEs de negação
+    # O SDDL da caminhada vem do .NET, em ordem CANÔNICA - negação antes de permissão. Numa lista só
+    # de permissão isso é indiferente (34 das 338 do perfil medido diferem só nisso). Com NEGAÇÃO
+    # não é: devolver a ordem canônica a uma pasta que não estava canônica faz a negação passar a
+    # vencer, e o Desfazer TRANCA o usuário. Por isso a entrada que nega traz o texto do próprio
+    # icacls. Aqui a pasta é criada em %TEMP%, com uma negação de verdade, e o que a função devolve
+    # é comparado com o que o icacls escreve por fora - sem elevação: 'icacls /save' não precisa
+    # dela numa pasta cuja dona é a própria identidade.
+    $wfOrdRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-ordem'
+    $wfOrdRegra = $null
+    $wfOrdDi = $null
+    try {
+        if (Test-Path -LiteralPath $wfOrdRaiz) { Remove-Item -LiteralPath $wfOrdRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfOrdPerfil = Join-Path $wfOrdRaiz 'perfil'
+        $wfOrdAlvo = Join-Path $wfOrdPerfil 'Negada'
+        New-Item -ItemType Directory -Path $wfOrdAlvo -Force | Out-Null
+        $wfOrdDi = New-Object System.IO.DirectoryInfo $wfOrdAlvo
+        $wfOrdSd = $wfOrdDi.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfOrdSd.SetAccessRuleProtection($true, $true)
+        $wfOrdRegra = New-Object System.Security.AccessControl.FileSystemAccessRule(([System.Security.Principal.WindowsIdentity]::GetCurrent().User), [System.Security.AccessControl.FileSystemRights]::WriteData, [System.Security.AccessControl.InheritanceFlags]::None, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny)
+        $wfOrdSd.AddAccessRule($wfOrdRegra)
+        $wfOrdDi.SetAccessControl($wfOrdSd)
+        # 1. A caminhada marca a entrada, e não só conta: quem vai reler é o chamador, e ele precisa
+        # saber QUAL entrada nega. Um segundo detector no chamador seria um segundo padrão a manter.
+        $wfOrdEscopo = Get-WinForgeAclContentScope -Path $wfOrdPerfil
+        if (-not $wfOrdEscopo.Ok) { throw "o escopo de teste falhou ($($wfOrdEscopo.Reason))" }
+        $wfOrdNegadas = @(@($wfOrdEscopo.Entries) | Where-Object { $_.Deny })
+        if ($wfOrdNegadas.Count -ne 1) { Write-Host "  [ERRO] Permissões (ordem de ACE): $($wfOrdNegadas.Count) entrada(s) marcadas com Deny, esperado 1 - sem a marca por entrada o chamador não sabe qual reler" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfOrdNegadas[0].Name -ne 'perfil\Negada') { Write-Host "  [ERRO] Permissões (ordem de ACE): a entrada marcada é '$($wfOrdNegadas[0].Name)', esperada 'perfil\Negada'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfOrdEscopo.Deny -ne @(@($wfOrdEscopo.Entries) | Where-Object { $_.Deny }).Count) { Write-Host "  [ERRO] Permissões (ordem de ACE): o contador 'Deny' ($($wfOrdEscopo.Deny)) discorda das entradas marcadas" -ForegroundColor Red; $wbErrors++ }
+        # 2. E o texto do icacls, comparado com o que ele mesmo escreve por fora. -cne: 'FA' e 'fa'
+        # são o mesmo direito para o icacls, mas caixa diferente aqui significaria que o texto não
+        # saiu do mesmo lugar.
+        $wfOrdTrab = Join-Path $wfOrdRaiz 'trabalho.tmp'
+        $wfOrdRes = Get-WinForgeAclIcaclsSddl -Path $wfOrdAlvo -WorkFile $wfOrdTrab
+        if (-not $wfOrdRes.Ok) { Write-Host "  [ERRO] Permissões (ordem de ACE): o texto do icacls não pôde ser lido ('$($wfOrdRes.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            # MEDIDO: 'icacls <pasta absoluta> /save f /L /Q', sem barra no fim e sem '/T', sai com
+            # UM par só, e o nome dele é a FOLHA da pasta - não um nome vazio e não os filhos. É
+            # esse par que a função tem de devolver.
+            $wfOrdRef = Join-Path $wfOrdRaiz 'referencia.txt'
+            & (Get-WinForgeSystemExe -Name 'icacls.exe') $wfOrdAlvo '/save' $wfOrdRef '/L' '/Q' | Out-Null
+            $wfOrdLinhas = @([System.IO.File]::ReadAllText($wfOrdRef, [System.Text.Encoding]::Unicode) -split "`r`n")
+            if ([string]$wfOrdLinhas[0] -cne 'Negada') { Write-Host "  [ERRO] Permissões (ordem de ACE): o '/save' de referência nomeou a entrada '$($wfOrdLinhas[0])', esperada a folha 'Negada'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfOrdRes.Sddl -cne [string]$wfOrdLinhas[1]) { Write-Host "  [ERRO] Permissões (ordem de ACE): o texto devolvido difere do que o icacls escreve`n    função: $($wfOrdRes.Sddl)`n    icacls: $($wfOrdLinhas[1])" -ForegroundColor Red; $wbErrors++ }
+            # E o texto é mesmo uma lista com negação: sem isso a pasta de teste não exercitaria o
+            # caminho que esta função existe para cobrir.
+            if ([string]$wfOrdRes.Sddl -notmatch '\([OXZ]?D;') { Write-Host "  [ERRO] Permissões (ordem de ACE): o texto devolvido não tem ACE de negação ('$($wfOrdRes.Sddl)') - a pasta de teste não exercita o caminho" -ForegroundColor Red; $wbErrors++ }
+        }
+        # 3. O arquivo de trabalho não fica no disco: ele carrega a lista de permissões de uma pasta
+        # do usuário e some assim que o texto é lido.
+        if (Test-Path -LiteralPath $wfOrdTrab) { Write-Host "  [ERRO] Permissões (ordem de ACE): o arquivo de trabalho ficou em '$wfOrdTrab'" -ForegroundColor Red; $wbErrors++ }
+        # 4. Pasta que não existe: recusa, com o CÓDIGO do icacls na frase. Duas medições feitas
+        # aqui sustentam esta linha, e a primeira custou um mutante sobrevivente:
+        #   1. COM '/C' o icacls sai com 0 mesmo sem achar a pasta - '/C' é "continue apesar do
+        #      erro", e num alvo único ele só apaga o sinal de falha. Sem '/C' o mesmo caso sai com
+        #      2. Por isso o '/C' ficou de fora desta chamada, ao contrário do resto do reparo.
+        #   2. O arquivo de saída é TRUNCADO antes de o icacls falhar, então quem não conferir o
+        #      código ainda assim recusa - só que pela frase errada ("não trouxe '' onde era
+        #      esperada a folha"), que não diz nada a quem lê o log de um reparo elevado. O código
+        #      na frase é o que esta asserção cobra.
+        $wfOrdSumiu = Get-WinForgeAclIcaclsSddl -Path (Join-Path $wfOrdPerfil 'nunca-existiu') -WorkFile $wfOrdTrab
+        if ($wfOrdSumiu.Ok) { Write-Host "  [ERRO] Permissões (ordem de ACE): uma pasta inexistente devolveu Ok=`$true" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfOrdSumiu.Reason -notmatch 'código \d+') { Write-Host "  [ERRO] Permissões (ordem de ACE): a recusa não diz com que código o icacls saiu ('$($wfOrdSumiu.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # 5. A conferência do NOME, provada na raiz do volume - o caso em que o icacls escolhe outro
+        # nome. Medido aqui, sem elevação: 'icacls C:\ /save f /L /Q' sai com 0 e grava a entrada
+        # com o NOME VAZIO, enquanto a folha de 'C:\' é 'C:\'. É a mesma entrada de nome vazio que
+        # o '/restore' nunca soube aplicar, e aceitá-la como resposta poria o descritor da RAIZ do
+        # disco no backup do conteúdo do perfil. Sem a conferência de nome nada disso apareceria.
+        $wfOrdRaizVol = Get-WinForgeAclIcaclsSddl -Path 'C:\' -WorkFile $wfOrdTrab
+        if ($wfOrdRaizVol.Ok) { Write-Host "  [ERRO] Permissões (ordem de ACE): a raiz do volume foi aceita ('$($wfOrdRaizVol.Sddl)') - o icacls grava a entrada dela com o nome VAZIO e o nome não está sendo conferido" -ForegroundColor Red; $wbErrors++ }
+        if (-not [string]::IsNullOrEmpty([string]$wfOrdRaizVol.Sddl)) { Write-Host "  [ERRO] Permissões (ordem de ACE): a recusa da raiz ainda devolveu um SDDL ('$($wfOrdRaizVol.Sddl)')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (ordem de ACE): a entrada que nega vem marcada da caminhada e o SDDL dela sai do próprio icacls, igual ao do '/save' de referência"
+    } catch {
+        Write-Host "  [ERRO] Permissões (ordem de ACE): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        # A negação sai antes da faxina: com ela no lugar a pasta não volta a ser apagável.
+        if ($null -ne $wfOrdRegra -and $null -ne $wfOrdDi) {
+            try {
+                $wfOrdDi2 = New-Object System.IO.DirectoryInfo $wfOrdDi.FullName
+                $wfOrdSd2 = $wfOrdDi2.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+                $null = $wfOrdSd2.RemoveAccessRuleSpecific($wfOrdRegra)
+                $wfOrdDi2.SetAccessControl($wfOrdSd2)
+            } catch { }
+        }
+        Remove-Item -LiteralPath $wfOrdRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
     # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os
