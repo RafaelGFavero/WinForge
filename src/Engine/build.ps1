@@ -3878,7 +3878,11 @@ if ($SelfTest) {
         # pior do que contar errado - este botão é o último recurso de quem acabou de ter as
         # permissões do disco reescritas. O sinal de "aplicou mesmo" vem da conferência por
         # amostragem da Tarefa 5, e não do código de saída daqui.
-        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/C', '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não é '<pasta> /restore <arquivo> /C /L' - sem '/C' o icacls pode parar na primeira entrada morta; sem '/L' a DACL das junções cai nos destinos delas" -ForegroundColor Red; $wbErrors++ }
+        # O nome da variável do arquivo é '$arquivoUsado', e não mais '$item.File': o arquivo do
+        # conteúdo pode estar na pasta protegida ou no disco que o usuário escolheu ('ExternalPath'),
+        # e quem decide qual dos dois entra no vetor é o bloco que vem antes. O que esta trava cobra
+        # continua sendo a FORMA do vetor.
+        if ($wfAclFonteUndo.IndexOf("'/restore', `$arquivoUsado, '/C', '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não é '<pasta> /restore <arquivo> /C /L' - sem '/C' o icacls pode parar na primeira entrada morta; sem '/L' a DACL das junções cai nos destinos delas" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclFonteUndo.IndexOf('Restore-WinForgeAclSddl -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o Desfazer não reaplica a lista da pasta em si (SDDL)" -ForegroundColor Red; $wbErrors++ }
         # E a outra ponta: o que a fase 2 indexa. O arquivo do conteúdo só pode ser endurecido - e
         # daí indexado - depois de a caminhada ter terminado inteira, do espaço ter sido conferido
@@ -5117,6 +5121,116 @@ if ($SelfTest) {
         Write-Host "  [ERRO] Permissões (amostragem): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
         Remove-Item -LiteralPath $wfAmRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: destino do conteúdo
+    # O backup de conteúdo é OBRIGATÓRIO (103,4 KB: não há o que economizar). O que é opcional é o
+    # DESTINO. As sete recusas abaixo existem porque o que sai desta pasta volta por um /restore
+    # elevado sobre o perfil inteiro.
+    $wfDestRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-destino'
+    try {
+        if (Test-Path -LiteralPath $wfDestRaiz) { Remove-Item -LiteralPath $wfDestRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfDestPerfil = Join-Path $wfDestRaiz 'perfil'
+        $wfDestBom = Join-Path $wfDestRaiz 'destino'
+        New-Item -ItemType Directory -Path $wfDestPerfil -Force | Out-Null
+        New-Item -ItemType Directory -Path $wfDestBom -Force | Out-Null
+        foreach ($wfDestCaso in @(
+            @{ Nome = 'relativo';    Path = 'pasta\destino';                        Match = 'absoluto' },
+            @{ Nome = 'UNC';         Path = '\\servidor\compartilhada\acl';         Match = 'rede' },
+            @{ Nome = 'raiz';        Path = ([System.IO.Path]::GetPathRoot($wfDestRaiz)); Match = 'raiz' },
+            @{ Nome = 'no perfil';   Path = (Join-Path $wfDestPerfil 'dentro');     Match = 'perfil' },
+            @{ Nome = 'sobre o perfil'; Path = $wfDestRaiz;                          Match = 'perfil' })) {
+            $wfDestR = Test-WinForgeAclContentRoot -Path ([string]$wfDestCaso.Path) -ProfilePath $wfDestPerfil
+            if ($wfDestR.Ok) { Write-Host "  [ERRO] Permissões (destino): '$($wfDestCaso.Nome)' foi aceito ('$($wfDestCaso.Path)')" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfDestR.Reason -notmatch [string]$wfDestCaso.Match) { Write-Host "  [ERRO] Permissões (destino): a recusa de '$($wfDestCaso.Nome)' não diz o motivo ('$($wfDestR.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A recusa de 'no perfil' acima é lida sobre uma pasta que NÃO EXISTE, e sozinha ela não
+        # prova nada: o caminho do fixture tem a palavra 'perfil' dentro dele, então QUALQUER recusa
+        # que cite o caminho casa com o padrão. Medido por mutação: com a conferência de "dentro do
+        # perfil" desligada, o teste continuava passando pela recusa de "a pasta não existe". A
+        # pasta abaixo EXISTE - sem a conferência ela seria ACEITA, e é isso que fecha o buraco.
+        $wfDestDentro = Join-Path $wfDestPerfil 'dentro'
+        New-Item -ItemType Directory -Path $wfDestDentro -Force | Out-Null
+        $wfDestRD = Test-WinForgeAclContentRoot -Path $wfDestDentro -ProfilePath $wfDestPerfil
+        if ($wfDestRD.Ok) { Write-Host "  [ERRO] Permissões (destino): uma pasta que EXISTE dentro do perfil foi aceita" -ForegroundColor Red; $wbErrors++ }
+        # Ponto de reanálise na cadeia: o caminho aponta para outro lugar sem parecer que aponta.
+        $wfDestLink = Join-Path $wfDestRaiz 'atalho'
+        cmd.exe /c mklink /J "$wfDestLink" "$wfDestBom" | Out-Null
+        if (Test-Path -LiteralPath $wfDestLink) {
+            $wfDestRL = Test-WinForgeAclContentRoot -Path $wfDestLink -ProfilePath $wfDestPerfil
+            if ($wfDestRL.Ok) { Write-Host "  [ERRO] Permissões (destino): pasta com ponto de reanálise na cadeia foi aceita" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sistema de arquivos e tipo de unidade são conferidos: exFAT/FAT32 não guardam DACL e não
+        # dão erro - o arquivo sairia mudo e o Desfazer aplicaria lixo.
+        $wfDestFonte = [string](Get-Command Test-WinForgeAclContentRoot).ScriptBlock
+        foreach ($wfDestExig in @('DriveFormat', 'NTFS', 'DriveType', 'Fixed', 'Removable')) {
+            if ($wfDestFonte -notmatch [regex]::Escape($wfDestExig)) { Write-Host "  [ERRO] Permissões (destino): a conferência não olha '$wfDestExig'" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfDestFonte -match '\$env:') { Write-Host "  [ERRO] Permissões (destino): o caminho não pode vir de variável de ambiente" -ForegroundColor Red; $wbErrors++ }
+        # Pasta boa passa e traz o aviso literal de §1.4.
+        $wfDestOk = Test-WinForgeAclContentRoot -Path $wfDestBom -ProfilePath $wfDestPerfil
+        if (-not $wfDestOk.Ok) { Write-Host "  [ERRO] Permissões (destino): a pasta de teste foi recusada ('$($wfDestOk.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfDestFrase in @('qualquer conta de administrador', 'recusa restaurar, mas não recupera arquivo apagado', 'disco desligado na hora de desfazer')) {
+            if ([string]$wfDestOk.Warning -notmatch [regex]::Escape($wfDestFrase)) { Write-Host "  [ERRO] Permissões (destino): o aviso não traz '$wfDestFrase'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O arquivo de conteúdo, dentro ou fora do %ProgramData%, passa por Protect-WinForgeSnapshotFile.
+        $wfDestFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if (@([regex]::Matches($wfDestFonteR, 'Protect-WinForgeSnapshotFile')).Count -lt 2) { Write-Host "  [ERRO] Permissões (destino): o arquivo de conteúdo externo não passa por Protect-WinForgeSnapshotFile" -ForegroundColor Red; $wbErrors++ }
+        if ($wfDestFonteR -notmatch 'WinForgeAclExternalRoot') { Write-Host "  [ERRO] Permissões (destino): a runspace não lê o destino escolhido na thread da janela" -ForegroundColor Red; $wbErrors++ }
+        # A caixa nasce DESMARCADA e o diálogo é criado na thread da janela.
+        $wfDestFonteD = [string](Get-Command Show-WinForgeAclBackupDestination).ScriptBlock
+        if ($wfDestFonteD -notmatch 'IsChecked\s*=\s*\$false') { Write-Host "  [ERRO] Permissões (destino): a caixa 'em outro disco' não nasce desmarcada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfDestFonteD -notmatch 'FolderBrowserDialog') { Write-Host "  [ERRO] Permissões (destino): o caminho não vem do seletor de pasta" -ForegroundColor Red; $wbErrors++ }
+        # Desfazer: caminho externo ausente diz QUAL disco ligar, e a recusa termina com a frase de §1.7.
+        $wfDestFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        if ($wfDestFonteU -notmatch 'ExternalPath') { Write-Host "  [ERRO] Permissões (Desfazer): o item de conteúdo não considera ExternalPath" -ForegroundColor Red; $wbErrors++ }
+        if ($wfDestFonteU -notmatch 'ligue o disco') { Write-Host "  [ERRO] Permissões (Desfazer): com o arquivo externo ausente, o texto não diz qual disco ligar" -ForegroundColor Red; $wbErrors++ }
+        # Travas de FORMA DE CHAMADA, e não de nome solto, pelo mesmo motivo de
+        # 'Test-WinForgeAclRestoreAllowed -Root' mais acima: o bloco de ajuda destas mesmas funções
+        # explica o campo e cita o nome dele, então procurar pelo nome aceitaria a PROSA no lugar do
+        # código. Não é hipótese - medido por mutação, trocar o FolderBrowserDialog por um seletor de
+        # ARQUIVO passava batido, porque o nome continuava na descrição da função.
+        #
+        # As três últimas cobrem as recusas 3, 4 e 7, que são as que o -SelfTest não consegue
+        # exercitar de verdade: esta máquina é NTFS e Fixed, e encher um volume para provar a
+        # conferência de espaço seria um teste pior do que a falta dele.
+        foreach ($wfDestChamada in @(
+            @($wfDestFonteR, '[string]$sync.WinForgeAclExternalRoot', 'a restauração CITA o destino escolhido e não o LÊ'),
+            @($wfDestFonteR, 'ExternalPath = [string]$externoArquivo', 'a restauração não anota o caminho externo no índice'),
+            @($wfDestFonteU, '([string]$item.ExternalPath).Trim()', 'o Desfazer CITA o caminho externo e não o LÊ do item'),
+            @($wfDestFonteD, 'New-Object System.Windows.Forms.FolderBrowserDialog', 'a caixa CITA o seletor de pasta e não o CRIA'),
+            @($wfDestFonte, '$formato -ne ''NTFS''', 'a conferência não compara o sistema de arquivos com NTFS'),
+            @($wfDestFonte, '$tipo -ne ''Fixed'' -and $tipo -ne ''Removable''', 'a conferência não separa disco interno e removível dos outros tipos'),
+            @($wfDestFonte, 'Test-WinForgeAclFreeSpace -Path $completo -Bytes', 'a conferência do destino não pergunta pelo espaço livre')
+        )) {
+            if ([string]$wfDestChamada[0] -notmatch [regex]::Escape([string]$wfDestChamada[1])) { Write-Host "  [ERRO] Permissões (destino): $($wfDestChamada[2]) - '$($wfDestChamada[1])' não aparece no código" -ForegroundColor Red; $wbErrors++ }
+        }
+        # As travas acima leem FONTE, e fonte é prova fraca: um comentário que cite o nome do
+        # campo as satisfaz. A parte da cadeia que dá para provar por COMPORTAMENTO sem elevação é
+        # esta - o caminho externo atravessando o JSON do índice e chegando ao vetor do '/restore'.
+        # É exatamente o trecho que some em silêncio se alguém trocar o campo por ''.
+        $wfDestIdx = Join-Path $wfDestRaiz 'indice'
+        New-Item -ItemType Directory -Path $wfDestIdx -Force | Out-Null
+        $wfDestArqExt = Join-Path $wfDestBom 'acl-perfil-teste-20260912-120000.txt'
+        Set-Content -LiteralPath $wfDestArqExt -Value '' -Encoding Unicode
+        $wfDestDados = [pscustomobject]@{
+            Stamp = '20260912-120000'
+            Items = @(
+                [pscustomobject]@{ Path = 'C:\Users\Teste'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-teste-20260912-120000.txt'; Target = 'C:\Users'; Sha256 = 'ABC'; ExternalPath = $wfDestArqExt }
+            )
+        }
+        Set-Content -LiteralPath (Join-Path $wfDestIdx 'acl-index-20260912-120000.json') -Value ($wfDestDados | ConvertTo-Json -Depth 4) -Encoding UTF8
+        $wfDestConj = Get-WinForgeAclBackupSet -Root $wfDestIdx
+        if (@($wfDestConj.Items).Count -ne 1) { Write-Host "  [ERRO] Permissões (destino): o índice com caminho externo deu $(@($wfDestConj.Items).Count) item(ns), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfDestConj.Items)[0].ExternalPath -ne $wfDestArqExt) { Write-Host "  [ERRO] Permissões (destino): o caminho externo não sobreviveu ao JSON do índice ('$([string]@($wfDestConj.Items)[0].ExternalPath)')" -ForegroundColor Red; $wbErrors++ }
+        $wfDestSeco = @(Invoke-WinForgeAclUndo -DryRun -BackupRoot $wfDestIdx)
+        if ($wfDestSeco.Count -ne 1) { Write-Host "  [ERRO] Permissões (destino): a simulação do Desfazer deu $($wfDestSeco.Count) linha(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfDestSeco[0]).IndexOf($wfDestArqExt, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (destino): o '/restore' da simulação não aponta para o arquivo de fora ('$($wfDestSeco[0])')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (destino): sete recusas de Test-WinForgeAclContentRoot, aviso literal, caixa desmarcada por padrão, proteção do arquivo externo e caminho externo do índice até o vetor do '/restore'"
+    } catch {
+        Write-Host "  [ERRO] Permissões (destino): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        try { cmd.exe /c rmdir "$wfDestRaiz\atalho" 2>$null | Out-Null } catch { }
+        Remove-Item -LiteralPath $wfDestRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
     # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os

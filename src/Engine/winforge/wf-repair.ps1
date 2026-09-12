@@ -1408,6 +1408,12 @@ function Invoke-WinForgeRepairCommand {
         A decisão fica antes do despacho, e não dentro do runspace, por um motivo: a trava
         $sync.CommandRunning só é tomada por Invoke-WinForgeCommandButton. Perguntar depois de tomar
         a trava deixaria o programa inteiro sem botões enquanto uma caixa espera alguém ler.
+
+        'AclRestore' tem uma segunda pergunta pelo mesmo motivo, e no mesmo lugar: ONDE o backup das
+        permissões vai ficar (Show-WinForgeAclBackupDestination). Ela é WPF e precisa da thread da
+        janela, e o seletor de pasta do shell precisa do apartamento STA em que este processo nasce -
+        a runspace do pool não tem nenhum dos dois. O que atravessa para lá é só o texto do caminho,
+        em $sync.WinForgeAclExternalRoot, zerado a cada clique.
     .PARAMETER NoUI
         Devolve a decisão em vez de mostrar janela ou caixa de mensagem, e não despacha nada. É o que
         o -SelfTest usa: ele roda sem ninguém na frente, não pode abrir caixa nenhuma (não há quem
@@ -1492,6 +1498,31 @@ function Invoke-WinForgeRepairCommand {
     }
 
     if ($NoUI) { return @{ Dispatched = $false; Reason = 'NoUI'; Kind = $kind } }
+
+    # O DESTINO do backup de permissões é perguntado AQUI, e não dentro da runspace. Três razões, e
+    # nenhuma é estilo: a caixa é WPF e precisa da thread da janela; perguntar depois de
+    # Invoke-WinForgeCommandButton seria perguntar com a trava $sync.CommandRunning na mão, deixando
+    # o programa sem botões enquanto alguém lê; e o seletor de pasta do shell exige o apartamento STA
+    # em que este processo nasce, que a runspace do pool não tem.
+    #
+    # O que atravessa é só o texto do caminho, em $sync.WinForgeAclExternalRoot - zerado a cada
+    # clique, porque sobra de uma escolha anterior mandaria o backup desta rodada para o disco de
+    # outra. Cancelar na caixa NÃO despacha nada: a pessoa ainda está decidindo onde o Desfazer dela
+    # vai morar.
+    if ($Name -eq 'AclRestore') {
+        $sync.WinForgeAclExternalRoot = ''
+        $destino = Show-WinForgeAclBackupDestination
+        if (-not $destino.Ok) {
+            Write-WinForgeLog -Component "Repair" -Message "$Name cancelado na escolha do destino do backup. Nada foi alterado."
+            return
+        }
+        if ($destino.External) {
+            $sync.WinForgeAclExternalRoot = [string]$destino.Path
+            Write-WinForgeLog -Component "Repair" -Message "${Name}: o backup do conteúdo vai para '$([string]$destino.Path)', fora da pasta protegida."
+        } else {
+            Write-WinForgeLog -Component "Repair" -Message "${Name}: o backup do conteúdo vai para a pasta protegida do WinForge."
+        }
+    }
 
     # Dois despachos, e a diferença é o TEMPO do comando. 'Stream' é das linhas que demoram minutos
     # ou horas (sfc, DISM, Windows Update): a janela abre vazia e se enche enquanto o trabalho
@@ -2366,6 +2397,388 @@ function Test-WinForgeAclAbsolutePath {
     try { $raiz = [string][System.IO.Path]::GetPathRoot([string]$Path) } catch { return $false }
     if ([string]::IsNullOrEmpty($raiz)) { return $false }
     try { return ([string][System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($raiz)) -eq $raiz) } catch { return $false }
+}
+
+function Test-WinForgeAclContentRoot {
+    <#
+    .SYNOPSIS
+        Diz se a pasta escolhida pelo usuário pode receber o arquivo de permissões do CONTEÚDO do
+        perfil. Só lê: não cria pasta, não grava nada e não pergunta nada a ninguém.
+    .DESCRIPTION
+        O backup do conteúdo é OBRIGATÓRIO, e isso é medida, não opinião: filtrado pela caminhada -
+        só pasta com a herança bloqueada entra -, ele caiu de 174 MB e 76 segundos para 103,4 KB e
+        39 segundos. Não há o que economizar deixando de fazê-lo. O que virou opcional foi o
+        DESTINO, e é por isso que esta função existe.
+
+        Dentro de %ProgramData%\WinForge o projeto sabe montar a pasta que o backup precisa - DACL
+        própria sem herança, dono Administradores, ninguém de fora de SYSTEM/Administradores com
+        escrita (Confirm-WinForgeAclBackupRoot). Fora dela, não sabe: um pen drive não tem lista de
+        permissões que o WinForge possa impor. Quem substitui a pasta protegida é o SHA-256 que o
+        índice guarda - e o índice continua DENTRO dela. Por isso o que se recusa aqui é só o que
+        nem o SHA-256 cobriria.
+
+        São sete perguntas, do mais barato para o mais caro, e nenhuma delas é gosto:
+
+        1. ABSOLUTO e não de REDE. A rede é recusada por TEXTO e primeiro: um '\\servidor\share'
+           que não existe não tem unidade a consultar, e a recusa tem de falar de rede e não de
+           disco. O absoluto é Test-WinForgeAclAbsolutePath, e não 'IsPathRooted': medido,
+           'C:pasta' e '\pasta' são "rooted" e resolvem contra o diretório do PROCESSO.
+        2. NÃO ser a raiz de um volume. Qualquer Usuário Autenticado cria e renomeia pasta na raiz
+           do disco - é a ACE '(AD)' que a própria fase 3 repõe.
+        3. DriveFormat igual a 'NTFS'. exFAT e FAT32 NÃO guardam lista de permissão nenhuma e NÃO
+           DÃO ERRO ao tentar: o arquivo sairia mudo e o Desfazer aplicaria lixo, calado. Esta é a
+           recusa que mais se parece com implicância e é a que mais faz falta.
+        4. DriveType 'Fixed' ou 'Removable'. Unidade de rede cai na recusa 1 por outro caminho; CD
+           e disco de memória não sobrevivem à reinicialização que separa a restauração do Desfazer.
+        5. Nem DENTRO nem CONTENDO o perfil, as duas pontas. Dentro, a fase 5 liga a herança em
+           cima do próprio backup; contendo, o arquivo fica num caminho que o /restore percorre.
+        6. Nenhum PONTO DE REANÁLISE na cadeia, da pasta escolhida até a raiz do volume. Com uma
+           junção no meio, o caminho conferido e o caminho gravado são dois - e quem planta a junção
+           escolhe o segundo.
+        7. ESPAÇO LIVRE com folga. Backup pela metade é o botão Desfazer prometendo o que não tem.
+
+        O caminho vem SEMPRE do seletor de pasta do shell (Show-WinForgeAclBackupDestination), e
+        nunca de variável de ambiente: a base de confiança deste projeto é
+        [Environment]::GetFolderPath, e um destino escolhido à mão não tem base nenhuma - ele tem de
+        ser conferido, que é exatamente o que acontece aqui.
+    .PARAMETER ProfilePath
+        A pasta do usuário. Vem de quem chama e não é adivinhada aqui: no -SelfTest ela é uma pasta
+        de %TEMP%, e a função não pode ter opinião sobre qual perfil é o certo.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <caminho normalizado>; Warning = <string> }.
+        'Warning' só vem preenchido quando a pasta é ACEITA - é o que o usuário precisa ler antes de
+        confirmar, e em cima de uma recusa não teria a quem servir.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ProfilePath
+    )
+
+    $r = @{ Ok = $false; Reason = ''; Path = [string]$Path; Warning = '' }
+    $bruto = [string]$Path
+    if ([string]::IsNullOrWhiteSpace($bruto)) {
+        $r.Reason = 'Nenhuma pasta foi escolhida. O destino precisa ser um caminho absoluto, com o disco na frente.'
+        return $r
+    }
+    # ---- 1. Rede, por TEXTO e antes de tudo. O prefixo '\\?\' é retirado antes da pergunta porque
+    # ele é só a forma de dizer "não normalize"; a forma de rede dele é '\\?\UNC\<servidor>\<share>'.
+    $semPrefixo = $bruto
+    $tinhaPrefixo = $false
+    if ($semPrefixo.StartsWith('\\?\', [StringComparison]::Ordinal)) { $semPrefixo = $semPrefixo.Substring(4); $tinhaPrefixo = $true }
+    if ($semPrefixo.StartsWith('\\', [StringComparison]::Ordinal) -or ($tinhaPrefixo -and $semPrefixo.StartsWith('UNC\', [StringComparison]::OrdinalIgnoreCase))) {
+        $r.Reason = "'$bruto' é uma pasta de rede. O backup das permissões não sai para a rede: o arquivo volta por um /restore elevado sobre o perfil inteiro, e um compartilhamento pode ser outro entre o backup e o Desfazer sem que o caminho mude."
+        return $r
+    }
+    # ---- 1b. Absoluto de verdade.
+    if (-not (Test-WinForgeAclAbsolutePath -Path $bruto)) {
+        $r.Reason = "'$bruto' não é um caminho absoluto. O destino do backup precisa ser absoluto, com o disco na frente: 'C:pasta' e '\pasta' resolvem contra o diretório do processo e gravariam em outro lugar."
+        return $r
+    }
+    $completo = ''
+    try { $completo = [string][System.IO.Path]::GetFullPath($bruto) }
+    catch {
+        $r.Reason = "'$bruto' não é um caminho válido: $($_.Exception.Message)"
+        return $r
+    }
+    $r.Path = $completo
+    $semBarra = $completo.TrimEnd('\')
+    $volume = ''
+    try { $volume = [string][System.IO.Path]::GetPathRoot($completo) } catch { $volume = '' }
+    if ([string]::IsNullOrWhiteSpace($volume)) {
+        $r.Reason = "'$completo' não diz em que volume está."
+        return $r
+    }
+    $raizVolume = $volume.TrimEnd('\')
+    # ---- 2. A raiz do volume.
+    if ($semBarra.Equals($raizVolume, [StringComparison]::OrdinalIgnoreCase)) {
+        $r.Reason = "'$completo' é a raiz do disco. O backup não fica na raiz de um volume: qualquer Usuário Autenticado cria e renomeia pasta ali - é a ACE '(AD)' que a própria restauração repõe. Escolha uma subpasta."
+        return $r
+    }
+    # ---- 3 e 4. O sistema de arquivos e o tipo da unidade, na MESMA leitura e os dois dentro do
+    # try: '[string]$obj.Propriedade' sobre propriedade que LANÇA devolve '' em silêncio (medido), e
+    # '' aqui viraria "não sei" em vez de erro - que é justamente o caso em que a recusa importa.
+    $formato = ''
+    $tipo = ''
+    try {
+        $unidade = New-Object System.IO.DriveInfo ($volume)
+        if ($unidade.IsReady) {
+            $formato = [string]$unidade.DriveFormat
+            $tipo = [string]$unidade.DriveType
+        }
+    } catch {
+        $formato = ''
+        $tipo = ''
+    }
+    if ([string]::IsNullOrWhiteSpace($formato) -or [string]::IsNullOrWhiteSpace($tipo)) {
+        $r.Reason = "o volume '$volume' não respondeu qual é o sistema de arquivos dele nem que tipo de unidade é. Sem essa resposta não há como garantir que a lista de permissões seria guardada, então a pasta é recusada."
+        return $r
+    }
+    if ($formato -ne 'NTFS') {
+        $r.Reason = "o volume '$volume' está formatado em $formato, e não em NTFS. exFAT e FAT32 não guardam lista de permissão nenhuma e NÃO dão erro ao tentar: o arquivo sairia mudo e o Desfazer aplicaria lixo."
+        return $r
+    }
+    if ($tipo -ne 'Fixed' -and $tipo -ne 'Removable') {
+        $r.Reason = "o volume '$volume' é do tipo $tipo. O backup só vai para disco interno (Fixed) ou removível (Removable): unidade de rede, CD e disco de memória não sobrevivem à reinicialização que separa a restauração do Desfazer."
+        return $r
+    }
+    # ---- 5. O perfil, nas duas pontas.
+    $perfil = ''
+    if (-not [string]::IsNullOrWhiteSpace([string]$ProfilePath)) {
+        try { $perfil = ([string][System.IO.Path]::GetFullPath([string]$ProfilePath)).TrimEnd('\') } catch { $perfil = '' }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($perfil)) {
+        if ($semBarra.Equals($perfil, [StringComparison]::OrdinalIgnoreCase) -or $semBarra.StartsWith(($perfil + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+            $r.Reason = "'$completo' está dentro do perfil '$perfil'. A fase 5 liga a herança em cada pasta de lá dentro: o backup seria alterado pela mesma alteração que ele existe para desfazer."
+            return $r
+        }
+        if ($perfil.StartsWith(($semBarra + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+            $r.Reason = "'$completo' contém o perfil '$perfil'. Pelo mesmo motivo da recusa de dentro: o arquivo ficaria num caminho que a restauração percorre."
+            return $r
+        }
+    }
+    # ---- 6. A cadeia, da pasta escolhida até a raiz do volume. Prefixo '\\?\' em TODA chamada
+    # .NET, a mesma regra da caminhada da fase 2: 'LongPathsEnabled = 1' não é o padrão do Windows.
+    $longo = { param($p) if ($p -like '\\?\*') { $p } else { '\\?\' + $p } }
+    $atual = $semBarra
+    $passos = 0
+    while (-not [string]::IsNullOrWhiteSpace($atual) -and $passos -lt 64) {
+        $passos++
+        if ($atual.Equals($raizVolume, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $attr = $null
+        try { $attr = [IO.File]::GetAttributes((& $longo $atual)) } catch { $attr = $null }
+        if ($null -eq $attr) {
+            # Só a pasta ESCOLHIDA precisa existir. Um pai ilegível no meio do caminho não é recusa:
+            # o que se persegue aqui é a junção, e junção ilegível não existe - ela é lida pelo
+            # atributo, não pelo conteúdo.
+            if ($atual.Equals($semBarra, [StringComparison]::OrdinalIgnoreCase)) {
+                $r.Reason = "a pasta '$completo' não existe ou não pôde ser lida. Escolha uma pasta que já esteja no disco."
+                return $r
+            }
+        } else {
+            if ($atual.Equals($semBarra, [StringComparison]::OrdinalIgnoreCase) -and -not ($attr -band [IO.FileAttributes]::Directory)) {
+                $r.Reason = "'$completo' não é uma pasta."
+                return $r
+            }
+            if ($attr -band [IO.FileAttributes]::ReparsePoint) {
+                $r.Reason = "'$atual' é um ponto de reanálise (junção ou link) no caminho de '$completo'. O caminho conferido e o caminho gravado seriam dois, e quem planta a junção escolhe o segundo."
+                return $r
+            }
+        }
+        $pai = ''
+        try { $pai = [string](Split-Path -Parent $atual) } catch { $pai = '' }
+        if ([string]::IsNullOrWhiteSpace($pai)) { break }
+        $pai = $pai.TrimEnd('\')
+        if ($pai.Equals($atual, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $atual = $pai
+    }
+    # ---- 7. O espaço livre, com folga. O arquivo medido tem 103,4 KB; o teto aqui é de 64 MB
+    # porque quem escolhe um destino externo o escolhe uma vez e restaura muitas, e um volume sem
+    # folga nenhuma é um backup pela metade esperando acontecer.
+    $esp = Test-WinForgeAclFreeSpace -Path $completo -Bytes ([long]67108864)
+    if (-not $esp.Ok) {
+        $r.Reason = [string]$esp.Reason
+        return $r
+    }
+
+    $r.Ok = $true
+    $r.Warning = 'Fora da pasta do WinForge, qualquer conta de administrador — desta máquina ou de outra onde o disco for ligado — pode ler, alterar ou apagar este arquivo. O WinForge percebe a alteração e recusa restaurar, mas não recupera arquivo apagado. Em pen drive ou HD externo: disco desligado na hora de desfazer é a mesma coisa que não ter backup.'
+    return $r
+}
+
+function Show-WinForgeAclBackupDestination {
+    <#
+    .SYNOPSIS
+        A caixa que pergunta ONDE o backup das permissões vai ficar. Roda na thread da janela, não
+        escreve nada em disco e não despacha nada.
+    .DESCRIPTION
+        A caixa não pergunta SE o backup acontece: ele acontece sempre. Medido, filtrado pela
+        caminhada, ele são 103,4 KB e 39 segundos - não há o que economizar deixando de fazê-lo, e
+        uma restauração sem Desfazer é o tipo de ajuda que transforma um problema em dois. O que a
+        caixa pergunta é ONDE, e a opção de sair da pasta do WinForge nasce DESMARCADA: o lugar
+        certo para quase todo mundo é a pasta protegida, e uma caixa pré-marcada treinaria a pessoa
+        a confirmar sem ler o aviso que vem junto.
+
+        Ela é chamada do handler do botão, que já roda na thread da janela, e ANTES do
+        Invoke-WPFRunspace: perguntar de dentro da runspace exigiria um Dispatcher.Invoke, e o
+        resultado da pergunta precisa existir antes de a trava de comando em andamento ser tomada -
+        senão o programa inteiro fica sem botões enquanto uma caixa espera alguém ler. O que atravessa
+        para a runspace é só o texto do caminho, em $sync.WinForgeAclExternalRoot.
+
+        O seletor é o FolderBrowserDialog do Windows Forms, e não uma caixa de texto: em .NET
+        Framework 4.8 o WPF só tem seletor de ARQUIVO, e um caminho digitado à mão seria o mesmo
+        que aceitar variável de ambiente - texto de origem desconhecida virando argumento de um
+        /restore elevado. O processo nasce STA e o relançamento '-Verb RunAs' preserva isso, que é o
+        que o seletor do shell exige.
+
+        A pasta escolhida passa por Test-WinForgeAclContentRoot na hora, com o resultado na tela: o
+        usuário descobre que o pen drive é exFAT ali, e não trinta e nove segundos depois.
+    .OUTPUTS
+        @{ Ok = <bool>; External = <bool>; Path = <string>; Warning = <string> }. 'Ok' falso é
+        "cancelar": quem chamou não despacha nada. Com 'External' falso o backup vai para a pasta
+        protegida de sempre, e 'Path' vem vazio.
+    #>
+    param()
+
+    # No uso normal o WPF já está carregado desde a montagem da janela principal; o Windows Forms
+    # não, e é dele que vem o seletor de pasta do shell.
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationcore')
+    [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
+
+    $perfil = ''
+    try { $perfil = [string][Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile) } catch { $perfil = '' }
+
+    # O estado mora numa hashtable porque os handlers abaixo são scriptblocks com closure: fechar
+    # sobre uma hashtable deixa eles ESCREVEREM no mesmo objeto; fechar sobre uma variável de valor
+    # daria a cada handler uma cópia, e a resposta da caixa voltaria vazia.
+    $estado = @{ Ok = $false; External = $false; Path = ''; Warning = '' }
+
+    $fundo = $null
+    $frente = $null
+    if ($null -ne $sync -and $null -ne $sync.Form) {
+        try { $fundo = $sync.Form.Resources['MainBackgroundColor'] } catch { $fundo = $null }
+        try { $frente = $sync.Form.Resources['MainForegroundColor'] } catch { $frente = $null }
+    }
+    if ($null -eq $fundo) { $fundo = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(35, 38, 41)) }
+    if ($null -eq $frente) { $frente = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(230, 230, 230)) }
+
+    $janela = New-Object System.Windows.Window
+    $janela.Title = 'WinForge - onde guardar o backup das permissões'
+    $janela.Width = 640
+    $janela.Height = 400
+    $janela.Background = $fundo
+    $janela.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+    if ($null -ne $sync -and $null -ne $sync.Form -and $sync.Form.IsVisible) {
+        try {
+            $janela.Owner = $sync.Form
+            $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+        } catch { }
+    }
+
+    $pilha = New-Object System.Windows.Controls.StackPanel
+    $pilha.Margin = New-Object System.Windows.Thickness 16
+
+    $novoTexto = {
+        param($Conteudo, $Topo)
+        $t = New-Object System.Windows.Controls.TextBlock
+        $t.Text = [string]$Conteudo
+        $t.TextWrapping = [System.Windows.TextWrapping]::Wrap
+        $t.Foreground = $frente
+        $t.Margin = New-Object System.Windows.Thickness (0, [int]$Topo, 0, 0)
+        return $t
+    }.GetNewClosure()
+
+    $pilha.Children.Add((& $novoTexto 'O backup das permissões atuais é sempre feito: sem ele o botão Desfazer não teria o que devolver. Ele ocupa cerca de 100 KB e leva meio minuto.' 0)) | Out-Null
+    $pilha.Children.Add((& $novoTexto "Por padrão o arquivo fica na pasta protegida do WinForge, em '$(Get-WinForgeAclBackupRoot)', onde só o SYSTEM e os Administradores escrevem." 10)) | Out-Null
+
+    $caixaExterna = New-Object System.Windows.Controls.CheckBox
+    $caixaExterna.Content = 'Guardar o backup das permissões em outro disco'
+    $caixaExterna.Foreground = $frente
+    $caixaExterna.Margin = New-Object System.Windows.Thickness (0, 16, 0, 0)
+    # DESMARCADA. O lugar certo para quase todo mundo é a pasta protegida, e uma caixa que nasce
+    # marcada é uma caixa que ninguém lê.
+    $caixaExterna.IsChecked = $false
+    $pilha.Children.Add($caixaExterna) | Out-Null
+
+    $linhaPasta = New-Object System.Windows.Controls.StackPanel
+    $linhaPasta.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $linhaPasta.Margin = New-Object System.Windows.Thickness (0, 10, 0, 0)
+    $btnEscolher = New-Object System.Windows.Controls.Button
+    $btnEscolher.Content = 'Escolher pasta...'
+    $btnEscolher.MinWidth = 130
+    $btnEscolher.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+    $btnEscolher.IsEnabled = $false
+    $linhaPasta.Children.Add($btnEscolher) | Out-Null
+    $pilha.Children.Add($linhaPasta) | Out-Null
+
+    $rotuloPasta = & $novoTexto '' 8
+    $pilha.Children.Add($rotuloPasta) | Out-Null
+    $rotuloAviso = & $novoTexto '' 10
+    $pilha.Children.Add($rotuloAviso) | Out-Null
+
+    $barra = New-Object System.Windows.Controls.StackPanel
+    $barra.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $barra.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+    $barra.Margin = New-Object System.Windows.Thickness (0, 20, 0, 0)
+    $btnOk = New-Object System.Windows.Controls.Button
+    $btnOk.Content = 'Continuar'
+    $btnOk.MinWidth = 110
+    $btnOk.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+    $btnCancelar = New-Object System.Windows.Controls.Button
+    $btnCancelar.Content = 'Cancelar'
+    $btnCancelar.MinWidth = 110
+    $btnCancelar.Margin = New-Object System.Windows.Thickness (8, 0, 0, 0)
+    $btnCancelar.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+    $barra.Children.Add($btnOk) | Out-Null
+    $barra.Children.Add($btnCancelar) | Out-Null
+    $pilha.Children.Add($barra) | Out-Null
+
+    $caixaExterna.Add_Checked({
+        $btnEscolher.IsEnabled = $true
+        # Marcar a caixa não escolhe pasta nenhuma: até haver uma pasta CONFERIDA, 'Continuar' fica
+        # desligado. Sem isso, marcar e confirmar cairia de volta na pasta protegida em silêncio,
+        # que é o oposto do que a pessoa acabou de pedir.
+        $btnOk.IsEnabled = [bool]$estado.External
+    }.GetNewClosure())
+    $caixaExterna.Add_Unchecked({
+        $btnEscolher.IsEnabled = $false
+        $estado.External = $false
+        $estado.Path = ''
+        $estado.Warning = ''
+        $rotuloPasta.Text = ''
+        $rotuloAviso.Text = ''
+        $btnOk.IsEnabled = $true
+    }.GetNewClosure())
+
+    $btnEscolher.Add_Click({
+        try {
+            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+            $dlg.Description = 'Escolha a pasta onde o arquivo de permissões vai ficar'
+            $dlg.ShowNewFolderButton = $true
+            if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+            $escolhida = [string]$dlg.SelectedPath
+            $julg = Test-WinForgeAclContentRoot -Path $escolhida -ProfilePath $perfil
+            if (-not $julg.Ok) {
+                $estado.External = $false
+                $estado.Path = ''
+                $estado.Warning = ''
+                $rotuloPasta.Text = "Esta pasta não serve: $($julg.Reason)"
+                $rotuloAviso.Text = ''
+                $btnOk.IsEnabled = $false
+                return
+            }
+            $estado.External = $true
+            $estado.Path = [string]$julg.Path
+            $estado.Warning = [string]$julg.Warning
+            $rotuloPasta.Text = "O arquivo das permissões vai para: $($julg.Path)"
+            $rotuloAviso.Text = [string]$julg.Warning
+            $btnOk.IsEnabled = $true
+        } catch {
+            $estado.External = $false
+            $estado.Path = ''
+            $estado.Warning = ''
+            $rotuloPasta.Text = "A pasta não pôde ser escolhida: $($_.Exception.Message)"
+            $rotuloAviso.Text = ''
+            $btnOk.IsEnabled = $false
+        }
+    }.GetNewClosure())
+
+    $btnOk.Add_Click({
+        $estado.Ok = $true
+        $janela.Close()
+    }.GetNewClosure())
+    $btnCancelar.Add_Click({
+        $estado.Ok = $false
+        $janela.Close()
+    }.GetNewClosure())
+
+    $janela.Content = $pilha
+    # Modal, e aqui isso é o certo: o handler do botão é síncrono e ainda não tomou a trava de
+    # comando em andamento, então nada mais do programa está parado esperando esta resposta.
+    $janela.ShowDialog() | Out-Null
+
+    return @{ Ok = [bool]$estado.Ok; External = [bool]$estado.External; Path = [string]$estado.Path; Warning = [string]$estado.Warning }
 }
 
 function Write-WinForgeAclContentBackup {
@@ -3366,6 +3779,16 @@ function Invoke-WinForgeAclRestore {
         da pasta errada) e a impressão digital SHA-256, com que o Desfazer descobre que o arquivo
         deixou de ser o que esta fase gravou. Índice e arquivo são endurecidos
         (Protect-WinForgeSnapshotFile: dono Administradores, DACL fechada).
+
+        O backup do conteúdo acontece SEMPRE - filtrado pela caminhada ele são 103,4 KB e 39
+        segundos, e não há o que economizar deixando de fazê-lo. O que é opcional é o DESTINO: a
+        caixa de Show-WinForgeAclBackupDestination, que roda na thread da janela antes do despacho,
+        deixa o usuário mandar o ARQUIVO para outro disco, e o caminho chega aqui em
+        $sync.WinForgeAclExternalRoot. O ÍNDICE não sai da pasta protegida em hipótese nenhuma: é
+        ele que carrega os SDDL e a impressão digital, e é a impressão digital que substitui, no
+        Desfazer, a proteção de pasta que um pen drive não tem. Destino que não passa por
+        Test-WinForgeAclContentRoot no momento da gravação não cancela nada - o arquivo volta para a
+        pasta protegida, com o motivo na tela.
     .PARAMETER DryRun
         Lista as fases, prefixadas com '[simulação] ' e com os passos condicionais marcados, e para
         por aí: nada roda, nenhuma pasta é criada, nenhum arquivo é gravado.
@@ -3548,17 +3971,50 @@ function Invoke-WinForgeAclRestore {
                     }
                 }
             }
+            # ---- O DESTINO do arquivo. O ÍNDICE fica sempre na pasta protegida; só o arquivo de
+            # conteúdo sai, e só se o usuário tiver pedido isso na caixa que rodou na thread da
+            # janela. O caminho vem de '$sync.WinForgeAclExternalRoot' e é CONFERIDO DE NOVO aqui:
+            # entre a caixa e este ponto passam o chkdsk e a caminhada do perfil, e um pen drive
+            # tirado nesse intervalo não pode virar um arquivo gravado em lugar nenhum.
+            #
+            # Destino recusado agora NÃO cancela o backup: ele volta para a pasta protegida, com o
+            # motivo na tela. O backup é obrigatório - é a rede de segurança de tudo o que vem
+            # depois -, e trocar "onde" por "se" seria deixar o disco sem Desfazer por causa de uma
+            # preferência.
+            $destinoArquivo = [string]$passo.Backup
+            $externoArquivo = ''
+            $externoEscolhido = ''
+            try { $externoEscolhido = [string]$sync.WinForgeAclExternalRoot } catch { $externoEscolhido = '' }
+            if (-not $motivo -and -not [string]::IsNullOrWhiteSpace($externoEscolhido)) {
+                $julgado = Test-WinForgeAclContentRoot -Path $externoEscolhido -ProfilePath $perfil
+                if ($julgado.Ok) {
+                    # A FOLHA do nome planejado, e nunca um nome montado aqui: é ela que o índice
+                    # anota e é por ela que Get-WinForgeAclBackupInventory reconhece o arquivo.
+                    $destinoArquivo = [string](Join-Path ([string]$julgado.Path) ([string](Split-Path -Leaf ([string]$passo.Backup))))
+                    $externoArquivo = $destinoArquivo
+                    Write-Host "O backup do conteúdo vai para '$destinoArquivo', fora da pasta protegida do WinForge."
+                    Write-Host ([string]$julgado.Warning)
+                } else {
+                    Write-Warning "A pasta escolhida para guardar o backup não serve mais ($($julgado.Reason)). O arquivo vai para a pasta protegida do WinForge: o backup acontece de todo jeito."
+                }
+            }
             # O espaço é conferido ANTES da primeira letra ir para o disco: encher o volume no meio
-            # do arquivo deixaria um backup pela metade, e é ele que o Desfazer leria como bom.
+            # do arquivo deixaria um backup pela metade, e é ele que o Desfazer leria como bom. A
+            # pergunta é sobre o volume do DESTINO, que pode não ser o do %ProgramData%.
             if (-not $motivo) {
-                $esp = Test-WinForgeAclFreeSpace -Path ([string]$passo.Backup) -Bytes ([long]$escopo.Bytes)
+                $esp = Test-WinForgeAclFreeSpace -Path $destinoArquivo -Bytes ([long]$escopo.Bytes)
                 if (-not $esp.Ok) { $motivo = $esp.Reason }
             }
             if (-not $motivo) {
-                $parcial = [string]$passo.Backup
+                $parcial = $destinoArquivo
                 $grav = Write-WinForgeAclContentBackup -Path $parcial -Entries @($escopo.Entries)
                 if (-not $grav.Ok) { $motivo = $grav.Reason }
             }
+            # O endurecimento vale para o arquivo esteja ele onde estiver - dono Administradores e
+            # DACL fechada são propriedade do ARQUIVO, não da pasta, e num volume NTFS externo eles
+            # pegam do mesmo jeito. Não é o mesmo que a pasta protegida (lá a pasta em si também
+            # recusa quem não devia), e é por isso que o índice guarda o SHA-256: o que o
+            # endurecimento não alcança fora do %ProgramData% a impressão digital denuncia.
             if (-not $motivo) {
                 $prot = Protect-WinForgeSnapshotFile -Path $parcial
                 if (-not $prot.Hardened) { $motivo = "o backup não pôde ser protegido ($($prot.Reason))" }
@@ -3584,7 +4040,10 @@ function Invoke-WinForgeAclRestore {
                     File         = [string](Split-Path -Leaf $parcial)
                     Target       = [string]$passo.Target
                     Sha256       = $impressao
-                    ExternalPath = ''
+                    # Vazio quando o arquivo ficou na pasta protegida. Preenchido, é o caminho
+                    # COMPLETO de fora: o Desfazer usa ele, e 'File' continua sendo só a folha,
+                    # que é por onde Get-WinForgeAclBackupInventory reconhece o arquivo citado.
+                    ExternalPath = [string]$externoArquivo
                 })
                 # Publicado só agora, e é o contrato com a fase 5: o que está aqui é exatamente o
                 # que o arquivo no disco cobre. Sem backup, sem escopo - e sem escopo a fase 5 não
@@ -4304,9 +4763,9 @@ function Get-WinForgeAclBackupSet {
         deixa o -SelfTest montar um conjunto numa pasta de %TEMP%, cujos arquivos pertencem à
         identidade atual e por isso nunca passariam na regra de dono da pasta padrão.
     .OUTPUTS
-        @{ Stamp; Index; Items = @(@{ Path; Sddl; Owner; OwnerSid; File; Target; Sha256 }); Origin;
-        Consumed; Pending; Reason; Refused }. 'Pending' é quantos índices não consumidos existem na
-        pasta, e é o número que a guarda da segunda restauração usa.
+        @{ Stamp; Index; Items = @(@{ Path; Sddl; Owner; OwnerSid; File; Target; Sha256;
+        ExternalPath }); Origin; Consumed; Pending; Reason; Refused }. 'Pending' é quantos índices
+        não consumidos existem na pasta, e é o número que a guarda da segunda restauração usa.
     #>
     param([string]$Root, [switch]$Trusted)
 
@@ -4341,14 +4800,20 @@ function Get-WinForgeAclBackupSet {
         if ([string]::IsNullOrWhiteSpace($caminho)) { continue }
         $arquivo = ''
         if (-not [string]::IsNullOrWhiteSpace([string]$it.File)) { $arquivo = Join-Path $dir ([string]$it.File).Trim() }
+        # 'ExternalPath' é o caminho COMPLETO de um arquivo de conteúdo que o usuário mandou para
+        # outro disco. Ele sai daqui CRU, sem ser reancorado na pasta protegida como 'File': é
+        # justamente por estar fora dela que ele existe. Quem o aceita ou recusa é
+        # Invoke-WinForgeAclUndo, e o que substitui a pasta protegida é o SHA-256 desta mesma linha.
+        # Índice de versão anterior não tem o campo, e '[string]$null' é '' - "não há externo".
         $itens += @{
-            Path     = $caminho
-            Sddl     = [string]$it.Sddl
-            Owner    = [string]$it.Owner
-            OwnerSid = [string]$it.OwnerSid
-            File     = $arquivo
-            Target   = ([string]$it.Target).Trim()
-            Sha256   = ([string]$it.Sha256).Trim()
+            Path         = $caminho
+            Sddl         = [string]$it.Sddl
+            Owner        = [string]$it.Owner
+            OwnerSid     = [string]$it.OwnerSid
+            File         = $arquivo
+            Target       = ([string]$it.Target).Trim()
+            Sha256       = ([string]$it.Sha256).Trim()
+            ExternalPath = ([string]$it.ExternalPath).Trim()
         }
     }
     return @{ Stamp = [string]$escolhido.Stamp; Index = [string]$escolhido.Path; Items = @($itens); Origin = $escolhido.Origin; Consumed = $false; Pending = $quantos; Refused = $false; Reason = '' }
@@ -4387,6 +4852,14 @@ function Invoke-WinForgeAclUndo {
         de backup). Índice recusado para tudo; arquivo recusado é pulado com o motivo na tela e não
         derruba os outros, porque um backup adulterado no meio do conjunto não é razão para deixar
         o disco pela metade.
+
+        O arquivo de conteúdo pode ter sido guardado FORA da pasta protegida, num disco que o
+        usuário escolheu na restauração: é o campo 'ExternalPath' do item. Ali a conferência de
+        pasta não existe - não há como impor DACL a um pen drive -, e quem toma o lugar dela é o
+        SHA-256 do ÍNDICE, que continua dentro da pasta protegida. Por isso, para esse arquivo, a
+        impressão digital deixa de ser opcional. E quando ele simplesmente não está lá, a mensagem
+        diz qual disco ligar antes de dizer qualquer outra coisa: quem clicou neste botão acabou de
+        ter as permissões do disco reescritas, e o que ele precisa é da instrução, não do diagnóstico.
 
         O conjunto é o MAIS ANTIGO ainda não desfeito, e não o mais novo (Get-WinForgeAclBackupSet).
         Antes de o primeiro SDDL virar argumento vêm mais duas portas: a ORIGEM do índice
@@ -4427,7 +4900,11 @@ function Invoke-WinForgeAclUndo {
         if (-not @($conjunto.Items).Count) { return @("[simulação] nada a desfazer: $($conjunto.Reason)") }
         return @($conjunto.Items | ForEach-Object {
             if (-not [string]::IsNullOrWhiteSpace([string]$_.File)) {
-                "[simulação] $icacls $($_.Target) /restore $($_.File) /C /L"
+                # A simulação nomeia o arquivo que o '/restore' vai receber de verdade: o de fora,
+                # quando o índice traz um 'ExternalPath', e não o nome reancorado na pasta protegida.
+                # Mostrar o outro faria a simulação apontar para um arquivo que não existe.
+                $arquivoSeco = if (-not [string]::IsNullOrWhiteSpace([string]$_.ExternalPath)) { [string]$_.ExternalPath } else { [string]$_.File }
+                "[simulação] $icacls $($_.Target) /restore $arquivoSeco /C /L"
             } elseif ([string]::IsNullOrWhiteSpace([string]$_.OwnerSid)) {
                 "[simulação] devolver a lista (SDDL) de '$($_.Path)' (o índice não guardou dono)"
             } else {
@@ -4515,29 +4992,84 @@ function Invoke-WinForgeAclUndo {
             $aplicados++
             continue
         }
-        $julg = Test-WinForgeAclBackupFile -Path ([string]$item.File) -Root ([string]$conf.Path)
-        if (-not $julg.Trusted) {
-            Write-Error "Backup recusado ('$($item.File)'): $($julg.Reason)."
-            $recusados++
-            continue
+        # ---- O arquivo do CONTEÚDO, e ele mora num de dois lugares. São dois regimes de confiança
+        # diferentes, e por isso duas portas:
+        #
+        # - Na pasta protegida (o normal), quem responde é Test-WinForgeAclBackupFile: dentro da
+        #   pasta, direto nela, dono e DACL de backup.
+        # - No disco que o usuário escolheu ('ExternalPath'), não há pasta protegida a conferir - um
+        #   pen drive não tem lista de permissões que o WinForge possa impor, e o próprio aviso da
+        #   escolha diz isso. O que substitui é o SHA-256 que a fase 2 anotou no ÍNDICE, e o índice
+        #   continua dentro da pasta protegida. Consequência direta: aqui a impressão digital deixa
+        #   de ser opcional. Sem ela o arquivo externo é RECUSADO, e não apenas avisado.
+        $externo = ''
+        try { $externo = ([string]$item.ExternalPath).Trim() } catch { $externo = '' }
+        $arquivoUsado = [string]$item.File
+        if (-not [string]::IsNullOrWhiteSpace($externo)) {
+            $arquivoUsado = $externo
+            # Absoluto de verdade antes de virar argumento: a mesma porta da gravação, e pela mesma
+            # medição - 'C:acl.txt' e '\acl.txt' são "rooted" e resolvem contra o diretório do
+            # PROCESSO, que aqui é um /restore elevado sobre o perfil inteiro.
+            if (-not (Test-WinForgeAclAbsolutePath -Path $externo)) {
+                Write-Error "O índice manda buscar o backup do conteúdo de '$($item.Path)' em '$externo', que não é um caminho absoluto. Este arquivo fica de fora e nada foi alterado."
+                $recusados++
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $externo -PathType Leaf)) {
+                # A pergunta que o usuário tem na cabeça não é "cadê o arquivo", é "qual disco eu
+                # tenho de plugar". O rótulo sai de DriveInfo e SÓ com a unidade pronta: ler
+                # '.VolumeLabel' de um volume ausente LANÇA, e '[string]$obj.Propriedade' sobre uma
+                # propriedade que lança devolve '' em silêncio - o que daria um "( )" sem sentido no
+                # meio da frase.
+                $raizExterna = ''
+                try { $raizExterna = [string][System.IO.Path]::GetPathRoot($externo) } catch { $raizExterna = '' }
+                $letraExterna = $raizExterna.TrimEnd('\')
+                if ([string]::IsNullOrWhiteSpace($letraExterna)) { $letraExterna = 'do backup' }
+                $rotuloExterno = 'não está ligado'
+                try {
+                    if (-not [string]::IsNullOrWhiteSpace($raizExterna)) {
+                        $unidadeExterna = New-Object System.IO.DriveInfo ($raizExterna)
+                        if ($unidadeExterna.IsReady) {
+                            $nomeVolume = [string]$unidadeExterna.VolumeLabel
+                            $rotuloExterno = if ([string]::IsNullOrWhiteSpace($nomeVolume)) { 'sem rótulo' } else { $nomeVolume }
+                        }
+                    }
+                } catch { $rotuloExterno = 'não está ligado' }
+                Write-Error "O backup do conteúdo de '$($item.Path)' foi guardado fora da pasta do WinForge, em '$externo', e o arquivo não está lá: ligue o disco $letraExterna ($rotuloExterno) e tente de novo. Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$externo' e tente outra vez."
+                $recusados++
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$item.Sha256)) {
+                Write-Error "O backup do conteúdo de '$($item.Path)' está fora da pasta protegida ('$externo') e o índice não guardou a impressão digital dele. Fora da pasta protegida a impressão digital é a ÚNICA conferência que existe, então este arquivo fica de fora. Nada foi alterado."
+                $recusados++
+                continue
+            }
+        } else {
+            $julg = Test-WinForgeAclBackupFile -Path ([string]$item.File) -Root ([string]$conf.Path)
+            if (-not $julg.Trusted) {
+                Write-Error "Backup recusado ('$($item.File)'): $($julg.Reason)."
+                $recusados++
+                continue
+            }
         }
         # A impressão digital que a fase 2 anotou, recalculada agora. É o que descobre, ANTES de o
         # arquivo virar argumento de um '/restore' elevado, que ele deixou de ser o que foi gravado.
         # Índice antigo não traz o campo: aí não há conferência, e isso é dito em vez de fingido.
+        # (No arquivo externo isso já foi recusado acima - lá o campo não é opcional.)
         $impressao = [string]$item.Sha256
         if ([string]::IsNullOrWhiteSpace($impressao)) {
-            Write-Warning "O backup '$(Split-Path -Leaf ([string]$item.File))' foi gravado por uma versão anterior, sem impressão digital: não há como conferir se ele ainda é o arquivo original."
+            Write-Warning "O backup '$(Split-Path -Leaf $arquivoUsado)' foi gravado por uma versão anterior, sem impressão digital: não há como conferir se ele ainda é o arquivo original."
         } else {
-            $conferida = Get-WinForgeAclContentHash -Path ([string]$item.File)
+            $conferida = Get-WinForgeAclContentHash -Path $arquivoUsado
             if (-not $conferida.Ok -or ([string]$conferida.Hash -ne $impressao)) {
                 $porque = if ($conferida.Ok) { 'a impressão digital SHA-256 não confere com a que a restauração anotou' } else { [string]$conferida.Reason }
-                Write-Error "O backup do conteúdo de '$($item.Path)' não é mais o arquivo que a restauração gravou ($porque). Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$($item.File)' e tente outra vez."
+                Write-Error "O backup do conteúdo de '$($item.Path)' não é mais o arquivo que a restauração gravou ($porque). Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$arquivoUsado' e tente outra vez."
                 $recusados++
                 continue
             }
         }
         if (-not (Test-Path -LiteralPath ([string]$item.Target) -PathType Container)) {
-            Write-Warning "A pasta '$($item.Target)' não existe mais; '$(Split-Path -Leaf ([string]$item.File))' fica de fora."
+            Write-Warning "A pasta '$($item.Target)' não existe mais; '$(Split-Path -Leaf $arquivoUsado)' fica de fora."
             $recusados++
             continue
         }
@@ -4564,7 +5096,7 @@ function Invoke-WinForgeAclUndo {
         # com o descritor guardado no arquivo. É comportamento, e por isso não depende do idioma do
         # sistema, que é justamente o que ler a frase de resumo do icacls não garante (a integração
         # contínua deste projeto roda em inglês e já quebrou uma asserção assim).
-        $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', [string]$item.File, '/C', '/L')
+        $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', $arquivoUsado, '/C', '/L')
         Write-Host ([string]$r.Text)
         if ([int]$r.ExitCode -ne 0) {
             Write-Error "Este arquivo terminou com código $($r.ExitCode)."
@@ -4572,7 +5104,7 @@ function Invoke-WinForgeAclUndo {
             continue
         }
         $aplicados++
-        $amostra = Test-WinForgeAclRestoreSample -Root ([string]$item.Target) -File ([string]$item.File)
+        $amostra = Test-WinForgeAclRestoreSample -Root ([string]$item.Target) -File $arquivoUsado
         if (-not $amostra.Ok) {
             Write-Warning "A conferência por amostragem de '$($item.Path)' não pôde ser feita ($($amostra.Reason)); o resultado deste arquivo fica sem confirmação."
         } else {
