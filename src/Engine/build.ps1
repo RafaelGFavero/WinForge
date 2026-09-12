@@ -5223,6 +5223,16 @@ if ($SelfTest) {
         $wfLimpAvisaExt = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
         if (-not $wfLimpAvisaExt.Count) { Write-Host "  [ERRO] Permissões (externo): o arquivo de outro disco sumiu da simulação - ele tem de aparecer mesmo sem ser apagado" -ForegroundColor Red; $wbErrors++ }
         elseif (([string]$wfLimpAvisaExt[0]).IndexOf('à mão', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo que o WinForge não vai apagar não diz o que fazer ('$($wfLimpAvisaExt[0])')" -ForegroundColor Red; $wbErrors++ }
+        # A promessa falsa do disco ausente: o ÍNDICE sai no mesmo laço, e o arquivo de outro disco
+        # só existe no inventário através dele. "Rode a limpeza de novo com o disco ligado" nunca
+        # mais encontraria o arquivo - na segunda passada não há índice que o nomeie. Guardar o
+        # índice para depois reabriria o beco sem saída, então a instrução é apagar à mão.
+        $wfLimpFonteC2 = [string](Get-Command Invoke-WinForgeAclCleanup).ScriptBlock
+        # A frase proibida é a do DISCO ("ligue o disco e rode a limpeza de novo"), e não qualquer
+        # "rode a limpeza de novo": o arquivo PENDENTE que fica na pasta continua alcançável numa
+        # segunda passada, e a mensagem dele diz isso com razão.
+        if ($wfLimpFonteC2 -match 'Ligue o disco e rode a limpeza de novo') { Write-Host "  [ERRO] Permissões (externo): a limpeza ainda promete uma segunda passada com o disco ligado - o índice saiu no mesmo laço e o arquivo nunca mais aparece" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLimpFonteC2.IndexOf('o índice que o nomeava saiu junto', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a mensagem do disco ausente não diz que o índice foi embora nesta mesma limpeza - sem isso ela volta a prometer uma segunda passada" -ForegroundColor Red; $wbErrors++ }
         $wfLimpAvisaSumido = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtSumido, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
         if (-not $wfLimpAvisaSumido.Count) { Write-Host "  [ERRO] Permissões (externo): a simulação omite o arquivo externo cujo disco não está disponível" -ForegroundColor Red; $wbErrors++ }
         elseif (([string]$wfLimpAvisaSumido[0]).IndexOf('não está disponível', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpAvisaSumido[0])')" -ForegroundColor Red; $wbErrors++ }

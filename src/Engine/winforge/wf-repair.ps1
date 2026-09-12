@@ -5907,7 +5907,12 @@ function Invoke-WinForgeAclCleanup {
     }
     Write-Host ''
     Write-Host "Limpeza concluída: $apagados de $($alvos.Count) arquivo(s) apagados, $([math]::Round($liberados / 1MB, 1)) MB liberados."
-    if ($ausentes.Count) { Write-Warning ("Backup de conteúdo em outro disco, que não está disponível agora: {0}. Ligue o disco e rode a limpeza de novo - eles continuam ocupando espaço lá." -f ($ausentes -join '; ')) }
+    # Sem promessa de segunda passada, e isso é medido no código ao lado, não no otimismo: o ÍNDICE
+    # que nomeia o arquivo de outro disco sai NESTA mesma limpeza, no laço acima, e é só através
+    # dele que o inventário enxerga aquele caminho. Rodar a limpeza de novo com o disco ligado não
+    # acharia mais nada. Guardar o índice para uma segunda passada reabriria o beco sem saída que a
+    # rodada anterior fechou, então o que sobra - e o que é honesto - é mandar apagar à mão.
+    if ($ausentes.Count) { Write-Warning ("Backup de conteúdo em outro disco, que não estava disponível agora: {0}. Estes arquivos continuam ocupando espaço lá, e o índice que o nomeava saiu junto nesta limpeza - uma segunda passada não vai mais encontrá-los. Ligue o disco e apague à mão o arquivo no caminho acima." -f ($ausentes -join '; ')) }
     if ($aMao.Count) { Write-Warning ("Estes arquivos estão fora da pasta protegida e o índice que os nomeia não passou na conferência de confiança, então o WinForge NÃO os apaga: {0}. Confira o caminho e apague à mão se ele for mesmo seu." -f ($aMao -join '; ')) }
     if ($falhas.Count) { Write-Error ("Não foi possível apagar: {0}." -f ($falhas -join '; ')) }
     $sobrando = @($todos | Where-Object { $_.Path -notin @($alvos | ForEach-Object { [string]$_.Path }) }).Count
