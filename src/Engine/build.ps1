@@ -5090,7 +5090,10 @@ if ($SelfTest) {
         Set-Content -LiteralPath $wfLimpExtArq -Value 'conteudo externo' -Encoding Unicode
         # O segundo mora num caminho que NÃO existe: é o disco desligado, o caso comum de quem
         # guardou o backup num pen drive e voltou uma semana depois.
-        $wfLimpExtSumido = Join-Path $wfLimpExtDir 'disco-desligado\acl-perfil-externo-20270202-000000.txt'
+        # A pasta que não existe NÃO pode ter 'disco' no nome: a linha da simulação traz o caminho
+        # completo, e a asserção de baixo procura a frase do motivo. Com 'disco' no caminho ela
+        # casaria com o caminho e um mutante que apagasse o motivo passaria batido.
+        $wfLimpExtSumido = Join-Path $wfLimpExtDir 'unidade-fora\acl-perfil-externo-20270202-000000.txt'
         Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Value (([pscustomobject]@{
             Stamp = '20270101-000000'; Consumed = $true; Origin = (New-WinForgeAclIndexOrigin)
             Items = @(
@@ -5120,7 +5123,7 @@ if ($SelfTest) {
         if (-not @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) { Write-Host "  [ERRO] Permissões (externo): a simulação não lista o arquivo de conteúdo que foi para outro disco" -ForegroundColor Red; $wbErrors++ }
         $wfLimpSecoAusente = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtSumido, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
         if (-not $wfLimpSecoAusente.Count) { Write-Host "  [ERRO] Permissões (externo): a simulação omite o arquivo externo cujo disco não está disponível" -ForegroundColor Red; $wbErrors++ }
-        elseif (([string]$wfLimpSecoAusente[0]).IndexOf('disco', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpSecoAusente[0])')" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpSecoAusente[0]).IndexOf('não está disponível', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpSecoAusente[0])')" -ForegroundColor Red; $wbErrors++ }
         Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue
         # E a linha recusa despacho sem ninguém para confirmar.
