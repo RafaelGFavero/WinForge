@@ -2200,8 +2200,10 @@ function Get-WinForgeAclContentScope {
         com '/inheritance:e', que só altera item com herança bloqueada. O guardado tem de ser
         exatamente o alterado, senão o Desfazer cobre um conjunto e a restauração mexe em outro.
 
-        'Denied' conta EXATAMENTE GetAccessControl e a enumeração dos filhos. GetAttributes fica de
-        fora: medido, em pasta negada ele NÃO lança, e contá-lo daria zero justo onde há problema.
+        'Denied' conta o GetAccessControl, a enumeração dos filhos e o GetAttributes que LANÇA. Em
+        pasta apenas negada o GetAttributes não lança (medido), e é por isso que não é ele quem
+        detecta negação; mas quando ele lança não se sabe se o item é ponto de reanálise, e seguir
+        adiante seria descer justamente no que não se conseguiu identificar - então falha FECHADA.
         Denied > 0 muda o veredito do chamador - essas pastas não foram copiadas, então também não
         podem ser alteradas.
 
@@ -2223,6 +2225,11 @@ function Get-WinForgeAclContentScope {
     )
 
     $frase = 'A cópia das permissões não ficou pronta em {0} segundos. Sem ela não haveria como desfazer, então nada foi alterado. Tente de novo com o computador recém-ligado.'
+    # O SDDL tem quatro formas de ACE de negação: 'D' (deny), 'OD' (object deny), 'XD' (callback
+    # deny) e 'ZD' (object callback deny). '\(D;' sozinho deixava passar as três últimas. O NTFS não
+    # produz ACE de objeto, então o SelfTest pesca este literal pelo marcador de fim de linha e o
+    # prova em SDDL sintético - o marcador tem de continuar onde está.
+    $negacao = '\([OXZ]?D;'   # SDDL-NEGACAO
     $r = @{ Ok = $false; Reason = ''; Entries = @(); Scanned = 0; Reparse = 0; Denied = 0; DeniedPaths = @(); Deny = 0; Bytes = 0; Seconds = 0.0 }
     $base = [string](Split-Path -Parent ([string]$Path))          # a pasta ACIMA: os nomes são relativos a ela
     $longo = { param($p) if ($p -like '\\?\*') { $p } else { '\\?\' + $p } }
@@ -2235,13 +2242,21 @@ function Get-WinForgeAclContentScope {
         if ($relogio.Elapsed.TotalSeconds -gt $MaxSeconds) { $r.Reason = ($frase -f $MaxSeconds); break }
         $no = $pilha.Pop()
         # GetAttributes ANTES de empilhar, e sobre o caminho longo: é a única pergunta que separa
-        # pasta de ponto de reanálise sem abrir o item. Ele NÃO entra em Denied: medido, em pasta
-        # negada ele não lança, e contá-lo daria zero justo onde há problema.
+        # pasta de ponto de reanálise sem abrir o item. Em pasta apenas NEGADA ele não lança
+        # (medido) - não é ele quem detecta negação, é o GetAccessControl abaixo. Mas quando ele
+        # LANÇA o item é desconhecido, e seguir adiante seria descer justamente no que não se
+        # conseguiu identificar: falha FECHADA, conta em Denied e não desce. Não é hipótese - sem o
+        # prefixo '\\?\' uma pasta de nome com espaço no fim cai exatamente aqui.
         $attr = $null
         try { $attr = [IO.File]::GetAttributes((& $longo $no.Path)) } catch { $attr = $null }
+        if ($null -eq $attr) {
+            $r.Denied++
+            if ($r.DeniedPaths.Count -lt 200) { $r.DeniedPaths += [string]$no.Path }
+            continue
+        }
         # O ponto de reanálise conta em Reparse e NÃO em Scanned: são duas grandezas diferentes.
         # 'Scanned' só sobe para pasta que a caminhada de fato visitou.
-        if ($null -ne $attr -and ($attr -band [IO.FileAttributes]::ReparsePoint)) { $r.Reparse++; continue }
+        if ($attr -band [IO.FileAttributes]::ReparsePoint) { $r.Reparse++; continue }
         $r.Scanned++
         $seg = $null
         try {
@@ -2253,7 +2268,7 @@ function Get-WinForgeAclContentScope {
         }
         if ($seg.AreAccessRulesProtected) {
             $sddl = [string]$seg.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
-            if ($sddl -match '\(D;') { $r.Deny++ }
+            if ($sddl -match $negacao) { $r.Deny++ }
             $nome = [string]$no.Path
             if ($nome.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { $nome = $nome.Substring($base.TrimEnd('\').Length + 1) }
             $itens.Add(@{ Name = $nome; Sddl = $sddl })
@@ -2261,7 +2276,18 @@ function Get-WinForgeAclContentScope {
             if ($itens.Count -gt $MaxItems) { $r.Reason = "A cópia das permissões passou de $MaxItems pastas. Nada foi alterado."; break }
             if ($bytes -gt $MaxBytes) { $r.Reason = "A cópia das permissões passou de $MaxBytes bytes. Nada foi alterado."; break }
         }
-        if ($no.Depth -ge $MaxDepth) { $r.Reason = "A cópia das permissões passou de $MaxDepth níveis de pasta. Nada foi alterado."; break }
+        # Duas causas, duas frases. Árvore funda de verdade e laço de atalhos estouram o MESMO teto,
+        # e responder a mesma coisa nas duas esconde justamente o defeito que esta função existe
+        # para evitar. O sinal do laço é a proporção: atalho de pasta é minoria numa árvore real e
+        # vira maioria quando a caminhada está girando.
+        if ($no.Depth -ge $MaxDepth) {
+            if ($r.Reparse -gt 0 -and ($r.Reparse * 2) -ge $r.Scanned) {
+                $r.Reason = "A cópia das permissões passou de $MaxDepth níveis de pasta, e $($r.Reparse) dos $($r.Scanned) itens vistos eram atalhos de pasta - isso é sinal de um laço de atalhos, não de uma árvore funda. Nada foi alterado."
+            } else {
+                $r.Reason = "A cópia das permissões passou de $MaxDepth níveis de pasta. Nada foi alterado."
+            }
+            break
+        }
         try {
             foreach ($filho in [IO.Directory]::EnumerateDirectories((& $longo $no.Path))) {
                 $pilha.Push(@{ Path = ([string]$filho -replace '^\\\\\?\\', ''); Depth = $no.Depth + 1 })

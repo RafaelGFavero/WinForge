@@ -4203,21 +4203,108 @@ if ($SelfTest) {
         $wfCamLongo = $wfCamPerfil
         while ($wfCamLongo.Length -lt 294) { $wfCamLongo = Join-Path $wfCamLongo ('n' * 30) }
         [System.IO.Directory]::CreateDirectory('\\?\' + $wfCamLongo) | Out-Null
+        # O prefixo '\\?\' não é só comprimento: ele desliga a normalização do Win32, e ISSO nenhum
+        # LongPathsEnabled reverte. 'cache ' - com espaço no fim - é criada pelo prefixo e, sem ele,
+        # o Win32 come o espaço, procura 'cache' e não acha: medido, Exists=False e GetAttributes e
+        # GetAccessControl lançam, enquanto a enumeração da pasta acima devolve o nome do mesmo
+        # jeito. É esta pasta, e não o comprimento, que mata a mutação do prefixo NESTA máquina:
+        # aqui LongPathsEnabled=1, então o caminho de 300 caracteres abre sem prefixo nenhum.
+        $wfCamEspaco = Join-Path $wfCamPerfil 'cache '
+        [System.IO.Directory]::CreateDirectory('\\?\' + $wfCamEspaco) | Out-Null
         $wfCamRLongo = Get-WinForgeAclContentScope -Path $wfCamPerfil
         if (-not $wfCamRLongo.Ok) { Write-Host "  [ERRO] Permissões (caminho longo): a caminhada falhou ('$($wfCamRLongo.Reason)') - falta o prefixo \\?\" -ForegroundColor Red; $wbErrors++ }
-        if ([int]$wfCamRLongo.Denied -ne 0) { Write-Host "  [ERRO] Permissões (caminho longo): $($wfCamRLongo.Denied) negada(s) num caminho de $($wfCamLongo.Length) caracteres - o prefixo \\?\ não está em toda chamada" -ForegroundColor Red; $wbErrors++ }
-        # 'Denied' conta GetAccessControl e EnumerateFileSystemEntries, e NÃO GetAttributes: medido,
-        # em pasta negada o GetAttributes não lança, e contá-lo daria zero justo onde há problema.
+        if ([int]$wfCamRLongo.Denied -ne 0) { Write-Host "  [ERRO] Permissões (caminho longo): $($wfCamRLongo.Denied) negada(s) - sem o prefixo \\?\ em TODA chamada a pasta 'cache ' (espaço no fim) some da árvore e o caminho de $($wfCamLongo.Length) caracteres não abre" -ForegroundColor Red; $wbErrors++ }
+
+        # Atributo ilegível NÃO é "não é ponto de reanálise". Quando o GetAttributes lança, não se
+        # sabe o que o item é, e descer nele é descer justamente no que não se conseguiu
+        # identificar - o caminho de volta ao laço. A caminhada falha FECHADA: conta em Denied e não
+        # desce. Caminho inexistente é a forma determinística de fazer o GetAttributes lançar mesmo
+        # COM o prefixo. 'Scanned' exato é o que mata a mutação: falhando aberta ele vem 1, porque a
+        # pasta é contada antes de o GetAccessControl recusar.
+        $wfCamSumiu = Get-WinForgeAclContentScope -Path (Join-Path $wfCamPerfil 'pasta-que-nunca-existiu')
+        if ([int]$wfCamSumiu.Scanned -ne 0) { Write-Host "  [ERRO] Permissões (atributo ilegível): Scanned=$($wfCamSumiu.Scanned), esperado 0 - o item cujo atributo não pôde ser lido foi visitado assim mesmo" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamSumiu.Denied -ne 1) { Write-Host "  [ERRO] Permissões (atributo ilegível): Denied=$($wfCamSumiu.Denied), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfCamSumiu.DeniedPaths).Count -ne 1 -or ([string](@($wfCamSumiu.DeniedPaths)[0])) -notlike '*pasta-que-nunca-existiu') { Write-Host "  [ERRO] Permissões (atributo ilegível): DeniedPaths veio '$(@($wfCamSumiu.DeniedPaths) -join ' | ')' - é esta lista que a Fase 2 mostra ao usuário" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamSumiu.Reparse -ne 0) { Write-Host "  [ERRO] Permissões (atributo ilegível): Reparse=$($wfCamSumiu.Reparse), esperado 0 - atributo ilegível não é ponto de reanálise" -ForegroundColor Red; $wbErrors++ }
+
+        # Profundidade x laço: as duas causas estouram o MESMO teto, e mandar a mesma frase nas duas
+        # esconde justamente o defeito que esta função existe para evitar. Controle negativo
+        # PRIMEIRO, enquanto não há atalho nenhum no caminho da descida.
+        $wfCamFundo = Get-WinForgeAclContentScope -Path $wfCamPerfil -MaxDepth 3
+        if ([string]$wfCamFundo.Reason -notmatch 'níveis de pasta') { Write-Host "  [ERRO] Permissões (profundidade): árvore funda não deu a frase de profundidade ('$($wfCamFundo.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCamFundo.Reason -match 'laço') { Write-Host "  [ERRO] Permissões (profundidade): árvore funda, sem atalho nenhum no caminho, foi chamada de laço ('$($wfCamFundo.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # Agora três atalhos com nome em 'z'. O NTFS enumera em ordem e a pilha é LIFO, então eles
+        # saem PRIMEIRO e a contagem de reparse já está alta quando a descida bate no teto - que é a
+        # assinatura do laço de verdade.
+        foreach ($wfCamZ in @('z1', 'z2', 'z3')) {
+            cmd.exe /c mklink /J "$wfCamPerfil\$wfCamZ" "$wfCamPerfil\Documentos" | Out-Null
+        }
+        $wfCamLaco = Get-WinForgeAclContentScope -Path $wfCamPerfil -MaxDepth 4
+        if ([string]$wfCamLaco.Reason -notmatch 'laço') { Write-Host "  [ERRO] Permissões (laço): $($wfCamLaco.Reparse) atalho(s) em $($wfCamLaco.Scanned) item(ns) e veio a frase de árvore funda ('$($wfCamLaco.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCamLaco.Reason -notmatch 'nada foi alterado') { Write-Host "  [ERRO] Permissões (laço): a frase do laço não diz que nada foi alterado ('$($wfCamLaco.Reason)')" -ForegroundColor Red; $wbErrors++ }
+
+        # 'Denied' POSITIVO, com pasta de verdade: negação explícita de "listar pasta" para o próprio
+        # usuário. Medido: o DONO mantém READ_CONTROL por direito implícito, então o GetAccessControl
+        # continua lendo a lista e a entrada entra no backup, mas a enumeração dos filhos é recusada.
+        # É o caso da §1.2 - pasta que fica fora do backup sem que nada exploda - e o SDDL dela é o
+        # único ACE de negação real desta árvore, o que prova a contagem de 'Deny' de ponta a ponta.
+        $wfCamNegada = Join-Path $wfCamPerfil 'negada'
+        New-Item -ItemType Directory -Path (Join-Path $wfCamNegada 'filha') -Force | Out-Null
+        $wfCamEu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wfCamNegDi = New-Object System.IO.DirectoryInfo $wfCamNegada
+        $wfCamNegSd = $wfCamNegDi.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfCamNegSd.SetAccessRuleProtection($true, $true)
+        $wfCamNegRegra = New-Object System.Security.AccessControl.FileSystemAccessRule($wfCamEu, [System.Security.AccessControl.FileSystemRights]::ListDirectory, [System.Security.AccessControl.InheritanceFlags]::None, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny)
+        $wfCamNegSd.AddAccessRule($wfCamNegRegra)
+        $wfCamNegDi.SetAccessControl($wfCamNegSd)
+        try {
+            $wfCamRNeg = Get-WinForgeAclContentScope -Path $wfCamPerfil
+            if (-not $wfCamRNeg.Ok) { Write-Host "  [ERRO] Permissões (negada): uma pasta recusada derrubou a caminhada inteira ('$($wfCamRNeg.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            if ([int]$wfCamRNeg.Denied -ne 1) { Write-Host "  [ERRO] Permissões (negada): Denied=$($wfCamRNeg.Denied), esperado exatamente 1" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfCamRNeg.DeniedPaths | Where-Object { $_ -like '*\negada' }).Count) { Write-Host "  [ERRO] Permissões (negada): DeniedPaths não traz a pasta recusada ('$(@($wfCamRNeg.DeniedPaths) -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            if ([int]$wfCamRNeg.Deny -ne 1) { Write-Host "  [ERRO] Permissões (negada): Deny=$($wfCamRNeg.Deny), esperado 1 - o ACE de negação da pasta recusada tem de ser contado" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            # Sai no finally: a pasta só volta a ser apagável depois que a negação some.
+            $wfCamNegDi2 = New-Object System.IO.DirectoryInfo $wfCamNegada
+            $wfCamNegSd2 = $wfCamNegDi2.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            $null = $wfCamNegSd2.RemoveAccessRuleSpecific($wfCamNegRegra)
+            $wfCamNegDi2.SetAccessControl($wfCamNegSd2)
+        }
+
+        # 'Denied' conta o GetAccessControl, a enumeração dos filhos e o GetAttributes que LANÇA. Em
+        # pasta apenas negada o GetAttributes não lança (medido), e por isso não é ele quem detecta
+        # negação; quando ele lança, o item é desconhecido e a caminhada falha fechada - é o que o
+        # bloco do atributo ilegível acima cobra.
         $wfCamFonte = [string](Get-Command Get-WinForgeAclContentScope).ScriptBlock
         if ($wfCamFonte -match 'AllDirectories') { Write-Host "  [ERRO] Permissões (caminhada): EnumerateFileSystemEntries com AllDirectories é proibido - ele segue reparse point" -ForegroundColor Red; $wbErrors++ }
         if ($wfCamFonte -match 'AccessControlSections\]::All') { Write-Host "  [ERRO] Permissões (caminhada): AccessControlSections::All lança sem SeSecurityPrivilege" -ForegroundColor Red; $wbErrors++ }
         if ($wfCamFonte -notmatch 'GetSecurityDescriptorSddlForm') { Write-Host "  [ERRO] Permissões (caminhada): o SDDL tem de sair de GetSecurityDescriptorSddlForm('Access')" -ForegroundColor Red; $wbErrors++ }
+        # O SDDL tem quatro formas de ACE de negação e o NTFS só sabe produzir uma: não existe pasta
+        # que gere '(OD;'. Então o padrão é pescado do fonte pelo marcador SDDL-NEGACAO e aplicado em
+        # SDDL sintético - é a única prova possível das outras três. A forma '(D;' já foi provada de
+        # ponta a ponta na pasta recusada, acima.
+        $wfCamNegPad = [regex]::Match($wfCamFonte, "'([^']+)'\s*#\s*SDDL-NEGACAO").Groups[1].Value
+        if ([string]::IsNullOrWhiteSpace($wfCamNegPad)) { Write-Host "  [ERRO] Permissões (negação): o marcador SDDL-NEGACAO sumiu do fonte - sem ele não há como provar o padrão" -ForegroundColor Red; $wbErrors++ }
+        else {
+            foreach ($wfCamNegCaso in @('D:P(A;;FA;;;SY)(D;;FA;;;WD)', 'D:P(A;;FA;;;SY)(OD;;CR;;;WD)', 'D:P(A;;FA;;;SY)(XD;;FA;;;WD)', 'D:P(A;;FA;;;SY)(ZD;;FA;;;WD)')) {
+                if ($wfCamNegCaso -notmatch $wfCamNegPad) { Write-Host "  [ERRO] Permissões (negação): o padrão '$wfCamNegPad' não pega '$wfCamNegCaso'" -ForegroundColor Red; $wbErrors++ }
+            }
+            foreach ($wfCamNegNao in @('D:P(A;;FA;;;SY)(A;;FA;;;WD)', 'D:P(A;;FA;;;SY)(OA;;CR;;;WD)')) {
+                if ($wfCamNegNao -match $wfCamNegPad) { Write-Host "  [ERRO] Permissões (negação): o padrão '$wfCamNegPad' pegou uma ACE de permissão ('$wfCamNegNao')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
         Write-Host "  Permissões (caminhada): junção auto-referente não é descida nem indexada, 1 entrada protegida, tetos devolvem lista vazia, caminho de $($wfCamLongo.Length) caracteres lido"
     } catch {
         Write-Host "  [ERRO] Permissões (caminhada): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        try { cmd.exe /c rmdir "$wfCamRaiz\perfil\AppData\Local\Dados de Aplicativos" 2>$null | Out-Null } catch { }
-        Remove-Item -LiteralPath $wfCamRaiz -Recurse -Force -ErrorAction SilentlyContinue
+        # Os atalhos primeiro, e por 'rmdir': medido, o Directory.Delete recursivo do .NET NÃO segue
+        # ponto de reanálise - o arquivo do outro lado sobreviveu -, mas LANÇA ao tentar apagá-lo.
+        # Depois o Delete COM prefixo, porque o Remove-Item deixa 'cache ' para trás: medido, ela
+        # some do Win32 e a pasta fica em %TEMP% para sempre.
+        foreach ($wfCamLixo in @('perfil\AppData\Local\Dados de Aplicativos', 'perfil\z1', 'perfil\z2', 'perfil\z3')) {
+            try { cmd.exe /c rmdir "$wfCamRaiz\$wfCamLixo" 2>$null | Out-Null } catch { }
+        }
+        try { [System.IO.Directory]::Delete('\\?\' + $wfCamRaiz, $true) } catch { }
     }
     # ---------------------------------------------------------------- Permissões: o arquivo e a contraprova
     # É o único ponto do desenho sem prova: gravar o arquivo de conteúdo e conferir byte a byte que
