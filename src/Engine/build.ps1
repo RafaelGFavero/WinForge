@@ -3444,8 +3444,18 @@ if ($SelfTest) {
                 if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Path)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Kind)' sem pasta" -ForegroundColor Red; $wbErrors++ }
                 continue
             }
+            # O terceiro sem executável, e pelo mesmo motivo: as chamadas do 'inherit-list' saem de
+            # Get-WinForgeAclInheritSteps, uma por pasta da lista que a fase 2 guardou. Um FilePath
+            # ou um vetor aqui seria o '/T' voltando pela porta dos fundos, agora sem nem a trava
+            # de '/T ⇒ /L' abaixo, que só olha vetor de argumentos.
+            if ([string]$wfAclPasso.Kind -eq 'inherit-list') {
+                if (-not [string]::IsNullOrWhiteSpace([string]$wfAclPasso.FilePath)) { Write-Host "  [ERRO] Permissões (plano): o passo 'inherit-list' de '$($wfAclPasso.Folder)' traz um executável ('$($wfAclPasso.FilePath)')" -ForegroundColor Red; $wbErrors++ }
+                if ($null -ne $wfAclPasso.Arguments) { Write-Host "  [ERRO] Permissões (plano): o passo 'inherit-list' de '$($wfAclPasso.Folder)' traz argumentos - a lista é que manda as chamadas" -ForegroundColor Red; $wbErrors++ }
+                if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Folder)) { Write-Host "  [ERRO] Permissões (plano): passo 'inherit-list' sem pasta" -ForegroundColor Red; $wbErrors++ }
+                continue
+            }
             $wfAclExe = [string]$wfAclPasso.FilePath
-            if ([string]::IsNullOrWhiteSpace($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Title)' sem executável e sem ser do tipo 'sddl' ou 'scope'" -ForegroundColor Red; $wbErrors++; continue }
+            if ([string]::IsNullOrWhiteSpace($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Title)' sem executável e sem ser do tipo 'sddl', 'scope' ou 'inherit-list'" -ForegroundColor Red; $wbErrors++; continue }
             if (-not [System.IO.Path]::IsPathRooted($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' não é caminho completo" -ForegroundColor Red; $wbErrors++ }
             elseif (-not $wfAclExe.StartsWith($wfAclSys, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' fora de '$wfAclSys'" -ForegroundColor Red; $wbErrors++ }
             elseif (-not (Test-Path -LiteralPath $wfAclExe -PathType Leaf)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' não existe nesta máquina" -ForegroundColor Red; $wbErrors++ }
@@ -3588,13 +3598,15 @@ if ($SelfTest) {
         $wfAclF5 = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 5 })
         $wfAclF5Tipos = @($wfAclF5 | ForEach-Object { [string]$_.Kind })
         $wfAclIdxGrant = [array]::IndexOf($wfAclF5Tipos, 'grant')
-        $wfAclIdxHerda = [array]::IndexOf($wfAclF5Tipos, 'inherit')
+        $wfAclIdxHerda = [array]::IndexOf($wfAclF5Tipos, 'inherit-list')
         if ($wfAclIdxGrant -lt 0 -or $wfAclIdxHerda -lt 0) { Write-Host "  [ERRO] Permissões (plano): a fase 5 precisa da concessão na raiz do perfil e da herança do conteúdo" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfAclIdxGrant -gt $wfAclIdxHerda) { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo vem ANTES da concessão na raiz do perfil - nessa ordem ela propaga o que ainda não existe" -ForegroundColor Red; $wbErrors++ }
         else {
-            $wfAclArgs5 = @($wfAclF5[$wfAclIdxHerda].Arguments | ForEach-Object { [string]$_ })
-            if ($wfAclArgs5 -notcontains '/inheritance:e') { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo do perfil deveria usar '/inheritance:e'" -ForegroundColor Red; $wbErrors++ }
-            if ([string]$wfAclArgs5[0] -ne 'C:\Users\PerfilDeTeste\*') { Write-Host "  [ERRO] Permissões (plano): a herança deveria mirar o CONTEÚDO do perfil, mira '$($wfAclArgs5[0])'" -ForegroundColor Red; $wbErrors++ }
+            # A herança mira a PASTA do perfil como escopo e nada mais: as chamadas de verdade saem
+            # da lista da fase 2. Um alvo com '*' aqui, como o que existia até a 1.7.0, é o que
+            # levava o '/T' para dentro de junção e OneDrive.
+            if (([string]$wfAclF5[$wfAclIdxHerda].Folder).TrimEnd('\') -ne 'C:\Users\PerfilDeTeste') { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo aponta para '$($wfAclF5[$wfAclIdxHerda].Folder)', esperado o perfil" -ForegroundColor Red; $wbErrors++ }
+            if (([string]$wfAclF5[$wfAclIdxHerda].Folder).IndexOf('*', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo voltou a mirar um curinga ('$($wfAclF5[$wfAclIdxHerda].Folder)')" -ForegroundColor Red; $wbErrors++ }
         }
         foreach ($wfAclPasso in $wfAclF5) {
             if (@($wfAclPasso.Arguments | ForEach-Object { [string]$_ }) -contains '/reset') { Write-Host "  [ERRO] Permissões (plano): '/reset' no perfil apagaria as ACEs explícitas dos aplicativos (AppData\Local\Packages, OneDrive)" -ForegroundColor Red; $wbErrors++ }
@@ -4492,6 +4504,40 @@ if ($SelfTest) {
         try { Write-WinForgeAclContentBackup -Path $wfArqRecusaCam -Entries @($wfArqEscopo.Entries) | Out-Null } catch { $wfArqRecusa = [string]$_.Exception.Message }
         if ($null -eq $wfArqRecusa -or $wfArqRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Permissões (arquivo): a gravação não recusou em modo SelfTest ('$wfArqRecusa')" -ForegroundColor Red; $wbErrors++ }
         if (Test-Path -LiteralPath $wfArqRecusaCam) { Write-Host "  [ERRO] Permissões (arquivo): a gravação recusada ainda deixou '$wfArqRecusaCam' no disco" -ForegroundColor Red; $wbErrors++ }
+        # A porta do caminho ABSOLUTO, nas duas funções que tocam o arquivo de backup. Ela diz
+        # "precisa ser absoluto" e até aqui perguntava 'IsPathRooted', que é outra pergunta. MEDIDO:
+        # 'C:acl.txt' (relativo ao diretório corrente DAQUELE disco) e '\acl.txt' (relativo ao disco
+        # corrente) são "rooted", passavam pela porta, viravam '\\?\C:acl.txt' e morriam adiante em
+        # "Não foi possível localizar o arquivo". Falha fechada - nada é gravado, medido aqui
+        # também -, mas com a mensagem culpando o disco por um caminho que o programa montou.
+        # Quem separa os três casos é a RAIZ: 'C:\' e '\\servidor\share' já dizem onde estão;
+        # 'C:', '\' e '' dependem de onde o processo está, e GetFullPath resolve cada uma para
+        # outra coisa.
+        $wfArqSelfAntes2 = $sync.SelfTest
+        $sync.SelfTest = $false
+        try {
+            foreach ($wfArqRel in @('acl.txt', 'C:acl.txt', '\acl.txt')) {
+                $wfArqRelG = Write-WinForgeAclContentBackup -Path $wfArqRel -Entries @($wfArqEscopo.Entries)
+                if ($wfArqRelG.Ok) { Write-Host "  [ERRO] Permissões (absoluto): a gravação aceitou '$wfArqRel'" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfArqRelG.Reason -notmatch 'precisa ser absoluto') { Write-Host "  [ERRO] Permissões (absoluto): a gravação recusou '$wfArqRel' pelo motivo errado ('$($wfArqRelG.Reason)')" -ForegroundColor Red; $wbErrors++ }
+                $wfArqRelH = Get-WinForgeAclContentHash -Path $wfArqRel
+                if ($wfArqRelH.Ok) { Write-Host "  [ERRO] Permissões (absoluto): a impressão digital aceitou '$wfArqRel'" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfArqRelH.Reason -notmatch 'precisa ser absoluto') { Write-Host "  [ERRO] Permissões (absoluto): a impressão digital recusou '$wfArqRel' pelo motivo errado ('$($wfArqRelH.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E nada foi para o disco por nenhum dos três: recusar com a frase certa e ainda assim
+            # gravar seria trocar uma mentira por outra.
+            foreach ($wfArqRelCam in @((Join-Path (Get-Location).Path 'acl.txt'), 'C:\acl.txt')) {
+                if (Test-Path -LiteralPath $wfArqRelCam) { Write-Host "  [ERRO] Permissões (absoluto): a recusa ainda gravou '$wfArqRelCam'" -ForegroundColor Red; $wbErrors++ }
+            }
+        } finally { $sync.SelfTest = $wfArqSelfAntes2 }
+        # A porta NÃO pode recusar caminho absoluto que só o prefixo '\\?\' alcança - é o caso que
+        # ela existe para servir. MEDIDO: 'GetFullPath' sobre o caminho INTEIRO come o ponto final
+        # de 'cache.' e resolve '..', então comparar o caminho todo recusaria justamente a pasta
+        # criada acima. A comparação é sobre a raiz, e por isso estes dois passam.
+        foreach ($wfArqAbs in @($wfArqLongoCam, ('\\?\' + $wfArqLongoCam))) {
+            $wfArqAbsH = Get-WinForgeAclContentHash -Path $wfArqAbs
+            if (-not $wfArqAbsH.Ok) { Write-Host "  [ERRO] Permissões (absoluto): '$wfArqAbs' foi recusado ('$($wfArqAbsH.Reason)') - a porta está comendo o ponto final de 'cache.'" -ForegroundColor Red; $wbErrors++ }
+        }
         # Measure-WinForgeAclSaveEntry lê por FLUXO: 'Get-Content' sem -Raw materializa um array e um
         # backup antigo grande vira OutOfMemoryException numa função que só conta linhas.
         $wfArqFonteM = [string](Get-Command Measure-WinForgeAclSaveEntry).ScriptBlock
@@ -4518,19 +4564,15 @@ if ($SelfTest) {
             if ($wfF2Escopo[0].FilePath) { Write-Host "  [ERRO] Permissões (fase 2): o passo 'scope' não pode ter executável - quem caminha é o motor" -ForegroundColor Red; $wbErrors++ }
             if ([string]$wfF2Escopo[0].Target -ne 'C:\Users') { Write-Host "  [ERRO] Permissões (fase 2): Target='$($wfF2Escopo[0].Target)', esperado 'C:\Users' (a pasta de onde o /restore roda)" -ForegroundColor Red; $wbErrors++ }
         }
-        # Nenhum passo do plano inteiro pode carregar '/T' sobre o perfil. A fase 5 é a única
-        # exceção, e é uma exceção ANOTADA, não esquecida: o '/inheritance:e /T' dela sai junto com
-        # o passo 'inherit-list', no commit seguinte a este. O pino abaixo cobra que ela seja
-        # exatamente UMA - quando o 'inherit' virar 'inherit-list' o pino fica vermelho e obriga a
-        # varredura a voltar a ser geral, em vez de a exceção virar moradia.
-        $wfF2Pinados = @()
+        # Nenhum passo do plano inteiro pode carregar '/T' sobre a pasta de perfil. A varredura é
+        # geral de novo: a fase 5 era a última exceção e caiu junto com o passo 'inherit', então o
+        # pino que cobrava "exatamente uma" saiu daqui no mesmo commit. Exceção anotada que
+        # sobrevive à própria causa vira moradia.
         foreach ($wfF2P in $wfF2Plano) {
             $wfF2Args = @($wfF2P.Arguments | ForEach-Object { [string]$_ })
             if (-not (($wfF2Args -contains '/T') -and ((@($wfF2Args) -join ' ') -like '*C:\Users\fulano*'))) { continue }
-            if ([int]$wfF2P.Phase -eq 5 -and [string]$wfF2P.Kind -eq 'inherit') { $wfF2Pinados += $wfF2P; continue }
             Write-Host "  [ERRO] Permissões (plano): passo da fase $($wfF2P.Phase) ainda usa '/T' sobre a pasta de perfil ('$($wfF2Args -join ' ')')" -ForegroundColor Red; $wbErrors++
         }
-        if ($wfF2Pinados.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): $($wfF2Pinados.Count) passo(s) 'inherit' da fase 5 com '/T', esperado 1 - se a fase 5 já foi trocada por 'inherit-list', tire esta exceção e deixe a varredura geral" -ForegroundColor Red; $wbErrors++ }
         # Espaço livre conferido ANTES: pedir mais do que o disco tem recusa, e diz quanto há.
         $wfF2Esp = Test-WinForgeAclFreeSpace -Path $wbSelfTestTemp -Bytes ([long]1PB)
         if ($wfF2Esp.Ok) { Write-Host "  [ERRO] Permissões (espaço): 1 PB deveria ser recusado" -ForegroundColor Red; $wbErrors++ }
@@ -4641,6 +4683,45 @@ if ($SelfTest) {
             } catch { }
         }
         Remove-Item -LiteralPath $wfOrdRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: a fase 5 sem /T
+    # Conserta de quebra um defeito da 1.7.0: '/inheritance:e /T /L' liga herança FORA do perfil,
+    # no destino de cada junção e no OneDrive. Uma chamada por entrada da lista da fase 2 não sai
+    # do conjunto que o backup cobre - e é isso que mantém "guardado = alterado".
+    try {
+        $wfF5Entradas = @(
+            @{ Name = 'fulano\AppData\Local\Pacotes'; Sddl = 'D:P(A;;FA;;;SY)' },
+            @{ Name = 'fulano'; Sddl = 'D:P(A;;FA;;;SY)' },
+            @{ Name = 'fulano\AppData'; Sddl = 'D:P(A;;FA;;;SY)' }
+        )
+        $wfF5Passos = @(Get-WinForgeAclInheritSteps -Root 'C:\Users' -Entries $wfF5Entradas)
+        if ($wfF5Passos.Count -ne 3) { Write-Host "  [ERRO] Permissões (fase 5): $($wfF5Passos.Count) passo(s) para 3 entradas" -ForegroundColor Red; $wbErrors++ }
+        $wfF5Ordem = @($wfF5Passos | ForEach-Object { [string]$_.Path })
+        if ([string]$wfF5Ordem[0] -ne 'C:\Users\fulano') { Write-Host "  [ERRO] Permissões (fase 5): a ordem ordinal tem de entregar o pai primeiro, veio '$($wfF5Ordem -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF5Ordem[2] -ne 'C:\Users\fulano\AppData\Local\Pacotes') { Write-Host "  [ERRO] Permissões (fase 5): o filho mais fundo tem de vir por último, veio '$($wfF5Ordem -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfF5P in $wfF5Passos) {
+            $wfF5A = @($wfF5P.Arguments | ForEach-Object { [string]$_ })
+            if ($wfF5A -contains '/T') { Write-Host "  [ERRO] Permissões (fase 5): '/T' voltou ao vetor ('$($wfF5A -join ' ')')" -ForegroundColor Red; $wbErrors++ }
+            if ($wfF5A -notcontains '/inheritance:e') { Write-Host "  [ERRO] Permissões (fase 5): falta '/inheritance:e' ('$($wfF5A -join ' ')')" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfF5P.FilePath -ne (Get-WinForgeSystemExe -Name 'icacls.exe')) { Write-Host "  [ERRO] Permissões (fase 5): o executável não é o icacls do System32 ('$($wfF5P.FilePath)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O conjunto coberto é o conjunto alterado: mesma lista, mesma contagem.
+        $wfF5Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-plano') -Stamp '20260912-101010')
+        $wfF5Velho = @($wfF5Plano | Where-Object { [int]$_.Phase -eq 5 -and [string]$_.Kind -eq 'inherit' })
+        if ($wfF5Velho.Count) { Write-Host "  [ERRO] Permissões (fase 5): o passo 'inherit' com '/T' continua no plano" -ForegroundColor Red; $wbErrors++ }
+        $wfF5Lista = @($wfF5Plano | Where-Object { [int]$_.Phase -eq 5 -and [string]$_.Kind -eq 'inherit-list' })
+        if ($wfF5Lista.Count -ne 1) { Write-Host "  [ERRO] Permissões (fase 5): esperava 1 passo 'inherit-list', veio $($wfF5Lista.Count)" -ForegroundColor Red; $wbErrors++ }
+        $wfF5Fonte = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfF5Fonte -notmatch 'Get-WinForgeAclInheritSteps') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não monta os passos a partir da lista da fase 2" -ForegroundColor Red; $wbErrors++ }
+        # A busca é pela CHAMADA ('-Root' junto), e não pelo nome. O nome também aparece no bloco de
+        # ajuda de Invoke-WinForgeAclRestore, que entra no ScriptBlock e faria a linha acima passar
+        # sozinha: um mutante que trocasse a chamada por um laço à mão sobreviveria. É a mesma trava
+        # que a fase 4 já usa para Invoke-WinForgeAclOwnerFallback.
+        if ($wfF5Fonte.IndexOf('Get-WinForgeAclInheritSteps -Root', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 CITA Get-WinForgeAclInheritSteps mas não a chama - a lista da fase 2 não está virando chamada nenhuma" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF5Fonte -notmatch 'WinForgeAclScope') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não lê o escopo guardado pela fase 2 - guardado e alterado divergiriam" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (fase 5): $($wfF5Passos.Count) chamada(s) '/inheritance:e' por entrada, pai antes de filho, nenhum '/T'"
+    } catch {
+        Write-Host "  [ERRO] Permissões (fase 5): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
     # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os

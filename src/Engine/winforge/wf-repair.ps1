@@ -2315,6 +2315,43 @@ function Get-WinForgeAclContentScope {
     return $r
 }
 
+function Test-WinForgeAclAbsolutePath {
+    <#
+    .SYNOPSIS
+        Diz se um caminho é ABSOLUTO de verdade - com disco ou servidor na frente. Função pura, só
+        texto: não toca no disco e não pergunta se o caminho existe.
+    .DESCRIPTION
+        Existe porque '[System.IO.Path]::IsPathRooted' responde OUTRA pergunta, e as duas portas que
+        tocam o arquivo de backup faziam a pergunta errada com a frase certa. MEDIDO: 'C:acl.txt'
+        (relativo ao diretório corrente DAQUELE disco) e '\acl.txt' (relativo ao disco corrente) são
+        "rooted", passavam pela porta que diz "precisa ser absoluto", viravam '\\?\C:acl.txt' e
+        morriam adiante em "Não foi possível localizar o arquivo". Falha FECHADA - medido, nada é
+        gravado nesse caminho -, mas a mensagem culpava o disco por um caminho que o próprio
+        programa montou, e é isso que se conserta aqui.
+
+        Quem separa os casos é a RAIZ, e a prova é GetFullPath sobre ela: 'C:\' e '\\servidor\share'
+        resolvem para si mesmas, enquanto 'C:', '\' e '' resolvem para onde o PROCESSO está - que é
+        exatamente o que "absoluto" exclui.
+
+        A comparação é só sobre a RAIZ, e isso também foi medido: GetFullPath sobre o caminho
+        INTEIRO normaliza - come o ponto final de uma pasta chamada 'cache.' e resolve '..'.
+        Recusar por isso seria recusar justamente o caminho que o prefixo '\\?\' existe para
+        atender, e o backup de permissões vive em caminho longo dentro do perfil.
+
+        Um caminho que JÁ chega com '\\?\' é aceito pela raiz que ele declara: o prefixo é a forma
+        de dizer ao Windows "este caminho é literal, não normalize". Quem chama nunca o monta antes
+        desta porta - os dois chamadores põem o prefixo DEPOIS dela.
+    .OUTPUTS
+        $true ou $false. Caminho vazio é $false.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+
+    $raiz = ''
+    try { $raiz = [string][System.IO.Path]::GetPathRoot([string]$Path) } catch { return $false }
+    if ([string]::IsNullOrEmpty($raiz)) { return $false }
+    try { return ([string][System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($raiz)) -eq $raiz) } catch { return $false }
+}
+
 function Write-WinForgeAclContentBackup {
     <#
     .SYNOPSIS
@@ -2379,7 +2416,9 @@ function Write-WinForgeAclContentBackup {
     # StreamWriter e FileInfo resolvem caminho relativo contra o diretório do PROCESSO, e não contra
     # a localização do PowerShell (Set-Content faria o contrário): um caminho relativo gravaria o
     # backup em outro lugar EM SILÊNCIO, e o Desfazer depois procuraria onde não está.
-    if (-not [System.IO.Path]::IsPathRooted([string]$Path)) {
+    # A pergunta é Test-WinForgeAclAbsolutePath e não 'IsPathRooted': a segunda deixava passar
+    # 'C:acl.txt' e '\acl.txt', que falhavam adiante com a mensagem errada.
+    if (-not (Test-WinForgeAclAbsolutePath -Path ([string]$Path))) {
         $r.Reason = "O caminho do backup precisa ser absoluto; veio '$Path'."
         return $r
     }
@@ -2451,7 +2490,9 @@ function Get-WinForgeAclContentHash {
     $r = @{ Ok = $false; Reason = ''; Hash = '' }
     $sha = $null
     $fluxo = $null
-    if (-not [System.IO.Path]::IsPathRooted([string]$Path)) {
+    # Mesma porta da gravação, e pela mesma medição: 'C:acl.txt' e '\acl.txt' são "rooted" e não são
+    # absolutos - a impressão digital do arquivo errado é pior que impressão digital nenhuma.
+    if (-not (Test-WinForgeAclAbsolutePath -Path ([string]$Path))) {
         $r.Reason = "O caminho do backup precisa ser absoluto; veio '$Path'."
         return $r
     }
@@ -2739,6 +2780,75 @@ function Measure-WinForgeAclSaveEntry {
     }
 }
 
+function Get-WinForgeAclInheritSteps {
+    <#
+    .SYNOPSIS
+        As chamadas de icacls da fase 5: UMA por pasta da lista que a fase 2 guardou, e nenhuma com
+        '/T'. Função pura - monta caminhos e vetores de argumentos, não roda nada.
+    .DESCRIPTION
+        É a outra metade do par que tirou o 'icacls /T' do perfil. A fase 2 já guarda só as pastas
+        com herança bloqueada (Get-WinForgeAclContentScope); esta função faz a fase 5 percorrer
+        EXATAMENTE essa lista. Guardado e alterado passam a ser o mesmo conjunto, que é a condição
+        de o botão Desfazer desfazer.
+
+        O que sai daqui é o conserto de um defeito da 1.7.0, e não só um ganho de velocidade:
+        'icacls <perfil>\* /inheritance:e /T /L' descia SEGUINDO ponto de reanálise - o '/L' fala do
+        ALVO de cada item, não do caminho percorrido - e ligava herança FORA do perfil, no destino
+        de cada junção de compatibilidade e no OneDrive redirecionado. Alterava o que o backup não
+        cobria, em pasta que o usuário nem sabia estar no caminho.
+
+        A ordem é ORDINAL, por CompareOrdinal, e é a MESMA de Write-WinForgeAclContentBackup: é o
+        código do caractere que garante que um prefixo venha antes do que o estende, e todo nome de
+        pai é prefixo do nome do filho ('fulano' < 'fulano\AppData' < 'fulano\AppData\Local'). Isso
+        importa porque ligar a herança no filho antes do pai não propaga o que o pai ainda não tem.
+        'Sort-Object' ordena pela CULTURA, onde 'ab' vem antes de 'a-b' e a garantia de prefixo sai
+        de cena; medido nesta máquina, as duas ordenações discordam em nove nomes de teste, e
+        '-Culture ([CultureInfo]::InvariantCulture)' não conserta isso - o parâmetro é uma STRING, a
+        cultura invariante vira '' e a comparação continua linguística.
+
+        O '/C' fica DENTRO do vetor aqui, ao contrário de Get-WinForgeAclIcaclsSddl: entre a
+        caminhada da fase 2 e esta fase passam minutos, e pasta de cache dentro de um perfil some
+        nesse intervalo o tempo todo. Sem '/C' cada pasta que sumiu vira uma linha de erro no log de
+        um reparo que correu bem. O preço está medido e é real - '/C' faz o icacls sair com 0
+        mesmo sem achar a pasta, então uma pasta de fato inalcançável não aparece no código de
+        saída; é uma troca a favor do log legível, e não um descuido.
+
+        Sem '/L': a caminhada da fase 2 NÃO indexa ponto de reanálise, então nenhuma entrada desta
+        lista é junção. O '/L' existe para não seguir o link, e aqui não há link para seguir.
+    .PARAMETER Root
+        A pasta de onde os nomes da lista são relativos - o 'Target' do passo 'scope' da fase 2, que
+        é a pasta ACIMA do perfil. É a mesma pasta que o 'icacls /restore' do Desfazer usa, e é por
+        isso que ela não é adivinhada aqui.
+    .OUTPUTS
+        @(@{ Path; FilePath; Arguments }), na ordem em que têm de rodar.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries
+    )
+
+    $icacls = Get-WinForgeSystemExe -Name 'icacls.exe'
+    $ordenadas = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($Entries)) { $ordenadas.Add($e) }
+    $ordenadas.Sort([System.Comparison[object]] { param($a, $b) [string]::CompareOrdinal([string]$a.Name, [string]$b.Name) })
+
+    $passos = @()
+    foreach ($e in $ordenadas) {
+        # Entrada sem nome não vira passo: '[string]$e.Name' sobre uma propriedade que lança devolve
+        # '' em silêncio, e 'Join-Path' com '' estouraria no meio da fase. Pular altera MENOS do que
+        # o backup cobre, que é o lado seguro da mesma regra.
+        $nome = [string]$e.Name
+        if ([string]::IsNullOrWhiteSpace($nome)) { continue }
+        $pasta = [string](Join-Path ([string]$Root) $nome)
+        $passos += @{
+            Path      = $pasta
+            FilePath  = $icacls
+            Arguments = @($pasta, '/inheritance:e', '/C', '/Q')
+        }
+    }
+    return @($passos)
+}
+
 function Get-WinForgeAclRestorePlan {
     <#
     .SYNOPSIS
@@ -2769,10 +2879,13 @@ function Get-WinForgeAclRestorePlan {
            "acesso negado", a posse vai para os Administradores, a concessão é repetida uma vez e a
            posse VOLTA ao dono padrão.
         5. A pasta do usuário: '/setowner' (condicional), negações fora (condicional), as três ACEs
-           padrão na RAIZ do perfil e, depois delas, '/inheritance:e /T /L' no CONTEÚDO. A ordem é
-           dependência: a herança só propaga o que já está concedido na raiz. '/reset /T' não é
-           usado - ele apagaria as ACEs explícitas que os próprios aplicativos põem
-           (AppData\Local\Packages, OneDrive), e '/inheritance:e' as preserva.
+           padrão na RAIZ do perfil e, depois delas, a herança do CONTEÚDO - um passo 'inherit-list'
+           sem executável, que o motor expande em um 'icacls <pasta> /inheritance:e' por pasta da
+           lista guardada na fase 2. A ordem é dependência: a herança só propaga o que já está
+           concedido na raiz. '/reset /T' não é usado - ele apagaria as ACEs explícitas que os
+           próprios aplicativos põem (AppData\Local\Packages, OneDrive), e '/inheritance:e' as
+           preserva. '/T' não é usado por nada nesta fase: ele descia pela junção e pelo OneDrive e
+           alterava mais do que o backup cobre.
         6. takeown /F <raiz> /A, SEM recursão, e só quando a fase 3 responder "acesso negado". O
            passo vem marcado com 'Conditional' e quem decide rodá-lo é Invoke-WinForgeAclRestore.
 
@@ -2798,8 +2911,9 @@ function Get-WinForgeAclRestorePlan {
         erro desses apareça no build, e não na máquina de quem clicou no botão.
     .OUTPUTS
         Vetor de hashtables com Phase, Title, Kind e, conforme o passo, FilePath/Arguments,
-        Path/Backup/Target (fase 2), Folder (fases 3 a 5) e Conditional. Os passos 'sddl' e 'scope'
-        da fase 2 são os únicos sem FilePath: nenhum dos dois chama executável.
+        Path/Backup/Target (fase 2), Folder (fases 3 a 5) e Conditional. Três passos não têm
+        FilePath, e nenhum dos três chama executável a partir do plano: 'sddl' e 'scope' na fase 2 e
+        'inherit-list' na fase 5.
     #>
     param(
         [string]$Profile,
@@ -3033,10 +3147,21 @@ function Get-WinForgeAclRestorePlan {
         # '/inheritance:e' LIGA a herança em cada item de dentro, e é o que faz as três ACEs da raiz
         # do perfil descerem. O que os aplicativos puseram à mão continua lá: as ACEs de pacote em
         # AppData\Local\Packages e as do OneDrive são explícitas, e ligar herança não apaga nenhuma.
-        # O '/L' anda pelo LINK e não pelo destino - mas isso é tudo o que ele faz: MEDIDO, ele NÃO
-        # poda a travessia do '/T', que continua descendo pela junção e pelo OneDrive até o limite
-        # de 63 saltos de reparse. É a mesma medição que tirou o '/T' da fase 2.
-        $plano += @{ Phase = 5; Kind = 'inherit'; Folder = [string]$Profile; Title = "Herança do conteúdo de '$Profile'"; FilePath = $icacls; Arguments = @((Join-Path ([string]$Profile) '*'), '/inheritance:e', '/T', '/L', '/C', '/Q') }
+        #
+        # Este passo NÃO tem executável nem vetor de argumentos, e é o terceiro do plano assim (os
+        # outros dois são o 'sddl' e o 'scope' da fase 2). As chamadas saem de
+        # Get-WinForgeAclInheritSteps, uma por pasta da lista que a fase 2 guardou, e quem as roda é
+        # Invoke-WinForgeAclRestore.
+        #
+        # O '/inheritance:e /T /L' que morava aqui saiu pela mesma medição que tirou o '/T' da fase
+        # 2: o '/L' fala do ALVO de cada item, não do caminho percorrido, e por isso NÃO poda a
+        # travessia do '/T'. Ele descia pela junção de compatibilidade e pelo OneDrive até o limite
+        # de 63 saltos de reparse, ligando herança FORA do perfil - em pasta que o backup não cobria
+        # e que o usuário nem sabia estar no caminho. Com a lista, o conjunto alterado é exatamente
+        # o conjunto guardado: o OneDrive em Sob Demanda fica fora do backup E fora desta fase, e as
+        # pastas que a caminhada não conseguiu ler também - o par é consistente nas duas pontas, e é
+        # o veredito de Get-WinForgeAclScopeVerdict que diz isso ao usuário.
+        $plano += @{ Phase = 5; Kind = 'inherit-list'; Folder = [string]$Profile; Title = "Herança do conteúdo de '$Profile', pasta por pasta da lista guardada" }
     }
     $plano += @{
         Phase       = 6
@@ -3127,6 +3252,15 @@ function Invoke-WinForgeAclRestore {
           nem o administrador alcança, e é o único caso em que o takeown da fase 6 roda - uma vez,
           só na raiz, sem recursão, seguido de UMA segunda tentativa da fase 3.
 
+        - Na fase 5, a LISTA da fase 2. O passo 'inherit-list' não traz comando nenhum: o motor o
+          expande em um 'icacls <pasta> /inheritance:e' por entrada de '$sync.WinForgeAclScope',
+          na ordem ordinal que entrega pai antes de filho. Sem escopo publicado - isto é, sem
+          backup do conteúdo - o conteúdo NÃO é alterado, e a fase diz isso em vez de seguir.
+          O que se perde, escrito: arquivo solto dentro do perfil (o backup guarda pasta, não
+          arquivo); ACE explícita de aplicativo, que '/inheritance:e' preserva de propósito; o
+          OneDrive em Sob Demanda, que fica fora do backup E fora desta fase, então o par é
+          consistente; e as pastas que a caminhada não conseguiu ler, que saem no veredito.
+
         A fase 2 é bloqueante das duas pontas: se a pasta protegida não passar na conferência, nada
         é alterado; se nenhum backup chegar a ser gravado, também não. E o passo do CONTEÚDO tem
         uma terceira porta: teto de caminhada estourado PARA a restauração inteira, porque nesse
@@ -3181,6 +3315,11 @@ function Invoke-WinForgeAclRestore {
                 # Sem FilePath e sem Arguments: quem caminha e quem grava é o motor. A simulação diz
                 # o que vai ser feito, e não uma linha de comando que não existe.
                 ("[simulação] Fase {0}{1}: caminhar '{2}' e guardar em '{3}' as pastas com herança bloqueada (o /restore roda de '{4}')" -f $_.Phase, $marca, $_.Path, $_.Backup, $_.Target)
+            } elseif ([string]$_.Kind -eq 'inherit-list') {
+                # Também sem FilePath: quantas chamadas vão sair daqui só se sabe com a lista da
+                # fase 2 na mão, e a simulação roda antes dela. Dizer o que vai ser feito é honesto;
+                # inventar uma linha de comando com '*' seria desenhar de volta o '/T' que saiu.
+                ("[simulação] Fase {0}{1}: ligar a herança em cada pasta de '{2}' que a fase 2 guardou, uma chamada '{3} <pasta> /inheritance:e' por entrada (sem '/T', sem sair do perfil)" -f $_.Phase, $marca, $_.Folder, (Get-WinForgeSystemExe -Name 'icacls.exe'))
             } else {
                 ("[simulação] Fase {0}{1}: {2} {3}" -f $_.Phase, $marca, $_.FilePath, (@($_.Arguments) -join ' ')).TrimEnd()
             }
@@ -3451,6 +3590,36 @@ function Invoke-WinForgeAclRestore {
             Write-Host "Fase 5 de 6 - $($passo.Title)"
         } elseif ([string]$passo.Kind -eq 'remove-deny') {
             Invoke-WinForgeAclDenyRemoval -Plan $plano -Phase 5 -Path $perfil
+            continue
+        } elseif ([string]$passo.Kind -eq 'inherit-list') {
+            # A herança é ligada pasta por pasta, na lista que a fase 2 guardou - e em nenhuma
+            # outra. É aqui que "guardado = alterado" deixa de ser promessa: o escopo em
+            # '$sync.WinForgeAclScope' só foi publicado com o arquivo de backup gravado, protegido
+            # e conferido, então sem ele não houve Desfazer e o conteúdo não pode ser tocado.
+            $escopo5 = $sync.WinForgeAclScope
+            $alvo5 = ''
+            foreach ($p2 in @($plano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })) {
+                if (([string]$p2.Path).TrimEnd('\') -eq ([string]$perfil).TrimEnd('\')) { $alvo5 = [string]$p2.Target }
+            }
+            Write-Host ''
+            if ($null -eq $escopo5 -or [string]::IsNullOrWhiteSpace($alvo5)) {
+                Write-Warning "O conteúdo de '$perfil' ficou fora do Desfazer, então fica fora daqui também: a herança NÃO foi ligada em pasta nenhuma de dentro. A pasta do perfil em si continua com as permissões que esta fase acabou de aplicar."
+                continue
+            }
+            $passos5 = @(Get-WinForgeAclInheritSteps -Root $alvo5 -Entries @($escopo5.Entries))
+            Write-Host "Fase 5 de 6 - $($passo.Title): $($passos5.Count) pasta(s)."
+            # Uma linha por pasta encheria a janela de saída com centenas de linhas que não dizem
+            # nada. O que interessa é o que FALHOU, e essa sai na hora, com a pasta e o código.
+            $falhas5 = 0
+            foreach ($p5 in $passos5) {
+                $r5 = Invoke-WinForgeNativeCommand -FilePath ([string]$p5.FilePath) -Arguments @($p5.Arguments)
+                if ([int]$r5.ExitCode -ne 0) {
+                    $falhas5++
+                    Write-Host ("  '{0}': código {1}. {2}" -f $p5.Path, $r5.ExitCode, ([string]$r5.Text).Trim())
+                }
+            }
+            if ($falhas5) { Write-Error "A herança não pôde ser ligada em $falhas5 de $($passos5.Count) pasta(s) do perfil; as demais foram. Essas $falhas5 continuam como estavam, e o backup delas segue no conjunto do Desfazer." }
+            else { Write-Host "Herança ligada nas $($passos5.Count) pasta(s) que o backup cobre." }
             continue
         } else {
             Write-Host ''
