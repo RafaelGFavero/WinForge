@@ -2570,7 +2570,9 @@ function Get-WinForgeAclScopeVerdict {
 
         Vinte caminhos, não a lista inteira: 'DeniedPaths' vem com até 200, e uma parede de texto
         na janela de saída esconde a informação em vez de entregá-la. A contagem completa fica na
-        primeira linha.
+        primeira linha - e quando ela for MAIOR que a lista de caminhos, o texto diz isso em vez de
+        emendar "as 20 primeiras, de 200" logo abaixo de "500 pasta(s)". Dois tetos diferentes
+        (contagem sem teto, caminhos até 200) faziam os números se contradizerem na tela.
     .OUTPUTS
         @{ Header; Text }. Sem pasta negada, 'Header' é 'Concluído' e 'Text' é vazio.
     #>
@@ -2585,8 +2587,15 @@ function Get-WinForgeAclScopeVerdict {
     $mostrar = @($todas | Select-Object -First 20)
     $linhas = New-Object System.Collections.Generic.List[string]
     $linhas.Add("$negadas pasta(s) não puderam ser lidas e por isso não foram copiadas nem alteradas - ficaram exatamente como estavam.")
-    if ($todas.Count -gt $mostrar.Count) { $linhas.Add("As $($mostrar.Count) primeiras, de $($todas.Count):") }
-    elseif ($mostrar.Count) { $linhas.Add('São elas:') }
+    # Três números, e eles têm de fechar. A CONTAGEM não tem teto; a lista de caminhos tem (a
+    # caminhada para de anotar em 200). Anunciar "500 pasta(s)" e emendar "as 20 primeiras, de 200"
+    # é contar duas histórias na mesma caixa - quem lê conclui que perdeu 480 no caminho. Quando os
+    # dois divergem, a linha diz por quê.
+    if ($mostrar.Count) {
+        if ($negadas -gt $todas.Count) { $linhas.Add("O caminho de $($todas.Count) delas foi anotado - as outras $($negadas - $todas.Count) foram contadas, mas a anotação dos caminhos para em $($todas.Count). Destas, as $($mostrar.Count) primeiras:") }
+        elseif ($todas.Count -gt $mostrar.Count) { $linhas.Add("As $($mostrar.Count) primeiras, de $($todas.Count):") }
+        else { $linhas.Add('São elas:') }
+    }
     foreach ($p in $mostrar) { $linhas.Add("  $p") }
     $r.Header = 'Concluído com ressalvas'
     $r.Text = (@($linhas) -join [Environment]::NewLine)
@@ -2806,12 +2815,23 @@ function Get-WinForgeAclInheritSteps {
         '-Culture ([CultureInfo]::InvariantCulture)' não conserta isso - o parâmetro é uma STRING, a
         cultura invariante vira '' e a comparação continua linguística.
 
-        O '/C' fica DENTRO do vetor aqui, ao contrário de Get-WinForgeAclIcaclsSddl: entre a
-        caminhada da fase 2 e esta fase passam minutos, e pasta de cache dentro de um perfil some
-        nesse intervalo o tempo todo. Sem '/C' cada pasta que sumiu vira uma linha de erro no log de
-        um reparo que correu bem. O preço está medido e é real - '/C' faz o icacls sair com 0
-        mesmo sem achar a pasta, então uma pasta de fato inalcançável não aparece no código de
-        saída; é uma troca a favor do log legível, e não um descuido.
+        SEM '/C', e isso é o oposto do que a primeira versão desta função fazia. O '/C' é "continue
+        apesar do erro", e num alvo ÚNICO não há o que continuar: ele só apaga o sinal. MEDIDO
+        nesta forma exata de chamada, sem elevação, em %TEMP%:
+
+            pasta que existe          -> 0 com '/C' e 0 sem
+            pasta que não existe      -> 0 com '/C' e 2 sem
+            curinga sem correspondência -> 0 com '/C' e 3 sem
+
+        Com '/C' no vetor, o 'if ($r.ExitCode -ne 0)' do chamador era código MORTO: a fase 5 podia
+        não ligar herança em pasta nenhuma e o log dizer "Concluído". O que sobra do argumento a
+        favor do '/C' - pasta de cache some entre a caminhada da fase 2 e esta fase o tempo todo -
+        é resolvido onde deve ser, no CHAMADOR: código 2 é "a pasta sumiu desde o backup", que é
+        aviso; qualquer outro código diferente de zero é erro. Assim o sinal volta e o reparo que
+        correu bem não vira lista de erros.
+
+        Sem '/T' e sem curinga, o código 3 não é esperado aqui - ele é o da forma '<pasta>\*', que
+        é justamente a que saiu.
 
         Sem '/L': a caminhada da fase 2 NÃO indexa ponto de reanálise, então nenhuma entrada desta
         lista é junção. O '/L' existe para não seguir o link, e aqui não há link para seguir.
@@ -2843,7 +2863,7 @@ function Get-WinForgeAclInheritSteps {
         $passos += @{
             Path      = $pasta
             FilePath  = $icacls
-            Arguments = @($pasta, '/inheritance:e', '/C', '/Q')
+            Arguments = @($pasta, '/inheritance:e', '/Q')
         }
     }
     return @($passos)
@@ -3008,8 +3028,10 @@ function Get-WinForgeAclRestorePlan {
             Backup = $arquivo
             # A pasta de onde o '/restore' roda: o nome de cada entrada é relativo a ela, e é a
             # pasta ACIMA do perfil. Medido: o arquivo começa com a entrada do próprio perfil
-            # ('<folha>'), e não com uma entrada de nome vazio - essa só aparece quando o alvo é a
-            # mesma pasta de onde o '/save' foi invocado, que é o caso da raiz.
+            # ('<folha>'), e não com uma entrada de nome vazio - o que decide isso é a BARRA no fim
+            # do alvo, e não quem invocou de onde: 'icacls <pasta>\ /save' grava a entrada vazia,
+            # 'icacls <pasta> /save' grava o par nomeado pela folha. A raiz cai no primeiro caso
+            # porque 'C:\' já termina em barra.
             Target = [string](Split-Path -Parent ([string]$alvo.Path))
         }
     }
@@ -3610,16 +3632,27 @@ function Invoke-WinForgeAclRestore {
             Write-Host "Fase 5 de 6 - $($passo.Title): $($passos5.Count) pasta(s)."
             # Uma linha por pasta encheria a janela de saída com centenas de linhas que não dizem
             # nada. O que interessa é o que FALHOU, e essa sai na hora, com a pasta e o código.
+            #
+            # O código de saída só existe porque o '/C' saiu do vetor - com ele, MEDIDO, uma pasta
+            # que não existe mais sai com 0 e este 'if' seria código morto. Os dois casos que sobram
+            # não são a mesma coisa: 2 é "a pasta sumiu desde o backup", e entre a caminhada da fase
+            # 2 e esta fase passam minutos em que pasta de cache dentro de um perfil some o tempo
+            # todo - isso é AVISO, e transformá-lo em erro faria um reparo que correu bem terminar
+            # numa lista de erros. Qualquer outro código é erro de verdade.
             $falhas5 = 0
+            $sumidas5 = 0
             foreach ($p5 in $passos5) {
                 $r5 = Invoke-WinForgeNativeCommand -FilePath ([string]$p5.FilePath) -Arguments @($p5.Arguments)
-                if ([int]$r5.ExitCode -ne 0) {
-                    $falhas5++
-                    Write-Host ("  '{0}': código {1}. {2}" -f $p5.Path, $r5.ExitCode, ([string]$r5.Text).Trim())
-                }
+                $c5 = [int]$r5.ExitCode
+                if ($c5 -eq 0) { continue }
+                if ($c5 -eq 2) { $sumidas5++; continue }
+                $falhas5++
+                Write-Host ("  '{0}': código {1}. {2}" -f $p5.Path, $c5, ([string]$r5.Text).Trim())
             }
-            if ($falhas5) { Write-Error "A herança não pôde ser ligada em $falhas5 de $($passos5.Count) pasta(s) do perfil; as demais foram. Essas $falhas5 continuam como estavam, e o backup delas segue no conjunto do Desfazer." }
-            else { Write-Host "Herança ligada nas $($passos5.Count) pasta(s) que o backup cobre." }
+            $resumo5 = "Herança ligada em $($passos5.Count - $falhas5 - $sumidas5) de $($passos5.Count) pasta(s) que o backup cobre."
+            if ($sumidas5) { $resumo5 += " $sumidas5 já não existia(m) desde a cópia das permissões - não havia o que ligar nelas." }
+            Write-Host $resumo5
+            if ($falhas5) { Write-Error "A herança não pôde ser ligada em $falhas5 pasta(s) do perfil; elas continuam como estavam, e o backup delas segue no conjunto do Desfazer." }
             continue
         } else {
             Write-Host ''
@@ -3817,9 +3850,13 @@ function Invoke-WinForgeAclUndo {
           Restore-WinForgeAclSddl (seção Access) e com uma tentativa separada de devolver o dono
           por 'icacls /setowner *<SID> /L /Q' - o .NET não habilita o SeRestorePrivilege e devolver
           a posse ao TrustedInstaller falhava com 1307 mesmo elevado. O 'icacls /save' não serve
-          para a lista: ele grava a entrada da própria pasta com o nome VAZIO e o '/restore' não a
-          aplica - procura '<pasta>\<sddl>' e responde "arquivo não encontrado".
-        - O CONTEÚDO do perfil volta por 'icacls <pasta acima> /restore <arquivo> /C /L', rodado a
+          para a lista da pasta em si, e o discriminador é a BARRA no fim do alvo - MEDIDO, e o
+          SelfTest confere as duas pontas: 'icacls <pasta>\ /save' (COM a barra) grava a entrada da
+          própria pasta com o nome VAZIO, e o '/restore' não a aplica - procura '<pasta>\<sddl>' e
+          responde "arquivo não encontrado". Sem a barra o arquivo sai com UM par nomeado pela
+          FOLHA, que é outra forma de chamada e a que Get-WinForgeAclIcaclsSddl usa para LER um
+          descritor. O que o Desfazer precisa aqui é aplicar, e para isso o SDDL do índice basta.
+        - O CONTEÚDO do perfil volta por 'icacls <pasta acima> /restore <arquivo> /L', rodado a
           partir da pasta anotada no índice: o icacls grava nomes RELATIVOS à pasta em que foi
           invocado, e restaurar da pasta errada aplicaria a DACL de uma coisa em outra. O '/L' é
           obrigatório e é o par do '/T' do backup: sem ele o '/restore' abre cada item SEGUINDO o
@@ -3946,10 +3983,23 @@ function Invoke-WinForgeAclUndo {
         }
         Write-Host ''
         Write-Host "Restaurando o conteúdo de '$($item.Path)' a partir de '$($item.Target)'."
-        # '/L' é obrigatório aqui, e é o par do '/T' do backup: ver a descrição da função.
-        $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', [string]$item.File, '/C', '/L')
+        # '/L' é obrigatório aqui: ver a descrição da função.
+        #
+        # E o '/C' saiu, pela mesma medição que o tirou da fase 5: com ele o icacls sai com 0
+        # mesmo sem achar o alvo, e este 'if' contava como RESTAURADO um arquivo que pode não ter
+        # aplicado uma linha sequer. Contar assim é a promessa que o botão Desfazer existe para não
+        # fazer. O código 2 continua não sendo erro - é a pasta que sumiu desde o backup -, mas
+        # também não conta como aplicado, porque não foi.
+        $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', [string]$item.File, '/L')
         Write-Host ([string]$r.Text)
-        if ([int]$r.ExitCode -ne 0) { Write-Error "Este arquivo terminou com código $($r.ExitCode)." } else { $aplicados++ }
+        $codigo = [int]$r.ExitCode
+        if ($codigo -eq 0) { $aplicados++ }
+        elseif ($codigo -eq 2) {
+            Write-Warning "O conteúdo de '$($item.Path)' não pôde ser aplicado inteiro: alguma pasta guardada já não existe (código 2). O que existe continua como está; nada foi apagado."
+            $recusados++
+        } else {
+            Write-Error "Este arquivo terminou com código $codigo."
+        }
     }
     Write-Host ''
     Write-Host "Desfazer concluído: $aplicados item(ns) restaurados, $recusados fora."

@@ -3867,7 +3867,13 @@ if ($SelfTest) {
             if (([string]$wfAclLinhaU).IndexOf(' /L', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (simulação): '$wfAclLinhaU' faz '/restore' sem '/L' - a DACL das junções do perfil cairia nos destinos delas" -ForegroundColor Red; $wbErrors++ }
         }
         $wfAclFonteUndo = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
-        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/C', '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não traz '/L'" -ForegroundColor Red; $wbErrors++ }
+        # O vetor traz '/L' e NÃO traz '/C'. O '/C' zera o código de saída (medido: alvo inexistente
+        # sai 0 com '/C' e 2 sem), e era ele que alimentava '$aplicados++' - o Desfazer contava como
+        # restaurado um arquivo que pode não ter aplicado uma linha. Contar assim é exatamente a
+        # promessa que este botão existe para não fazer.
+        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não é '<pasta> /restore <arquivo> /L'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/C'", [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (desfazer): o '/C' voltou ao '/restore' - com ele o código de saída é sempre 0 e '`$aplicados' conta o que não foi aplicado" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAclFonteUndo -notmatch '\$codigo\s*-eq\s*2') { Write-Host "  [ERRO] Permissões (desfazer): o '/restore' não separa o código 2 (pasta guardada que sumiu) dos demais" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclFonteUndo.IndexOf('Restore-WinForgeAclSddl -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o Desfazer não reaplica a lista da pasta em si (SDDL)" -ForegroundColor Red; $wbErrors++ }
         # E a outra ponta: o que a fase 2 indexa. O arquivo do conteúdo só pode ser endurecido - e
         # daí indexado - depois de a caminhada ter terminado inteira, do espaço ter sido conferido
@@ -4583,8 +4589,20 @@ if ($SelfTest) {
         if ([string]$wfF2Ver.Header -ne 'Concluído com ressalvas') { Write-Host "  [ERRO] Permissões (ressalvas): cabeçalho '$($wfF2Ver.Header)', esperado 'Concluído com ressalvas'" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfF2Ver.Text -notmatch 'não foram copiadas nem alteradas') { Write-Host "  [ERRO] Permissões (ressalvas): falta a frase de que essas pastas não foram copiadas nem alteradas" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfF2Ver.Text -notmatch 'C:\\Users\\fulano\\A') { Write-Host "  [ERRO] Permissões (ressalvas): a lista de DeniedPaths não aparece no texto" -ForegroundColor Red; $wbErrors++ }
+        # A CONTAGEM no texto, e não só a frase. §1.7 pede o número; sem esta linha, trocar
+        # "$negadas pasta(s)" por "Algumas pasta(s)" passava verde - mutante que sobreviveu na
+        # revisão da Tarefa 3.
+        if ([string]$wfF2Ver.Text -notmatch '(?m)^3 pasta\(s\)') { Write-Host "  [ERRO] Permissões (ressalvas): o texto não abre com a CONTAGEM de pastas não lidas ('$([string]$wfF2Ver.Text -split "`n" | Select-Object -First 1)')" -ForegroundColor Red; $wbErrors++ }
         $wfF2Muitas = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 50; DeniedPaths = @(1..50 | ForEach-Object { "C:\p$_" }); Entries = @(1) }
         if (@([regex]::Matches([string]$wfF2Muitas.Text, 'C:\\p\d+')).Count -ne 20) { Write-Host "  [ERRO] Permissões (ressalvas): o texto tem de listar as 20 PRIMEIRAS, veio $(@([regex]::Matches([string]$wfF2Muitas.Text, 'C:\\p\d+')).Count)" -ForegroundColor Red; $wbErrors++ }
+        # Contagem e lista de caminhos têm tetos DIFERENTES: a contagem não tem, a anotação de
+        # caminhos para em 200. Com 500 negadas o texto dizia "500 pasta(s)" e emendava "As 20
+        # primeiras, de 200" - quem lê conclui que 300 sumiram do relatório. Os números têm de
+        # fechar, ou o texto tem de dizer por que não fecham.
+        $wfF2Trunc = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 500; DeniedPaths = @(1..200 | ForEach-Object { "C:\q$_" }); Entries = @(1) }
+        if ([string]$wfF2Trunc.Text -notmatch '(?m)^500 pasta\(s\)') { Write-Host "  [ERRO] Permissões (ressalvas): com a lista truncada a contagem total sumiu da primeira linha" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Trunc.Text -notmatch '300') { Write-Host "  [ERRO] Permissões (ressalvas): o texto não diz que 300 pastas foram contadas sem o caminho anotado - '500' e 'de 200' se contradizem na tela" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Trunc.Text -match 'primeiras, de 200') { Write-Host "  [ERRO] Permissões (ressalvas): o texto ainda emenda 'de 200' logo abaixo de '500 pasta(s)'" -ForegroundColor Red; $wbErrors++ }
         $wfF2Limpo = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 0; DeniedPaths = @(); Entries = @(1) }
         if ([string]$wfF2Limpo.Header -ne 'Concluído') { Write-Host "  [ERRO] Permissões (ressalvas): sem Denied o cabeçalho é 'Concluído', veio '$($wfF2Limpo.Header)'" -ForegroundColor Red; $wbErrors++ }
         # O arquivo parcial some no 'finally', e não dentro do laço: hoje o descarte não roda se o
@@ -4593,6 +4611,13 @@ if ($SelfTest) {
         if ($wfF2Fonte -notmatch '(?s)finally\s*\{[^}]*Remove-Item[^}]*parcial') { Write-Host "  [ERRO] Permissões (parcial): falta o 'finally' que apaga o arquivo de conteúdo pela metade" -ForegroundColor Red; $wbErrors++ }
         if ($wfF2Fonte -notmatch 'Get-WinForgeAclContentScope') { Write-Host "  [ERRO] Permissões (fase 2): Invoke-WinForgeAclRestore não usa a caminhada" -ForegroundColor Red; $wbErrors++ }
         if ($wfF2Fonte -notmatch 'Get-WinForgeAclContentHash') { Write-Host "  [ERRO] Permissões (fase 2): o índice não recebe o SHA-256 do arquivo de conteúdo" -ForegroundColor Red; $wbErrors++ }
+        # A linha acima prova que o hash é CALCULADO, não que ele CHEGA ao índice. Mutante que
+        # sobreviveu na revisão da Tarefa 3: trocar 'Sha256 = $impressao' por 'Sha256 = ''' ficava
+        # verde, e a Tarefa 5 - que recusa o backup cujo hash não bate - herdaria um campo vazio sem
+        # aviso nenhum. As duas pontas da corrente, então: o hash sai da função, e o campo do índice
+        # recebe esse valor.
+        if ($wfF2Fonte -notmatch '\$impressao\s*=\s*\[string\]\$hash\.Hash') { Write-Host "  [ERRO] Permissões (fase 2): o SHA-256 do índice não sai de Get-WinForgeAclContentHash" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF2Fonte -notmatch 'Sha256\s*=\s*\$impressao') { Write-Host "  [ERRO] Permissões (fase 2): o item de conteúdo do índice não grava o SHA-256 calculado - um campo vazio ali passa por 'sem conferência' sem nenhum aviso" -ForegroundColor Red; $wbErrors++ }
         Write-Host "  Permissões (fase 2): passo 'scope' sem icacls, nenhum '/T' sobre o perfil, espaço conferido antes, veredito com ressalvas e finally do parcial"
     } catch {
         Write-Host "  [ERRO] Permissões (fase 2): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -4703,6 +4728,11 @@ if ($SelfTest) {
             $wfF5A = @($wfF5P.Arguments | ForEach-Object { [string]$_ })
             if ($wfF5A -contains '/T') { Write-Host "  [ERRO] Permissões (fase 5): '/T' voltou ao vetor ('$($wfF5A -join ' ')')" -ForegroundColor Red; $wbErrors++ }
             if ($wfF5A -notcontains '/inheritance:e') { Write-Host "  [ERRO] Permissões (fase 5): falta '/inheritance:e' ('$($wfF5A -join ' ')')" -ForegroundColor Red; $wbErrors++ }
+            # E sem '/C'. MEDIDO nesta forma exata, sem elevação: pasta que não existe sai com 2 sem
+            # '/C' e com 0 COM '/C'. Num alvo único não há o que "continuar"; o '/C' só apagaria o
+            # código de saída, e com ele o 'if' do chamador vira código morto - a fase 5 poderia não
+            # ligar herança em pasta nenhuma e o log dizer "Concluído".
+            if ($wfF5A -contains '/C') { Write-Host "  [ERRO] Permissões (fase 5): '/C' voltou ao vetor ('$($wfF5A -join ' ')') - ele zera o código de saída e o chamador perde o sinal" -ForegroundColor Red; $wbErrors++ }
             if ([string]$wfF5P.FilePath -ne (Get-WinForgeSystemExe -Name 'icacls.exe')) { Write-Host "  [ERRO] Permissões (fase 5): o executável não é o icacls do System32 ('$($wfF5P.FilePath)')" -ForegroundColor Red; $wbErrors++ }
         }
         # O conjunto coberto é o conjunto alterado: mesma lista, mesma contagem.
@@ -4718,6 +4748,12 @@ if ($SelfTest) {
         # sozinha: um mutante que trocasse a chamada por um laço à mão sobreviveria. É a mesma trava
         # que a fase 4 já usa para Invoke-WinForgeAclOwnerFallback.
         if ($wfF5Fonte.IndexOf('Get-WinForgeAclInheritSteps -Root', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 CITA Get-WinForgeAclInheritSteps mas não a chama - a lista da fase 2 não está virando chamada nenhuma" -ForegroundColor Red; $wbErrors++ }
+        # Com o '/C' fora, o código de saída volta a dizer alguma coisa - e os dois casos não são a
+        # mesma coisa. 2 é "a pasta sumiu desde o backup", e pasta de cache dentro de um perfil some
+        # entre a fase 2 e a fase 5 o tempo todo: virar erro faria um reparo que correu bem terminar
+        # numa lista de erros. Sem esta trava, tirar o '/C' trocaria um defeito por outro.
+        if ($wfF5Fonte -notmatch '\$c5\s*-eq\s*2') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não separa o código 2 (pasta que sumiu desde o backup) dos demais - cada pasta de cache apagada viraria erro" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF5Fonte -notmatch 'sumidas5') { Write-Host "  [ERRO] Permissões (fase 5): o resumo não conta quantas pastas já não existiam" -ForegroundColor Red; $wbErrors++ }
         if ($wfF5Fonte -notmatch 'WinForgeAclScope') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não lê o escopo guardado pela fase 2 - guardado e alterado divergiriam" -ForegroundColor Red; $wbErrors++ }
         Write-Host "  Permissões (fase 5): $($wfF5Passos.Count) chamada(s) '/inheritance:e' por entrada, pai antes de filho, nenhum '/T'"
     } catch {
