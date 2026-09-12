@@ -5170,6 +5170,23 @@ if ($SelfTest) {
         # O salto para a thread da janela precisa do callback nascido na runspace PRINCIPAL. Sem ele
         # no lugar, o pedido morre no Dispatcher e o descarte nunca acontece - calado.
         if ($sync.WinForgeAclCleanupConfirmCallback -isnot [scriptblock]) { Write-Host "  [ERRO] Permissões (descarte): `$sync.WinForgeAclCleanupConfirmCallback não é um scriptblock - o pedido não chega à thread da janela" -ForegroundColor Red; $wbErrors++ }
+        # Janela FECHANDO: Invoke-WPFUIThread é Dispatcher.Invoke síncrono e ficaria parado esperando
+        # um Dispatcher que já está desligando - a thread do pool trava e a limpeza não termina. É a
+        # mesma guarda que o download de driver já tem (wf-diag.ps1), e ela vem ANTES da de janela
+        # ausente: as duas respondem NÃO, mas a ordem é o que faz a guarda existir no fonte.
+        $wfLimpFonteQ = [string](Get-Command Request-WinForgeAclCleanupDiscard).ScriptBlock
+        $wfLimpPosFec = $wfLimpFonteQ.IndexOf('if ($sync.WinForgeClosing) { return $false }', [StringComparison]::Ordinal)
+        $wfLimpPosForm = $wfLimpFonteQ.IndexOf('$null -eq $sync.Form', [StringComparison]::Ordinal)
+        if ($wfLimpPosFec -lt 0) { Write-Host "  [ERRO] Permissões (descarte): o pedido não desiste com a janela fechando - Invoke-WPFUIThread ficaria parado esperando um Dispatcher que já está desligando" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosForm -ge 0 -and $wfLimpPosFec -gt $wfLimpPosForm) { Write-Host "  [ERRO] Permissões (descarte): a guarda de janela fechando vem depois da de janela ausente" -ForegroundColor Red; $wbErrors++ }
+        # E ela responde de verdade, não só existe no fonte.
+        $wfLimpFechandoAntes = $sync.WinForgeClosing
+        try {
+            $sync.WinForgeClosing = $true
+            if (Request-WinForgeAclCleanupDiscard -Stamps @('20250101-000000') -Bytes 1) { Write-Host "  [ERRO] Permissões (descarte): com a janela fechando o pedido respondeu SIM" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            $sync.WinForgeClosing = $wfLimpFechandoAntes
+        }
         Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20250101-000000.json') -Force -ErrorAction SilentlyContinue
         # ---- O arquivo de conteúdo que a Tarefa 7 manda para OUTRO disco. A limpeza não o enxergava:
         # ele não está na pasta protegida, e o inventário só olhava a pasta. Ficava metade do backup

@@ -5692,6 +5692,11 @@ function Request-WinForgeAclCleanupDiscard {
         Sem janela (uma sessão sem interface) a resposta é NÃO, e não "sim por omissão": não há quem
         digite a palavra, e descartar backup bom porque ninguém estava lá para recusar é exatamente
         o estrago que a palavra digitada existe para impedir.
+
+        Janela FECHANDO responde NÃO antes de qualquer outra coisa, como no download de driver da aba
+        Diagnóstico: Invoke-WPFUIThread é Dispatcher.Invoke SÍNCRONO, e chamá-lo com o Dispatcher
+        desligando deixa a thread do pool parada esperando por ele - a limpeza não termina e o
+        fechamento não completa.
     .OUTPUTS
         $true só quando alguém digitou a palavra e clicou em Descartar.
     #>
@@ -5700,6 +5705,7 @@ function Request-WinForgeAclCleanupDiscard {
         [long]$Bytes = 0
     )
 
+    if ($sync.WinForgeClosing) { return $false }
     if ($null -eq $sync -or $null -eq $sync.Form) { return $false }
     $sync.WinForgeAclCleanupConfirm = @{ Stamps = @($Stamps); Bytes = [long]$Bytes; Answer = $false }
     try {
