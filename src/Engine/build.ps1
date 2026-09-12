@@ -5467,7 +5467,45 @@ if ($SelfTest) {
         # Desfazer: caminho externo ausente diz QUAL disco ligar, e a recusa termina com a frase de §1.7.
         $wfDestFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
         if ($wfDestFonteU -notmatch 'ExternalPath') { Write-Host "  [ERRO] Permissões (Desfazer): o item de conteúdo não considera ExternalPath" -ForegroundColor Red; $wbErrors++ }
-        if ($wfDestFonteU -notmatch 'ligue o disco') { Write-Host "  [ERRO] Permissões (Desfazer): com o arquivo externo ausente, o texto não diz qual disco ligar" -ForegroundColor Red; $wbErrors++ }
+        # A instrução de "qual disco plugar" vem INTEIRA de Get-WinForgeAclDriveHint, e por isso é
+        # provada NELA, por comportamento - a trava que procurava a frase 'ligue o disco' dentro do
+        # Desfazer era da classe que o próprio revisor apontou: prosa satisfaz.
+        #
+        # Letra AUSENTE: a instrução é ligar aquele disco, e o rótulo NÃO entra. O WinForge nunca
+        # guardou o rótulo no índice, então quando o disco some não há de onde tirar o nome - e
+        # '[string]$obj.VolumeLabel' de um volume ausente lança e devolve '' em silêncio.
+        $wfDestLivre = ''
+        $wfDestUsadas = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { ([string]$_.Name).Substring(0, 1).ToUpperInvariant() })
+        foreach ($wfDestL in @('Z', 'Y', 'X', 'W', 'V', 'U', 'T')) { if ($wfDestUsadas -notcontains $wfDestL) { $wfDestLivre = $wfDestL; break } }
+        if ([string]::IsNullOrWhiteSpace($wfDestLivre)) { Write-Host "  [ERRO] Permissões (Desfazer): esta máquina não tem letra de unidade livre para provar o disco ausente" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfDestDica = [string](Get-WinForgeAclDriveHint -Path ("{0}:\backup\acl.txt" -f $wfDestLivre))
+            if ($wfDestDica -notmatch [regex]::Escape("ligue o disco $($wfDestLivre):")) { Write-Host "  [ERRO] Permissões (Desfazer): com a letra $($wfDestLivre): ausente, a instrução não manda ligar aquele disco ('$wfDestDica')" -ForegroundColor Red; $wbErrors++ }
+            if ($wfDestDica -match 'rótulo') { Write-Host "  [ERRO] Permissões (Desfazer): a instrução do disco ausente inventa um rótulo que ninguém consegue ler ('$wfDestDica')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Letra LIGADA e arquivo fora: mandar "ligue o disco C: (rótulo)" é mandar ligar o que já
+        # está ligado, com o nome do volume ERRADO - o que estiver nessa letra agora. Achado do
+        # revisor. A instrução tem de dizer que a letra está ligada e que é outro disco.
+        $wfDestDicaLigada = [string](Get-WinForgeAclDriveHint -Path (Join-Path $wfDestBom 'nao-existe.txt'))
+        foreach ($wfDestDicaFrase in @('está ligada agora', 'outro disco')) {
+            if ($wfDestDicaLigada -notmatch [regex]::Escape($wfDestDicaFrase)) { Write-Host "  [ERRO] Permissões (Desfazer): com a letra ligada, a instrução não traz '$wfDestDicaFrase' ('$wfDestDicaLigada')" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfDestDicaLigada -match '^ligue o disco') { Write-Host "  [ERRO] Permissões (Desfazer): com a letra JÁ ligada, a instrução ainda começa mandando ligar o disco ('$wfDestDicaLigada')" -ForegroundColor Red; $wbErrors++ }
+        # Caminho sem raiz não inventa letra nenhuma.
+        if ([string](Get-WinForgeAclDriveHint -Path '') -notmatch 'ligue o disco em que o backup foi guardado') { Write-Host "  [ERRO] Permissões (Desfazer): sem raiz no caminho, a instrução deveria ser a genérica" -ForegroundColor Red; $wbErrors++ }
+        # Caminho de REDE: a porta do absoluto ACEITA '\\servidor\share', e ela era a única
+        # conferência estrutural do caminho externo no Desfazer e na limpeza. Achado do revisor.
+        foreach ($wfDestRedeCaso in @(
+            @{ Path = '\\servidor\compartilhada\acl.txt'; Vale = $true },
+            @{ Path = '\\?\UNC\servidor\compartilhada\acl.txt'; Vale = $true },
+            @{ Path = 'C:\pasta\acl.txt'; Vale = $false },
+            @{ Path = '\\?\C:\pasta\acl.txt'; Vale = $false },
+            @{ Path = ''; Vale = $false }
+        )) {
+            if ([bool](Test-WinForgeAclNetworkPath -Path ([string]$wfDestRedeCaso.Path)) -ne [bool]$wfDestRedeCaso.Vale) { Write-Host "  [ERRO] Permissões (rede): '$($wfDestRedeCaso.Path)' deveria $(if ($wfDestRedeCaso.Vale) { 'ser' } else { 'NÃO ser' }) caminho de rede" -ForegroundColor Red; $wbErrors++ }
+            # E a prova de que a porta do absoluto não basta: ela ACEITA o caminho de rede.
+            if ($wfDestRedeCaso.Vale -and -not (Test-WinForgeAclAbsolutePath -Path ([string]$wfDestRedeCaso.Path))) { Write-Host "  [ERRO] Permissões (rede): '$($wfDestRedeCaso.Path)' foi recusado pela porta do absoluto - a trava de rede perderia o motivo de existir" -ForegroundColor Red; $wbErrors++ }
+        }
         # O destino é ESTADO COMPARTILHADO, e o clique que o escolhe pode ser recusado lá embaixo,
         # em Start-WinForgeStreamedCommand, que tem a conferência de trava dela própria. Zerar
         # '$sync.WinForgeAclExternalRoot' antes disso mandava o backup de uma restauração de quinze
@@ -5526,6 +5564,9 @@ if ($SelfTest) {
             @($wfDestFonteR, '[string]$sync.WinForgeAclExternalRoot', 'a restauração CITA o destino escolhido e não o LÊ'),
             @($wfDestFonteR, 'ExternalPath = [string]$externoArquivo', 'a restauração não anota o caminho externo no índice'),
             @($wfDestFonteU, '([string]$item.ExternalPath).Trim()', 'o Desfazer CITA o caminho externo e não o LÊ do item'),
+            @($wfDestFonteU, 'Test-WinForgeAclNetworkPath -Path $externo', 'o Desfazer não recusa caminho de rede antes do /restore elevado'),
+            @($wfDestFonteU, 'Get-WinForgeAclDriveHint -Path $externo', 'o Desfazer não diz qual disco ligar quando o arquivo externo não está lá'),
+            @([string](Get-Command Invoke-WinForgeAclCleanup).ScriptBlock, 'Test-WinForgeAclNetworkPath -Path ([string]$a.Path)', 'a limpeza não recusa caminho de rede antes do Remove-Item elevado'),
             @($wfDestFonteD, 'New-Object System.Windows.Forms.FolderBrowserDialog', 'a caixa CITA o seletor de pasta e não o CRIA'),
             @($wfDestFonte, '$formato -ne ''NTFS''', 'a conferência não compara o sistema de arquivos com NTFS'),
             @($wfDestFonte, '$tipo -ne ''Fixed'' -and $tipo -ne ''Removable''', 'a conferência não separa disco interno e removível dos outros tipos'),

@@ -2435,6 +2435,38 @@ function Test-WinForgeAclAbsolutePath {
     try { return ([string][System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($raiz)) -eq $raiz) } catch { return $false }
 }
 
+function Test-WinForgeAclNetworkPath {
+    <#
+    .SYNOPSIS
+        Diz se um caminho é de REDE. Função pura, só texto: não toca no disco, não resolve nome e
+        não pergunta nada à rede.
+    .DESCRIPTION
+        Existe porque Test-WinForgeAclAbsolutePath responde OUTRA pergunta e ACEITA caminho de rede -
+        '\\servidor\compartilhada' é absoluto de verdade, e para o que aquela função protege isso
+        está certo. Só que o backup de permissões tem uma regra a mais: o que sai desta máquina volta
+        por um '/restore' elevado sobre o perfil inteiro, e um compartilhamento pode ser outro entre
+        o backup e o Desfazer sem que o caminho mude. A escolha do destino já recusava rede; o
+        Desfazer e a limpeza, que recebem o caminho pronto do índice, não - e era a única
+        conferência estrutural deles. Achado do revisor da Tarefa 7.
+
+        Por TEXTO, e antes de qualquer pergunta ao disco, porque é isso que funciona com um servidor
+        que não existe: DriveInfo sobre '\\servidor\share' lança, e a recusa sairia falando de disco
+        em vez de rede. O prefixo '\\?\' é retirado antes da pergunta - ele é só a forma de dizer ao
+        Windows "não normalize" -, e a forma de rede dele é '\\?\UNC\<servidor>\<share>'.
+    .OUTPUTS
+        $true ou $false. Caminho vazio é $false.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+
+    $texto = [string]$Path
+    if ([string]::IsNullOrWhiteSpace($texto)) { return $false }
+    $tinhaPrefixo = $false
+    if ($texto.StartsWith('\\?\', [StringComparison]::Ordinal)) { $texto = $texto.Substring(4); $tinhaPrefixo = $true }
+    if ($texto.StartsWith('\\', [StringComparison]::Ordinal)) { return $true }
+    if ($tinhaPrefixo -and $texto.StartsWith('UNC\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $false
+}
+
 function Test-WinForgeAclContentRoot {
     <#
     .SYNOPSIS
@@ -2496,12 +2528,9 @@ function Test-WinForgeAclContentRoot {
         $r.Reason = 'Nenhuma pasta foi escolhida. O destino precisa ser um caminho absoluto, com o disco na frente.'
         return $r
     }
-    # ---- 1. Rede, por TEXTO e antes de tudo. O prefixo '\\?\' é retirado antes da pergunta porque
-    # ele é só a forma de dizer "não normalize"; a forma de rede dele é '\\?\UNC\<servidor>\<share>'.
-    $semPrefixo = $bruto
-    $tinhaPrefixo = $false
-    if ($semPrefixo.StartsWith('\\?\', [StringComparison]::Ordinal)) { $semPrefixo = $semPrefixo.Substring(4); $tinhaPrefixo = $true }
-    if ($semPrefixo.StartsWith('\\', [StringComparison]::Ordinal) -or ($tinhaPrefixo -and $semPrefixo.StartsWith('UNC\', [StringComparison]::OrdinalIgnoreCase))) {
+    # ---- 1. Rede, por TEXTO e antes de tudo (Test-WinForgeAclNetworkPath, a mesma porta que o
+    # Desfazer e a limpeza usam sobre o caminho já gravado no índice).
+    if (Test-WinForgeAclNetworkPath -Path $bruto) {
         $r.Reason = "'$bruto' é uma pasta de rede. O backup das permissões não sai para a rede: o arquivo volta por um /restore elevado sobre o perfil inteiro, e um compartilhamento pode ser outro entre o backup e o Desfazer sem que o caminho mude."
         return $r
     }
@@ -5165,6 +5194,16 @@ function Invoke-WinForgeAclUndo {
         $arquivoUsado = [string]$item.File
         if (-not [string]::IsNullOrWhiteSpace($externo)) {
             $arquivoUsado = $externo
+            # Rede primeiro, e por texto. A porta do absoluto ACEITA '\\servidor\share' - ele é
+            # absoluto de verdade -, e até aqui essa era a única conferência estrutural deste
+            # caminho: a escolha do destino recusa rede na primeira regra e o Desfazer não recusava,
+            # então um caminho de rede plantado no índice entrava num '/restore' elevado sobre o
+            # perfil inteiro. Achado do revisor da Tarefa 7.
+            if (Test-WinForgeAclNetworkPath -Path $externo) {
+                Write-Error "O índice manda buscar o backup do conteúdo de '$($item.Path)' em '$externo', que é um caminho de rede. O backup das permissões não volta da rede: um compartilhamento pode ser outro entre o backup e agora sem que o caminho mude. Este arquivo fica de fora e nada foi alterado."
+                $recusados++
+                continue
+            }
             # Absoluto de verdade antes de virar argumento: a mesma porta da gravação, e pela mesma
             # medição - 'C:acl.txt' e '\acl.txt' são "rooted" e resolvem contra o diretório do
             # PROCESSO, que aqui é um /restore elevado sobre o perfil inteiro.
@@ -5176,8 +5215,9 @@ function Invoke-WinForgeAclUndo {
             if (-not (Test-Path -LiteralPath $externo -PathType Leaf)) {
                 # A pergunta que o usuário tem na cabeça não é "cadê o arquivo", é "qual disco eu
                 # tenho de plugar". Quem responde é Get-WinForgeAclDriveHint, a mesma função que a
-                # limpeza usa para o mesmo arquivo - a frase tem de ser a mesma nas duas telas.
-                Write-Error "O backup do conteúdo de '$($item.Path)' foi guardado fora da pasta do WinForge, em '$externo', e o arquivo não está lá: ligue o disco $(Get-WinForgeAclDriveHint -Path $externo) e tente de novo. Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$externo' e tente outra vez."
+                # limpeza usa para o mesmo arquivo - a frase tem de ser a mesma nas duas telas, e ela
+                # vem INTEIRA de lá porque muda de forma conforme a letra esteja ligada ou não.
+                Write-Error "O backup do conteúdo de '$($item.Path)' foi guardado fora da pasta do WinForge, em '$externo', e o arquivo não está lá: $(Get-WinForgeAclDriveHint -Path $externo). Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$externo' e tente outra vez."
                 $recusados++
                 continue
             }
@@ -5296,36 +5336,51 @@ function Invoke-WinForgeAclUndo {
 function Get-WinForgeAclDriveHint {
     <#
     .SYNOPSIS
-        Como chamar, na tela, o disco onde um caminho mora: a letra e o rótulo do volume. Só lê.
+        A INSTRUÇÃO de tela para quem procura um backup que foi para outro disco. Só lê.
     .DESCRIPTION
         A pergunta que o usuário tem na cabeça quando o backup foi para outro disco não é "cadê o
-        arquivo", é "qual disco eu tenho de plugar". A resposta é a letra mais o NOME que ele deu ao
-        volume, que é o que está escrito na etiqueta e o que o Explorer mostra.
+        arquivo", é "qual disco eu tenho de plugar". Quem responde é esta função, e ela devolve a
+        frase INTEIRA - não um pedaço para quem chama emendar. Os dois chamadores (o Desfazer e a
+        limpeza) mostram a mesma coisa, e a frase muda de forma entre os casos: emendá-la fora daqui
+        obrigaria os dois a repetir a decisão.
 
-        O rótulo só é lido com a unidade PRONTA: ler '.VolumeLabel' de um volume ausente LANÇA, e
-        '[string]$obj.Propriedade' sobre propriedade que lança devolve '' em silêncio - o que daria
-        um "( )" sem sentido no meio da frase. Sem unidade pronta a resposta é "não está ligado",
-        que é a informação que falta.
+        São três casos, e o terceiro é o que essa frase errava antes. Achado do revisor da Tarefa 7:
+
+        1. Sem raiz no caminho - não há letra a nomear, e a instrução é genérica.
+        2. A letra NÃO está ligada. É o caso comum, e a instrução é "ligue o disco <letra>". O
+           rótulo não entra: ler '.VolumeLabel' de um volume ausente LANÇA, e
+           '[string]$obj.Propriedade' sobre propriedade que lança devolve '' em silêncio - o que
+           daria um "( )" sem sentido no meio da frase. O WinForge nunca guardou o rótulo do disco
+           no índice, então quando ele some não há de onde tirar o nome.
+        3. A letra ESTÁ ligada e o arquivo não está lá. Mandar "ligue o disco E: (Backup)" aqui era
+           mandar ligar um disco que já está ligado, com o rótulo de OUTRO volume - o que estiver
+           nessa letra agora. As duas explicações possíveis são honestas e cabem na frase: ou a
+           letra foi reaproveitada por outro disco, ou o arquivo foi apagado de lá.
     .OUTPUTS
-        Texto no formato '<letra> (<rótulo>)', pronto para entrar depois de "ligue o disco".
+        A frase, começando em minúscula e terminando em "tente de novo", para entrar depois de um
+        dois-pontos.
     #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
 
     $raiz = ''
     try { $raiz = [string][System.IO.Path]::GetPathRoot([string]$Path) } catch { $raiz = '' }
     $letra = $raiz.TrimEnd('\')
-    if ([string]::IsNullOrWhiteSpace($letra)) { $letra = 'do backup' }
-    $rotulo = 'não está ligado'
+    if ([string]::IsNullOrWhiteSpace($letra)) { return 'ligue o disco em que o backup foi guardado e tente de novo' }
+    $ligada = $false
+    $rotulo = ''
     try {
-        if (-not [string]::IsNullOrWhiteSpace($raiz)) {
-            $unidade = New-Object System.IO.DriveInfo ($raiz)
-            if ($unidade.IsReady) {
-                $nome = [string]$unidade.VolumeLabel
-                $rotulo = if ([string]::IsNullOrWhiteSpace($nome)) { 'sem rótulo' } else { $nome }
-            }
+        $unidade = New-Object System.IO.DriveInfo ($raiz)
+        if ($unidade.IsReady) {
+            $ligada = $true
+            $nome = [string]$unidade.VolumeLabel
+            $rotulo = if ([string]::IsNullOrWhiteSpace($nome)) { 'sem rótulo' } else { $nome }
         }
-    } catch { $rotulo = 'não está ligado' }
-    return "$letra ($rotulo)"
+    } catch {
+        $ligada = $false
+        $rotulo = ''
+    }
+    if (-not $ligada) { return "ligue o disco $letra e tente de novo" }
+    return "a letra $letra está ligada agora e tem o rótulo '$rotulo', então ou essa letra é de outro disco, ou o arquivo foi apagado de lá; ligue o disco em que o backup foi guardado e tente de novo"
 }
 
 function Get-WinForgeAclBackupInventory {
@@ -5931,13 +5986,19 @@ function Invoke-WinForgeAclCleanup {
         # Disco desligado não é falha, é instrução: o item continua no índice, o arquivo continua no
         # outro disco, e a limpeza seguinte o alcança. Dizer qual disco ligar é o que resolve.
         if ($a.External -and $a.Missing) {
-            $ausentes += ("'$($a.Path)' - ligue o disco $(Get-WinForgeAclDriveHint -Path ([string]$a.Path))")
+            $ausentes += ("'$($a.Path)' - $(Get-WinForgeAclDriveHint -Path ([string]$a.Path))")
             Write-Host ("  PULADO, disco indisponível: $(& $linha $a)")
             continue
         }
         # O caminho externo vem de um arquivo de texto, e aqui ele vira argumento de um Remove-Item
-        # elevado. Mesma porta da gravação e do Desfazer, e pela mesma medição: 'C:acl.txt' e
-        # '\acl.txt' são "rooted" e resolvem contra o diretório do PROCESSO.
+        # elevado. Mesmas duas portas do Desfazer, e pelo mesmo motivo: rede primeiro (a porta do
+        # absoluto ACEITA '\\servidor\share', e apagar na rede é o mesmo risco com outro nome) e
+        # depois o absoluto, porque 'C:acl.txt' e '\acl.txt' são "rooted" e resolvem contra o
+        # diretório do PROCESSO.
+        if ($a.External -and (Test-WinForgeAclNetworkPath -Path ([string]$a.Path))) {
+            $falhas += ("'$($a.Path)': o índice guardou um caminho de rede, e a limpeza não apaga na rede")
+            continue
+        }
         if ($a.External -and -not (Test-WinForgeAclAbsolutePath -Path ([string]$a.Path))) {
             $falhas += ("'$($a.Path)': o índice guardou um caminho que não é absoluto")
             continue
@@ -5958,7 +6019,7 @@ function Invoke-WinForgeAclCleanup {
     # dele que o inventário enxerga aquele caminho. Rodar a limpeza de novo com o disco ligado não
     # acharia mais nada. Guardar o índice para uma segunda passada reabriria o beco sem saída que a
     # rodada anterior fechou, então o que sobra - e o que é honesto - é mandar apagar à mão.
-    if ($ausentes.Count) { Write-Warning ("Backup de conteúdo em outro disco, que não estava disponível agora: {0}. Estes arquivos continuam ocupando espaço lá, e o índice que o nomeava saiu junto nesta limpeza - uma segunda passada não vai mais encontrá-los. Ligue o disco e apague à mão o arquivo no caminho acima." -f ($ausentes -join '; ')) }
+    if ($ausentes.Count) { Write-Warning ("Backup de conteúdo em outro disco, que não estava disponível agora: {0}. Estes arquivos continuam ocupando espaço lá, e o índice que o nomeava saiu junto nesta limpeza - uma segunda passada não vai mais encontrá-los. Apague-os à mão, no disco em que eles foram guardados." -f ($ausentes -join '; ')) }
     if ($aMao.Count) { Write-Warning ("Estes arquivos estão fora da pasta protegida e o índice que os nomeia não passou na conferência de confiança, então o WinForge NÃO os apaga: {0}. Confira o caminho e apague à mão se ele for mesmo seu." -f ($aMao -join '; ')) }
     if ($falhas.Count) { Write-Error ("Não foi possível apagar: {0}." -f ($falhas -join '; ')) }
     $sobrando = @($todos | Where-Object { $_.Path -notin @($alvos | ForEach-Object { [string]$_.Path }) }).Count
