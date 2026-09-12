@@ -3867,13 +3867,16 @@ if ($SelfTest) {
             if (([string]$wfAclLinhaU).IndexOf(' /L', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (simulação): '$wfAclLinhaU' faz '/restore' sem '/L' - a DACL das junções do perfil cairia nos destinos delas" -ForegroundColor Red; $wbErrors++ }
         }
         $wfAclFonteUndo = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
-        # O vetor traz '/L' e NÃO traz '/C'. O '/C' zera o código de saída (medido: alvo inexistente
-        # sai 0 com '/C' e 2 sem), e era ele que alimentava '$aplicados++' - o Desfazer contava como
-        # restaurado um arquivo que pode não ter aplicado uma linha. Contar assim é exatamente a
-        # promessa que este botão existe para não fazer.
-        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não é '<pasta> /restore <arquivo> /L'" -ForegroundColor Red; $wbErrors++ }
-        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/C'", [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (desfazer): o '/C' voltou ao '/restore' - com ele o código de saída é sempre 0 e '`$aplicados' conta o que não foi aplicado" -ForegroundColor Red; $wbErrors++ }
-        if ($wfAclFonteUndo -notmatch '\$codigo\s*-eq\s*2') { Write-Host "  [ERRO] Permissões (desfazer): o '/restore' não separa o código 2 (pasta guardada que sumiu) dos demais" -ForegroundColor Red; $wbErrors++ }
+        # O vetor traz '/C' E '/L', e o '/C' é o OPOSTO do que a fase 5 faz - de propósito, porque a
+        # pergunta é outra. Lá é um alvo único por chamada: não há o que continuar, e o código de
+        # saída é o único sinal (medido: pasta inexistente sai 2 sem '/C' e 0 com). Aqui é UMA
+        # chamada para um arquivo de centenas de entradas, e continuar apesar do erro é o
+        # comportamento desejado: sem '/C' o icacls pode PARAR na primeira entrada morta, e uma
+        # pasta que sumiu desde o backup não pode custar a restauração das outras. Abortar no meio é
+        # pior do que contar errado - este botão é o último recurso de quem acabou de ter as
+        # permissões do disco reescritas. O sinal de "aplicou mesmo" vem da conferência por
+        # amostragem da Tarefa 5, e não do código de saída daqui.
+        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/C', '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não é '<pasta> /restore <arquivo> /C /L' - sem '/C' o icacls pode parar na primeira entrada morta; sem '/L' a DACL das junções cai nos destinos delas" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclFonteUndo.IndexOf('Restore-WinForgeAclSddl -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o Desfazer não reaplica a lista da pasta em si (SDDL)" -ForegroundColor Red; $wbErrors++ }
         # E a outra ponta: o que a fase 2 indexa. O arquivo do conteúdo só pode ser endurecido - e
         # daí indexado - depois de a caminhada ter terminado inteira, do espaço ter sido conferido

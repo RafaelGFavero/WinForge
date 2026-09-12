@@ -3856,7 +3856,7 @@ function Invoke-WinForgeAclUndo {
           responde "arquivo não encontrado". Sem a barra o arquivo sai com UM par nomeado pela
           FOLHA, que é outra forma de chamada e a que Get-WinForgeAclIcaclsSddl usa para LER um
           descritor. O que o Desfazer precisa aqui é aplicar, e para isso o SDDL do índice basta.
-        - O CONTEÚDO do perfil volta por 'icacls <pasta acima> /restore <arquivo> /L', rodado a
+        - O CONTEÚDO do perfil volta por 'icacls <pasta acima> /restore <arquivo> /C /L', rodado a
           partir da pasta anotada no índice: o icacls grava nomes RELATIVOS à pasta em que foi
           invocado, e restaurar da pasta errada aplicaria a DACL de uma coisa em outra. O '/L' é
           obrigatório e é o par do '/T' do backup: sem ele o '/restore' abre cada item SEGUINDO o
@@ -3985,21 +3985,29 @@ function Invoke-WinForgeAclUndo {
         Write-Host "Restaurando o conteúdo de '$($item.Path)' a partir de '$($item.Target)'."
         # '/L' é obrigatório aqui: ver a descrição da função.
         #
-        # E o '/C' saiu, pela mesma medição que o tirou da fase 5: com ele o icacls sai com 0
-        # mesmo sem achar o alvo, e este 'if' contava como RESTAURADO um arquivo que pode não ter
-        # aplicado uma linha sequer. Contar assim é a promessa que o botão Desfazer existe para não
-        # fazer. O código 2 continua não sendo erro - é a pasta que sumiu desde o backup -, mas
-        # também não conta como aplicado, porque não foi.
-        $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', [string]$item.File, '/L')
+        # E o '/C' FICA, ao contrário da fase 5, que roda sem ele. Os dois lados usam o mesmo
+        # icacls e recebem tratamento oposto de propósito, porque a pergunta é outra:
+        #
+        # - Fase 5: alvo ÚNICO, uma pasta por chamada. Não há o que "continuar" dentro de uma
+        #   chamada só, então o '/C' apenas apagaria o código de saída - e o código de saída é o
+        #   único sinal que aquela fase tem. Lá ele sai, e está MEDIDO (pasta inexistente: 2 sem
+        #   '/C', 0 com).
+        # - Aqui: uma chamada para um arquivo de CENTENAS de entradas. Continuar apesar do erro é o
+        #   comportamento desejado - uma pasta que sumiu desde o backup não pode custar a
+        #   restauração das outras 337. Sem '/C' o icacls pode PARAR na primeira entrada morta, e
+        #   abortar no meio é pior do que contar errado: quem clica neste botão acabou de ter as
+        #   permissões do disco reescritas e ele é o último recurso.
+        #
+        # O preço continua sendo o que é: com '/C' o código de saída é 0 quase sempre, então o
+        # '$aplicados++' abaixo diz "o icacls rodou", e não "todas as entradas foram aplicadas".
+        # Esse sinal volta pela CONFERÊNCIA POR AMOSTRAGEM da Tarefa 5 - reler a lista de algumas
+        # pastas depois do '/restore' e comparar com o descritor guardado no arquivo. Não ficou
+        # esquecido: é comportamento medido e não depende de idioma, que é justamente o que ler a
+        # frase de resumo do icacls não garante (a integração contínua deste projeto roda em inglês
+        # e já quebrou uma asserção assim).
+        $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', [string]$item.File, '/C', '/L')
         Write-Host ([string]$r.Text)
-        $codigo = [int]$r.ExitCode
-        if ($codigo -eq 0) { $aplicados++ }
-        elseif ($codigo -eq 2) {
-            Write-Warning "O conteúdo de '$($item.Path)' não pôde ser aplicado inteiro: alguma pasta guardada já não existe (código 2). O que existe continua como está; nada foi apagado."
-            $recusados++
-        } else {
-            Write-Error "Este arquivo terminou com código $codigo."
-        }
+        if ([int]$r.ExitCode -ne 0) { Write-Error "Este arquivo terminou com código $($r.ExitCode)." } else { $aplicados++ }
     }
     Write-Host ''
     Write-Host "Desfazer concluído: $aplicados item(ns) restaurados, $recusados fora."
