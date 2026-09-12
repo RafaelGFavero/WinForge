@@ -2283,6 +2283,109 @@ function Get-WinForgeAclContentScope {
     return $r
 }
 
+function Write-WinForgeAclContentBackup {
+    <#
+    .SYNOPSIS
+        Grava a lista que a caminhada devolveu no formato que o 'icacls /restore' lê. É o ÚNICO
+        ponto do programa que escreve o arquivo de conteúdo.
+    .DESCRIPTION
+        O formato foi MEDIDO no arquivo que o 'icacls /save' escreve, e são dois fatos:
+
+        1. UTF-16LE SEM BOM. Os primeiros bytes do arquivo real são '72 00 61 00' - o "ra" do nome da
+           primeira pasta - e não 'FF FE'. Em .NET 4.8 quem produz isso é UnicodeEncoding($false,
+           $false): o primeiro $false é "não big-endian", o segundo é "não emita a marca".
+           '[System.Text.Encoding]::Unicode' TEM a marca. O que está MEDIDO é o arquivo do icacls
+           não ter marca nenhuma - o SelfTest confere isso a cada build, comparando os nossos bytes
+           com os de um '/save' da mesma árvore. Que o '/restore' RECUSE um arquivo que comece com
+           a marca é pesquisa, não medição: ele habilita SeRestorePrivilege na entrada e por isso
+           não roda sem admin, onde o SelfTest vive. A regra prática não muda nos dois casos -
+           escrever exatamente o que o icacls escreve.
+        2. Par de linhas: '<nome relativo>' CRLF '<SDDL>' CRLF. O nome é relativo à pasta ACIMA do
+           perfil, que é a pasta passada ao 'icacls <pasta> /restore'; quem monta esse nome é
+           Get-WinForgeAclContentScope.
+
+        O SDDL vem do .NET, e não do icacls. Nas amostras conferidas os dois são -ceq; quando
+        diferem, diferem só na ORDEM das ACEs, porque o .NET as entrega em ordem canônica - 34 de 338
+        entradas no perfil medido. Numa lista só de permissão a ordem é indiferente. Com ACE de
+        NEGAÇÃO não é: negação só vence quando vem antes. Por isso a caminhada devolve 'Deny' e é o
+        chamador que desvia essas pastas para um '/save' de verdade; aqui não há como recuperar uma
+        ordem que já chegou canônica.
+
+        A trava de SelfTest vem antes de qualquer abertura de arquivo: esta função escreve, e o
+        SelfTest não altera a máquina.
+    .OUTPUTS
+        @{ Ok; Reason; Count; Bytes }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries
+    )
+
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    $r = @{ Ok = $false; Reason = ''; Count = 0; Bytes = 0 }
+    $itens = @($Entries)
+    # Lista vazia não vira arquivo vazio: um backup sem entrada nenhuma é contado como rede de
+    # segurança pelo índice e não segura nada. Quem chama trata isso como "esta pasta fica fora".
+    if ($itens.Count -lt 1) {
+        $r.Reason = 'A lista de pastas veio vazia; não há permissão nenhuma para guardar.'
+        return $r
+    }
+    try {
+        # UnicodeEncoding($false, $false): UTF-16LE, sem BOM e sem detecção. É o formato medido no
+        # arquivo que o 'icacls /save' escreve, e é o que o '/restore' aceita - com BOM ele recusa.
+        $enc = New-Object System.Text.UnicodeEncoding($false, $false)
+        $escritor = New-Object System.IO.StreamWriter($Path, $false, $enc)
+        try {
+            foreach ($e in $itens) {
+                $escritor.Write([string]$e.Name); $escritor.Write("`r`n")
+                $escritor.Write([string]$e.Sddl); $escritor.Write("`r`n")
+            }
+        } finally { $escritor.Dispose() }
+        $r.Count = $itens.Count
+        $r.Bytes = [long](New-Object System.IO.FileInfo ([string]$Path)).Length
+        $r.Ok = $true
+    } catch {
+        $r.Reason = $_.Exception.Message
+    }
+    return $r
+}
+
+function Get-WinForgeAclContentHash {
+    <#
+    .SYNOPSIS
+        A impressão digital SHA-256 de um arquivo de backup de permissões, em maiúsculas. Só lê.
+    .DESCRIPTION
+        FileShare.Read, e não FileShare.None: o arquivo de backup é endurecido e conferido por outras
+        partes do reparo, que o abrem para ler. Pedir exclusividade faria a impressão digital falhar
+        justamente quando alguém está olhando o mesmo arquivo - e um 'não consegui' aqui vira
+        "backup sem impressão digital", que é o mesmo que backup sem conferência.
+
+        O hash sai do FLUXO, não dos bytes carregados na memória: ComputeHash(Stream) lê em pedaços,
+        e o arquivo pode ter centenas de MB.
+    .OUTPUTS
+        @{ Ok; Reason; Hash }. 'Hash' são 64 caracteres hexadecimais em MAIÚSCULAS, ou '' quando o
+        arquivo não pôde ser lido.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $r = @{ Ok = $false; Reason = ''; Hash = '' }
+    $sha = $null
+    $fluxo = $null
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $fluxo = [System.IO.File]::Open([string]$Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $r.Hash = [string](([System.BitConverter]::ToString($sha.ComputeHash($fluxo))) -replace '-', '')
+        $r.Ok = $true
+    } catch {
+        $r.Reason = $_.Exception.Message
+    } finally {
+        if ($null -ne $fluxo) { $fluxo.Dispose() }
+        if ($null -ne $sha) { $sha.Dispose() }
+    }
+    return $r
+}
+
 function Restore-WinForgeAclSddl {
     <#
     .SYNOPSIS
@@ -2367,18 +2470,31 @@ function Measure-WinForgeAclSaveEntry {
         separa um backup com conteúdo de um arquivo que o '/save' criou e não conseguiu preencher
         (pasta com DACL só de SYSTEM, 'System Volume Information' e parentes), que era indexado e
         contado como se fosse rede de segurança.
+
+        A leitura é por FLUXO, uma linha de cada vez. Um backup de perfil inteiro guardado pela 1.7.0
+        passa dos 100 MB; materializar as linhas num vetor só para olhar as duas primeiras letras de
+        cada uma é OutOfMemoryException numa função que não precisa de nenhuma linha depois de
+        contá-la.
     .OUTPUTS
         O número de entradas; 0 quando o arquivo não pôde ser lido.
     #>
     param([Parameter(Mandatory)][string]$Path)
 
+    $leitor = $null
     try {
-        return @(Get-Content -LiteralPath $Path -Encoding Unicode -ErrorAction Stop | Where-Object {
-            $t = ([string]$_).Trim()
-            $t.StartsWith('D:', [StringComparison]::Ordinal) -or $t.StartsWith('O:', [StringComparison]::Ordinal)
-        }).Count
+        # O $false final desliga a detecção pela marca: o formato medido não tem marca nenhuma, e
+        # assim a decodificação fica presa em UTF-16LE em vez de depender dos primeiros bytes.
+        $leitor = New-Object System.IO.StreamReader([string]$Path, [System.Text.Encoding]::Unicode, $false)
+        $n = 0
+        while ($null -ne ($linha = $leitor.ReadLine())) {
+            $t = ([string]$linha).Trim()
+            if ($t.StartsWith('D:', [StringComparison]::Ordinal) -or $t.StartsWith('O:', [StringComparison]::Ordinal)) { $n++ }
+        }
+        return $n
     } catch {
         return 0
+    } finally {
+        if ($null -ne $leitor) { $leitor.Dispose() }
     }
 }
 

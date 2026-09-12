@@ -4219,6 +4219,128 @@ if ($SelfTest) {
         try { cmd.exe /c rmdir "$wfCamRaiz\perfil\AppData\Local\Dados de Aplicativos" 2>$null | Out-Null } catch { }
         Remove-Item -LiteralPath $wfCamRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- Permissões: o arquivo e a contraprova
+    # É o único ponto do desenho sem prova: gravar o arquivo de conteúdo e conferir byte a byte que
+    # ele é o que o icacls escreveria. Roda em %TEMP%, sem elevação.
+    #
+    # A prova NÃO é um '/restore'. Medido aqui, sem elevação: 'icacls <raiz> /restore <arq> /C /L'
+    # responde 1300 ("Nem todos os privilégios ou grupos mencionados estão atribuídos ao chamador"),
+    # diz "Processados com sucesso 0 arquivos" e deixa a DACL como estava - com QUALQUER combinação
+    # de /C, /L e /Q, e mesmo com o arquivo que o próprio icacls acabou de gravar. Ele habilita
+    # SeRestorePrivilege na entrada, antes de olhar o conteúdo, e o SelfTest roda sem admin. É a
+    # mesma razão que já mantém o '/restore' do conteúdo fora do SelfTest (bloco 3a3).
+    #
+    # A contraprova é o '/save', que roda sem elevação E é o AUTOR do formato: o arquivo que ele
+    # escreve para a MESMA árvore tem de trazer o mesmo nome relativo, o mesmo SDDL e o mesmo
+    # encoding que o nosso. Um '/restore' que aceitasse o arquivo diria menos: ele aceita em
+    # silêncio o que decodificar, e é justo o encoding que precisa ser cobrado.
+    $wfArqRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-arquivo'
+    $wfArqSelfAntes = $sync.SelfTest
+    try {
+        if (Test-Path -LiteralPath $wfArqRaiz) { Remove-Item -LiteralPath $wfArqRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfArqPerfil = Join-Path $wfArqRaiz 'perfil'
+        $wfArqAlvo = Join-Path $wfArqPerfil 'Protegida'
+        New-Item -ItemType Directory -Path $wfArqAlvo -Force | Out-Null
+        $wfArqDir = New-Object System.IO.DirectoryInfo $wfArqAlvo
+        $wfArqSd = $wfArqDir.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfArqSd.SetAccessRuleProtection($true, $true)
+        $wfArqDir.SetAccessControl($wfArqSd)
+        $wfArqEscopo = Get-WinForgeAclContentScope -Path $wfArqPerfil
+        if (-not $wfArqEscopo.Ok -or @($wfArqEscopo.Entries).Count -lt 1) { throw "o escopo de teste saiu vazio ($($wfArqEscopo.Reason))" }
+        $wfArqSddlAntes = [string]@($wfArqEscopo.Entries)[0].Sddl
+
+        $wfArqArquivo = Join-Path $wfArqRaiz 'conteudo.txt'
+        # A gravação é o ÚNICO ponto que escreve o arquivo de conteúdo, e por isso recusa em
+        # SelfTest. A trava é desligada só em volta desta chamada; o 'finally' a devolve mesmo se
+        # algo estourar no meio.
+        $sync.SelfTest = $false
+        $wfArqGrav = Write-WinForgeAclContentBackup -Path $wfArqArquivo -Entries @($wfArqEscopo.Entries)
+        $sync.SelfTest = $wfArqSelfAntes
+        if (-not $sync.SelfTest) { Write-Host "  [ERRO] Permissões (arquivo): a trava de SelfTest não voltou depois da gravação" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfArqGrav.Ok) { throw "a gravação falhou: $($wfArqGrav.Reason)" }
+        # UTF-16LE SEM BOM, pares de linhas - é o que o arquivo do icacls traz, conferido logo
+        # abaixo. Cobrar só a AUSÊNCIA de 'FF FE' deixaria passar UTF-8, ASCII e arquivo vazio (o
+        # mutante que troca o encoder por UTF8Encoding sobreviveria), por isso o teste afirma
+        # o encoding: o primeiro nome é 'perfil\Protegida', então os dois primeiros bytes têm de ser
+        # 0x70 ('p') e 0x00 (o byte alto do UTF-16LE).
+        $wfArqBytes = [System.IO.File]::ReadAllBytes($wfArqArquivo)
+        if ($wfArqBytes.Length -lt 4) { Write-Host "  [ERRO] Permissões (arquivo): o arquivo saiu com $($wfArqBytes.Length) byte(s)" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqBytes[0] -eq 0xFF -and $wfArqBytes[1] -eq 0xFE) { Write-Host "  [ERRO] Permissões (arquivo): o arquivo saiu COM BOM - o formato medido é UTF-16LE sem BOM" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqBytes[0] -ne 0x70 -or $wfArqBytes[1] -ne 0x00) { Write-Host "  [ERRO] Permissões (arquivo): os dois primeiros bytes são $('0x{0:X2} 0x{1:X2}' -f $wfArqBytes[0], $wfArqBytes[1]), esperado 0x70 0x00 - isto não é UTF-16LE" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfArqGrav.Count -ne @($wfArqEscopo.Entries).Count) { Write-Host "  [ERRO] Permissões (arquivo): a gravação relatou Count=$($wfArqGrav.Count) para $(@($wfArqEscopo.Entries).Count) entrada(s)" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfArqGrav.Bytes -ne [long]$wfArqBytes.Length) { Write-Host "  [ERRO] Permissões (arquivo): a gravação relatou Bytes=$($wfArqGrav.Bytes) e o arquivo tem $($wfArqBytes.Length)" -ForegroundColor Red; $wbErrors++ }
+        $wfArqLinhas = @([System.IO.File]::ReadAllText($wfArqArquivo, [System.Text.Encoding]::Unicode) -split "`r`n" | Where-Object { $_ -ne '' })
+        if ($wfArqLinhas.Count -ne (2 * @($wfArqEscopo.Entries).Count)) { Write-Host "  [ERRO] Permissões (arquivo): $($wfArqLinhas.Count) linha(s) úteis para $(@($wfArqEscopo.Entries).Count) entrada(s) - o formato é um par por entrada" -ForegroundColor Red; $wbErrors++ }
+        # -cne nas duas: o arquivo tem de trazer o texto que a caminhada leu, e não uma versão dele
+        # com a caixa mexida. O icacls trata 'FA' e 'fa' como o mesmo direito, então uma comparação
+        # sem caixa aceitaria um escritor que reescreve o que copia - e aí não é mais cópia.
+        if ([string]$wfArqLinhas[0] -cne 'perfil\Protegida') { Write-Host "  [ERRO] Permissões (arquivo): a primeira linha é '$($wfArqLinhas[0])', esperado o nome relativo 'perfil\Protegida'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfArqLinhas[1] -cne $wfArqSddlAntes) { Write-Host "  [ERRO] Permissões (arquivo): o SDDL gravado difere do lido" -ForegroundColor Red; $wbErrors++ }
+        if ((Measure-WinForgeAclSaveEntry -Path $wfArqArquivo) -ne @($wfArqEscopo.Entries).Count) { Write-Host "  [ERRO] Permissões (arquivo): a contagem de entradas não bate" -ForegroundColor Red; $wbErrors++ }
+
+        # CONTRAPROVA: o arquivo que o PRÓPRIO icacls escreve para a mesma árvore.
+        $wfArqIcacls = Get-WinForgeSystemExe -Name 'icacls.exe'
+        $wfArqRef = Join-Path $wfArqRaiz 'referencia.txt'
+        $wfArqRes = Invoke-WinForgeNativeCommand -FilePath $wfArqIcacls -Arguments @($wfArqPerfil, '/save', $wfArqRef, '/T', '/C', '/L') -Encoding 'oem'
+        if ([int]$wfArqRes.ExitCode -ne 0) { Write-Host "  [ERRO] Permissões (contraprova): o /save terminou com código $($wfArqRes.ExitCode): $(([string]$wfArqRes.Text).Trim())" -ForegroundColor Red; $wbErrors++ }
+        $wfArqRefBytes = [System.IO.File]::ReadAllBytes($wfArqRef)
+        # A medida que justifica UnicodeEncoding($false, $false), feita AQUI e não copiada da
+        # pesquisa: o arquivo do icacls não começa com a marca. Se um dia começar, é o nosso
+        # escritor que passa a estar errado, e é este erro que avisa.
+        if ($wfArqRefBytes.Length -lt 4) { Write-Host "  [ERRO] Permissões (contraprova): o /save gravou $($wfArqRefBytes.Length) byte(s)" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqRefBytes[0] -eq 0xFF -and $wfArqRefBytes[1] -eq 0xFE) { Write-Host "  [ERRO] Permissões (contraprova): o arquivo do icacls veio COM BOM - o formato medido mudou e o escritor tem de acompanhar" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqRefBytes[0] -ne 0x70 -or $wfArqRefBytes[1] -ne 0x00) { Write-Host "  [ERRO] Permissões (contraprova): o arquivo do icacls começa com $('0x{0:X2} 0x{1:X2}' -f $wfArqRefBytes[0], $wfArqRefBytes[1]), esperado 0x70 0x00" -ForegroundColor Red; $wbErrors++ }
+        $wfArqRefLinhas = @([System.IO.File]::ReadAllText($wfArqRef, [System.Text.Encoding]::Unicode) -split "`r`n" | Where-Object { $_ -ne '' })
+        # O nome relativo é escolha do icacls, não nossa: dado '<pasta>\perfil', ele grava
+        # 'perfil\Protegida'. É o que a caminhada monta, e é aqui que as duas versões se encontram.
+        $wfArqRefIdx = [array]::IndexOf($wfArqRefLinhas, 'perfil\Protegida')
+        if ($wfArqRefIdx -lt 0 -or $wfArqRefIdx + 1 -ge $wfArqRefLinhas.Count) { Write-Host "  [ERRO] Permissões (contraprova): o icacls não gravou o par de 'perfil\Protegida' ($($wfArqRefLinhas.Count) linha(s) úteis)" -ForegroundColor Red; $wbErrors++ }
+        # -cne: o SDDL é comparado com MAIÚSCULAS E MINÚSCULAS. 'FA' e 'fa' são o mesmo direito para
+        # o icacls, mas uma diferença de caixa aqui significaria que o texto não saiu do mesmo lugar.
+        elseif ([string]$wfArqRefLinhas[$wfArqRefIdx + 1] -cne $wfArqSddlAntes) { Write-Host "  [ERRO] Permissões (contraprova): o SDDL do .NET difere do que o icacls gravou`n    .NET  : $wfArqSddlAntes`n    icacls: $($wfArqRefLinhas[$wfArqRefIdx + 1])" -ForegroundColor Red; $wbErrors++ }
+        # E a contagem lida num arquivo do PRÓPRIO icacls, que é o caso real: duas entradas, 'perfil'
+        # e 'perfil\Protegida'. Contar só o arquivo que nós mesmos escrevemos deixaria passar um erro
+        # que o escritor e o leitor cometessem juntos.
+        if ((Measure-WinForgeAclSaveEntry -Path $wfArqRef) -ne 2) { Write-Host "  [ERRO] Permissões (contraprova): a contagem no arquivo do icacls deu $(Measure-WinForgeAclSaveEntry -Path $wfArqRef), esperado 2 ('perfil' e 'perfil\Protegida')" -ForegroundColor Red; $wbErrors++ }
+
+        # SHA-256: um byte muda e a impressão digital muda.
+        $wfArqH1 = Get-WinForgeAclContentHash -Path $wfArqArquivo
+        # 64 hexadecimais em MAIÚSCULAS, cobrado com -cnotmatch: o índice grava esta impressão e
+        # depois a compara como texto, então a caixa faz parte do contrato.
+        if (-not $wfArqH1.Ok -or [string]$wfArqH1.Hash -cnotmatch '^[0-9A-F]{64}$') { Write-Host "  [ERRO] Permissões (SHA-256): '$($wfArqH1.Hash)' ($($wfArqH1.Reason))" -ForegroundColor Red; $wbErrors++ }
+        Add-Content -LiteralPath $wfArqArquivo -Value ' ' -Encoding Unicode
+        $wfArqH2 = Get-WinForgeAclContentHash -Path $wfArqArquivo
+        if ([string]$wfArqH2.Hash -eq [string]$wfArqH1.Hash) { Write-Host "  [ERRO] Permissões (SHA-256): a impressão digital não mudou com o arquivo alterado" -ForegroundColor Red; $wbErrors++ }
+        # Lista vazia não pode virar arquivo vazio: o índice contaria esse arquivo como rede de
+        # segurança e ele não segura nada. Quem chama trata a recusa como "esta pasta fica fora".
+        $wfArqVazioCam = Join-Path $wfArqRaiz 'vazio.txt'
+        $sync.SelfTest = $false
+        $wfArqVazio = Write-WinForgeAclContentBackup -Path $wfArqVazioCam -Entries @()
+        $sync.SelfTest = $wfArqSelfAntes
+        if ($wfArqVazio.Ok) { Write-Host "  [ERRO] Permissões (arquivo): a lista vazia devolveu Ok=`$true" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfArqVazioCam) { Write-Host "  [ERRO] Permissões (arquivo): a lista vazia deixou um arquivo em '$wfArqVazioCam'" -ForegroundColor Red; $wbErrors++ }
+        # E a gravação recusa em modo SelfTest - é o único ponto que escreve. Duas provas: a trava no
+        # fonte e o COMPORTAMENTO, porque uma trava posta depois da abertura do arquivo passaria na
+        # primeira e escreveria assim mesmo.
+        $wfArqFonteW = [string](Get-Command Write-WinForgeAclContentBackup).ScriptBlock
+        if ($wfArqFonteW -notmatch 'Assert-WinForgeNotSelfTest') { Write-Host "  [ERRO] Permissões (arquivo): Write-WinForgeAclContentBackup sem a trava de SelfTest" -ForegroundColor Red; $wbErrors++ }
+        $wfArqRecusaCam = Join-Path $wfArqRaiz 'recusado.txt'
+        $wfArqRecusa = $null
+        try { Write-WinForgeAclContentBackup -Path $wfArqRecusaCam -Entries @($wfArqEscopo.Entries) | Out-Null } catch { $wfArqRecusa = [string]$_.Exception.Message }
+        if ($null -eq $wfArqRecusa -or $wfArqRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Permissões (arquivo): a gravação não recusou em modo SelfTest ('$wfArqRecusa')" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfArqRecusaCam) { Write-Host "  [ERRO] Permissões (arquivo): a gravação recusada ainda deixou '$wfArqRecusaCam' no disco" -ForegroundColor Red; $wbErrors++ }
+        # Measure-WinForgeAclSaveEntry lê por FLUXO: 'Get-Content' sem -Raw materializa um array e um
+        # backup antigo grande vira OutOfMemoryException numa função que só conta linhas.
+        $wfArqFonteM = [string](Get-Command Measure-WinForgeAclSaveEntry).ScriptBlock
+        if ($wfArqFonteM -match 'Get-Content') { Write-Host "  [ERRO] Permissões (contagem): Measure-WinForgeAclSaveEntry ainda usa Get-Content - tem de ler por StreamReader" -ForegroundColor Red; $wbErrors++ }
+        if ($wfArqFonteM -notmatch 'StreamReader') { Write-Host "  [ERRO] Permissões (contagem): Measure-WinForgeAclSaveEntry não usa StreamReader" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (arquivo): UTF-16LE sem BOM, $(@($wfArqEscopo.Entries).Count) par(es) idênticos aos do 'icacls /save' da mesma árvore, SHA-256 sensível a um byte"
+    } catch {
+        Write-Host "  [ERRO] Permissões (arquivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        $sync.SelfTest = $wfArqSelfAntes
+        Remove-Item -LiteralPath $wfArqRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
     # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os
     # dois títulos trazem o mesmo DriverModel e versões diferentes. Mostrar as duas convida o usuário
