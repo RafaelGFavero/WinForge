@@ -342,6 +342,22 @@ function Get-WinForgeRepairCommand {
                 Confirm  = 'Reaplica as listas de permissão guardadas na última restauração de padrões, a partir da pasta protegida do WinForge, e tenta devolver também a posse de cada pasta. Sem backup gravado, não faz nada.'
             }
         }
+        # A terceira ação de permissões só APAGA arquivo, e mesmo assim é 'repair' com fluxo ao
+        # vivo: a pasta pode ter centenas de GB e a lista do que vai sair precisa aparecer na tela
+        # antes do primeiro Remove-Item. Ela fecha o par aberto pela guarda da segunda restauração -
+        # numa máquina que rodou a 1.7.0 o índice antigo não tem a marca de consumido, conta como
+        # pendente e recusa toda restauração nova; sem este botão não havia saída dessa recusa.
+        'AclCleanup' {
+            return @{
+                Title    = 'Permissões do disco C: - Limpar backups antigos'
+                Requires = $null
+                Kind     = 'repair'
+                Stream   = $true
+                Steps    = @(@{ Function = 'Invoke-WinForgeAclCleanup' })
+                Final    = 'A pasta de backup continua protegida: o que ficou nela é backup que ninguém desfez, e é dele que o botão Desfazer depende.'
+                Confirm  = 'Lista os arquivos da pasta protegida de backup de permissões com tamanho e data e apaga apenas os que nenhum backup pendente usa: os avulsos, que índice nenhum referencia, e os conjuntos que o Desfazer já aplicou. Backup que ninguém desfez nunca sai.'
+            }
+        }
     }
     throw "Comando de reparo desconhecido: '$Name'."
 }
@@ -4541,6 +4557,283 @@ function Invoke-WinForgeAclUndo {
     }
     Write-Host 'O que volta de cada pasta é a lista DELA MESMA, mais o dono quando dá. O conteúdo de dentro só volta na sua pasta de usuário, que é a única guardada com recursão.'
     Write-Host 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
+}
+
+function Get-WinForgeAclBackupInventory {
+    <#
+    .SYNOPSIS
+        O que existe na pasta de backups de permissões: cada arquivo com tamanho, data, tipo, e se
+        algum índice ainda precisa dele. Só lê.
+    .DESCRIPTION
+        É a lista que o botão de limpeza mostra antes de apagar qualquer coisa, e a mesma que a
+        varredura de abertura soma para dizer quanto a pasta ocupa.
+
+        Duas classes de arquivo moram ali: o ÍNDICE ('acl-index-<carimbo>.json', que carrega o SDDL
+        e o dono de cada pasta) e o CONTEÚDO (o arquivo de 'icacls /save' do perfil). ÓRFÃO é
+        arquivo de conteúdo que índice nenhum referencia - nem por 'File' nem por 'ExternalPath'.
+        Ele aparece quando uma restauração grava o arquivo do perfil e morre antes de gravar o
+        índice: o arquivo fica no disco, do tamanho que for, e não serve para desfazer nada.
+
+        'Consumed' de um arquivo de conteúdo é o E de todos os índices que o citam: um índice
+        pendente no meio segura o arquivo inteiro. É essa conta que impede a limpeza de levar o
+        arquivo do perfil de um backup que ninguém desfez ainda.
+
+        Índice que NÃO PÔDE SER LIDO cega a pasta, e aqui isso é decisivo: sem saber o que ele
+        referenciava, chamar de órfão qualquer arquivo de conteúdo seria apagar justamente o backup
+        que ele cobre. Com um ilegível na pasta, NENHUM arquivo é marcado como órfão - a limpeza
+        fica sem alvo, que é o lado seguro do erro.
+
+        A ordem é ORDINAL, por CompareOrdinal, como no resto deste arquivo: 'Sort-Object' ordena
+        pela CULTURA, e '-Culture' recebe uma STRING - passar um objeto de cultura vira '' em
+        silêncio e a comparação continua linguística.
+    .PARAMETER Root
+        Pasta de backup alternativa, para o teste. A padrão é Get-WinForgeAclBackupRoot.
+    .OUTPUTS
+        @(@{ Name; Path; Bytes; Date; Kind = 'indice'|'conteudo'; Orphan = <bool>; Consumed = <bool> }),
+        em ordem ordinal por nome.
+    #>
+    param([string]$Root)
+
+    $dir = Get-WinForgeAclBackupRoot $Root
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    $arquivos = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue)
+    if (-not $arquivos.Count) { return @() }
+
+    $indices = @(Get-WinForgeAclIndexList -Root $dir)
+    $cego = [bool]@($indices | Where-Object { -not $_.Readable }).Count
+    # Quem é citado por quem. O índice nomeia o arquivo de conteúdo pelo NOME, e é o Desfazer que
+    # reancora esse nome dentro da pasta protegida - por isso a chave aqui também é o nome, e a
+    # folha é tirada com Split-Path para um 'sub\..\x.txt' plantado no índice não virar chave nova.
+    $citados = New-Object 'System.Collections.Generic.Dictionary[string,bool]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($idx in $indices) {
+        foreach ($it in @($idx.Items)) {
+            # '[string]$obj.Propriedade' sobre propriedade que lança devolve '' em silêncio (medido),
+            # e '' aqui é "não cita nada" - que é o tratamento certo, não um atalho.
+            $campos = @()
+            try { $campos += ([string]$it.File).Trim() } catch { }
+            try { $campos += ([string]$it.ExternalPath).Trim() } catch { }
+            foreach ($campo in $campos) {
+                if ([string]::IsNullOrWhiteSpace($campo)) { continue }
+                $folha = ''
+                try { $folha = [string](Split-Path -Leaf $campo) } catch { $folha = '' }
+                if ([string]::IsNullOrWhiteSpace($folha)) { continue }
+                if ($citados.ContainsKey($folha)) { $citados[$folha] = $citados[$folha] -and [bool]$idx.Consumed }
+                else { $citados[$folha] = [bool]$idx.Consumed }
+            }
+        }
+    }
+
+    $saida = New-Object System.Collections.Generic.List[object]
+    foreach ($f in $arquivos) {
+        $nome = [string]$f.Name
+        $tipo = if ($nome -match '^acl-index-.+\.json$') { 'indice' } else { 'conteudo' }
+        $consumido = $false
+        $orfao = $false
+        if ($tipo -eq 'indice') {
+            $meu = @($indices | Where-Object { [string]$_.Path -eq [string]$f.FullName })
+            if ($meu.Count) { $consumido = [bool]$meu[0].Consumed }
+        } elseif ($citados.ContainsKey($nome)) {
+            $consumido = [bool]$citados[$nome]
+        } else {
+            $orfao = -not $cego
+        }
+        $saida.Add(@{
+            Name     = $nome
+            Path     = [string]$f.FullName
+            Bytes    = [long]$f.Length
+            Date     = $f.LastWriteTime
+            Kind     = $tipo
+            Orphan   = $orfao
+            Consumed = $consumido
+        })
+    }
+    $arr = $saida.ToArray()
+    [array]::Sort($arr, [System.Comparison[object]] { param($a, $b) [string]::CompareOrdinal([string]$a.Name, [string]$b.Name) })
+    return @($arr)
+}
+
+function Get-WinForgeAclBackupSizeWarning {
+    <#
+    .SYNOPSIS
+        Diz se a pasta de backups de permissões passou do limite de tamanho, e com que frase avisar.
+        SÓ RELATA.
+    .DESCRIPTION
+        A varredura de abertura do WinForge. O caso real é o de quem matou a 1.7.0 no meio da fase 2:
+        o 'icacls /save' do perfil inteiro já tinha gravado centenas de GB numa pasta que só o
+        SYSTEM e os Administradores apagam, e ninguém contou isso a ele - o disco simplesmente
+        encheu.
+
+        Esta função não apaga nada e nunca vai apagar: ela responde, e quem apaga é o botão, depois
+        de o usuário ler a lista e confirmar. Um aviso de abertura que apagasse arquivo por conta
+        própria levaria junto o backup de quem ainda não desfez.
+    .PARAMETER LimitBytes
+        O limite. O padrão é 1 GB (1073741824), que é o ponto em que a pasta deixa de ser detalhe.
+    .OUTPUTS
+        @{ Over = <bool>; Bytes = <long>; Text = <string> }. 'Text' vem vazio quando não passou: não
+        há o que dizer a quem tem uma pasta de alguns megabytes.
+    #>
+    param([string]$Root, [long]$LimitBytes = 1073741824)
+
+    $itens = @(Get-WinForgeAclBackupInventory -Root $Root)
+    $total = [long]0
+    foreach ($i in $itens) { $total += [long]$i.Bytes }
+    $r = @{ Over = $false; Bytes = $total; Text = '' }
+    if (-not $itens.Count -or $total -lt $LimitBytes) { return $r }
+    $r.Over = $true
+    $tamanho = if ($total -ge 1GB) { '{0:N1} GB' -f ($total / 1GB) } else { '{0:N1} MB' -f ($total / 1MB) }
+    $orfaos = @($itens | Where-Object { $_.Orphan }).Count
+    $r.Text = "Os backups de permissões do WinForge ocupam $tamanho em '$(Get-WinForgeAclBackupRoot $Root)' ($($itens.Count) arquivo(s), $orfaos sem índice que os use). Use o botão 'Permissões do disco C: - Limpar backups antigos', na aba Config, para descartar o que não interessa mais."
+    return $r
+}
+
+function Show-WinForgeAclBackupSizeWarning {
+    <#
+    .SYNOPSIS
+        Põe o aviso da pasta de backups de permissões no log e na barra de status, na abertura da
+        janela. Não apaga nada e não abre caixa de mensagem nenhuma.
+    .DESCRIPTION
+        Pendurada no mesmo gancho de Start-WinForgeProfileJob, em DispatcherPriority::Background: a
+        varredura é leitura de uma pasta só e não justifica um runspace, mas também não pode segurar
+        a janela antes de ela aparecer.
+
+        Log e barra, e nunca caixa de mensagem: quem abre o WinForge abriu para fazer outra coisa, e
+        uma caixa modal na abertura por causa de espaço em disco é a definição de aviso que se fecha
+        no susto. Quem decide o que fazer é o usuário, no botão, com a lista na frente.
+
+        Nada escapa daqui. O que roda no Dispatcher da janela roda na thread da interface: uma
+        exceção solta neste bloco derruba o programa na abertura, e derrubar o WinForge por causa de
+        um aviso de espaço em disco seria trocar um incômodo por um defeito.
+    .OUTPUTS
+        $true se avisou, $false se a pasta está dentro do limite ou se a varredura não pôde ser feita.
+    #>
+    param([string]$Root, [long]$LimitBytes = 1073741824)
+
+    try {
+        $aviso = Get-WinForgeAclBackupSizeWarning -Root $Root -LimitBytes $LimitBytes
+        if (-not $aviso.Over) { return $false }
+        Write-WinForgeLog -Component "Repair" -Level "WARN" -Message ([string]$aviso.Text)
+        $null = Set-WinForgeProfileProgress -Label ([string]$aviso.Text) -Percent 100
+        return $true
+    } catch {
+        try { Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "A pasta de backup de permissões não pôde ser medida: $($_.Exception.Message)" } catch { }
+        return $false
+    }
+}
+
+function Invoke-WinForgeAclCleanup {
+    <#
+    .SYNOPSIS
+        Apaga da pasta protegida os backups de permissões que ninguém mais usa, e só esses.
+    .DESCRIPTION
+        É a outra metade da guarda da segunda restauração (Test-WinForgeAclRestoreAllowed). Numa
+        máquina que rodou a 1.7.0 o índice antigo não tem o campo 'Consumed', conta como PENDENTE e
+        recusa toda restauração nova: ou o usuário desfaz aquele backup, ou o descarta aqui. Sem
+        este botão a recusa era um beco sem saída, porque a pasta só o SYSTEM e os Administradores
+        apagam - o Explorer do próprio dono da máquina responde "acesso negado".
+
+        Sai daqui exatamente o que Get-WinForgeAclBackupInventory marca:
+
+        - ÓRFÃO: arquivo de conteúdo que índice nenhum referencia. Ele é o rastro de uma restauração
+          que morreu entre gravar o arquivo do perfil e gravar o índice - o maior arquivo da pasta,
+          e o único que não serve para desfazer coisa alguma.
+        - CONJUNTO JÁ DESFEITO: o índice marcado como consumido e o arquivo de conteúdo que só ele
+          referencia. O Desfazer já aplicou aquilo; guardar de novo não devolve nada.
+
+        NÃO sai, em hipótese nenhuma, backup que ninguém desfez - é dele que o botão Desfazer
+        depende, e apagá-lo por engano é o estrago que todo este conjunto de botões existe para
+        evitar. Índice ilegível cega a conta e deixa a limpeza sem alvo (ver o inventário).
+
+        A confirmação é a do clique, com o texto da aba Config, e a LISTA vai para a tela antes do
+        primeiro arquivo sair: é fluxo ao vivo, e quem está olhando vê nome, tamanho e motivo de
+        cada um. A lista é montada UMA vez e é a mesma nos três caminhos - simulação, conferência de
+        elevação e execução -, para a simulação não prometer uma coisa e a execução apagar outra.
+    .PARAMETER DryRun
+        Lista o que seria apagado, prefixado com '[simulação] ', sem apagar nada e sem criar a pasta
+        de backup.
+    .PARAMETER Probe
+        Responde só à primeira porta, a elevação, e volta. Ver Invoke-WinForgeAclRestore.
+    .PARAMETER BackupRoot
+        Pasta de backup alternativa, para o teste. Vale a conferência da pasta padrão.
+    .OUTPUTS
+        Com -DryRun, as linhas do plano. Com -Probe, @{ Elevated; Reason }. Sem eles, escreve o
+        andamento (é um passo de fluxo ao vivo).
+    #>
+    param(
+        [switch]$DryRun,
+        [switch]$Probe,
+        [string]$BackupRoot
+    )
+
+    $motivo = {
+        param($item)
+        if ($item.Orphan) { return 'nenhum índice o referencia' }
+        if ([string]$item.Kind -eq 'indice') { return 'conjunto já desfeito' }
+        return 'conteúdo de conjunto já desfeito'
+    }
+    $linha = {
+        param($item)
+        "'$($item.Name)' - $($item.Bytes) byte(s), $(([datetime]$item.Date).ToString('dd/MM/yyyy HH:mm')), $(& $motivo $item)"
+    }
+
+    if ($DryRun) {
+        $secos = @(Get-WinForgeAclBackupInventory -Root $BackupRoot | Where-Object { $_.Orphan -or $_.Consumed })
+        if (-not $secos.Count) { return @('[simulação] nada a apagar: todo arquivo desta pasta pertence a um backup que ninguém desfez.') }
+        return @($secos | ForEach-Object { "[simulação] apagar $(& $linha $_)" })
+    }
+    if ($Probe) {
+        $elevado = [bool](Test-WinForgeRepairElevated)
+        return @{ Elevated = $elevado; Reason = $(if ($elevado) { '' } else { 'Esta ação precisa do WinForge aberto como administrador. Nada foi apagado e nenhuma pasta foi criada.' }) }
+    }
+    Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeAclCleanup'
+
+    # Mesma ordem das outras duas: a elevação vem antes de a pasta de backup ser criada ou conferida.
+    if (-not (Test-WinForgeRepairElevated)) {
+        Write-Error 'Esta ação precisa do WinForge aberto como administrador. Nada foi apagado e nenhuma pasta foi criada.'
+        return
+    }
+    $conf = Confirm-WinForgeAclBackupRoot -Root $BackupRoot
+    if (-not $conf.Ok) {
+        Write-Error "A pasta de backup de permissões não é confiável ($($conf.Reason)). Nada foi apagado."
+        return
+    }
+    $todos = @(Get-WinForgeAclBackupInventory -Root $conf.Path)
+    if (-not $todos.Count) {
+        Write-Host "Nada a limpar: a pasta '$($conf.Path)' não tem arquivo nenhum."
+        return
+    }
+    $bytesTodos = [long]0
+    foreach ($t in $todos) { $bytesTodos += [long]$t.Bytes }
+    Write-Host "Pasta de backup de permissões: '$($conf.Path)' - $($todos.Count) arquivo(s), $([math]::Round($bytesTodos / 1MB, 1)) MB."
+    Write-Host ''
+    foreach ($t in $todos) {
+        $estado = if ($t.Orphan) { 'órfão' } elseif ($t.Consumed) { 'já desfeito' } else { 'EM USO (backup pendente)' }
+        Write-Host ("  [{0}] '{1}' - {2} byte(s), {3} - {4}" -f $t.Kind, $t.Name, $t.Bytes, ([datetime]$t.Date).ToString('dd/MM/yyyy HH:mm'), $estado)
+    }
+    Write-Host ''
+    $alvos = @($todos | Where-Object { $_.Orphan -or $_.Consumed })
+    if (-not $alvos.Count) {
+        Write-Host 'Nada a apagar: todo arquivo desta pasta pertence a um backup que ninguém desfez. Use o botão Desfazer antes, ou deixe como está.'
+        return
+    }
+    Write-Host "$($alvos.Count) arquivo(s) para apagar:"
+    $apagados = 0
+    $liberados = [long]0
+    $falhas = @()
+    foreach ($a in $alvos) {
+        Write-Host ("  apagando $(& $linha $a)")
+        try {
+            Remove-Item -LiteralPath ([string]$a.Path) -Force -ErrorAction Stop
+            $apagados++
+            $liberados += [long]$a.Bytes
+        } catch {
+            $falhas += ("'$($a.Name)': $($_.Exception.Message)")
+        }
+    }
+    Write-Host ''
+    Write-Host "Limpeza concluída: $apagados de $($alvos.Count) arquivo(s) apagados, $([math]::Round($liberados / 1MB, 1)) MB liberados."
+    if ($falhas.Count) { Write-Error ("Não foi possível apagar: {0}." -f ($falhas -join '; ')) }
+    $sobrando = @($todos | Where-Object { -not ($_.Orphan -or $_.Consumed) }).Count
+    if ($sobrando) { Write-Host "$sobrando arquivo(s) ficaram: eles pertencem a backup que ninguém desfez, e é deles que o botão Desfazer depende." }
 }
 
 #endregion

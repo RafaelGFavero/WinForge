@@ -824,6 +824,7 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFRepAclVerify" {Invoke-WinForgeRepairCommand -Name AclVerify}
         "WPFWFRepAclRestore" {Invoke-WinForgeRepairCommand -Name AclRestore}
         "WPFWFRepAclUndo" {Invoke-WinForgeRepairCommand -Name AclUndo}
+        "WPFWFRepAclCleanup" {Invoke-WinForgeRepairCommand -Name AclCleanup}
         # Correções (aba Config, vindas da base): mesma tabela e mesma máquina do reparo, com a
         # janela que se enche ao vivo. Antes cada uma destas chaves chamava a função da base pelo
         # campo "function" da config, na thread da janela.
@@ -1154,7 +1155,7 @@ if ($SelfTest) {
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
-    if (@($sync.configs.feature.PSObject.Properties).Count -ne 57) { Write-Host "  [ERRO] Config: esperado 57 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 58) { Write-Host "  [ERRO] Config: esperado 58 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
@@ -2648,10 +2649,11 @@ if ($SelfTest) {
         # Passos do botão "Servidor NTP - Ativar": mexem num serviço do Windows, então caem na mesma
         # regra - param() com -DryRun e recusa em modo SelfTest.
         'Start-WinForgeTimeService', 'Restart-WinForgeTimeService',
-        # As duas ações de permissões do disco. Elas reescrevem DACL com elevação: se o -DryRun
-        # delas se perder em $args por falta de param(), a "simulação" reescreve o disco de quem
-        # compila - que é exatamente o estrago que criou esta lista.
-        'Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo'
+        # As ações de permissões do disco. Duas delas reescrevem DACL com elevação e a terceira
+        # APAGA arquivo: se o -DryRun se perder em $args por falta de param(), a "simulação"
+        # reescreve o disco de quem compila, ou esvazia a pasta de backup dele - que é exatamente o
+        # estrago que criou esta lista.
+        'Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo', 'Invoke-WinForgeAclCleanup'
     )
     try {
         if (-not $sync.SelfTest) { Write-Host "  [ERRO] Reparo (trava): `$sync.SelfTest deveria estar ligado dentro do SelfTest" -ForegroundColor Red; $wbErrors++ }
@@ -3329,7 +3331,7 @@ if ($SelfTest) {
     # contra pastas descartáveis em %TEMP%, com o alvo trocado. Sem ele, um erro de sintaxe do
     # icacls (direito específico sem parênteses é código 87, "Parâmetro inválido") só apareceria na
     # máquina de quem clicou no botão - foi assim que 'AD' virou '(AD)'.
-    $wfAclNomes = @('AclVerify', 'AclRestore', 'AclUndo')
+    $wfAclNomes = @('AclVerify', 'AclRestore', 'AclUndo', 'AclCleanup')
     # 1. A comparação. Ela é quem decide o veredito, e as três DACLs abaixo são o gabarito dela:
     # uma completa (nenhuma diferença), uma sem a ACE do SYSTEM e uma com o dono trocado.
     try {
@@ -3978,7 +3980,8 @@ if ($SelfTest) {
         }
         foreach ($wfAclTrava in @(
             @('Invoke-WinForgeAclRestore', { Invoke-WinForgeAclRestore }),
-            @('Invoke-WinForgeAclUndo', { Invoke-WinForgeAclUndo })
+            @('Invoke-WinForgeAclUndo', { Invoke-WinForgeAclUndo }),
+            @('Invoke-WinForgeAclCleanup', { Invoke-WinForgeAclCleanup })
         )) {
             $wfAclMsg = $null
             try { & $wfAclTrava[1] | Out-Null } catch { $wfAclMsg = [string]$_.Exception.Message }
@@ -4000,7 +4003,7 @@ if ($SelfTest) {
     # lista de coisas que NÃO podem aparecer antes da checagem.
     try {
         $wfAclRaizFantasma = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-nao-deve-nascer'
-        foreach ($wfAclFn in @('Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo')) {
+        foreach ($wfAclFn in @('Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo', 'Invoke-WinForgeAclCleanup')) {
             $wfAclFonteEl = [string](Get-Command $wfAclFn).ScriptBlock
             # A âncora é a trava de SelfTest, e não o começo da função: acima dela ficam o -DryRun
             # e o -Probe, que também citam Test-WinForgeRepairElevated e não escrevem nada. Medir a
@@ -4078,7 +4081,7 @@ if ($SelfTest) {
     }
     # 6. As três linhas da tabela, a entrada da config e a pergunta antes de agir.
     try {
-        $wfAclChaves = @{ AclVerify = 'read'; AclRestore = 'repair'; AclUndo = 'repair' }
+        $wfAclChaves = @{ AclVerify = 'read'; AclRestore = 'repair'; AclUndo = 'repair'; AclCleanup = 'repair' }
         foreach ($wfAclNome in $wfAclNomes) {
             $wfAclSpec = Get-WinForgeRepairCommand -Name $wfAclNome
             if ([string]$wfAclSpec.Kind -ne $wfAclChaves[$wfAclNome]) { Write-Host "  [ERRO] Permissões $wfAclNome`: tipo '$($wfAclSpec.Kind)', esperado '$($wfAclChaves[$wfAclNome])'" -ForegroundColor Red; $wbErrors++ }
@@ -4116,7 +4119,7 @@ if ($SelfTest) {
         # O Desfazer diz o que NÃO devolve: /restore repõe a lista, nunca a posse.
         $wfAclPerguntaU = [string](Get-WinForgeRepairConfirmText -Name AclUndo)
         if ($wfAclPerguntaU.IndexOf('posse', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (confirmação) AclUndo: a pergunta não diz que o /restore não devolve a posse" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Permissões (tabela): $($wfAclNomes.Count) botão(ões) - 1 leitura e 2 com fluxo ao vivo, confirmação vinda da aba Config"
+        Write-Host "  Permissões (tabela): $($wfAclNomes.Count) botão(ões) - 1 leitura e 3 com fluxo ao vivo, confirmação vinda da aba Config"
     } catch {
         Write-Host "  [ERRO] Permissões (tabela): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
@@ -4858,6 +4861,96 @@ if ($SelfTest) {
         Write-Host "  [ERRO] Permissões (índices): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
         Remove-Item -LiteralPath $wfIdxRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: limpar backups antigos
+    # A saída de quem matou a 1.7.0 na fase 2 e ficou com centenas de GB numa pasta que só SYSTEM e
+    # Administradores apagam. É também a outra metade da guarda da segunda restauração: numa máquina
+    # que já rodou a 1.7.0 o índice antigo não tem a marca de consumido, conta como pendente e
+    # recusa toda restauração nova - a recusa manda usar este botão, e sem ele não havia saída.
+    $wfLimpRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-limpeza'
+    try {
+        if (Test-Path -LiteralPath $wfLimpRaiz) { Remove-Item -LiteralPath $wfLimpRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfLimpRaiz -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-perfil-fulano-20260101-000000.txt') -Value 'usado' -Encoding Unicode
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-perfil-fulano-19990101-000000.txt') -Value 'orfao' -Encoding Unicode
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20260101-000000.json') -Value (([pscustomobject]@{
+            Stamp = '20260101-000000'; Consumed = $false; Origin = (New-WinForgeAclIndexOrigin)
+            Items = @([pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-fulano-20260101-000000.txt'; Target = 'C:\Users'; Sha256 = ''; ExternalPath = '' })
+        } | ConvertTo-Json -Depth 5)) -Encoding UTF8
+        $wfLimpInv = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz)
+        if ($wfLimpInv.Count -ne 3) { Write-Host "  [ERRO] Permissões (limpeza): o inventário trouxe $($wfLimpInv.Count) item(ns), esperado 3" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpOrf = @($wfLimpInv | Where-Object { $_.Orphan })
+        if ($wfLimpOrf.Count -ne 1) { Write-Host "  [ERRO] Permissões (limpeza): $($wfLimpOrf.Count) órfão(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfLimpOrf[0].Name -ne 'acl-perfil-fulano-19990101-000000.txt') { Write-Host "  [ERRO] Permissões (limpeza): o órfão apontado é '$($wfLimpOrf[0].Name)'" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfLimpInv | Where-Object { [string]$_.Name -eq 'acl-perfil-fulano-20260101-000000.txt' -and $_.Orphan }).Count) { Write-Host "  [ERRO] Permissões (limpeza): arquivo referenciado por índice foi marcado como órfão" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLimpI in $wfLimpInv) {
+            if ([long]$wfLimpI.Bytes -le 0) { Write-Host "  [ERRO] Permissões (limpeza): '$($wfLimpI.Name)' sem tamanho" -ForegroundColor Red; $wbErrors++ }
+            if ($null -eq $wfLimpI.Date) { Write-Host "  [ERRO] Permissões (limpeza): '$($wfLimpI.Name)' sem data" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O tipo separa o índice do conteúdo: é ele que decide o que pode ser apagado junto de quê.
+        $wfLimpTipos = @($wfLimpInv | Group-Object { [string]$_.Kind } | ForEach-Object { "$($_.Name)=$($_.Count)" } | Sort-Object)
+        if (($wfLimpTipos -join ',') -ne 'conteudo=2,indice=1') { Write-Host "  [ERRO] Permissões (limpeza): os tipos do inventário saíram '$($wfLimpTipos -join ',')', esperado 'conteudo=2,indice=1'" -ForegroundColor Red; $wbErrors++ }
+        # A linha nova existe e é 'repair'. O título é conferido AQUI, com o índice ainda pendente:
+        # a recusa da segunda restauração cita o botão pelo nome, e quem lê a recusa vai procurar
+        # esse nome na aba Config - um travessão de um lado com hífen do outro manda a pessoa
+        # procurar um botão que ela não encontra.
+        $wfLimpCmd = Get-WinForgeRepairCommand -Name 'AclCleanup'
+        if ([string]$wfLimpCmd.Kind -ne 'repair') { Write-Host "  [ERRO] Permissões (limpeza): a linha AclCleanup é '$($wfLimpCmd.Kind)', esperado 'repair'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLimpCmd.Title -ne 'Permissões do disco C: - Limpar backups antigos') { Write-Host "  [ERRO] Permissões (limpeza): título '$($wfLimpCmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpRecusa = Test-WinForgeAclRestoreAllowed -Root $wfLimpRaiz
+        if ($wfLimpRecusa.Ok) { Write-Host "  [ERRO] Permissões (limpeza): com um índice pendente a restauração deveria ser recusada - é a recusa que manda usar este botão" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpRecusa.Reason).IndexOf([string]$wfLimpCmd.Title, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (limpeza): a recusa da restauração não cita o botão com o título EXATO da tabela ('$($wfLimpCmd.Title)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepAclCleanup.Content -ne [string]$wfLimpCmd.Title) { Write-Host "  [ERRO] Permissões (limpeza): o Content da config ('$($sync.configs.feature.WPFWFRepAclCleanup.Content)') não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSeco = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+        if (-not @($wfLimpSeco | Where-Object { [string]$_ -like '*[simulação]*' }).Count) { Write-Host "  [ERRO] Permissões (limpeza): -DryRun não devolveu linhas prefixadas com '[simulação] '" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfLimpSeco | Where-Object { [string]$_ -like '*20260101*' }).Count) { Write-Host "  [ERRO] Permissões (limpeza): a simulação apagaria um arquivo em uso" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath (Join-Path $wfLimpRaiz 'acl-perfil-fulano-19990101-000000.txt'))) { Write-Host "  [ERRO] Permissões (limpeza): o -DryRun APAGOU arquivo" -ForegroundColor Red; $wbErrors++ }
+        # Marcado o índice como desfeito, o conjunto INTEIRO passa a poder sair - o índice e o
+        # arquivo que ele referencia. É a saída de quem já desfez e continua com a pasta cheia.
+        $null = Set-WinForgeAclIndexConsumed -Path (Join-Path $wfLimpRaiz 'acl-index-20260101-000000.json')
+        $wfLimpSeco2 = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+        if ($wfLimpSeco2.Count -ne 3) { Write-Host "  [ERRO] Permissões (limpeza): com o índice consumido a simulação apagaria $($wfLimpSeco2.Count) arquivo(s), esperado 3" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfLimpSeco2 | Where-Object { [string]$_ -like '*acl-index-20260101-000000.json*' }).Count) { Write-Host "  [ERRO] Permissões (limpeza): o índice já desfeito não entrou na simulação" -ForegroundColor Red; $wbErrors++ }
+        # Varredura de abertura: acima de 1 GB ela RELATA, e não apaga nada.
+        $wfLimpAviso = Get-WinForgeAclBackupSizeWarning -Root $wfLimpRaiz -LimitBytes 1
+        if (-not $wfLimpAviso.Over) { Write-Host "  [ERRO] Permissões (varredura): 1 byte de limite deveria disparar o aviso" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfLimpAviso.Bytes -le 0) { Write-Host "  [ERRO] Permissões (varredura): o aviso não soma os bytes da pasta ($($wfLimpAviso.Bytes))" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLimpAviso.Text -notmatch 'Limpar backups antigos') { Write-Host "  [ERRO] Permissões (varredura): o aviso não aponta o botão ('$($wfLimpAviso.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeAclBackupSizeWarning -Root $wfLimpRaiz -LimitBytes 1073741824).Over) { Write-Host "  [ERRO] Permissões (varredura): três arquivos minúsculos dispararam o aviso de 1 GB" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpFonteV = [string](Get-Command Get-WinForgeAclBackupSizeWarning).ScriptBlock
+        if ($wfLimpFonteV -match 'Remove-Item') { Write-Host "  [ERRO] Permissões (varredura): a varredura de abertura SÓ RELATA - não pode apagar nada" -ForegroundColor Red; $wbErrors++ }
+        # Índice ILEGÍVEL cega o inventário: não dá para saber o que ele referenciava, e chutar
+        # "órfão" aqui apagaria o backup que ele cobre. Nada é marcado, e a limpeza não acha alvo.
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-19990101-000000.json') -Value 'isto não é json' -Encoding UTF8
+        $wfLimpCego = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { $_.Orphan })
+        if ($wfLimpCego.Count) { Write-Host "  [ERRO] Permissões (limpeza): com um índice ilegível na pasta, $($wfLimpCego.Count) arquivo(s) foram marcados como órfãos - não há como saber o que ele referenciava" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSecoCego = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*acl-perfil-fulano-19990101*' })
+        if ($wfLimpSecoCego.Count) { Write-Host "  [ERRO] Permissões (limpeza): a simulação apagaria um arquivo que um índice ilegível pode referenciar" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-19990101-000000.json') -Force -ErrorAction SilentlyContinue
+        # E a linha recusa despacho sem ninguém para confirmar.
+        $wfLimpDesp = Invoke-WinForgeRepairCommand -Name 'AclCleanup' -NoUI
+        if ($wfLimpDesp.Dispatched) { Write-Host "  [ERRO] Permissões (limpeza): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepAclCleanup.Description)) { Write-Host "  [ERRO] Permissões (limpeza): WPFWFRepAclCleanup sem Description na config" -ForegroundColor Red; $wbErrors++ }
+        # A varredura de abertura está PENDURADA no gancho da janela. Exercitá-la solta prova que ela
+        # sabe responder, não que alguém pergunta - e ninguém perguntando é a pasta crescendo calada.
+        $wfLimpFonteG = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfLimpFonteG = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfLimpFonteG = '' }
+        # A agulha é MONTADA, e não escrita inteira: esta linha mora no mesmo arquivo que ela
+        # procura, e um literal contíguo casaria consigo mesmo - um mutante que apagasse o gancho
+        # sobreviveria com o teste verde. Medido: com a busca escrita inteira, ele sobreviveu.
+        $wfLimpAlvoG = '::Background, [action]{ Show-WinForgeAcl' + 'BackupSizeWarning }'
+        if ([string]::IsNullOrWhiteSpace($wfLimpFonteG)) { Write-Host "  [ERRO] Permissões (varredura): o próprio arquivo do WinForge não pôde ser lido para conferir o gancho de abertura" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpFonteG.IndexOf($wfLimpAlvoG, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (varredura): o gancho de abertura não chama Show-WinForgeAclBackupSizeWarning em DispatcherPriority::Background - a pasta cresceria calada" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpFonteS = [string](Get-Command Show-WinForgeAclBackupSizeWarning).ScriptBlock
+        if ($wfLimpFonteS -match 'MessageBox') { Write-Host "  [ERRO] Permissões (varredura): a varredura de abertura abre caixa de mensagem - ela escreve no log e na barra, e nada mais" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLimpEsp in @('Write-WinForgeLog', 'Set-WinForgeProfileProgress')) {
+            if ($wfLimpFonteS.IndexOf($wfLimpEsp, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (varredura): a varredura de abertura não usa '$wfLimpEsp'" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Permissões (limpeza): inventário com tamanho e data, 1 órfão marcado, simulação não apaga, varredura de 1 GB só relata"
+    } catch {
+        Write-Host "  [ERRO] Permissões (limpeza): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfLimpRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- Permissões: conferência por amostragem
     # A dívida que o '/C' deixou no '/restore' do Desfazer: com ele o icacls sai 0 quase sempre, então
@@ -5815,7 +5908,7 @@ if ($SelfTest) {
         # trava é sobre o controle na janela, não sobre a config: uma entrada com categoria ou painel
         # errado continuaria na config e nunca apareceria na tela.
         try {
-            # $wfAclNomes traz as duas linhas de permissões que rodam com fluxo ao vivo: elas não têm
+            # $wfAclNomes traz as linhas de permissões que rodam com fluxo ao vivo: elas não têm
             # 'Command' e por isso ficam fora de $wfRepNomes, mas o botão delas está na mesma aba.
             $wfRepChaves = @(@($wfRepNomes + $wfAclNomes) | Sort-Object -Unique | ForEach-Object { "WPFWFRep$_" })
             $wfRepFaltando = @($wfRepChaves | Where-Object { $sync[$_] -isnot [System.Windows.Controls.Button] })
@@ -6814,6 +6907,11 @@ $src = Insert-After $src '    $sync["Form"].Dispatcher.BeginInvoke([System.Windo
 
     # WinForge: diagnóstico do sistema em segundo plano (perfil + regras -> contornos e aba Diagnóstico)
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{ Start-WinForgeProfileJob }) | Out-Null
+
+    # WinForge: varredura da pasta de backup de permissões - acima de 1 GB ela RELATA, no log e na
+    # barra de status, e não apaga nada. Quem apaga é o botão "Limpar backups antigos", com a lista
+    # na tela e sob confirmação.
+    $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{ Show-WinForgeAclBackupSizeWarning }) | Out-Null
 
     # WinForge: pergunta (opcional) sobre ponto de restauração depois que a janela aparece
     $sync["Form"].Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle, [action]{ Invoke-WinUtilBoostRestorePointPrompt }) | Out-Null

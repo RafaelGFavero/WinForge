@@ -136,6 +136,14 @@ $sync.configs.wfrepair = @'
     "panel": "1",
     "Type": "Button",
     "ButtonWidth": "350"
+  },
+  "WPFWFRepAclCleanup": {
+    "Content": "Permissões do disco C: - Limpar backups antigos",
+    "Description": "Lista os arquivos de backup de permissões guardados pelo WinForge com tamanho e data, marca os que nenhum índice usa e apaga só os marcados, sob confirmação.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
   }
 }
 '@ | ConvertFrom-Json
