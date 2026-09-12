@@ -5450,6 +5450,25 @@ if ($SelfTest) {
             if ($wfDestFonte -notmatch [regex]::Escape($wfDestExig)) { Write-Host "  [ERRO] Permissões (destino): a conferência não olha '$wfDestExig'" -ForegroundColor Red; $wbErrors++ }
         }
         if ($wfDestFonte -match '\$env:') { Write-Host "  [ERRO] Permissões (destino): o caminho não pode vir de variável de ambiente" -ForegroundColor Red; $wbErrors++ }
+        # A recusa 3 não era exercitada por nenhum teste, só por trava de forma - e o revisor
+        # encontrou um volume não-NTFS nesta máquina (o G: do Google Drive: formato FAT32, tipo
+        # fixo). VARRER é melhor do que fixar a letra: numa máquina só de NTFS o laço não roda e não
+        # cobra nada; onde houver um volume assim, ele tem de ser recusado PELO FORMATO, e é isso que
+        # se cobra - a recusa nomeia o formato que leu. Nada é criado: a pasta nem precisa existir,
+        # porque a conferência do sistema de arquivos vem ANTES da de existência.
+        $wfDestNaoNtfs = 0
+        foreach ($wfDestUn in @([System.IO.DriveInfo]::GetDrives())) {
+            $wfDestPronta = $false
+            try { $wfDestPronta = [bool]$wfDestUn.IsReady } catch { $wfDestPronta = $false }
+            if (-not $wfDestPronta) { continue }
+            $wfDestFmt = ''
+            try { $wfDestFmt = [string]$wfDestUn.DriveFormat } catch { $wfDestFmt = '' }
+            if ([string]::IsNullOrWhiteSpace($wfDestFmt) -or $wfDestFmt -eq 'NTFS') { continue }
+            $wfDestNaoNtfs++
+            $wfDestRV = Test-WinForgeAclContentRoot -Path (Join-Path ([string]$wfDestUn.Name) 'WinForge-SelfTest-destino') -ProfilePath $wfDestPerfil
+            if ($wfDestRV.Ok) { Write-Host "  [ERRO] Permissões (destino): o volume $($wfDestUn.Name) é $wfDestFmt e foi ACEITO - lista de permissão nenhuma seria guardada lá" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfDestRV.Reason -notmatch [regex]::Escape($wfDestFmt)) { Write-Host "  [ERRO] Permissões (destino): o volume $($wfDestUn.Name) foi recusado sem nomear o formato '$wfDestFmt' ('$($wfDestRV.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
         # Pasta boa passa e traz o aviso literal de §1.4.
         $wfDestOk = Test-WinForgeAclContentRoot -Path $wfDestBom -ProfilePath $wfDestPerfil
         if (-not $wfDestOk.Ok) { Write-Host "  [ERRO] Permissões (destino): a pasta de teste foi recusada ('$($wfDestOk.Reason)')" -ForegroundColor Red; $wbErrors++ }
@@ -5457,8 +5476,11 @@ if ($SelfTest) {
             if ([string]$wfDestOk.Warning -notmatch [regex]::Escape($wfDestFrase)) { Write-Host "  [ERRO] Permissões (destino): o aviso não traz '$wfDestFrase'" -ForegroundColor Red; $wbErrors++ }
         }
         # O arquivo de conteúdo, dentro ou fora do %ProgramData%, passa por Protect-WinForgeSnapshotFile.
+        # A trava é por FORMA DE CHAMADA, e uma para cada arquivo. Contar ocorrências do NOME era da
+        # classe que o revisor apontou: ele aparece três vezes na função (a descrição, o arquivo de
+        # conteúdo e o índice), então apagar a chamada do arquivo de conteúdo deixava duas e a
+        # exigência de "pelo menos duas" continuava satisfeita.
         $wfDestFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
-        if (@([regex]::Matches($wfDestFonteR, 'Protect-WinForgeSnapshotFile')).Count -lt 2) { Write-Host "  [ERRO] Permissões (destino): o arquivo de conteúdo externo não passa por Protect-WinForgeSnapshotFile" -ForegroundColor Red; $wbErrors++ }
         if ($wfDestFonteR -notmatch 'WinForgeAclExternalRoot') { Write-Host "  [ERRO] Permissões (destino): a runspace não lê o destino escolhido na thread da janela" -ForegroundColor Red; $wbErrors++ }
         # A caixa nasce DESMARCADA e o diálogo é criado na thread da janela.
         $wfDestFonteD = [string](Get-Command Show-WinForgeAclBackupDestination).ScriptBlock
@@ -5623,6 +5645,8 @@ if ($SelfTest) {
         # exercitar de verdade: esta máquina é NTFS e Fixed, e encher um volume para provar a
         # conferência de espaço seria um teste pior do que a falta dele.
         foreach ($wfDestChamada in @(
+            @($wfDestFonteR, 'Protect-WinForgeSnapshotFile -Path $parcial', 'o arquivo de conteúdo (dentro ou fora do %ProgramData%) não é endurecido'),
+            @($wfDestFonteR, 'Protect-WinForgeSnapshotFile -Path $arquivoIndice', 'o índice não é endurecido'),
             @($wfDestFonteR, '[string]$sync.WinForgeAclExternalRoot', 'a restauração CITA o destino escolhido e não o LÊ'),
             @($wfDestFonteR, 'ExternalPath = [string]$externoArquivo', 'a restauração não anota o caminho externo no índice'),
             @($wfDestFonteU, '([string]$item.ExternalPath).Trim()', 'o Desfazer CITA o caminho externo e não o LÊ do item'),
@@ -5657,7 +5681,7 @@ if ($SelfTest) {
         $wfDestSeco = @(Invoke-WinForgeAclUndo -DryRun -BackupRoot $wfDestIdx)
         if ($wfDestSeco.Count -ne 1) { Write-Host "  [ERRO] Permissões (destino): a simulação do Desfazer deu $($wfDestSeco.Count) linha(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
         elseif (([string]$wfDestSeco[0]).IndexOf($wfDestArqExt, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (destino): o '/restore' da simulação não aponta para o arquivo de fora ('$($wfDestSeco[0])')" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Permissões (destino): sete recusas de Test-WinForgeAclContentRoot, aviso literal, caixa desmarcada por padrão, proteção do arquivo externo e caminho externo do índice até o vetor do '/restore'"
+        Write-Host "  Permissões (destino): sete recusas de Test-WinForgeAclContentRoot ($wfDestNaoNtfs volume(s) não-NTFS desta máquina recusados pelo formato), aviso literal, caixa e barra provadas na janela montada sem aparecer, e caminho externo do índice até o vetor do '/restore'"
     } catch {
         Write-Host "  [ERRO] Permissões (destino): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
