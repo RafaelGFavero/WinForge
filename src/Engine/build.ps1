@@ -3944,8 +3944,11 @@ if ($SelfTest) {
             foreach ($wfAclIdxLinha in $wfAclIdxSeco) {
                 if (-not ([string]$wfAclIdxLinha).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Permissões (índice): '$wfAclIdxLinha' deveria começar com '[simulação] '" -ForegroundColor Red; $wbErrors++ }
             }
-            # Índice ilegível não pode virar "nada a desfazer" silencioso nem estourar.
-            Set-Content -LiteralPath (Join-Path $wfAclIdxRaiz 'acl-index-20260911-130000.json') -Value 'isto não é json' -Encoding UTF8
+            # Índice ilegível não pode virar "nada a desfazer" silencioso nem estourar. O carimbo é
+            # o MAIS ANTIGO da pasta de propósito: o Desfazer escolhe o mais antigo não consumido, e
+            # um ilegível conta como não consumido - ninguém o desfez. Com um carimbo mais novo este
+            # teste não exercitaria nada, porque o conjunto escolhido seria o bom ao lado.
+            Set-Content -LiteralPath (Join-Path $wfAclIdxRaiz 'acl-index-20260911-110000.json') -Value 'isto não é json' -Encoding UTF8
             $wfAclIdxRuim = Get-WinForgeAclBackupSet -Root $wfAclIdxRaiz
             if (@($wfAclIdxRuim.Items).Count) { Write-Host "  [ERRO] Permissões (índice): um índice ilegível devolveu $(@($wfAclIdxRuim.Items).Count) item(ns)" -ForegroundColor Red; $wbErrors++ }
             elseif ([string]::IsNullOrWhiteSpace([string]$wfAclIdxRuim.Reason)) { Write-Host "  [ERRO] Permissões (índice): um índice ilegível não disse por que não deu" -ForegroundColor Red; $wbErrors++ }
@@ -4761,6 +4764,208 @@ if ($SelfTest) {
         Write-Host "  Permissões (fase 5): $($wfF5Passos.Count) chamada(s) '/inheritance:e' por entrada, pai antes de filho, nenhum '/T'"
     } catch {
         Write-Host "  [ERRO] Permissões (fase 5): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Permissões: um índice por vez
+    # Defeito da 1.7.0, confirmado no código (:3044 e :2760-2769): o Desfazer lia o índice MAIS NOVO.
+    # Na 2ª execução a fase 5 da 1ª já tinha removido a proteção de herança, o escopo caía para perto
+    # de zero e o índice novo - que continua com os itens 'sddl' das fases 3 e 4 - virava o único
+    # visível. As 338 originais ficavam irrecuperáveis.
+    $wfIdxRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-indices'
+    try {
+        if (Test-Path -LiteralPath $wfIdxRaiz) { Remove-Item -LiteralPath $wfIdxRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfIdxRaiz -Force | Out-Null
+        $wfIdxOrigem = New-WinForgeAclIndexOrigin
+        if ([string]::IsNullOrWhiteSpace([string]$wfIdxOrigem.MachineGuid) -or [string]::IsNullOrWhiteSpace([string]$wfIdxOrigem.ProfileSid)) { Write-Host "  [ERRO] Permissões (origem): New-WinForgeAclIndexOrigin veio incompleta ('$($wfIdxOrigem.MachineGuid)' / '$($wfIdxOrigem.ProfileSid)')" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxGrava = {
+            param($Nome, $Consumido, $Origem)
+            $conteudo = [pscustomobject]@{
+                Stamp = $Nome; Consumed = $Consumido; Origin = $Origem
+                Items = @([pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = 'D:P(A;;FA;;;SY)'; Owner = 'SYSTEM'; OwnerSid = 'S-1-5-18'; File = ''; Target = ''; Sha256 = ''; ExternalPath = '' })
+            }
+            Set-Content -LiteralPath (Join-Path $wfIdxRaiz "acl-index-$Nome.json") -Value ($conteudo | ConvertTo-Json -Depth 5) -Encoding UTF8
+        }
+        & $wfIdxGrava '20260101-000000' $false $wfIdxOrigem
+        & $wfIdxGrava '20260202-000000' $false $wfIdxOrigem
+        $wfIdxLista = @(Get-WinForgeAclIndexList -Root $wfIdxRaiz)
+        if ($wfIdxLista.Count -ne 2) { Write-Host "  [ERRO] Permissões (índices): a lista trouxe $($wfIdxLista.Count), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfIdxLista[0].Stamp -ne '20260101-000000') { Write-Host "  [ERRO] Permissões (índices): a lista não vem do mais antigo para o mais novo ('$($wfIdxLista[0].Stamp)')" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxConj = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
+        if ([string]$wfIdxConj.Stamp -ne '20260101-000000') { Write-Host "  [ERRO] Permissões (Desfazer): o conjunto escolhido é '$($wfIdxConj.Stamp)', esperado o MAIS ANTIGO não consumido '20260101-000000'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfIdxConj.Pending -ne 2) { Write-Host "  [ERRO] Permissões (Desfazer): Pending=$($wfIdxConj.Pending), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        # Consumido some da fila; o seguinte assume.
+        if (-not (Set-WinForgeAclIndexConsumed -Path (Join-Path $wfIdxRaiz 'acl-index-20260101-000000.json')).Ok) { Write-Host "  [ERRO] Permissões (Consumed): a marcação falhou" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxConj2 = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
+        if ([string]$wfIdxConj2.Stamp -ne '20260202-000000') { Write-Host "  [ERRO] Permissões (Consumed): depois de consumido o primeiro, o conjunto é '$($wfIdxConj2.Stamp)', esperado '20260202-000000'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfIdxConj2.Pending -ne 1) { Write-Host "  [ERRO] Permissões (Consumed): Pending=$($wfIdxConj2.Pending), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # Índice de OUTRA máquina é recusado: SDDL com SIDs alheios entra como SID cru e tranca o perfil.
+        $wfIdxOutra = Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Origin = [pscustomobject]@{ MachineGuid = '00000000-0000-0000-0000-000000000000'; ProfileSid = [string]$wfIdxOrigem.ProfileSid } })
+        if ($wfIdxOutra.Ok) { Write-Host "  [ERRO] Permissões (origem): MachineGuid trocado foi aceito" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxOutroSid = Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Origin = [pscustomobject]@{ MachineGuid = [string]$wfIdxOrigem.MachineGuid; ProfileSid = 'S-1-5-21-9-9-9-1001' } })
+        if ($wfIdxOutroSid.Ok) { Write-Host "  [ERRO] Permissões (origem): SID de perfil trocado foi aceito" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Origin = $wfIdxOrigem })).Ok) { Write-Host "  [ERRO] Permissões (origem): o índice desta máquina foi recusado" -ForegroundColor Red; $wbErrors++ }
+        # Índice da 1.7.0 NÃO tem origem: ele é aceito, com aviso. Recusá-lo mataria o Desfazer
+        # justamente do backup que a guarda da segunda restauração manda desfazer - e a pasta
+        # protegida já garante que quem escreveu ali estava elevado nesta máquina.
+        $wfIdxVelho = Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Stamp = '20250101-000000' })
+        if (-not $wfIdxVelho.Ok) { Write-Host "  [ERRO] Permissões (origem): um índice SEM o campo de origem (1.7.0) foi recusado - o Desfazer que a própria recusa manda usar deixaria de funcionar" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfIdxVelho.Reason)) { Write-Host "  [ERRO] Permissões (origem): o índice sem origem foi aceito CALADO - quem confere tem de dizer que não houve o que conferir" -ForegroundColor Red; $wbErrors++ }
+        # Restauração NOVA é recusada enquanto houver índice não consumido, e diz o que fazer.
+        $wfIdxProva = Test-WinForgeAclRestoreAllowed -Root $wfIdxRaiz
+        if ($wfIdxProva.Ok) { Write-Host "  [ERRO] Permissões (segunda execução): com 1 índice não consumido a restauração foi permitida - é o defeito que destrói o backup bom" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfIdxProva.Reason -notmatch 'Limpar backups antigos') { Write-Host "  [ERRO] Permissões (segunda execução): a recusa não manda usar Desfazer ou 'Limpar backups antigos' ('$($wfIdxProva.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeAclIndexConsumed -Path (Join-Path $wfIdxRaiz 'acl-index-20260202-000000.json')
+        if (-not (Test-WinForgeAclRestoreAllowed -Root $wfIdxRaiz).Ok) { Write-Host "  [ERRO] Permissões (segunda execução): com todos consumidos a restauração continua recusada" -ForegroundColor Red; $wbErrors++ }
+        # E a restauração CHAMA a guarda: exercer Test-WinForgeAclRestoreAllowed solto prova que ela
+        # sabe responder, não que alguém pergunta. Implementá-la e nunca invocá-la deixaria o defeito
+        # que destrói o backup bom inteiro, com o teste verde.
+        $wfIdxFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfIdxFonteR -notmatch 'Test-WinForgeAclRestoreAllowed') { Write-Host "  [ERRO] Permissões (segunda execução): Invoke-WinForgeAclRestore não chama Test-WinForgeAclRestoreAllowed - a guarda existe e ninguém pergunta a ela" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxPosGuarda = $wfIdxFonteR.IndexOf('Test-WinForgeAclRestoreAllowed', [StringComparison]::Ordinal)
+        $wfIdxPosEscopo = $wfIdxFonteR.IndexOf('Get-WinForgeAclContentScope', [StringComparison]::Ordinal)
+        if ($wfIdxPosGuarda -lt 0 -or $wfIdxPosEscopo -lt 0 -or $wfIdxPosGuarda -gt $wfIdxPosEscopo) { Write-Host "  [ERRO] Permissões (segunda execução): a guarda é conferida DEPOIS da caminhada - a recusa tem de vir antes de qualquer trabalho" -ForegroundColor Red; $wbErrors++ }
+        # As duas linhas acima pescam o NOME, e o nome também aparece em comentário e no bloco de
+        # ajuda - que entram no ScriptBlock. Um mutante que apagasse a CHAMADA e deixasse o
+        # comentário sobreviveria às duas. Aqui a cobrança é pela chamada, com o parâmetro junto, e
+        # é ela que fixa também a POSIÇÃO.
+        $wfIdxPosChamada = $wfIdxFonteR.IndexOf('Test-WinForgeAclRestoreAllowed -Root', [StringComparison]::Ordinal)
+        if ($wfIdxPosChamada -lt 0) { Write-Host "  [ERRO] Permissões (segunda execução): Invoke-WinForgeAclRestore CITA Test-WinForgeAclRestoreAllowed e não a chama" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIdxPosEscopo -ge 0 -and $wfIdxPosChamada -gt $wfIdxPosEscopo) { Write-Host "  [ERRO] Permissões (segunda execução): a guarda é CHAMADA depois da caminhada - a recusa tem de vir antes de qualquer trabalho" -ForegroundColor Red; $wbErrors++ }
+        # E o índice que a fase 2 grava nasce com os dois campos novos: sem 'Consumed' a fila não
+        # anda, e sem 'Origin' o Desfazer perde a única prova de que o índice é desta máquina.
+        if ($wfIdxFonteR -notmatch 'Consumed\s*=\s*\$false') { Write-Host "  [ERRO] Permissões (índices): o índice gravado na fase 2 não nasce com Consumed = `$false" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteR.IndexOf('Origin = (New-WinForgeAclIndexOrigin)', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (índices): o índice gravado na fase 2 não anota a máquina de origem" -ForegroundColor Red; $wbErrors++ }
+        # Toda recusa do Desfazer termina com a frase de §1.7.
+        $wfIdxFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        if ($wfIdxFonteU -notmatch 'coloque-a de volta em') { Write-Host "  [ERRO] Permissões (Desfazer): falta a frase 'Nada foi alterado. Se tiver uma cópia do arquivo original…'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'Set-WinForgeAclIndexConsumed') { Write-Host "  [ERRO] Permissões (Desfazer): um Desfazer bem-sucedido não marca o índice como consumido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'Test-WinForgeAclIndexOrigin') { Write-Host "  [ERRO] Permissões (Desfazer): a origem do índice não é conferida" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'Get-WinForgeAclContentHash') { Write-Host "  [ERRO] Permissões (Desfazer): o SHA-256 do arquivo de conteúdo não é recalculado" -ForegroundColor Red; $wbErrors++ }
+        # As três travas acima pescam o NOME, e os três nomes também aparecem no bloco de ajuda da
+        # função, que entra no ScriptBlock: um mutante que trocasse a CHAMADA por um valor fixo
+        # sobreviveria a elas. Aqui a cobrança é pela chamada, com o parâmetro junto.
+        foreach ($wfIdxChamada in @(
+            @('Test-WinForgeAclIndexOrigin -Index', 'a origem do índice é CITADA, mas não conferida'),
+            @('Get-WinForgeAclContentHash -Path', 'o SHA-256 do arquivo de conteúdo é CITADO, mas não recalculado'),
+            @('Set-WinForgeAclIndexConsumed -Path', 'a marca de consumido é CITADA, mas não gravada - o conjunto ficaria na fila para sempre')
+        )) {
+            if ($wfIdxFonteU.IndexOf([string]$wfIdxChamada[0], [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (Desfazer): $($wfIdxChamada[1])" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Ancorado no INDEXADOR, e não em 'Count - 1': essa string casa com qualquer comentário que
+        # explique o defeito antigo, e o teste ficaria vermelho justamente na implementação correta.
+        if ($wfIdxFonteU -match '\$indices\[\s*\$indices\.Count\s*-\s*1\s*\]') { Write-Host "  [ERRO] Permissões (Desfazer): ainda existe a escolha pelo índice mais novo (`$indices[`$indices.Count-1])" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (índices): Desfazer no mais antigo não consumido, Consumed avança a fila, origem por MachineGuid+SID, restauração recusada com pendente"
+    } catch {
+        Write-Host "  [ERRO] Permissões (índices): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfIdxRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: conferência por amostragem
+    # A dívida que o '/C' deixou no '/restore' do Desfazer: com ele o icacls sai 0 quase sempre, então
+    # o '$aplicados++' de lá diz "o icacls rodou", e não "as entradas foram aplicadas". O sinal volta
+    # por COMPORTAMENTO - reler a lista de algumas pastas e comparar com o descritor do arquivo -, e
+    # nunca pela frase de resumo do icacls: a integração contínua deste projeto roda em inglês e uma
+    # asserção presa ao idioma já quebrou antes.
+    $wfAmRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-amostra'
+    try {
+        if (Test-Path -LiteralPath $wfAmRaiz) { Remove-Item -LiteralPath $wfAmRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfAmRaiz -Force | Out-Null
+        $wfAmPai = [string](Split-Path -Parent $wfAmRaiz)
+        $wfAmArq = Join-Path $wfAmRaiz 'amostra.txt'
+        # O backup só guarda pasta com a herança BLOQUEADA, então o fixture bloqueia a herança das
+        # quatro - é a mesma condição que a caminhada da fase 2 exige para indexar.
+        $wfAmNomes = @('alfa', 'beta', 'gama', 'delta')
+        foreach ($wfAmN in $wfAmNomes) {
+            $wfAmP = Join-Path $wfAmRaiz $wfAmN
+            New-Item -ItemType Directory -Path $wfAmP -Force | Out-Null
+            $wfAmAcl = Get-Acl -LiteralPath $wfAmP
+            $wfAmAcl.SetAccessRuleProtection($true, $true)
+            Set-Acl -LiteralPath $wfAmP -AclObject $wfAmAcl
+        }
+        # Os pares saem da CAMINHADA de verdade, e não de uma segunda forma de ler a ACL: o que se
+        # confere depois é exatamente o texto que a fase 2 teria gravado.
+        $wfAmEsc = Get-WinForgeAclContentScope -Path $wfAmRaiz
+        if (-not $wfAmEsc.Ok) { throw "a caminhada do fixture falhou: $($wfAmEsc.Reason)" }
+        $wfAmEntradas = @($wfAmEsc.Entries)
+        if ($wfAmEntradas.Count -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): o fixture deu $($wfAmEntradas.Count) entrada(s), esperado 4" -ForegroundColor Red; $wbErrors++ }
+        # Formato medido do 'icacls /save': pares <nome>CRLF<SDDL>CRLF em UTF-16LE SEM marca. Escrito
+        # aqui à mão porque Write-WinForgeAclContentBackup se recusa a rodar sob -SelfTest, e é
+        # justamente essa recusa que não se quer afrouxar.
+        $wfAmGrava = {
+            param($Destino, $Pares)
+            $wfAmEnc = New-Object System.Text.UnicodeEncoding($false, $false)
+            $wfAmW = New-Object System.IO.StreamWriter($Destino, $false, $wfAmEnc)
+            try { foreach ($wfAmPar in $Pares) { $wfAmW.Write([string]$wfAmPar.Name); $wfAmW.Write("`r`n"); $wfAmW.Write([string]$wfAmPar.Sddl); $wfAmW.Write("`r`n") } } finally { $wfAmW.Dispose() }
+        }
+        & $wfAmGrava $wfAmArq $wfAmEntradas
+        $wfAmTudo = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmArq -Size 4
+        if (-not $wfAmTudo.Ok) { Write-Host "  [ERRO] Permissões (amostragem): a conferência não rodou ($($wfAmTudo.Reason))" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmTudo.Checked -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): conferiu $($wfAmTudo.Checked) pasta(s), esperado 4" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmTudo.Match -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): $($wfAmTudo.Match) de 4 bateram com o backup logo depois de gravá-lo - a comparação está acusando o que não mudou" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmTudo.Differ -ne 0 -or [int]$wfAmTudo.Missing -ne 0) { Write-Host "  [ERRO] Permissões (amostragem): Differ=$($wfAmTudo.Differ) e Missing=$($wfAmTudo.Missing) num fixture intacto" -ForegroundColor Red; $wbErrors++ }
+        # A prova de COMPORTAMENTO: uma pasta cuja lista mudou depois do backup tem de sair como
+        # divergente. É este caso que o código de saída do icacls com '/C' não denuncia.
+        #
+        # A mexida vai por Restore-WinForgeAclSddl, e não por 'Get-Acl | Set-Acl': MEDIDO aqui, o
+        # par Get-Acl/Set-Acl sobre uma pasta com a herança JÁ bloqueada tenta escrever a SACL junto
+        # e morre com PrivilegeNotHeldException ('SeSecurityPrivilege'), deixando a pasta intacta -
+        # o teste passaria a não mexer em nada e acusaria a comparação no lugar do fixture.
+        $wfAmAlvo = Join-Path $wfAmRaiz 'beta'
+        $wfAmSddlBeta = [string](@($wfAmEntradas | Where-Object { ([string]$_.Name) -like '*beta' })[0].Sddl)
+        $wfAmMex = Restore-WinForgeAclSddl -Path $wfAmAlvo -Sddl ($wfAmSddlBeta + '(A;OICI;FA;;;WD)')
+        if (-not $wfAmMex.DaclOk) { throw "a ACE plantada em 'beta' não foi aplicada: $($wfAmMex.Reason)" }
+        if ([string](Get-WinForgeAclFolderSecurity -Path $wfAmAlvo).Sddl -eq $wfAmSddlBeta) { Write-Host "  [ERRO] Permissões (amostragem): a ACE plantada não mudou o descritor de 'beta' - o teste não está provando nada" -ForegroundColor Red; $wbErrors++ }
+        $wfAmMexida = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmArq -Size 4
+        if ([int]$wfAmMexida.Differ -ne 1) { Write-Host "  [ERRO] Permissões (amostragem): uma pasta com a lista alterada deu Differ=$($wfAmMexida.Differ), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmMexida.Match -ne 3) { Write-Host "  [ERRO] Permissões (amostragem): Match=$($wfAmMexida.Match) com uma pasta alterada, esperado 3" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfAmMexida.Paths) -notcontains $wfAmAlvo) { Write-Host "  [ERRO] Permissões (amostragem): a divergente não foi nomeada ('$(@($wfAmMexida.Paths) -join '; ')')" -ForegroundColor Red; $wbErrors++ }
+        # Pasta que sumiu desde o backup não é divergência: é o caso comum de pasta de cache.
+        Remove-Item -LiteralPath (Join-Path $wfAmRaiz 'delta') -Recurse -Force
+        $wfAmSumida = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmArq -Size 4
+        if ([int]$wfAmSumida.Missing -ne 1) { Write-Host "  [ERRO] Permissões (amostragem): a pasta apagada deu Missing=$($wfAmSumida.Missing), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # A amostra ATRAVESSA o arquivo. Um '/restore' que morre no meio deixa o começo certo e o fim
+        # intocado; uma amostra presa nas primeiras N entradas diria "tudo certo" exatamente aí. Aqui
+        # só a ÚLTIMA das 20 entradas existe de verdade: quem não chega ao fim devolve Match=0.
+        $wfAmLongo = Join-Path $wfAmRaiz 'amostra-longa.txt'
+        $wfAmPares = @()
+        for ($wfAmI = 1; $wfAmI -le 19; $wfAmI++) { $wfAmPares += @{ Name = ('acl-amostra\fantasma-{0:D2}' -f $wfAmI); Sddl = 'D:P(A;;FA;;;SY)' } }
+        $wfAmPares += @($wfAmEntradas | Where-Object { ([string]$_.Name) -like '*alfa' })[0]
+        & $wfAmGrava $wfAmLongo $wfAmPares
+        $wfAmEspalhada = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmLongo -Size 4
+        if ([int]$wfAmEspalhada.Checked -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): conferiu $($wfAmEspalhada.Checked) de 20 com -Size 4" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmEspalhada.Match -ne 1) { Write-Host "  [ERRO] Permissões (amostragem): a amostra não alcançou a ÚLTIMA entrada do arquivo (Match=$($wfAmEspalhada.Match), esperado 1) - presa no começo ela aprova um '/restore' que morreu no meio" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmEspalhada.Total -ne 20) { Write-Host "  [ERRO] Permissões (amostragem): Total=$($wfAmEspalhada.Total), esperado 20" -ForegroundColor Red; $wbErrors++ }
+        # O tamanho padrão é 20, e é ele que roda no Desfazer de verdade.
+        $wfAmPadrao = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmLongo
+        if ([int]$wfAmPadrao.Checked -ne 20) { Write-Host "  [ERRO] Permissões (amostragem): sem -Size conferiu $($wfAmPadrao.Checked) de 20, esperado 20" -ForegroundColor Red; $wbErrors++ }
+        # Arquivo que não existe é recusa com motivo, e não uma conferência silenciosamente vazia.
+        $wfAmSemArq = Test-WinForgeAclRestoreSample -Root $wfAmPai -File (Join-Path $wfAmRaiz 'nao-existe.txt')
+        if ($wfAmSemArq.Ok) { Write-Host "  [ERRO] Permissões (amostragem): um arquivo inexistente passou por conferência boa" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfAmSemArq.Reason)) { Write-Host "  [ERRO] Permissões (amostragem): recusou o arquivo inexistente sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        # As duas normalizações da comparação, cobradas direto: 'P' (herança bloqueada) é semântica e
+        # tem de separar; 'AI' aparece sozinha na primeira gravação de uma pasta nova e não pode
+        # separar; e a ORDEM das ACEs não pode separar, porque o descritor guardado pode ter vindo do
+        # icacls (pastas com negação) e a releitura vem do .NET, em ordem canônica.
+        if (Test-WinForgeAclSddlSame -A 'D:P(A;;FA;;;SY)' -B 'D:(A;;FA;;;SY)') { Write-Host "  [ERRO] Permissões (amostragem): pasta com herança bloqueada e pasta sem foram dadas como iguais" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclSddlSame -A 'D:PAI(A;;FA;;;SY)' -B 'D:P(A;;FA;;;SY)')) { Write-Host "  [ERRO] Permissões (amostragem): a flag 'AI' separou dois descritores com a MESMA lista - ela aparece sozinha na primeira gravação de uma pasta nova" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclSddlSame -A 'D:P(A;;FA;;;SY)(A;;FA;;;BA)' -B 'D:P(A;;FA;;;BA)(A;;FA;;;SY)')) { Write-Host "  [ERRO] Permissões (amostragem): a ORDEM das ACEs separou duas listas iguais - o texto guardado pode vir do icacls e a releitura vem do .NET" -ForegroundColor Red; $wbErrors++ }
+        if (Test-WinForgeAclSddlSame -A 'D:P(A;;FA;;;SY)' -B 'D:P(A;;FA;;;SY)(A;;FA;;;WD)') { Write-Host "  [ERRO] Permissões (amostragem): uma ACE a mais não separou os descritores" -ForegroundColor Red; $wbErrors++ }
+        # O sinal é comportamento, não texto: nada de processo nem de frase do icacls. A integração
+        # contínua roda em inglês e 'Processados com sucesso N arquivos' não aparece lá.
+        $wfAmFonte = [string](Get-Command Test-WinForgeAclRestoreSample).ScriptBlock
+        if ($wfAmFonte -match 'Invoke-WinForgeNativeCommand') { Write-Host "  [ERRO] Permissões (amostragem): a conferência roda um processo - ela tem de reler a ACL pelo .NET" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAmFonte -match '(?i)processad|processed|com sucesso|successfully') { Write-Host "  [ERRO] Permissões (amostragem): a conferência parseia a frase de resumo do icacls, que muda com o idioma do sistema" -ForegroundColor Red; $wbErrors++ }
+        # E o Desfazer CHAMA a conferência, depois do '/restore' e não antes.
+        $wfAmFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        if ($wfAmFonteU.IndexOf('Test-WinForgeAclRestoreSample -Root', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (amostragem): o Desfazer não chama a conferência por amostragem - a dívida do '/C' continua sem pagar" -ForegroundColor Red; $wbErrors++ }
+        $wfAmPosRestore = $wfAmFonteU.IndexOf("'/restore'", [StringComparison]::Ordinal)
+        $wfAmPosAmostra = $wfAmFonteU.IndexOf('Test-WinForgeAclRestoreSample -Root', [StringComparison]::Ordinal)
+        if ($wfAmPosRestore -lt 0 -or $wfAmPosAmostra -lt 0 -or $wfAmPosAmostra -lt $wfAmPosRestore) { Write-Host "  [ERRO] Permissões (amostragem): a conferência vem ANTES do '/restore' - ali ela mediria o disco que ninguém restaurou ainda" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAmFonteU -notmatch 'amostragem') { Write-Host "  [ERRO] Permissões (amostragem): o resumo do Desfazer não diz ao usuário que a conferência é por amostra" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (amostragem): 4 de 4 conferem no fixture intacto, 1 divergente nomeada, 1 sumida separada, amostra espalhada alcança a última de 20, padrão 20"
+    } catch {
+        Write-Host "  [ERRO] Permissões (amostragem): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfAmRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
     # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os

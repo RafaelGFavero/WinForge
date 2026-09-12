@@ -3362,6 +3362,15 @@ function Invoke-WinForgeAclRestore {
         Write-Error 'Esta ação precisa do WinForge aberto como administrador. Nada foi alterado e nenhuma pasta foi criada.'
         return
     }
+    # A segunda porta, e ela vem antes de criar pasta e antes do chkdsk: um backup pendente significa
+    # que o disco já está alterado em relação a ele, e restaurar por cima gravaria o índice do disco
+    # ALTERADO. Foi assim que a 1.7.0 destruiu o backup bom - ver Test-WinForgeAclRestoreAllowed.
+    # Perguntar depois de qualquer trabalho seria perguntar tarde.
+    $permitido = Test-WinForgeAclRestoreAllowed -Root $BackupRoot
+    if (-not $permitido.Ok) {
+        Write-Error "Nada foi alterado: $($permitido.Reason)"
+        return
+    }
     if ([string]::IsNullOrWhiteSpace($perfil) -or [string]::IsNullOrWhiteSpace($meuSid)) {
         Write-Error 'Não foi possível descobrir a pasta e o SID do usuário atual. Nada foi alterado.'
         return
@@ -3530,7 +3539,11 @@ function Invoke-WinForgeAclRestore {
     # JSON, e não mais '<arquivo>|<pasta>': o índice passou a carregar a lista e o dono de cada
     # pasta, e um formato de duas colunas não comporta isso sem inventar separador novo.
     $arquivoIndice = Join-Path $conf.Path ("acl-index-{0}.json" -f $carimbo)
-    Set-Content -LiteralPath $arquivoIndice -Value ([pscustomobject]@{ Stamp = $carimbo; Items = @($indice) } | ConvertTo-Json -Depth 4) -Encoding UTF8 -ErrorAction Stop
+    # 'Consumed' nasce falso e vira verdadeiro num Desfazer sem recusa: é ele que tira o conjunto da
+    # fila e deixa a próxima restauração começar. 'Origin' é a máquina e o perfil que gravaram - o
+    # Desfazer confere os dois antes de aplicar SDDL nenhum, porque descritor de outra máquina traz
+    # SID que não existe aqui e trancaria o perfil.
+    Set-Content -LiteralPath $arquivoIndice -Value ([pscustomobject]@{ Stamp = $carimbo; Consumed = $false; Origin = (New-WinForgeAclIndexOrigin); Items = @($indice) } | ConvertTo-Json -Depth 5) -Encoding UTF8 -ErrorAction Stop
     $protIndice = Protect-WinForgeSnapshotFile -Path $arquivoIndice
     if (-not $protIndice.Hardened) {
         Remove-Item -LiteralPath $arquivoIndice -Force -ErrorAction SilentlyContinue
@@ -3771,13 +3784,439 @@ function Invoke-WinForgeAclDenyRemoval {
     if ([int]$r.ExitCode -ne 0) { Write-Error "A retirada das negações terminou com código $($r.ExitCode)." }
 }
 
+function New-WinForgeAclIndexOrigin {
+    <#
+    .SYNOPSIS
+        A identidade da máquina e do perfil que estão gravando um índice de backup de permissões.
+        Só lê.
+    .DESCRIPTION
+        Duas coisas, e as duas fazem falta. O 'MachineGuid' de
+        'HKLM\SOFTWARE\Microsoft\Cryptography' nasce na instalação do Windows e separa esta máquina
+        de qualquer outra; o SID do perfil ATUAL separa dois usuários da mesma máquina.
+
+        O SHA-256 do item de conteúdo protege o ARQUIVO contra alteração e não diz nada sobre a
+        PROCEDÊNCIA do índice - e é o índice que carrega os SDDL das fases 3 e 4. Um índice de outra
+        máquina aplica descritores com SIDs que não existem aqui: eles entram como SID cru, não
+        resolvem para conta nenhuma e trancam o perfil. Por isso o par é gravado na fase 2 e
+        conferido pelo Desfazer (Test-WinForgeAclIndexOrigin) antes de qualquer SDDL virar argumento.
+
+        Campo que não pôde ser lido volta VAZIO, e nunca inventado: quem confere trata vazio como
+        "não dá para afirmar", que é diferente de "confere".
+    .OUTPUTS
+        @{ MachineGuid = <string>; ProfileSid = <string> }.
+    #>
+    param()
+
+    $guid = ''
+    try { $guid = [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid } catch { $guid = '' }
+    $sid = ''
+    try { $sid = [string]([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) } catch { $sid = '' }
+    return @{ MachineGuid = [string]$guid; ProfileSid = [string]$sid }
+}
+
+function Test-WinForgeAclIndexOrigin {
+    <#
+    .SYNOPSIS
+        Diz se um índice de backup foi gravado NESTA máquina, por ESTE perfil. Só lê.
+    .DESCRIPTION
+        A pergunta vem antes de o primeiro SDDL do índice virar argumento. Divergência RECUSA: um
+        descritor gravado em outra máquina traz SIDs que não existem aqui, e o Windows os mantém
+        como SID cru - a pasta fica com uma lista que não dá acesso a ninguém desta máquina, que é
+        exatamente o sintoma que estes botões existem para curar.
+
+        Índice SEM origem nenhuma - o da 1.7.0, que não gravava o campo - é ACEITO, com o motivo
+        preenchido para quem chama avisar. Recusá-lo seria matar o Desfazer justamente do backup que
+        a guarda de Test-WinForgeAclRestoreAllowed manda desfazer, e a pasta protegida já garante
+        que quem escreveu ali estava elevado nesta máquina (Confirm-WinForgeAclBackupRoot: dono
+        dentro de SYSTEM/Administradores, ninguém de fora deles com escrita). O que a origem pega é
+        a CÓPIA deliberada de um índice de outra máquina para dentro dessa pasta.
+
+        Campo presente e diferente recusa; campo ausente não afirma nada. E não poder ler a
+        identidade DESTA máquina também recusa: sem os dois lados não há comparação, e aqui não
+        comparar é aplicar às cegas.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string> }. Com Ok = $true, 'Reason' vazio é "confere" e 'Reason'
+        preenchido é "não havia o que comparar" - o aviso que quem chama põe na tela.
+    #>
+    param([Parameter(Mandatory)]$Index)
+
+    $r = @{ Ok = $false; Reason = '' }
+    $atual = New-WinForgeAclIndexOrigin
+    $origem = $null
+    try { $origem = $Index.Origin } catch { $origem = $null }
+    $guid = ''
+    $sid = ''
+    if ($null -ne $origem) {
+        # '[string]$obj.Propriedade' sobre propriedade que lança devolve '' em silêncio (medido), e
+        # '' aqui significa "não afirma nada" - que é o tratamento certo, não um atalho.
+        try { $guid = ([string]$origem.MachineGuid).Trim() } catch { $guid = '' }
+        try { $sid = ([string]$origem.ProfileSid).Trim() } catch { $sid = '' }
+    }
+    if ([string]::IsNullOrWhiteSpace($guid) -and [string]::IsNullOrWhiteSpace($sid)) {
+        $r.Ok = $true
+        $r.Reason = 'este índice foi gravado por uma versão do WinForge que não anotava a máquina de origem; não há como conferir se ele é mesmo daqui.'
+        return $r
+    }
+    if (-not [string]::IsNullOrWhiteSpace($guid)) {
+        if ([string]::IsNullOrWhiteSpace([string]$atual.MachineGuid)) {
+            $r.Reason = "o identificador desta máquina não pôde ser lido, então não dá para confirmar que o índice '$guid' é daqui"
+            return $r
+        }
+        if (-not [string]::Equals($guid, ([string]$atual.MachineGuid).Trim(), [StringComparison]::OrdinalIgnoreCase)) {
+            $r.Reason = "o índice foi gravado em OUTRA máquina (identificador '$guid'; esta é '$($atual.MachineGuid)') - as permissões guardadas lá citam contas que não existem aqui"
+            return $r
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($sid)) {
+        if ([string]::IsNullOrWhiteSpace([string]$atual.ProfileSid)) {
+            $r.Reason = "o SID do perfil desta sessão não pôde ser lido, então não dá para confirmar que o índice '$sid' é deste usuário"
+            return $r
+        }
+        if (-not [string]::Equals($sid, ([string]$atual.ProfileSid).Trim(), [StringComparison]::OrdinalIgnoreCase)) {
+            $r.Reason = "o índice foi gravado por OUTRO usuário desta máquina (SID '$sid'; o desta sessão é '$($atual.ProfileSid)') - a pasta de usuário guardada lá não é esta"
+            return $r
+        }
+    }
+    $r.Ok = $true
+    return $r
+}
+
+function Get-WinForgeAclIndexList {
+    <#
+    .SYNOPSIS
+        Todos os índices de backup de permissões de uma pasta, do MAIS ANTIGO para o mais novo. Só lê.
+    .DESCRIPTION
+        O carimbo sai do NOME do arquivo ('acl-index-<aaaaMMdd-HHmmss>.json'), campo de largura fixa,
+        e não da data do sistema de arquivos, que uma cópia de pasta reescreve, nem do campo 'Stamp'
+        de dentro, que é conteúdo de arquivo como qualquer outro.
+
+        A ordem é ORDINAL, por CompareOrdinal: 'Sort-Object' ordena pela CULTURA, e
+        '-Culture ([CultureInfo]::InvariantCulture)' não conserta isso - o parâmetro é uma STRING, a
+        cultura invariante vira '' em silêncio e a comparação continua linguística.
+
+        'Consumed' AUSENTE conta como $false, e isso é o certo: um índice da 1.7.0 é mesmo um backup
+        que ninguém desfez. Índice que não pôde ser lido também entra como não consumido, com
+        'Readable' falso - ele existe, ninguém o desfez, e sumir com ele da fila faria a guarda da
+        segunda restauração dizer "pode ir" por cima de um backup que ninguém conferiu.
+    .PARAMETER Trusted
+        Confere cada índice por Test-WinForgeAclBackupFile ANTES de abri-lo, e marca 'Refused' com o
+        motivo quando ele não passa - sem chegar a analisar o JSON. É a promessa de
+        Test-WinForgeSnapshotFileTrusted ("antes de ele ser lido"), e é o caminho do Desfazer.
+    .OUTPUTS
+        @(@{ Path; Stamp; Consumed; Origin; Items; Readable; Refused; Reason }), do mais antigo para
+        o mais novo.
+    #>
+    param([string]$Root, [switch]$Trusted)
+
+    $dir = Get-WinForgeAclBackupRoot $Root
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    $arquivos = @(Get-ChildItem -LiteralPath $dir -Filter 'acl-index-*.json' -File -ErrorAction SilentlyContinue)
+    if (-not $arquivos.Count) { return @() }
+    $saida = New-Object System.Collections.Generic.List[object]
+    foreach ($f in $arquivos) {
+        $carimbo = [string]([System.IO.Path]::GetFileNameWithoutExtension([string]$f.Name)) -replace '^acl-index-', ''
+        $item = @{ Path = [string]$f.FullName; Stamp = $carimbo; Consumed = $false; Origin = $null; Items = @(); Readable = $false; Refused = $false; Reason = '' }
+        if ($Trusted) {
+            $julg = Test-WinForgeAclBackupFile -Path ([string]$f.FullName) -Root $dir
+            if (-not $julg.Trusted) {
+                $item.Refused = $true
+                $item.Reason = [string]$julg.Reason
+                $saida.Add($item)
+                continue
+            }
+        }
+        $dados = $null
+        try { $dados = Get-Content -LiteralPath ([string]$f.FullName) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json } catch { $dados = $null }
+        if ($null -eq $dados) {
+            $item.Reason = "o índice '$($f.Name)' não pôde ser lido"
+            $saida.Add($item)
+            continue
+        }
+        $item.Readable = $true
+        $item.Consumed = [bool]$dados.Consumed
+        $item.Origin = $dados.Origin
+        $item.Items = @($dados.Items)
+        $saida.Add($item)
+    }
+    $arr = $saida.ToArray()
+    [array]::Sort($arr, [System.Comparison[object]] { param($a, $b) [string]::CompareOrdinal([string]$a.Stamp, [string]$b.Stamp) })
+    return @($arr)
+}
+
+function Set-WinForgeAclIndexConsumed {
+    <#
+    .SYNOPSIS
+        Marca um índice de backup como já desfeito, para ele sair da fila do Desfazer.
+    .DESCRIPTION
+        É a outra metade do conserto do defeito da 1.7.0: sem a marca, o índice recém-desfeito
+        continuaria sendo o mais antigo não consumido e o Desfazer seguinte o aplicaria de novo, em
+        cima de um disco que já voltou.
+
+        O arquivo é reescrito no lugar (Set-Content trunca, não recria), então o endurecimento de
+        Protect-WinForgeSnapshotFile - dono Administradores, DACL fechada - continua valendo sem
+        precisar ser refeito. Quem chama já está elevado; sem elevação a gravação falha e o motivo
+        volta em 'Reason'.
+
+        O NOME é conferido antes da abertura: esta função escreve, e o caminho vem de um arquivo de
+        índice. 'acl-index-*.json' é a única forma que ela aceita.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string> }.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $r = @{ Ok = $false; Reason = '' }
+    $nome = ''
+    try { $nome = [string](Split-Path -Leaf ([string]$Path)) } catch { $nome = '' }
+    if ($nome -notmatch '^acl-index-.+\.json$') {
+        $r.Reason = "'$Path' não tem a forma de um índice de backup de permissões"
+        return $r
+    }
+    if (-not (Test-Path -LiteralPath ([string]$Path) -PathType Leaf)) {
+        $r.Reason = "o índice '$Path' não existe"
+        return $r
+    }
+    try {
+        $dados = Get-Content -LiteralPath ([string]$Path) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+        if ($null -eq $dados) { throw "o índice '$Path' não pôde ser lido" }
+        # '-Force' porque o índice da 1.7.0 não TEM o campo: ali a marca é criada, não atualizada.
+        $dados | Add-Member -NotePropertyName 'Consumed' -NotePropertyValue $true -Force
+        Set-Content -LiteralPath ([string]$Path) -Value ($dados | ConvertTo-Json -Depth 5) -Encoding UTF8 -ErrorAction Stop
+        $r.Ok = $true
+    } catch {
+        $r.Reason = $_.Exception.Message
+    }
+    return $r
+}
+
+function Test-WinForgeAclRestoreAllowed {
+    <#
+    .SYNOPSIS
+        Diz se uma restauração NOVA pode começar, ou se há backup que ninguém desfez no caminho.
+        Só lê.
+    .DESCRIPTION
+        É a guarda que fecha o defeito da 1.7.0. Lá, a segunda restauração gravava um índice novo
+        sobre um disco JÁ alterado: a fase 5 da primeira tinha tirado a proteção de herança, o escopo
+        do conteúdo caía para perto de zero e mesmo assim '$gravados' continuava maior que zero,
+        porque os itens 'sddl' das fases 3 e 4 entram sempre. Como o Desfazer lia o índice mais novo,
+        esse índice quase vazio virava o único alcançável e as 338 pastas originais ficavam
+        irrecuperáveis.
+
+        Com a guarda, a segunda restauração nem começa: ou o usuário desfaz o que está pendente, ou
+        descarta o backup antigo pelo botão de limpeza. A recusa nomeia os dois caminhos.
+
+        Índice sem 'Consumed' - o da 1.7.0 - conta como PENDENTE, e é o certo: ele é mesmo um backup
+        que ninguém desfez.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Pending = <int> }.
+    #>
+    param([string]$Root)
+
+    $r = @{ Ok = $true; Reason = ''; Pending = 0 }
+    $pendentes = @(Get-WinForgeAclIndexList -Root $Root | Where-Object { -not $_.Consumed })
+    $r.Pending = [int]$pendentes.Count
+    if ($r.Pending -lt 1) { return $r }
+    $r.Ok = $false
+    $carimbos = @($pendentes | ForEach-Object { [string]$_.Stamp }) -join ', '
+    $r.Reason = "já existe backup de permissões que ninguém desfez ($($r.Pending) conjunto(s): $carimbos). Restaurar de novo gravaria um backup do disco JÁ alterado, e o backup bom deixaria de ser alcançável - foi assim que a versão anterior destruiu a cópia que interessava. Use 'Permissões do disco C: - Desfazer (restaurar backup)' para voltar ao que estava, ou 'Permissões do disco C: - Limpar backups antigos' para descartar o que não interessa mais, e então tente outra vez."
+    return $r
+}
+
+function Test-WinForgeAclSddlSame {
+    <#
+    .SYNOPSIS
+        Diz se dois descritores descrevem a MESMA lista de permissões. Função pura, só texto.
+    .DESCRIPTION
+        Duas normalizações, e as duas são medição, não gosto:
+
+        1. As FLAGS de controle da DACL entram só pela proteção de herança ('P'). 'AI' ("herança
+           automática já propagada") aparece sozinha na primeira gravação de uma pasta recém-criada,
+           sem nenhuma ACE ter mudado - comparar o texto cru acusaria isso como divergência. 'P' fica
+           porque é semântica: é ela que diz se a herança está bloqueada, que é justamente a condição
+           que o backup guarda.
+        2. As ACEs são comparadas como CONJUNTO, e não na ordem. O descritor guardado pode ter vindo
+           do próprio icacls (as pastas com negação saem de 'icacls /save', para preservar a ordem no
+           disco), enquanto a releitura vem do .NET, que entrega a lista em ordem canônica - negação
+           antes de permissão. Cobrar a ordem aqui acusaria divergência em pasta que voltou inteira.
+
+        A comparação existe para a conferência por amostragem do Desfazer, e ali a pergunta é "esta
+        pasta recebeu a lista que o backup guardava", não "os dois textos são iguais byte a byte".
+    .OUTPUTS
+        $true ou $false. Texto sem seção 'D:' é $false nos dois lados - sem DACL não há o que comparar.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$A,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$B
+    )
+
+    $forma = {
+        param($sddl)
+        $t = [string]$sddl
+        $i = $t.IndexOf('D:', [StringComparison]::Ordinal)
+        if ($i -lt 0) { return $null }
+        $resto = $t.Substring($i + 2)
+        $flags = [string][regex]::Match($resto, '^[A-Za-z_]*').Value
+        $aces = New-Object System.Collections.Generic.List[string]
+        foreach ($m in [regex]::Matches($resto, '\([^()]*\)')) { $aces.Add(([string]$m.Value).ToUpperInvariant()) }
+        $arr = $aces.ToArray()
+        # Ordinal de novo, pelo mesmo motivo de sempre: ordenação por cultura muda com a máquina.
+        [array]::Sort($arr, [System.Comparison[string]] { param($x, $y) [string]::CompareOrdinal($x, $y) })
+        return @{ Protected = ($flags.IndexOf('P', [StringComparison]::OrdinalIgnoreCase) -ge 0); Aces = @($arr) }
+    }
+    $fa = & $forma $A
+    $fb = & $forma $B
+    if ($null -eq $fa -or $null -eq $fb) { return $false }
+    if ([bool]$fa.Protected -ne [bool]$fb.Protected) { return $false }
+    if (@($fa.Aces).Count -ne @($fb.Aces).Count) { return $false }
+    for ($i = 0; $i -lt @($fa.Aces).Count; $i++) {
+        if ([string]@($fa.Aces)[$i] -ne [string]@($fb.Aces)[$i]) { return $false }
+    }
+    return $true
+}
+
+# A regra que decide o desenho de Test-WinForgeAclRestoreSample está AQUI, fora do corpo, pelo mesmo
+# motivo de Get-WinForgeAclContentScope: o SelfTest lê '(Get-Command …).ScriptBlock' e reprova o
+# fonte que CITE a frase de resumo do icacls ("Processados com sucesso N arquivos", "successfully
+# processed"), porque essa frase muda com o idioma do sistema e a integração contínua deste projeto
+# roda em inglês - uma asserção presa ao idioma já quebrou aqui antes. Escrever o exemplo dentro da
+# função reprovaria justamente a função que não o usa. O sinal daqui é COMPORTAMENTO: relê a ACL e
+# compara descritor com descritor.
+function Test-WinForgeAclRestoreSample {
+    <#
+    .SYNOPSIS
+        Relê a lista de permissões de uma AMOSTRA das pastas de um arquivo de backup e compara com o
+        descritor guardado nele. Só lê.
+    .DESCRIPTION
+        Existe para pagar a dívida do '/C'. O '/restore' do Desfazer roda COM '/C' de propósito - o
+        alvo é um arquivo de centenas de entradas e continuar apesar do erro vale mais do que o
+        código de saída -, e o preço é que o código de saída passa a ser 0 quase sempre. Contar uma
+        pasta como aplicada por causa dele significa "o icacls rodou", não "as entradas foram
+        aplicadas". O sinal volta por comparação de descritores, e nunca por leitura de texto de
+        saída - ver o comentário acima desta função.
+
+        A leitura é a MESMA da caminhada da fase 2 - 'DirectoryInfo.GetAccessControl(Access)' sobre
+        o caminho com prefixo '\\?\' -, e não Get-Acl: é o mesmo produtor do texto guardado, e o
+        prefixo é o que faz caminho longo dentro do perfil responder em vez de virar divergência.
+
+        A amostra é ESPALHADA pelo arquivo, e isso não é detalhe: um '/restore' que morre no meio
+        deixa o começo certo e o fim intocado, e é exatamente esse o caso que o '/C' esconde. Uma
+        amostra das N primeiras entradas aprovaria esse arquivo. Os índices vão de 0 a Total-1 em
+        passo constante, as duas pontas incluídas, e a escolha é determinística: o mesmo arquivo dá
+        a mesma amostra, e o resultado é reproduzível.
+
+        Tamanho padrão 20, e o número tem uma razão de cada lado. O custo de conferir é uma leitura
+        de ACL por pasta - dezenas de milissegundos no total, contra um '/restore' que leva minutos -,
+        então reler pouco não economiza nada que importe; e reler TUDO num perfil de centenas de
+        pastas transformaria a conferência em uma segunda caminhada, que é o que a fase 2 acabou de
+        gastar 39 segundos fazendo. Vinte pontos espalhados detectam com certeza a falha que
+        interessa (o '/restore' que não aplicou nada, ou que parou no meio, atinge blocos inteiros do
+        arquivo) e, para uma falha espalhada em 10% das entradas, a chance de passar despercebida é
+        (1 - 0,1)^20, cerca de 12%.
+
+        Pasta que não existe mais NÃO é divergência: conta em 'Missing'. Entre o backup e o Desfazer
+        passam minutos, e pasta de cache dentro de um perfil some o tempo todo - é o mesmo
+        tratamento que a fase 5 dá ao código 2 do icacls. Pasta que existe e não pôde ser LIDA conta
+        em 'Differ': não confirmar é diferente de confirmar.
+    .PARAMETER Root
+        A pasta de onde os nomes do arquivo são relativos - a mesma que o 'icacls /restore' recebeu.
+    .PARAMETER Size
+        Quantas pastas conferir. Menos que 1 vira 1; mais que o arquivo tem confere o arquivo todo.
+    .OUTPUTS
+        @{ Ok; Reason; Total; Checked; Match; Differ; Missing; Paths }. 'Paths' traz até 10 das
+        divergentes, para o resumo poder nomeá-las.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$File,
+        [int]$Size = 20
+    )
+
+    $r = @{ Ok = $false; Reason = ''; Total = 0; Checked = 0; Match = 0; Differ = 0; Missing = 0; Paths = @() }
+    if ($Size -lt 1) { $Size = 1 }
+    # Primeira passada: quantos pares o arquivo tem. Por FLUXO, e duas linhas de cada vez - é o
+    # formato do '/save' (nome, descritor) e é o mesmo motivo de Measure-WinForgeAclSaveEntry ler
+    # assim: materializar as linhas de um backup grande é OutOfMemoryException numa função que não
+    # precisa de nenhuma delas depois de contá-la.
+    $leitor = $null
+    try {
+        $leitor = New-Object System.IO.StreamReader([string]$File, [System.Text.Encoding]::Unicode, $false)
+        while ($null -ne ($linha = $leitor.ReadLine())) {
+            if ($null -eq $leitor.ReadLine()) { break }
+            $r.Total++
+        }
+    } catch {
+        $r.Reason = "o backup '$File' não pôde ser lido para conferência: $($_.Exception.Message)"
+        return $r
+    } finally {
+        if ($null -ne $leitor) { $leitor.Dispose() }
+    }
+    if ($r.Total -lt 1) {
+        $r.Reason = "o backup '$File' não tem entrada nenhuma para conferir"
+        return $r
+    }
+    $quantas = [Math]::Min([int]$Size, [int]$r.Total)
+    $alvos = New-Object 'System.Collections.Generic.HashSet[int]'
+    if ($quantas -le 1) {
+        [void]$alvos.Add(0)
+    } else {
+        for ($i = 0; $i -lt $quantas; $i++) {
+            [void]$alvos.Add([int][Math]::Round(([double]$i * ([double]$r.Total - 1.0)) / ([double]$quantas - 1.0), [MidpointRounding]::AwayFromZero))
+        }
+    }
+    $longo = { param($p) if ($p -like '\\?\*') { $p } else { '\\?\' + $p } }
+    $indice = 0
+    $leitor = $null
+    try {
+        $leitor = New-Object System.IO.StreamReader([string]$File, [System.Text.Encoding]::Unicode, $false)
+        while ($null -ne ($nome = $leitor.ReadLine())) {
+            $sddl = $leitor.ReadLine()
+            if ($null -eq $sddl) { break }
+            if ($alvos.Contains($indice)) {
+                $r.Checked++
+                $abs = ''
+                try { if (-not [string]::IsNullOrWhiteSpace([string]$nome)) { $abs = [string](Join-Path ([string]$Root) ([string]$nome)) } } catch { $abs = '' }
+                if ([string]::IsNullOrWhiteSpace($abs)) {
+                    $r.Differ++
+                } elseif (-not [System.IO.Directory]::Exists((& $longo $abs))) {
+                    $r.Missing++
+                } else {
+                    $atual = ''
+                    try {
+                        $atual = [string](New-Object System.IO.DirectoryInfo ((& $longo $abs))).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+                    } catch { $atual = '' }
+                    if (Test-WinForgeAclSddlSame -A $atual -B ([string]$sddl)) {
+                        $r.Match++
+                    } else {
+                        $r.Differ++
+                        if (@($r.Paths).Count -lt 10) { $r.Paths += $abs }
+                    }
+                }
+            }
+            $indice++
+            if ($r.Checked -ge $alvos.Count) { break }
+        }
+        $r.Ok = $true
+    } catch {
+        $r.Reason = "a conferência do backup '$File' parou: $($_.Exception.Message)"
+    } finally {
+        if ($null -ne $leitor) { $leitor.Dispose() }
+    }
+    return $r
+}
+
 function Get-WinForgeAclBackupSet {
     <#
     .SYNOPSIS
-        O conjunto de backup de permissões mais recente: o índice, o carimbo de tempo e os arquivos.
+        O conjunto de backup de permissões da vez: o índice, o carimbo de tempo e os arquivos.
     .DESCRIPTION
-        Só lê. O mais recente sai da ordenação por NOME, e não pela data do sistema de arquivos, que
-        uma cópia de pasta reescreve: o nome carrega '<aaaaMMdd-HHmmss>', campo de largura fixa.
+        Só lê. O escolhido é o MAIS ANTIGO ainda NÃO CONSUMIDO, e não o mais novo - esse "mais novo"
+        era o defeito da 1.7.0. Na segunda restauração a fase 5 da primeira já tinha tirado a
+        proteção de herança, o escopo do conteúdo caía para perto de zero e mesmo assim o índice novo
+        nascia com itens (os 'sddl' das fases 3 e 4 entram sempre): lendo o mais novo, o Desfazer
+        aplicava esse índice quase vazio e as 338 pastas originais ficavam irrecuperáveis. Quem tira
+        um conjunto da fila é Set-WinForgeAclIndexConsumed, chamada por um Desfazer sem recusa.
+
+        A ordem vem do NOME do arquivo, e não da data do sistema de arquivos, que uma cópia de pasta
+        reescreve: o nome carrega '<aaaaMMdd-HHmmss>', campo de largura fixa.
 
         O índice é um JSON com 'Stamp' e 'Items'. Cada item é uma pasta: 'Path' sempre, e daí ou
         'Sddl'/'Owner'/'OwnerSid' (a lista DELA MESMA, que o Desfazer reaplica direto) ou
@@ -3796,33 +4235,39 @@ function Get-WinForgeAclBackupSet {
         deixa o -SelfTest montar um conjunto numa pasta de %TEMP%, cujos arquivos pertencem à
         identidade atual e por isso nunca passariam na regra de dono da pasta padrão.
     .OUTPUTS
-        @{ Stamp; Index; Items = @(@{ Path; Sddl; Owner; OwnerSid; File; Target }); Reason; Refused }.
+        @{ Stamp; Index; Items = @(@{ Path; Sddl; Owner; OwnerSid; File; Target; Sha256 }); Origin;
+        Consumed; Pending; Reason; Refused }. 'Pending' é quantos índices não consumidos existem na
+        pasta, e é o número que a guarda da segunda restauração usa.
     #>
     param([string]$Root, [switch]$Trusted)
 
     $dir = Get-WinForgeAclBackupRoot $Root
+    $vazio = @{ Stamp = ''; Index = ''; Items = @(); Origin = $null; Consumed = $false; Pending = 0; Refused = $false; Reason = '' }
     if (-not (Test-Path -LiteralPath $dir)) {
-        return @{ Stamp = ''; Index = ''; Items = @(); Refused = $false; Reason = "a pasta '$dir' não existe - nenhuma restauração foi feita nesta máquina" }
+        $vazio.Reason = "a pasta '$dir' não existe - nenhuma restauração foi feita nesta máquina"
+        return $vazio
     }
-    $indices = @(Get-ChildItem -LiteralPath $dir -Filter 'acl-index-*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name)
-    if (-not $indices.Count) {
-        return @{ Stamp = ''; Index = ''; Items = @(); Refused = $false; Reason = "nenhum índice de backup em '$dir'" }
+    $lista = @(Get-WinForgeAclIndexList -Root $dir -Trusted:$Trusted)
+    if (-not $lista.Count) {
+        $vazio.Reason = "nenhum índice de backup em '$dir'"
+        return $vazio
     }
-    $novo = $indices[$indices.Count - 1]
-    $carimbo = [string]([System.IO.Path]::GetFileNameWithoutExtension($novo.Name)) -replace '^acl-index-', ''
-    if ($Trusted) {
-        $julg = Test-WinForgeAclBackupFile -Path ([string]$novo.FullName) -Root $dir
-        if (-not $julg.Trusted) {
-            return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @(); Refused = $true; Reason = $julg.Reason }
-        }
+    $pendentes = @($lista | Where-Object { -not $_.Consumed })
+    $quantos = [int]$pendentes.Count
+    if ($quantos -lt 1) {
+        # Tudo já desfeito não é erro nem recusa: é o caso de quem clica no Desfazer duas vezes.
+        $ultimo = $lista | Select-Object -Last 1
+        return @{ Stamp = [string]$ultimo.Stamp; Index = [string]$ultimo.Path; Items = @(); Origin = $ultimo.Origin; Consumed = $true; Pending = 0; Refused = $false; Reason = "os $($lista.Count) conjunto(s) de backup desta pasta já foram desfeitos" }
     }
-    $dados = $null
-    try { $dados = Get-Content -LiteralPath $novo.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json } catch { $dados = $null }
-    if ($null -eq $dados) {
-        return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @(); Refused = $false; Reason = "o índice '$($novo.Name)' não pôde ser lido" }
+    $escolhido = $pendentes | Select-Object -First 1
+    if ($escolhido.Refused) {
+        return @{ Stamp = [string]$escolhido.Stamp; Index = [string]$escolhido.Path; Items = @(); Origin = $null; Consumed = $false; Pending = $quantos; Refused = $true; Reason = [string]$escolhido.Reason }
+    }
+    if (-not $escolhido.Readable) {
+        return @{ Stamp = [string]$escolhido.Stamp; Index = [string]$escolhido.Path; Items = @(); Origin = $null; Consumed = $false; Pending = $quantos; Refused = $false; Reason = [string]$escolhido.Reason }
     }
     $itens = @()
-    foreach ($it in @($dados.Items)) {
+    foreach ($it in @($escolhido.Items)) {
         $caminho = [string]$it.Path
         if ([string]::IsNullOrWhiteSpace($caminho)) { continue }
         $arquivo = ''
@@ -3834,9 +4279,10 @@ function Get-WinForgeAclBackupSet {
             OwnerSid = [string]$it.OwnerSid
             File     = $arquivo
             Target   = ([string]$it.Target).Trim()
+            Sha256   = ([string]$it.Sha256).Trim()
         }
     }
-    return @{ Stamp = $carimbo; Index = [string]$novo.FullName; Items = @($itens); Refused = $false; Reason = '' }
+    return @{ Stamp = [string]$escolhido.Stamp; Index = [string]$escolhido.Path; Items = @($itens); Origin = $escolhido.Origin; Consumed = $false; Pending = $quantos; Refused = $false; Reason = '' }
 }
 
 function Invoke-WinForgeAclUndo {
@@ -3872,6 +4318,19 @@ function Invoke-WinForgeAclUndo {
         de backup). Índice recusado para tudo; arquivo recusado é pulado com o motivo na tela e não
         derruba os outros, porque um backup adulterado no meio do conjunto não é razão para deixar
         o disco pela metade.
+
+        O conjunto é o MAIS ANTIGO ainda não desfeito, e não o mais novo (Get-WinForgeAclBackupSet).
+        Antes de o primeiro SDDL virar argumento vêm mais duas portas: a ORIGEM do índice
+        (Test-WinForgeAclIndexOrigin - descritor de outra máquina traz SID que não existe aqui) e,
+        por item de conteúdo, a IMPRESSÃO DIGITAL que a fase 2 anotou. No fim, um Desfazer sem
+        recusa marca o conjunto como consumido (Set-WinForgeAclIndexConsumed), que é o que tira ele
+        da fila e libera a próxima restauração.
+
+        O que o resumo afirma também mudou. O '/restore' roda com '/C', e com ele o código de saída
+        é 0 quase sempre: contar por ele diria "o icacls rodou", não "as entradas foram aplicadas".
+        Depois de cada arquivo, Test-WinForgeAclRestoreSample relê a lista de uma amostra espalhada
+        das pastas e compara com o descritor guardado - comportamento, não a frase de resumo do
+        icacls, que muda com o idioma. Divergência na amostra deixa o conjunto na fila.
 
         Sem conjunto nenhum a função apenas DIZ isso. É o caso de quem clica no Desfazer sem nunca
         ter restaurado nada, e ele não é erro.
@@ -3937,11 +4396,28 @@ function Invoke-WinForgeAclUndo {
         Write-Host "Nada a desfazer: $($conjunto.Reason)."
         return
     }
+    # A origem, antes de o primeiro SDDL do índice virar argumento: um descritor gravado em outra
+    # máquina traz SIDs que não existem aqui, entram como SID cru e trancam o perfil - e o SHA-256
+    # do arquivo de conteúdo não diz nada sobre isso, porque quem carrega os SDDL é o ÍNDICE.
+    $origem = Test-WinForgeAclIndexOrigin -Index $conjunto
+    if (-not $origem.Ok) {
+        Write-Error "O índice do backup foi recusado ($($origem.Reason)). Nada foi restaurado."
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$origem.Reason)) { Write-Warning ([string]$origem.Reason) }
     Write-Host "Conjunto de backup $($conjunto.Stamp): $(@($conjunto.Items).Count) item(ns) para restaurar."
+    if ([int]$conjunto.Pending -gt 1) { Write-Host "Há $($conjunto.Pending) conjunto(s) por desfazer nesta pasta; este é o mais antigo, e é por ele que se começa." }
 
     $aplicados = 0
     $recusados = 0
     $donosFora = @()
+    # A conferência por amostragem do conteúdo, somada entre os itens. Ver
+    # Test-WinForgeAclRestoreSample: o código de saída do '/restore' com '/C' não serve de sinal.
+    $amostraLidas = 0
+    $amostraBatem = 0
+    $amostraFora = 0
+    $amostraSumidas = 0
+    $amostraPaths = @()
     foreach ($item in @($conjunto.Items)) {
         # Item sem arquivo é a pasta EM SI, guardada como SDDL no índice.
         if ([string]::IsNullOrWhiteSpace([string]$item.File)) {
@@ -3976,6 +4452,21 @@ function Invoke-WinForgeAclUndo {
             $recusados++
             continue
         }
+        # A impressão digital que a fase 2 anotou, recalculada agora. É o que descobre, ANTES de o
+        # arquivo virar argumento de um '/restore' elevado, que ele deixou de ser o que foi gravado.
+        # Índice antigo não traz o campo: aí não há conferência, e isso é dito em vez de fingido.
+        $impressao = [string]$item.Sha256
+        if ([string]::IsNullOrWhiteSpace($impressao)) {
+            Write-Warning "O backup '$(Split-Path -Leaf ([string]$item.File))' foi gravado por uma versão anterior, sem impressão digital: não há como conferir se ele ainda é o arquivo original."
+        } else {
+            $conferida = Get-WinForgeAclContentHash -Path ([string]$item.File)
+            if (-not $conferida.Ok -or ([string]$conferida.Hash -ne $impressao)) {
+                $porque = if ($conferida.Ok) { 'a impressão digital SHA-256 não confere com a que a restauração anotou' } else { [string]$conferida.Reason }
+                Write-Error "O backup do conteúdo de '$($item.Path)' não é mais o arquivo que a restauração gravou ($porque). Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$($item.File)' e tente outra vez."
+                $recusados++
+                continue
+            }
+        }
         if (-not (Test-Path -LiteralPath ([string]$item.Target) -PathType Container)) {
             Write-Warning "A pasta '$($item.Target)' não existe mais; '$(Split-Path -Leaf ([string]$item.File))' fica de fora."
             $recusados++
@@ -3998,21 +4489,55 @@ function Invoke-WinForgeAclUndo {
         #   abortar no meio é pior do que contar errado: quem clica neste botão acabou de ter as
         #   permissões do disco reescritas e ele é o último recurso.
         #
-        # O preço continua sendo o que é: com '/C' o código de saída é 0 quase sempre, então o
-        # '$aplicados++' abaixo diz "o icacls rodou", e não "todas as entradas foram aplicadas".
-        # Esse sinal volta pela CONFERÊNCIA POR AMOSTRAGEM da Tarefa 5 - reler a lista de algumas
-        # pastas depois do '/restore' e comparar com o descritor guardado no arquivo. Não ficou
-        # esquecido: é comportamento medido e não depende de idioma, que é justamente o que ler a
-        # frase de resumo do icacls não garante (a integração contínua deste projeto roda em inglês
-        # e já quebrou uma asserção assim).
+        # O preço do '/C' é que o código de saída vira 0 quase sempre: sozinho, ele diz "o icacls
+        # rodou", e não "todas as entradas foram aplicadas". Quem devolve o sinal é a CONFERÊNCIA
+        # POR AMOSTRAGEM logo abaixo - reler a lista de algumas das pastas restauradas e comparar
+        # com o descritor guardado no arquivo. É comportamento, e por isso não depende do idioma do
+        # sistema, que é justamente o que ler a frase de resumo do icacls não garante (a integração
+        # contínua deste projeto roda em inglês e já quebrou uma asserção assim).
         $r = Invoke-WinForgeNativeCommand -FilePath $icacls -Arguments @([string]$item.Target, '/restore', [string]$item.File, '/C', '/L')
         Write-Host ([string]$r.Text)
-        if ([int]$r.ExitCode -ne 0) { Write-Error "Este arquivo terminou com código $($r.ExitCode)." } else { $aplicados++ }
+        if ([int]$r.ExitCode -ne 0) {
+            Write-Error "Este arquivo terminou com código $($r.ExitCode)."
+            $recusados++
+            continue
+        }
+        $aplicados++
+        $amostra = Test-WinForgeAclRestoreSample -Root ([string]$item.Target) -File ([string]$item.File)
+        if (-not $amostra.Ok) {
+            Write-Warning "A conferência por amostragem de '$($item.Path)' não pôde ser feita ($($amostra.Reason)); o resultado deste arquivo fica sem confirmação."
+        } else {
+            $amostraLidas += [int]$amostra.Checked
+            $amostraBatem += [int]$amostra.Match
+            $amostraFora += [int]$amostra.Differ
+            $amostraSumidas += [int]$amostra.Missing
+            foreach ($p in @($amostra.Paths)) { if ($amostraPaths.Count -lt 10) { $amostraPaths += [string]$p } }
+            Write-Host ("Conferência por amostragem: {0} de {1} pasta(s) relidas conferem com o backup ({2} de {3} entradas do arquivo)." -f $amostra.Match, $amostra.Checked, $amostra.Checked, $amostra.Total)
+        }
     }
     Write-Host ''
-    Write-Host "Desfazer concluído: $aplicados item(ns) restaurados, $recusados fora."
+    Write-Host "Desfazer concluído: $aplicados item(ns) processados, $recusados fora."
+    # O resumo diz o que foi CONFERIDO, e não "restaurado": o '/restore' com '/C' não garante que
+    # todas as entradas foram aplicadas, e prometer isso seria a mesma mentira que o código de saída
+    # conta. A amostra também não promete o arquivo inteiro, e o texto diz isso.
+    if ($amostraLidas -gt 0) {
+        Write-Host "Conferência por amostragem do conteúdo: de $amostraLidas pasta(s) relidas, $amostraBatem conferem com o backup, $amostraFora não conferem e $amostraSumidas já não existem. A conferência é por amostra - ela não afirma que todas as entradas do arquivo voltaram."
+    }
+    if ($amostraFora -gt 0) {
+        Write-Error ("A lista de $amostraFora pasta(s) da amostra NÃO voltou ao que o backup guardava (por exemplo: {0}). O conjunto $($conjunto.Stamp) continua na fila do Desfazer para você tentar de novo." -f (@($amostraPaths) -join '; '))
+    }
     if ($donosFora.Count) {
         Write-Warning ("O dono NÃO voltou em: {0}. Devolver a posse ao TrustedInstaller exige um privilégio que nem todo administrador tem; a lista de permissões dessas pastas voltou do mesmo jeito." -f ($donosFora -join '; '))
+    }
+    # A marca de consumido é o que tira este conjunto da fila e deixa a próxima restauração começar.
+    # Ela só vem quando NÃO houve recusa nem divergência na amostra: marcar um Desfazer que falhou
+    # pela metade esconderia o backup que o usuário ainda precisa.
+    if ($recusados -eq 0 -and $amostraFora -eq 0) {
+        $marca = Set-WinForgeAclIndexConsumed -Path ([string]$conjunto.Index)
+        if ($marca.Ok) { Write-Host "O conjunto $($conjunto.Stamp) sai da fila do Desfazer; a pasta e o arquivo continuam no disco até você usar 'Limpar backups antigos'." }
+        else { Write-Warning "O conjunto $($conjunto.Stamp) não pôde ser marcado como desfeito ($($marca.Reason)); ele continua aparecendo como pendente." }
+    } else {
+        Write-Host "O conjunto $($conjunto.Stamp) continua na fila do Desfazer, porque nem tudo voltou."
     }
     Write-Host 'O que volta de cada pasta é a lista DELA MESMA, mais o dono quando dá. O conteúdo de dentro só volta na sua pasta de usuário, que é a única guardada com recursão.'
     Write-Host 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
