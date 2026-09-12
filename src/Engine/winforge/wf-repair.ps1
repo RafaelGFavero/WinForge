@@ -2166,6 +2166,123 @@ function Get-WinForgeAclFolderSecurity {
     return $r
 }
 
+# Quatro medições decidem o desenho de Get-WinForgeAclContentScope, e estão AQUI, fora do corpo, de
+# propósito: o SelfTest lê '(Get-Command …).ScriptBlock' e reprova o fonte que cite a sobrecarga
+# recursiva de enumeração ou a seção 'All' - escrever esses nomes dentro da função reprovaria
+# justamente a função que os evita.
+#   1. 'icacls <perfil> /save /T /L' NÃO poda a travessia. O '/L' fala do ALVO de cada item, não do
+#      caminho percorrido: com '/T' o icacls desce na junção do mesmo jeito. Foi esse laço -
+#      'AppData\Local\Dados de Aplicativos' é junção para 'AppData\Local', o próprio pai - que
+#      gravou ~50 GB e travou a máquina de um usuário real. Quem para a recursão é o limite de 63
+#      saltos de reparse, não o MAX_PATH.
+#   2. '[IO.Directory]::EnumerateFileSystemEntries(<pasta>, <padrão>, AllDirectories)' é PROIBIDO
+#      aqui: medido, ele segue ponto de reanálise e cai no mesmo laço. Por isso a caminhada é uma
+#      pilha explícita que pergunta os atributos ANTES de empilhar.
+#   3. Prefixo '\\?\' em TODA chamada .NET. 'LongPathsEnabled = 1' não é o padrão do Windows: sem o
+#      prefixo, um caminho longo dentro do perfil devolve PathTooLongException no PC do usuário, e
+#      aqui isso viraria 'Denied' - ou seja, pasta silenciosamente fora do backup.
+#   4. 'GetAccessControl([...AccessControlSections]::Access)' e nunca a seção 'All': medido, 'All'
+#      inclui a SACL e LANÇA sem SeSecurityPrivilege. 'Access' é também a única seção que o Desfazer
+#      reaplica, então guardar mais do que isso seria guardar o que não volta.
+function Get-WinForgeAclContentScope {
+    <#
+    .SYNOPSIS
+        Caminha uma árvore de pastas e devolve só as que têm a herança BLOQUEADA, cada uma com o seu
+        SDDL. É a caminhada que substitui o 'icacls <perfil> /save /T'. Só lê.
+    .DESCRIPTION
+        A travessia é uma PILHA explícita - nem recursão, nem a sobrecarga de enumeração que desce
+        sozinha. Ponto de reanálise (junção, link simbólico) não é empilhado E não vira entrada. São
+        dois problemas diferentes e por isso as duas coisas: não empilhar é o que evita o laço
+        infinito; não indexar é o que evita trocar permissão por permissão, porque o .NET lê a ACL
+        do ALVO da junção e o 'icacls /restore ... /L' devolveria essa ACL ao LINK.
+
+        O filtro é AreAccessRulesProtected, não "tem ACE explícita": a restauração liga a herança
+        com '/inheritance:e', que só altera item com herança bloqueada. O guardado tem de ser
+        exatamente o alterado, senão o Desfazer cobre um conjunto e a restauração mexe em outro.
+
+        'Denied' conta EXATAMENTE GetAccessControl e a enumeração dos filhos. GetAttributes fica de
+        fora: medido, em pasta negada ele NÃO lança, e contá-lo daria zero justo onde há problema.
+        Denied > 0 muda o veredito do chamador - essas pastas não foram copiadas, então também não
+        podem ser alteradas.
+
+        Estourar qualquer um dos quatro tetos devolve Ok = $false e Entries VAZIO, nunca o coletado
+        até ali: meia cópia é um Desfazer que não desfaz.
+    .OUTPUTS
+        @{ Ok; Reason; Entries = @(@{ Name; Sddl }); Scanned; Reparse; Denied; DeniedPaths; Deny;
+        Bytes; Seconds }. 'Name' é o caminho RELATIVO à pasta acima de -Path, com a folha de -Path
+        na frente ('rafa_', 'rafa_\AppData', ...), que é a forma que o 'icacls <pasta acima>
+        /restore' espera. 'Deny' conta quantas entradas trazem ACE de negação.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$IncludeFiles,
+        [int]$MaxItems = 20000,
+        [int]$MaxBytes = 4194304,
+        [int]$MaxDepth = 32,
+        [int]$MaxSeconds = 90
+    )
+
+    $frase = 'A cópia das permissões não ficou pronta em {0} segundos. Sem ela não haveria como desfazer, então nada foi alterado. Tente de novo com o computador recém-ligado.'
+    $r = @{ Ok = $false; Reason = ''; Entries = @(); Scanned = 0; Reparse = 0; Denied = 0; DeniedPaths = @(); Deny = 0; Bytes = 0; Seconds = 0.0 }
+    $base = [string](Split-Path -Parent ([string]$Path))          # a pasta ACIMA: os nomes são relativos a ela
+    $longo = { param($p) if ($p -like '\\?\*') { $p } else { '\\?\' + $p } }
+    $pilha = New-Object System.Collections.Generic.Stack[object]
+    $pilha.Push(@{ Path = [string]$Path; Depth = 0 })
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $itens = New-Object System.Collections.Generic.List[object]
+    $bytes = 0
+    while ($pilha.Count -gt 0) {
+        if ($relogio.Elapsed.TotalSeconds -gt $MaxSeconds) { $r.Reason = ($frase -f $MaxSeconds); break }
+        $no = $pilha.Pop()
+        # GetAttributes ANTES de empilhar, e sobre o caminho longo: é a única pergunta que separa
+        # pasta de ponto de reanálise sem abrir o item. Ele NÃO entra em Denied: medido, em pasta
+        # negada ele não lança, e contá-lo daria zero justo onde há problema.
+        $attr = $null
+        try { $attr = [IO.File]::GetAttributes((& $longo $no.Path)) } catch { $attr = $null }
+        # O ponto de reanálise conta em Reparse e NÃO em Scanned: são duas grandezas diferentes.
+        # 'Scanned' só sobe para pasta que a caminhada de fato visitou.
+        if ($null -ne $attr -and ($attr -band [IO.FileAttributes]::ReparsePoint)) { $r.Reparse++; continue }
+        $r.Scanned++
+        $seg = $null
+        try {
+            $seg = (New-Object System.IO.DirectoryInfo ((& $longo $no.Path))).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        } catch {
+            $r.Denied++
+            if ($r.DeniedPaths.Count -lt 200) { $r.DeniedPaths += [string]$no.Path }
+            continue
+        }
+        if ($seg.AreAccessRulesProtected) {
+            $sddl = [string]$seg.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+            if ($sddl -match '\(D;') { $r.Deny++ }
+            $nome = [string]$no.Path
+            if ($nome.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { $nome = $nome.Substring($base.TrimEnd('\').Length + 1) }
+            $itens.Add(@{ Name = $nome; Sddl = $sddl })
+            $bytes += [System.Text.Encoding]::Unicode.GetByteCount($nome + $sddl) + 8
+            if ($itens.Count -gt $MaxItems) { $r.Reason = "A cópia das permissões passou de $MaxItems pastas. Nada foi alterado."; break }
+            if ($bytes -gt $MaxBytes) { $r.Reason = "A cópia das permissões passou de $MaxBytes bytes. Nada foi alterado."; break }
+        }
+        if ($no.Depth -ge $MaxDepth) { $r.Reason = "A cópia das permissões passou de $MaxDepth níveis de pasta. Nada foi alterado."; break }
+        try {
+            foreach ($filho in [IO.Directory]::EnumerateDirectories((& $longo $no.Path))) {
+                $pilha.Push(@{ Path = ([string]$filho -replace '^\\\\\?\\', ''); Depth = $no.Depth + 1 })
+            }
+            if ($IncludeFiles) { foreach ($arq in [IO.Directory]::EnumerateFiles((& $longo $no.Path))) { $r.Scanned++ } }
+        } catch {
+            $r.Denied++
+            if ($r.DeniedPaths.Count -lt 200) { $r.DeniedPaths += [string]$no.Path }
+        }
+    }
+    $r.Bytes = $bytes
+    $r.Seconds = [math]::Round($relogio.Elapsed.TotalSeconds, 3)
+    # A lista só sai inteira. Teto estourado deixa Entries vazio de propósito - §1.6 não tem
+    # "continuar mesmo assim", porque meia cópia reintroduz o Desfazer que não desfaz.
+    if ([string]::IsNullOrEmpty([string]$r.Reason)) {
+        $r.Entries = $itens.ToArray()
+        $r.Ok = $true
+    }
+    return $r
+}
+
 function Restore-WinForgeAclSddl {
     <#
     .SYNOPSIS

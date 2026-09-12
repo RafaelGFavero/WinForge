@@ -4135,6 +4135,90 @@ if ($SelfTest) {
         Write-Host "  NVIDIA (rede): status=$($wbNv.Status) versão=$($wbNv.Version) lançamento=$($wbNv.ReleaseDate)"
         if ($wbNv.Status -ne 'ok' -or $wbNv.Version -notmatch '^\d{3}\.\d{2}$') { Write-Host "  [ERRO] Get-WinForgeNvidiaLatestDriver: esperado status 'ok' e versão no formato 000.00" -ForegroundColor Red; $wbErrors++ }
     }
+    # ---------------------------------------------------------------- Permissões: a caminhada
+    # O laço que encheu o disco em produção: 'AppData\Local\Dados de Aplicativos' é uma junção para
+    # 'AppData\Local', alcançável por dois caminhos, e quem para a recursão é o limite de 63 saltos
+    # de reparse - não o MAX_PATH. A caminhada nova não desce em ponto de reanálise E não o indexa:
+    # o .NET lê a ACL do ALVO e o '/restore /L' a devolveria ao LINK, trocando permissão por
+    # permissão. As duas coisas, e é isto que o teste cobra.
+    $wfCamRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-caminhada'
+    try {
+        if (Test-Path -LiteralPath $wfCamRaiz) { Remove-Item -LiteralPath $wfCamRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfCamPerfil = Join-Path $wfCamRaiz 'perfil'
+        $wfCamLocal = Join-Path $wfCamPerfil 'AppData\Local'
+        New-Item -ItemType Directory -Path $wfCamLocal -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $wfCamPerfil 'Documentos') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $wfCamPerfil 'nota.txt') -Value 'x' -Encoding UTF8
+        # A junção auto-referente: 'Dados de Aplicativos' -> o próprio pai. É o laço exato da máquina real.
+        $wfCamJuncao = Join-Path $wfCamLocal 'Dados de Aplicativos'
+        cmd.exe /c mklink /J "$wfCamJuncao" "$wfCamLocal" | Out-Null
+        if (-not (Test-Path -LiteralPath $wfCamJuncao)) { throw "a junção de teste não pôde ser criada em '$wfCamJuncao'" }
+        # Herança bloqueada em UMA pasta: é ela, e só ela, que o filtro tem de guardar.
+        $wfCamProt = New-Object System.IO.DirectoryInfo (Join-Path $wfCamPerfil 'Documentos')
+        $wfCamSd = $wfCamProt.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfCamSd.SetAccessRuleProtection($true, $true)
+        $wfCamProt.SetAccessControl($wfCamSd)
+
+        $wfCamR = Get-WinForgeAclContentScope -Path $wfCamPerfil
+        if (-not $wfCamR.Ok) { Write-Host "  [ERRO] Permissões (caminhada): devolveu Ok=`$false ('$($wfCamR.Reason)') numa pasta de teste íntegra" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamR.Reparse -lt 1) { Write-Host "  [ERRO] Permissões (caminhada): a junção não foi contada em Reparse (veio $($wfCamR.Reparse))" -ForegroundColor Red; $wbErrors++ }
+        $wfCamNomes = @($wfCamR.Entries | ForEach-Object { [string]$_.Name })
+        if (@($wfCamNomes | Where-Object { $_ -like '*Dados de Aplicativos*' }).Count) { Write-Host "  [ERRO] Permissões (caminhada): o ponto de reanálise virou ENTRADA ('$($wfCamNomes -join ' | ')') - o /restore /L aplicaria no link a ACL do destino" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfCamNomes | Sort-Object -Unique).Count -ne $wfCamNomes.Count) { Write-Host "  [ERRO] Permissões (caminhada): item visitado duas vezes ('$($wfCamNomes -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # CONTAGEM EXATA, e não 'pelo menos': com uma entrada só, "sem duplicata" é vácuo, e contar o
+        # reparse E empilhá-lo passaria verde com o laço inteiro vivo e invisível. São quatro pastas -
+        # perfil, AppData, Local, Documentos - e nenhuma quinta: 'Scanned' conta pasta ENUMERADA, o
+        # ponto de reanálise conta só em 'Reparse'. Descer na junção traria Local e Documentos de novo
+        # e isto viraria 6.
+        if ([int]$wfCamR.Scanned -ne 4) { Write-Host "  [ERRO] Permissões (caminhada): Scanned=$($wfCamR.Scanned), esperado exatamente 4 (perfil, AppData, Local, Documentos) - mais que isso é a junção sendo descida" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamR.Reparse -ne 1) { Write-Host "  [ERRO] Permissões (caminhada): Reparse=$($wfCamR.Reparse), esperado exatamente 1" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfCamR.Entries).Count -ne 1) { Write-Host "  [ERRO] Permissões (caminhada): o filtro é AreAccessRulesProtected - esperava 1 entrada, veio $(@($wfCamR.Entries).Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfCamR.Entries[0].Name -notlike '*Documentos') { Write-Host "  [ERRO] Permissões (caminhada): a entrada guardada é '$($wfCamR.Entries[0].Name)', esperada a pasta com herança bloqueada" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfCamR.Entries[0].Sddl)) { Write-Host "  [ERRO] Permissões (caminhada): a entrada veio sem SDDL" -ForegroundColor Red; $wbErrors++ }
+        # Nome RELATIVO à pasta ACIMA do perfil, com a folha do perfil na frente: é o que o
+        # 'icacls <pasta acima> /restore' espera, e é o que o Desfazer vai consumir.
+        if ([string]$wfCamR.Entries[0].Name -ne 'perfil\Documentos') { Write-Host "  [ERRO] Permissões (caminhada): o nome relativo veio '$($wfCamR.Entries[0].Name)', esperado 'perfil\Documentos'" -ForegroundColor Red; $wbErrors++ }
+        # Arquivo fica FORA por padrão (84 protegidos em 294.011 na máquina medida, todos cache).
+        # Contagem EXATA outra vez: há um único arquivo na árvore ('nota.txt'), então -IncludeFiles
+        # soma exatamente 1. "Aumentou" passaria verde com a árvore inteira sendo varrida duas vezes.
+        $wfCamArq = Get-WinForgeAclContentScope -Path $wfCamPerfil -IncludeFiles
+        if ([int]$wfCamArq.Scanned -ne ([int]$wfCamR.Scanned + 1)) { Write-Host "  [ERRO] Permissões (caminhada): -IncludeFiles deu Scanned=$($wfCamArq.Scanned), esperado $([int]$wfCamR.Scanned + 1) (só 'nota.txt' entra)" -ForegroundColor Red; $wbErrors++ }
+
+        # Os quatro tetos: Entries VAZIO, nunca o coletado até ali, e a frase de §1.6.
+        # '@($h)[0]' NÃO é splat - é argumento posicional, e os quatro tetos rodariam com o padrão,
+        # sem estourar nunca. Splat é '@nome', sobre uma VARIÁVEL.
+        foreach ($wfCamTeto in @(
+            @{ Nome = 'MaxItems';   Args = @{ MaxItems = 0 } },
+            @{ Nome = 'MaxBytes';   Args = @{ MaxBytes = 1 } },
+            @{ Nome = 'MaxDepth';   Args = @{ MaxDepth = 0 } },
+            @{ Nome = 'MaxSeconds'; Args = @{ MaxSeconds = 0 } })) {
+            $wfCamArgs = $wfCamTeto.Args
+            $wfCamEstouro = Get-WinForgeAclContentScope -Path $wfCamPerfil @wfCamArgs
+            if ($wfCamEstouro.Ok) { Write-Host "  [ERRO] Permissões (tetos): $($wfCamTeto.Nome) estourado devolveu Ok=`$true" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfCamEstouro.Entries).Count -ne 0) { Write-Host "  [ERRO] Permissões (tetos): $($wfCamTeto.Nome) devolveu $(@($wfCamEstouro.Entries).Count) entrada(s) - o parcial não pode sair" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCamEstouro.Reason -notmatch 'nada foi alterado') { Write-Host "  [ERRO] Permissões (tetos): $($wfCamTeto.Nome) sem a frase de §1.6 ('$($wfCamEstouro.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Caminho longo: sem o prefixo '\\?\' isto estoura PathTooLongException no PC do usuário,
+        # porque LongPathsEnabled=1 não é o padrão.
+        $wfCamLongo = $wfCamPerfil
+        while ($wfCamLongo.Length -lt 294) { $wfCamLongo = Join-Path $wfCamLongo ('n' * 30) }
+        [System.IO.Directory]::CreateDirectory('\\?\' + $wfCamLongo) | Out-Null
+        $wfCamRLongo = Get-WinForgeAclContentScope -Path $wfCamPerfil
+        if (-not $wfCamRLongo.Ok) { Write-Host "  [ERRO] Permissões (caminho longo): a caminhada falhou ('$($wfCamRLongo.Reason)') - falta o prefixo \\?\" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamRLongo.Denied -ne 0) { Write-Host "  [ERRO] Permissões (caminho longo): $($wfCamRLongo.Denied) negada(s) num caminho de $($wfCamLongo.Length) caracteres - o prefixo \\?\ não está em toda chamada" -ForegroundColor Red; $wbErrors++ }
+        # 'Denied' conta GetAccessControl e EnumerateFileSystemEntries, e NÃO GetAttributes: medido,
+        # em pasta negada o GetAttributes não lança, e contá-lo daria zero justo onde há problema.
+        $wfCamFonte = [string](Get-Command Get-WinForgeAclContentScope).ScriptBlock
+        if ($wfCamFonte -match 'AllDirectories') { Write-Host "  [ERRO] Permissões (caminhada): EnumerateFileSystemEntries com AllDirectories é proibido - ele segue reparse point" -ForegroundColor Red; $wbErrors++ }
+        if ($wfCamFonte -match 'AccessControlSections\]::All') { Write-Host "  [ERRO] Permissões (caminhada): AccessControlSections::All lança sem SeSecurityPrivilege" -ForegroundColor Red; $wbErrors++ }
+        if ($wfCamFonte -notmatch 'GetSecurityDescriptorSddlForm') { Write-Host "  [ERRO] Permissões (caminhada): o SDDL tem de sair de GetSecurityDescriptorSddlForm('Access')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (caminhada): junção auto-referente não é descida nem indexada, 1 entrada protegida, tetos devolvem lista vazia, caminho de $($wfCamLongo.Length) caracteres lido"
+    } catch {
+        Write-Host "  [ERRO] Permissões (caminhada): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        try { cmd.exe /c rmdir "$wfCamRaiz\perfil\AppData\Local\Dados de Aplicativos" 2>$null | Out-Null } catch { }
+        Remove-Item -LiteralPath $wfCamRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
     # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os
     # dois títulos trazem o mesmo DriverModel e versões diferentes. Mostrar as duas convida o usuário
