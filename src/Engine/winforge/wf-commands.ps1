@@ -423,6 +423,14 @@ function Invoke-WinForgeStreamedProcess {
     $codigo = $null
     try {
         $escritor = Open-WinForgeStreamWriter -Path $StreamTo
+        # O teto do ARQUIVO desta execução, já estourado por um passo anterior ou não. Passado o
+        # teto, as linhas continuam sendo LIDAS (parar de ler enche o cano de 4 KB e trava os dois
+        # lados) e deixam de ser escritas.
+        $estourou = $false
+        try { $estourou = [bool]$sync.WinForgeStreamCapped[$StreamTo] } catch { $estourou = $false }
+        # De 2000 em 2000 linhas, e não a cada linha: o teto existe para pegar um arquivo que cresce
+        # sem parar, e um Get-Item por linha seria um acesso a disco por linha.
+        $desdeAConta = 0
         [void]$processo.Start()
         $tSaida = $processo.StandardOutput.ReadLineAsync()
         $tErro = $processo.StandardError.ReadLineAsync()
@@ -435,8 +443,11 @@ function Invoke-WinForgeStreamedProcess {
                 if ($null -eq $linha) {
                     $tSaida = $null
                 } else {
-                    $escritor.WriteLine($linha)
-                    if ($null -ne $acumulado) { [void]$acumulado.AppendLine($linha) }
+                    if (-not $estourou) {
+                        $escritor.WriteLine($linha)
+                        if ($null -ne $acumulado) { [void]$acumulado.AppendLine($linha) }
+                        $desdeAConta++
+                    }
                     $tSaida = $processo.StandardOutput.ReadLineAsync()
                 }
             }
@@ -445,9 +456,24 @@ function Invoke-WinForgeStreamedProcess {
                 if ($null -eq $linha) {
                     $tErro = $null
                 } else {
-                    $escritor.WriteLine("[erro] $linha")
-                    if ($null -ne $acumulado) { [void]$acumulado.AppendLine("[erro] $linha") }
+                    if (-not $estourou) {
+                        $escritor.WriteLine("[erro] $linha")
+                        if ($null -ne $acumulado) { [void]$acumulado.AppendLine("[erro] $linha") }
+                        $desdeAConta++
+                    }
                     $tErro = $processo.StandardError.ReadLineAsync()
+                }
+            }
+            if ($desdeAConta -ge 2000) {
+                $desdeAConta = 0
+                $teto = Test-WinForgeStreamFileCap -Path $StreamTo
+                if ($teto.Over) {
+                    $estourou = $true
+                    # UMA linha por arquivo, e não por processo: numa fase 5 de 338 pastas são 338
+                    # chamadas de processo sobre o MESMO arquivo, e o aviso repetido seria o próximo
+                    # despejo a encher o disco.
+                    $escritor.WriteLine([string]$teto.Text)
+                    $sync.WinForgeStreamCapped[$StreamTo] = $true
                 }
             }
         }
@@ -893,6 +919,11 @@ function Show-WinForgeOutputWindow {
             Box    = $caixa
             Header = $cabecalho
             Timer  = $null
+            # Quantos caracteres a caixa tem, contados por nós. Ler '$caixa.Text' MATERIALIZA a
+            # string inteira - até 4 MB -, e perguntar o tamanho a cada meio segundo seria copiar
+            # 4 MB por tique só para descobrir que não precisa cortar nada. Com o contador, a caixa
+            # só é lida no tique em que o corte acontece.
+            Chars  = [int]([string]$caixa.Text).Length
         }
         # Primeira leitura antes de mostrar: a janela abre já com o que o arquivo tem, e não em
         # branco por meio segundo.
@@ -915,6 +946,155 @@ function Show-WinForgeOutputWindow {
     # acima) garante que ela continua por cima da janela principal e fecha com ela.
     if (-not $NoShow) { $janela.Show() }
     return $janela
+}
+
+function Limit-WinForgeStreamText {
+    <#
+    .SYNOPSIS
+        O anel da caixa de texto: acima de 4 MB, volta para os últimos 2 MB, com uma marca no topo.
+    .DESCRIPTION
+        HISTERESE, e não corte por tique. Cortar sempre que passa de 2 MB faz a caixa copiar 2 MB a
+        cada 512 KB que chegam - foi assim que o pico bateu 971 MB. Cortando só acima de 4 MB e
+        voltando para 2 MB, a cópia acontece uma vez a cada 2 MB de saída: 274 MB de pico, medido.
+
+        O corte cai na primeira quebra de linha a partir do ponto de 2 MB, e não no meio de uma
+        linha: metade de um caminho de pasta no topo da caixa é ruído, não informação. Sem quebra de
+        linha nenhuma no trecho (uma linha só, gigante), corta no ponto exato - é o único jeito de o
+        teto valer para saída que não tem linha.
+
+        Quem fica é o FIM do texto. A janela acompanha um comando em andamento: o que interessa é o
+        que está acontecendo agora, e o começo continua inteiro no arquivo - é o que a marca diz.
+    .OUTPUTS
+        O texto, cortado ou não.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [int]$MaxChars = 4194304,
+        [int]$KeepChars = 2097152
+    )
+
+    if ($Text.Length -le $MaxChars) { return $Text }
+    $corte = $Text.IndexOf("`n", $Text.Length - $KeepChars)
+    $inicio = if ($corte -lt 0) { $Text.Length - $KeepChars } else { $corte + 1 }
+    return "… (o começo desta parte ficou só no arquivo)`r`n" + $Text.Substring($inicio)
+}
+
+function Get-WinForgeFollowReadWindow {
+    <#
+    .SYNOPSIS
+        Quanto do arquivo um tique lê: o pedaço inteiro, ou só a cauda quando ele cresceu demais.
+        Função pura.
+    .DESCRIPTION
+        O tique lê de '$Offset' até o fim do arquivo. Isso vale enquanto o arquivo cresce meio
+        segundo por vez; não vale quando a janela fica minimizada ou a thread da interface fica presa
+        e o arquivo ganha dezenas de MB entre dois tiques - aí a leitura aloca um byte[] do tamanho
+        do salto, decodifica tudo e joga quase tudo fora no teto do bloco. O pico vem dessa alocação,
+        e não do que aparece na tela.
+
+        Acima de 'MaxGrowth' (8 MB) o tique lê só o último 'TailBytes' (1 MB) e diz quanto pulou -
+        quem quer o meio tem o arquivo, que continua completo. Abaixo disso não recorta nada: o caso
+        normal é de alguns KB por tique, e recortar ali seria perder linha à toa.
+
+        Ser pura é o que permite provar os dois lados com números, sem arquivo nenhum e sem janela.
+    .OUTPUTS
+        @{ Start = <long>; Count = <int>; Skipped = <long> }. 'Skipped' é 0 quando nada foi pulado.
+    #>
+    param(
+        [Parameter(Mandatory)][long]$Offset,
+        [Parameter(Mandatory)][long]$Length,
+        [long]$MaxGrowth = 8388608,
+        [long]$TailBytes = 1048576
+    )
+
+    $inicio = [long]$Offset
+    if ($inicio -lt 0) { $inicio = 0 }
+    if ($Length -le $inicio) { return @{ Start = $inicio; Count = 0; Skipped = [long]0 } }
+    $cresceu = [long]($Length - $inicio)
+    if ($cresceu -le $MaxGrowth) { return @{ Start = $inicio; Count = [int]$cresceu; Skipped = [long]0 } }
+    $novoInicio = [long]($Length - $TailBytes)
+    return @{ Start = $novoInicio; Count = [int]$TailBytes; Skipped = [long]($novoInicio - $inicio) }
+}
+
+function Test-WinForgeStreamFileCap {
+    <#
+    .SYNOPSIS
+        Diz se o arquivo de saída desta execução passou do teto, e com que linha avisar. Só lê.
+    .DESCRIPTION
+        O teto é do ARQUIVO, e é a última rede: o anel da caixa protege a memória da janela, e este
+        protege o disco de quem clicou. Um reparo de permissões num perfil grande, ou um DISM que
+        entra em laço de erro, escreve sem parar enquanto o usuário está fora da frente da máquina -
+        e foi disco cheio, não só memória, o que o usuário relatou.
+
+        256 MB é folgado de propósito: nenhuma execução legítima chega perto, e o que chega lá não
+        está mais dizendo nada de novo. O que passa disso vira UMA linha e silêncio - e a linha diz
+        que os detalhes foram descartados, porque um arquivo que simplesmente para de crescer é
+        indistinguível de um comando que travou.
+
+        Arquivo que não existe, ou que não pode ser medido, responde 'não passou': o teto não é lugar
+        de derrubar um comando por não conseguir ler um tamanho.
+    .OUTPUTS
+        @{ Over = <bool>; Bytes = <long>; Text = <string> }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [long]$MaxBytes = 268435456
+    )
+
+    $bytes = [long]0
+    try { $bytes = [long](Get-Item -LiteralPath $Path -ErrorAction Stop).Length } catch { return @{ Over = $false; Bytes = [long]0; Text = '' } }
+    if ($bytes -le $MaxBytes) { return @{ Over = $false; Bytes = $bytes; Text = '' } }
+    return @{
+        Over  = $true
+        Bytes = $bytes
+        Text  = ("== Teto de {0} MB alcançado: os detalhes daqui em diante foram descartados. O comando continua rodando, e o fim dele ainda aparece nesta janela. ==" -f [int]($MaxBytes / 1MB))
+    }
+}
+
+function Remove-WinForgeOldCommandOutput {
+    <#
+    .SYNOPSIS
+        Retenção dos arquivos de saída de um prefixo: 30 dias e 20 arquivos. Apaga o excedente.
+    .DESCRIPTION
+        Os arquivos de saída nunca eram apagados. Um DISM de 40 MB por clique, numa máquina que usa o
+        botão toda semana, é a pasta de logs crescendo para sempre - e a queixa que abriu esta leva
+        começou com disco cheio.
+
+        POR PREFIXO, e as duas regras somam: sai o que tem mais de 30 dias, e depois sai o que
+        sobrar além dos 20 mais novos. O prefixo é o que mantém 'server' e 'repair' independentes -
+        vinte diagnósticos de servidor não podem empurrar para fora os reparos, que são o histórico
+        que alguém vai querer ler depois de uma restauração de permissões dar errado.
+
+        A ordem é do mais NOVO para o mais velho, e o corte é no fim da fila: apagar do começo seria
+        apagar exatamente o arquivo que o usuário acabou de gerar.
+
+        Falha de remoção não é erro: o arquivo pode estar aberto na janela de outra execução. Ele
+        fica, e a limpeza da execução seguinte tenta de novo.
+    .PARAMETER Root
+        A pasta. Vazio, é a mesma de Get-WinForgeCommandOutputPath.
+    .OUTPUTS
+        @{ Removed = @(<string>) } com os nomes apagados.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Prefix,
+        [int]$MaxAgeDays = 30,
+        [int]$MaxFiles = 20,
+        [string]$Root = ''
+    )
+
+    $dir = $Root
+    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Split-Path -Parent (Get-WinForgeCommandOutputPath -Name 'retencao' -Prefix $Prefix) }
+    $apagados = @()
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return @{ Removed = @() } }
+    $arquivos = @(Get-ChildItem -LiteralPath $dir -File -Filter ("{0}-*.txt" -f $Prefix) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    $limite = (Get-Date).AddDays(-[math]::Abs($MaxAgeDays))
+    $n = 0
+    foreach ($f in $arquivos) {
+        $n++
+        if ($n -le $MaxFiles -and [datetime]$f.LastWriteTime -ge $limite) { continue }
+        Remove-Item -LiteralPath ([string]$f.FullName) -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath ([string]$f.FullName))) { $apagados += [string]$f.Name }
+    }
+    return @{ Removed = @($apagados) }
 }
 
 function Invoke-WinForgeFollowTick {
@@ -943,6 +1123,15 @@ function Invoke-WinForgeFollowTick {
            AppendText desse tamanho congela a thread da interface por muito tempo. O deslocamento
            avança sobre o bloco inteiro de qualquer jeito: o arquivo continua completo, e é ele o
            resultado. A caixa recebe a última parte, precedida de um aviso.
+        5. E são TRÊS tetos, não um, porque são três consumos diferentes:
+           - o do byte[] LIDO (Get-WinForgeFollowReadWindow, 8 MB de crescimento / 1 MB de cauda):
+             a janela minimizada ou a thread presa deixam o arquivo crescer dezenas de MB entre dois
+             tiques, e alocar esse salto inteiro para descartá-lo no teto do bloco é o pico que não
+             aparece na tela;
+           - o do BLOCO por tique (512 KB, item 4), que é o custo do AppendText;
+           - o da CAIXA (Limit-WinForgeStreamText, 4 MB com volta para 2 MB), que é o que fica na
+             memória depois. O teto do bloco sozinho não segura este: 512 KB por tique, meia hora de
+             DISM, é a caixa com centenas de MB dentro.
     #>
     param([Parameter(Mandatory)]$Window)
 
@@ -956,11 +1145,15 @@ function Invoke-WinForgeFollowTick {
         $arquivo = [System.IO.File]::Open([string]$estado.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
         try {
             if ($arquivo.Length -gt [long]$estado.Offset) {
-                [void]$arquivo.Seek([long]$estado.Offset, [System.IO.SeekOrigin]::Begin)
-                $bytes = New-Object byte[] ([int]($arquivo.Length - [long]$estado.Offset))
+                # Quanto ler, e de onde: acima de 8 MB de crescimento o tique pega só a cauda de
+                # 1 MB e pula o resto - o arquivo continua completo, e quem quer o meio tem ele.
+                $janelaLeitura = Get-WinForgeFollowReadWindow -Offset ([long]$estado.Offset) -Length ([long]$arquivo.Length)
+                $pulou = [long]$janelaLeitura.Skipped
+                [void]$arquivo.Seek([long]$janelaLeitura.Start, [System.IO.SeekOrigin]::Begin)
+                $bytes = New-Object byte[] ([int]$janelaLeitura.Count)
                 $lidos = $arquivo.Read($bytes, 0, $bytes.Length)
                 $inicio = 0
-                if ([long]$estado.Offset -eq 0 -and $lidos -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $inicio = 3 }
+                if ([long]$janelaLeitura.Start -eq 0 -and $lidos -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $inicio = 3 }
                 $texto = [System.Text.Encoding]::UTF8.GetString($bytes, $inicio, $lidos - $inicio)
                 if (-not $concluido) {
                     $corte = $texto.LastIndexOf("`n")
@@ -974,11 +1167,22 @@ function Invoke-WinForgeFollowTick {
                     $corteTeto = $texto.IndexOf("`n", $texto.Length - 524288)
                     $texto = "… (o começo desta parte ficou só no arquivo)`r`n" + $texto.Substring($(if ($corteTeto -lt 0) { $texto.Length - 524288 } else { $corteTeto + 1 }))
                 }
+                if ($pulou -gt 0) { $texto = ("… ({0} MB desta parte ficaram só no arquivo)`r`n" -f [int][math]::Ceiling($pulou / 1MB)) + $texto }
                 if ($texto.Length -gt 0) {
                     $estado.Box.AppendText($texto)
+                    $estado.Chars = [int]$estado.Chars + $texto.Length
+                    # O ANEL, e só depois do acréscimo: o teto do bloco acima limita o que ENTRA por
+                    # tique, e este limita o que FICA. A caixa só é LIDA no tique em que o corte
+                    # acontece - ler '.Text' materializa a string inteira, e fazer isso a cada meio
+                    # segundo seria copiar 4 MB por tique para descobrir que não há o que cortar.
+                    if ([int]$estado.Chars -gt 4194304) {
+                        $cortado = Limit-WinForgeStreamText -Text ([string]$estado.Box.Text)
+                        $estado.Box.Text = $cortado
+                        $estado.Chars = $cortado.Length
+                    }
                     $estado.Box.ScrollToEnd()
                 }
-                $estado.Offset = [long]$estado.Offset + $avanco
+                $estado.Offset = [long]$janelaLeitura.Start + $avanco
             }
         } finally { $arquivo.Dispose() }
     } catch {
@@ -1017,6 +1221,12 @@ $sync.WinForgeStreamExit = [System.Collections.Hashtable]::Synchronized(@{})
 # por cima um do outro, quando o Windows não recusa a segunda abertura antes disso. Quem abre é
 # Open-WinForgeStreamWriter, quem fecha é o 'finally' do corpo da runspace.
 $sync.WinForgeStreamWriters = [System.Collections.Hashtable]::Synchronized(@{})
+
+# Quais arquivos já passaram do teto de tamanho desta execução. Mora ao lado do escritor porque é a
+# mesma chave e o mesmo tempo de vida: o aviso de "os detalhes daqui em diante foram descartados"
+# sai UMA vez por arquivo, e não uma por chamada de processo - a fase 5 de um perfil são centenas
+# de chamadas sobre o mesmo arquivo.
+$sync.WinForgeStreamCapped = [System.Collections.Hashtable]::Synchronized(@{})
 
 # O arquivo que o comando com fluxo ao vivo está escrevendo AGORA. É como um passo do tipo
 # 'Function' - que roda com todos os fluxos redirecionados para o arquivo, sem receber argumento
@@ -1332,6 +1542,7 @@ $sync.WinForgeStreamBody = {
         # a única saída - um passo que estoure passa por este 'finally', e sem ele o identificador
         # do arquivo ficaria aberto até o programa fechar.
         Close-WinForgeStreamWriter -Path $wfCaminho
+        [void]$sync.WinForgeStreamCapped.Remove($wfCaminho)
         $sync.WinForgeStreamPath = ''
         $sync.WinForgeStreamExit[$wfCaminho] = $wfCodigo
         $sync.WinForgeStreamDone[$wfCaminho] = $true
@@ -1447,6 +1658,11 @@ function Start-WinForgeStreamedCommand {
         $caminho = Get-WinForgeCommandOutputPath -Name $Name -Prefix 'repair'
         $cabecalho = "WinForge - $($Spec.Title)`r`n$((Get-Date).ToString('dd/MM/yyyy HH:mm:ss')) - $env:COMPUTERNAME`r`n" + ('-' * 78)
         Set-Content -LiteralPath $caminho -Value $cabecalho -Encoding UTF8 -ErrorAction Stop
+        # A retenção roda UMA vez por execução, aqui, e DEPOIS de o arquivo desta nascer: assim ela
+        # conta o de agora entre os vinte que ficam, e nunca apaga o que a janela vai acompanhar.
+        # Estes arquivos nunca eram apagados - um DISM de 40 MB por clique, semana após semana, é a
+        # pasta de logs crescendo para sempre, e disco cheio foi metade da queixa que abriu isto.
+        [void](Remove-WinForgeOldCommandOutput -Prefix 'repair')
         $sync.WinForgeStreamDone[$caminho] = $false
         $sync.WinForgeStreamExit[$caminho] = $null
 

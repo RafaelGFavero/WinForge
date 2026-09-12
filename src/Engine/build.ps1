@@ -3512,6 +3512,111 @@ if ($SelfTest) {
     } finally {
         Remove-Item -LiteralPath $wfMemRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- Janela de saída: tetos
+    try {
+        # Anel com histerese: abaixo do teto não mexe; acima, volta para 2 MB cortando na primeira
+        # quebra de linha, com a marca.
+        $wfTetoCurto = ('linha' + "`r`n") * 100
+        if ((Limit-WinForgeStreamText -Text $wfTetoCurto) -ne $wfTetoCurto) { Write-Host "  [ERRO] Tetos (anel): texto abaixo do teto foi alterado" -ForegroundColor Red; $wbErrors++ }
+        $wfTetoGrande = ('x' * 99 + "`r`n") * 50000     # ~5 MB
+        $wfTetoCortado = Limit-WinForgeStreamText -Text $wfTetoGrande
+        if ($wfTetoCortado.Length -gt 4194304) { Write-Host "  [ERRO] Tetos (anel): o corte deixou $($wfTetoCortado.Length) caractere(s), acima do teto de 4 MB" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoCortado.Length -lt 1000000) { Write-Host "  [ERRO] Tetos (anel): o corte deixou só $($wfTetoCortado.Length) caractere(s) - a histerese devolve ~2 MB" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoCortado -notlike '*(o começo desta parte ficou só no arquivo)*') { Write-Host "  [ERRO] Tetos (anel): o texto cortado saiu sem a marca" -ForegroundColor Red; $wbErrors++ }
+        $wfTetoResto = $wfTetoCortado.Substring($wfTetoCortado.IndexOf("`n") + 1)
+        if ($wfTetoResto -notmatch '^x{99}') { Write-Host "  [ERRO] Tetos (anel): o corte não caiu numa quebra de linha" -ForegroundColor Red; $wbErrors++ }
+        # E a histerese de verdade: cortar o já cortado não corta de novo.
+        if ((Limit-WinForgeStreamText -Text $wfTetoCortado).Length -ne $wfTetoCortado.Length) { Write-Host "  [ERRO] Tetos (anel): o texto já dentro do teto foi cortado outra vez" -ForegroundColor Red; $wbErrors++ }
+        # A histerese é a FAIXA ENTRE os dois tetos, e é ela que tem de ser provada: 3 MB está acima
+        # do que o corte deixa (2 MB) e abaixo do teto (4 MB), e não pode ser tocado. A linha acima
+        # sozinha não prova isso - MEDIDO: um mutante que cortasse sempre acima de 2 MB SOBREVIVEU a
+        # ela, porque o texto recém-cortado cai alguns caracteres ABAIXO de 2 MB por acaso (o corte
+        # anda até a próxima quebra de linha e a marca é menor que a linha). É a faixa do meio que
+        # separa "corta a cada tique" - 971 MB de pico - de "corta a cada 2 MB de saída".
+        $wfTetoMeio = ('y' * 99 + "`r`n") * 30000     # ~3 MB: entre os dois tetos
+        if ((Limit-WinForgeStreamText -Text $wfTetoMeio).Length -ne $wfTetoMeio.Length) { Write-Host "  [ERRO] Tetos (anel): texto de 3 MB - entre o corte (2 MB) e o teto (4 MB) - foi cortado; sem a histerese a caixa copia 2 MB a cada tique" -ForegroundColor Red; $wbErrors++ }
+        # Leitura por tique: cresceu mais de 8 MB, lê só o último 1 MB e diz quanto pulou.
+        $wfTetoJan = Get-WinForgeFollowReadWindow -Offset 0 -Length 20971520
+        if ([long]$wfTetoJan.Start -ne (20971520 - 1048576)) { Write-Host "  [ERRO] Tetos (tique): crescimento de 20 MB deveria começar em Length-1MB, veio $($wfTetoJan.Start)" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfTetoJan.Count -gt 1048576) { Write-Host "  [ERRO] Tetos (tique): o tique leria $($wfTetoJan.Count) bytes" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfTetoJan.Skipped -le 0) { Write-Host "  [ERRO] Tetos (tique): o que foi pulado não é relatado" -ForegroundColor Red; $wbErrors++ }
+        $wfTetoPouco = Get-WinForgeFollowReadWindow -Offset 100 -Length 200000
+        if ([long]$wfTetoPouco.Start -ne 100 -or [int]$wfTetoPouco.Count -ne 199900) { Write-Host "  [ERRO] Tetos (tique): crescimento pequeno foi recortado ($($wfTetoPouco.Start)/$($wfTetoPouco.Count))" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfTetoPouco.Skipped -ne 0) { Write-Host "  [ERRO] Tetos (tique): crescimento pequeno relatou salto" -ForegroundColor Red; $wbErrors++ }
+        # Teto do ARQUIVO: 256 MB por execução, com a linha dizendo que os detalhes foram descartados.
+        $wfTetoDir = Join-Path $wbSelfTestRaiz 'tetos'
+        if (Test-Path -LiteralPath $wfTetoDir) { Remove-Item -LiteralPath $wfTetoDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfTetoDir -Force | Out-Null
+        $wfTetoArq = Join-Path $wfTetoDir 'repair-Teste-20260912-101010.txt'
+        Set-Content -LiteralPath $wfTetoArq -Value ('y' * 4096) -Encoding UTF8
+        $wfTetoCap = Test-WinForgeStreamFileCap -Path $wfTetoArq -MaxBytes 1024
+        if (-not $wfTetoCap.Over) { Write-Host "  [ERRO] Tetos (arquivo): 4 KB contra um teto de 1 KB não disparou" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfTetoCap.Text -notmatch 'descartados') { Write-Host "  [ERRO] Tetos (arquivo): a linha não diz que os detalhes dali em diante foram descartados ('$($wfTetoCap.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if ((Test-WinForgeStreamFileCap -Path $wfTetoArq).Over) { Write-Host "  [ERRO] Tetos (arquivo): 4 KB dispararam o teto padrão de 256 MB" -ForegroundColor Red; $wbErrors++ }
+        # E o teto é CONSULTADO no laço que escreve, e uma vez só por arquivo: sem isso a função é
+        # decoração, e sem a marca de "já avisei" cada chamada de processo repetiria a linha - numa
+        # fase 5 de 338 pastas isso é 338 avisos.
+        $wfTetoFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        if ($wfTetoFonteP.IndexOf('Test-WinForgeStreamFileCap -Path $StreamTo', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (arquivo): quem escreve não consulta o teto - o arquivo cresce sem limite" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteP.IndexOf('$sync.WinForgeStreamCapped', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (arquivo): o aviso do teto não é marcado por arquivo - ele sairia a cada chamada de processo" -ForegroundColor Red; $wbErrors++ }
+        # Retenção: 30 dias / 20 arquivos POR PREFIXO - 'server' não conta no corte de 'repair'.
+        # Cada um com a SUA data de gravação, e não a de agora: criados no mesmo instante, os 25
+        # ficam empatados em LastWriteTime e a ordem de remoção deixa de ser observável - MEDIDO, um
+        # mutante que apagasse do mais novo para o mais velho SOBREVIVEU a este bloco.
+        foreach ($wfTetoN in 1..25) {
+            $wfTetoF = Join-Path $wfTetoDir ("repair-X-202609{0:00}-101010.txt" -f $wfTetoN)
+            Set-Content -LiteralPath $wfTetoF -Value 'z' -Encoding UTF8
+            (Get-Item -LiteralPath $wfTetoF).LastWriteTime = (Get-Date '2026-09-01 10:10:10').AddDays($wfTetoN - 1)
+        }
+        foreach ($wfTetoN in 1..3) { Set-Content -LiteralPath (Join-Path $wfTetoDir ("server-X-202609{0:00}-101010.txt" -f $wfTetoN)) -Value 'z' -Encoding UTF8 }
+        $wfTetoVelho = Join-Path $wfTetoDir 'repair-Antigo-20250101-101010.txt'
+        Set-Content -LiteralPath $wfTetoVelho -Value 'z' -Encoding UTF8
+        (Get-Item -LiteralPath $wfTetoVelho).LastWriteTime = (Get-Date).AddDays(-45)
+        $wfTetoRet = Remove-WinForgeOldCommandOutput -Prefix 'repair' -Root $wfTetoDir
+        if (@(Get-ChildItem -LiteralPath $wfTetoDir -Filter 'repair-*.txt').Count -gt 20) { Write-Host "  [ERRO] Tetos (retenção): sobraram $(@(Get-ChildItem -LiteralPath $wfTetoDir -Filter 'repair-*.txt').Count) arquivos 'repair', o teto é 20" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfTetoVelho) { Write-Host "  [ERRO] Tetos (retenção): o arquivo de 45 dias não foi apagado" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wfTetoDir -Filter 'server-*.txt').Count -ne 3) { Write-Host "  [ERRO] Tetos (retenção): a limpeza de 'repair' mexeu nos arquivos de 'server'" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfTetoRet.Removed).Count) { Write-Host "  [ERRO] Tetos (retenção): a limpeza não relatou o que apagou" -ForegroundColor Red; $wbErrors++ }
+        # O que SOBRA é o mais NOVO, e o que sai é o mais velho: apagar do fim da fila e não do
+        # começo é o que separa retenção de "apagar o histórico que o usuário acabou de gerar".
+        if (-not (Test-Path -LiteralPath (Join-Path $wfTetoDir 'repair-X-20260925-101010.txt'))) { Write-Host "  [ERRO] Tetos (retenção): o arquivo mais NOVO foi apagado - a fila está sendo cortada pelo lado errado" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath (Join-Path $wfTetoDir 'repair-X-20260901-101010.txt')) { Write-Host "  [ERRO] Tetos (retenção): o arquivo mais VELHO ficou - o corte de 20 não está tirando os de baixo da fila" -ForegroundColor Red; $wbErrors++ }
+        # E a retenção roda UMA vez por execução, de quem cria o arquivo.
+        $wfTetoFonteS = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        if ($wfTetoFonteS.IndexOf('Remove-WinForgeOldCommandOutput -Prefix', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (retenção): ninguém chama a limpeza ao abrir um comando com fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
+        # 'IsUndoEnabled = $false' NÃO MUDA NADA (medido) e não pode aparecer.
+        $wfTetoFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
+        if ($wfTetoFonteT -match 'IsUndoEnabled') { Write-Host "  [ERRO] Tetos (caixa): 'IsUndoEnabled' voltou ao tique - medido, não muda nada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteT -notmatch '524288') { Write-Host "  [ERRO] Tetos (caixa): o bloco por tique deixou de ser 512 KB" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteT.IndexOf('Limit-WinForgeStreamText -Text', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (caixa): o tique não aplica o anel" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteT.IndexOf('Get-WinForgeFollowReadWindow -Offset', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (tique): o tique não usa a janela de leitura - um crescimento de 20 MB volta a vir inteiro" -ForegroundColor Red; $wbErrors++ }
+        # E o anel no COMPORTAMENTO, com janela de verdade e tiques à mão: 6 MB entrando em blocos,
+        # e a caixa tem de parar nos 4 MB. Sem esta metade, as travas de fonte acima ficariam verdes
+        # com um anel que nunca é alcançado - e a caixa voltaria a crescer sem teto.
+        $wfTetoSeg = Join-Path $wfTetoDir 'follow.txt'
+        [System.IO.File]::WriteAllText($wfTetoSeg, "primeira linha`r`n", (New-Object System.Text.UTF8Encoding($true)))
+        $wfTetoJanela = Show-WinForgeOutputWindow -Title 'SelfTest tetos' -FollowPath $wfTetoSeg -NoShow
+        if ($wfTetoJanela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Tetos (caixa): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfTetoCaixa = $wfTetoJanela.FindName('WFOutputText')
+            $wfTetoBloco = ('t' * 199 + "`r`n") * 3500     # ~700 KB por rodada
+            foreach ($wfTetoI in 1..12) {
+                [System.IO.File]::AppendAllText($wfTetoSeg, $wfTetoBloco, (New-Object System.Text.UTF8Encoding($false)))
+                Invoke-WinForgeFollowTick -Window $wfTetoJanela
+            }
+            $wfTetoLen = ([string]$wfTetoCaixa.Text).Length
+            if ($wfTetoLen -gt 4194304) { Write-Host "  [ERRO] Tetos (caixa): depois de 8 MB entrando, a caixa ficou com $wfTetoLen caractere(s) - o anel não pegou" -ForegroundColor Red; $wbErrors++ }
+            if ($wfTetoLen -lt 500000) { Write-Host "  [ERRO] Tetos (caixa): a caixa ficou com só $wfTetoLen caractere(s) - o anel cortou demais" -ForegroundColor Red; $wbErrors++ }
+            # O contador não pode sair do lugar: é ele que decide QUANDO ler a caixa, e um contador
+            # torto faz o corte acontecer tarde (memória) ou nunca.
+            if ([int]$wfTetoJanela.Tag.Chars -ne $wfTetoLen) { Write-Host "  [ERRO] Tetos (caixa): o contador diz $($wfTetoJanela.Tag.Chars) caractere(s) e a caixa tem $wfTetoLen" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Tetos: anel 4 MB -> 2 MB com histerese, tique lê no máximo 1 MB após 8 MB de crescimento, arquivo de 256 MB, retenção 30/20 por prefixo"
+    } catch {
+        Write-Host "  [ERRO] Tetos: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath (Join-Path $wbSelfTestRaiz 'tetos') -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Permissões do disco do sistema
     # O caso real: uma atualização de fabricante derrubou a cadeia de permissões do disco do Windows,
     # e o dono da máquina ficou sem acesso às próprias pastas. São três botões - Verificar (só lê),
