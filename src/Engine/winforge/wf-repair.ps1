@@ -5051,25 +5051,9 @@ function Invoke-WinForgeAclUndo {
             }
             if (-not (Test-Path -LiteralPath $externo -PathType Leaf)) {
                 # A pergunta que o usuário tem na cabeça não é "cadê o arquivo", é "qual disco eu
-                # tenho de plugar". O rótulo sai de DriveInfo e SÓ com a unidade pronta: ler
-                # '.VolumeLabel' de um volume ausente LANÇA, e '[string]$obj.Propriedade' sobre uma
-                # propriedade que lança devolve '' em silêncio - o que daria um "( )" sem sentido no
-                # meio da frase.
-                $raizExterna = ''
-                try { $raizExterna = [string][System.IO.Path]::GetPathRoot($externo) } catch { $raizExterna = '' }
-                $letraExterna = $raizExterna.TrimEnd('\')
-                if ([string]::IsNullOrWhiteSpace($letraExterna)) { $letraExterna = 'do backup' }
-                $rotuloExterno = 'não está ligado'
-                try {
-                    if (-not [string]::IsNullOrWhiteSpace($raizExterna)) {
-                        $unidadeExterna = New-Object System.IO.DriveInfo ($raizExterna)
-                        if ($unidadeExterna.IsReady) {
-                            $nomeVolume = [string]$unidadeExterna.VolumeLabel
-                            $rotuloExterno = if ([string]::IsNullOrWhiteSpace($nomeVolume)) { 'sem rótulo' } else { $nomeVolume }
-                        }
-                    }
-                } catch { $rotuloExterno = 'não está ligado' }
-                Write-Error "O backup do conteúdo de '$($item.Path)' foi guardado fora da pasta do WinForge, em '$externo', e o arquivo não está lá: ligue o disco $letraExterna ($rotuloExterno) e tente de novo. Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$externo' e tente outra vez."
+                # tenho de plugar". Quem responde é Get-WinForgeAclDriveHint, a mesma função que a
+                # limpeza usa para o mesmo arquivo - a frase tem de ser a mesma nas duas telas.
+                Write-Error "O backup do conteúdo de '$($item.Path)' foi guardado fora da pasta do WinForge, em '$externo', e o arquivo não está lá: ligue o disco $(Get-WinForgeAclDriveHint -Path $externo) e tente de novo. Nada foi alterado. Se tiver uma cópia do arquivo original, coloque-a de volta em '$externo' e tente outra vez."
                 $recusados++
                 continue
             }
@@ -5185,6 +5169,41 @@ function Invoke-WinForgeAclUndo {
     Write-Host 'Reinicie o computador para que os programas já abertos passem a enxergar as permissões que voltaram.'
 }
 
+function Get-WinForgeAclDriveHint {
+    <#
+    .SYNOPSIS
+        Como chamar, na tela, o disco onde um caminho mora: a letra e o rótulo do volume. Só lê.
+    .DESCRIPTION
+        A pergunta que o usuário tem na cabeça quando o backup foi para outro disco não é "cadê o
+        arquivo", é "qual disco eu tenho de plugar". A resposta é a letra mais o NOME que ele deu ao
+        volume, que é o que está escrito na etiqueta e o que o Explorer mostra.
+
+        O rótulo só é lido com a unidade PRONTA: ler '.VolumeLabel' de um volume ausente LANÇA, e
+        '[string]$obj.Propriedade' sobre propriedade que lança devolve '' em silêncio - o que daria
+        um "( )" sem sentido no meio da frase. Sem unidade pronta a resposta é "não está ligado",
+        que é a informação que falta.
+    .OUTPUTS
+        Texto no formato '<letra> (<rótulo>)', pronto para entrar depois de "ligue o disco".
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+
+    $raiz = ''
+    try { $raiz = [string][System.IO.Path]::GetPathRoot([string]$Path) } catch { $raiz = '' }
+    $letra = $raiz.TrimEnd('\')
+    if ([string]::IsNullOrWhiteSpace($letra)) { $letra = 'do backup' }
+    $rotulo = 'não está ligado'
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($raiz)) {
+            $unidade = New-Object System.IO.DriveInfo ($raiz)
+            if ($unidade.IsReady) {
+                $nome = [string]$unidade.VolumeLabel
+                $rotulo = if ([string]::IsNullOrWhiteSpace($nome)) { 'sem rótulo' } else { $nome }
+            }
+        }
+    } catch { $rotulo = 'não está ligado' }
+    return "$letra ($rotulo)"
+}
+
 function Get-WinForgeAclBackupInventory {
     <#
     .SYNOPSIS
@@ -5224,7 +5243,9 @@ function Get-WinForgeAclBackupInventory {
         Pasta de backup alternativa, para o teste. A padrão é Get-WinForgeAclBackupRoot.
     .OUTPUTS
         @(@{ Name; Path; Bytes; Date; Kind = 'indice'|'conteudo'; Orphan = <bool>; Consumed = <bool>;
-        Unreadable = <bool> }), em ordem ordinal por nome.
+        Unreadable = <bool>; External = <bool>; Missing = <bool> }), em ordem ordinal por nome.
+        Com 'External', 'Path' é o caminho COMPLETO no outro disco e 'Missing' diz que ele não está
+        lá agora - disco desligado, que é o caso comum e não um erro.
     #>
     param([string]$Root)
 
@@ -5284,6 +5305,46 @@ function Get-WinForgeAclBackupInventory {
             Orphan     = $orfao
             Consumed   = $consumido
             Unreadable = $ilegivel
+            External   = $false
+            Missing    = $false
+        })
+    }
+
+    # Os arquivos de conteúdo que foram para OUTRO disco ('ExternalPath'). Eles não saem de
+    # Get-ChildItem - não estão nesta pasta -, e é justamente por isso que precisam sair daqui: sem
+    # eles a limpeza apagava metade do backup e deixava a outra metade num pen drive, sem uma linha
+    # dizendo isso. Quem os nomeia é o índice, que continua dentro da pasta protegida.
+    #
+    # 'Missing' é o disco desligado, que é o caso comum, e não um erro: o item aparece na lista
+    # assim mesmo, porque omitir em silêncio é o que se está consertando. 'Orphan' nunca vale aqui -
+    # se ele está nesta lista é porque um índice o citou.
+    $externos = New-Object 'System.Collections.Generic.Dictionary[string,bool]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($idx in $indices) {
+        foreach ($it in @($idx.Items)) {
+            $ext = ''
+            try { $ext = ([string]$it.ExternalPath).Trim() } catch { $ext = '' }
+            if ([string]::IsNullOrWhiteSpace($ext)) { continue }
+            if ($externos.ContainsKey($ext)) { $externos[$ext] = $externos[$ext] -and [bool]$idx.Consumed }
+            else { $externos[$ext] = [bool]$idx.Consumed }
+        }
+    }
+    foreach ($ext in @($externos.Keys)) {
+        $info = $null
+        try { if (Test-Path -LiteralPath $ext -PathType Leaf) { $info = Get-Item -LiteralPath $ext -ErrorAction Stop } } catch { $info = $null }
+        $folhaExt = ''
+        try { $folhaExt = [string](Split-Path -Leaf $ext) } catch { $folhaExt = '' }
+        if ([string]::IsNullOrWhiteSpace($folhaExt)) { $folhaExt = $ext }
+        $saida.Add(@{
+            Name       = $folhaExt
+            Path       = [string]$ext
+            Bytes      = $(if ($null -ne $info) { [long]$info.Length } else { [long]0 })
+            Date       = $(if ($null -ne $info) { $info.LastWriteTime } else { $null })
+            Kind       = 'conteudo'
+            Orphan     = $false
+            Consumed   = [bool]$externos[$ext]
+            Unreadable = $false
+            External   = $true
+            Missing    = ($null -eq $info)
         })
     }
     $arr = $saida.ToArray()
@@ -5313,7 +5374,10 @@ function Get-WinForgeAclBackupSizeWarning {
     #>
     param([string]$Root, [long]$LimitBytes = 1073741824)
 
-    $itens = @(Get-WinForgeAclBackupInventory -Root $Root)
+    # Só o que está NA PASTA. O arquivo de conteúdo que foi para outro disco também faz parte do
+    # backup, mas a frase daqui é sobre o espaço que o WinForge ocupa em %ProgramData% - somar o pen
+    # drive do usuário nessa conta seria acusar a pasta por espaço que não é dela.
+    $itens = @(Get-WinForgeAclBackupInventory -Root $Root | Where-Object { -not $_.External })
     $total = [long]0
     foreach ($i in $itens) { $total += [long]$i.Bytes }
     $r = @{ Over = $false; Bytes = $total; Text = '' }
@@ -5608,9 +5672,15 @@ function Invoke-WinForgeAclCleanup {
         if ($item.Consumed) { if ([string]$item.Kind -eq 'indice') { return 'conjunto já desfeito' } else { return 'conteúdo de conjunto já desfeito' } }
         return 'DESCARTADO a pedido - ninguém desfez este backup'
     }
+    # O que aparece na tela de um item de OUTRO disco é o caminho COMPLETO, e não a folha: 'ligue o
+    # disco' só ajuda quem sabe qual. E o item ausente sai com o motivo do disco em vez de sumir da
+    # lista - omitir em silêncio era o defeito.
     $linha = {
         param($item)
-        "'$($item.Name)' - $($item.Bytes) byte(s), $(([datetime]$item.Date).ToString('dd/MM/yyyy HH:mm')), $(& $motivo $item)"
+        $onde = if ($item.External) { [string]$item.Path } else { [string]$item.Name }
+        $quando = if ($null -eq $item.Date) { 'sem data' } else { ([datetime]$item.Date).ToString('dd/MM/yyyy HH:mm') }
+        $porque = if ($item.External -and $item.Missing) { "em outro disco, que não está disponível agora - $(& $motivo $item)" } else { & $motivo $item }
+        "'$onde' - $($item.Bytes) byte(s), $quando, $porque"
     }
 
     if ($DryRun) {
@@ -5645,7 +5715,8 @@ function Invoke-WinForgeAclCleanup {
     Write-Host ''
     foreach ($t in $todos) {
         $estado = if ($t.Unreadable) { 'ILEGÍVEL' } elseif ($t.Orphan) { 'órfão' } elseif ($t.Consumed) { 'já desfeito' } else { 'EM USO (backup pendente)' }
-        Write-Host ("  [{0}] '{1}' - {2} byte(s), {3} - {4}" -f $t.Kind, $t.Name, $t.Bytes, ([datetime]$t.Date).ToString('dd/MM/yyyy HH:mm'), $estado)
+        if ($t.External) { $estado = "$estado, em outro disco$(if ($t.Missing) { ' que NÃO está disponível agora' } else { '' })" }
+        Write-Host ("  [{0}] '{1}' - {2} byte(s), {3} - {4}" -f $t.Kind, $(if ($t.External) { $t.Path } else { $t.Name }), $t.Bytes, $(if ($null -eq $t.Date) { 'sem data' } else { ([datetime]$t.Date).ToString('dd/MM/yyyy HH:mm') }), $estado)
     }
     Write-Host ''
     $alvos = @($todos | Where-Object { (& $solto $_) -or $DiscardPending })
@@ -5673,7 +5744,22 @@ function Invoke-WinForgeAclCleanup {
     $apagados = 0
     $liberados = [long]0
     $falhas = @()
+    $ausentes = @()
     foreach ($a in $alvos) {
+        # Disco desligado não é falha, é instrução: o item continua no índice, o arquivo continua no
+        # outro disco, e a limpeza seguinte o alcança. Dizer qual disco ligar é o que resolve.
+        if ($a.External -and $a.Missing) {
+            $ausentes += ("'$($a.Path)' - ligue o disco $(Get-WinForgeAclDriveHint -Path ([string]$a.Path))")
+            Write-Host ("  PULADO, disco indisponível: $(& $linha $a)")
+            continue
+        }
+        # O caminho externo vem de um arquivo de texto, e aqui ele vira argumento de um Remove-Item
+        # elevado. Mesma porta da gravação e do Desfazer, e pela mesma medição: 'C:acl.txt' e
+        # '\acl.txt' são "rooted" e resolvem contra o diretório do PROCESSO.
+        if ($a.External -and -not (Test-WinForgeAclAbsolutePath -Path ([string]$a.Path))) {
+            $falhas += ("'$($a.Path)': o índice guardou um caminho que não é absoluto")
+            continue
+        }
         Write-Host ("  apagando $(& $linha $a)")
         try {
             Remove-Item -LiteralPath ([string]$a.Path) -Force -ErrorAction Stop
@@ -5685,6 +5771,7 @@ function Invoke-WinForgeAclCleanup {
     }
     Write-Host ''
     Write-Host "Limpeza concluída: $apagados de $($alvos.Count) arquivo(s) apagados, $([math]::Round($liberados / 1MB, 1)) MB liberados."
+    if ($ausentes.Count) { Write-Warning ("Backup de conteúdo em outro disco, que não está disponível agora: {0}. Ligue o disco e rode a limpeza de novo - eles continuam ocupando espaço lá." -f ($ausentes -join '; ')) }
     if ($falhas.Count) { Write-Error ("Não foi possível apagar: {0}." -f ($falhas -join '; ')) }
     $sobrando = @($todos | Where-Object { $_.Path -notin @($alvos | ForEach-Object { [string]$_.Path }) }).Count
     if ($sobrando) { Write-Host "$sobrando arquivo(s) ficaram: eles pertencem a backup que ninguém desfez, e é deles que o botão Desfazer depende. Para descartá-los, rode a limpeza de novo e confirme o descarte por escrito." }

@@ -5080,6 +5080,49 @@ if ($SelfTest) {
         # no lugar, o pedido morre no Dispatcher e o descarte nunca acontece - calado.
         if ($sync.WinForgeAclCleanupConfirmCallback -isnot [scriptblock]) { Write-Host "  [ERRO] Permissões (descarte): `$sync.WinForgeAclCleanupConfirmCallback não é um scriptblock - o pedido não chega à thread da janela" -ForegroundColor Red; $wbErrors++ }
         Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20250101-000000.json') -Force -ErrorAction SilentlyContinue
+        # ---- O arquivo de conteúdo que a Tarefa 7 manda para OUTRO disco. A limpeza não o enxergava:
+        # ele não está na pasta protegida, e o inventário só olhava a pasta. Ficava metade do backup
+        # apagada e metade esquecida num pen drive, sem uma linha dizendo isso.
+        $wfLimpExtDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-limpeza-externo'
+        if (Test-Path -LiteralPath $wfLimpExtDir) { Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfLimpExtDir -Force | Out-Null
+        $wfLimpExtArq = Join-Path $wfLimpExtDir 'acl-perfil-externo-20270101-000000.txt'
+        Set-Content -LiteralPath $wfLimpExtArq -Value 'conteudo externo' -Encoding Unicode
+        # O segundo mora num caminho que NÃO existe: é o disco desligado, o caso comum de quem
+        # guardou o backup num pen drive e voltou uma semana depois.
+        $wfLimpExtSumido = Join-Path $wfLimpExtDir 'disco-desligado\acl-perfil-externo-20270202-000000.txt'
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Value (([pscustomobject]@{
+            Stamp = '20270101-000000'; Consumed = $true; Origin = (New-WinForgeAclIndexOrigin)
+            Items = @(
+                [pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-externo-20270101-000000.txt'; Target = 'C:\Users'; Sha256 = 'abc'; ExternalPath = $wfLimpExtArq },
+                [pscustomobject]@{ Path = 'C:\Users\sicrano'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-externo-20270202-000000.txt'; Target = 'C:\Users'; Sha256 = 'def'; ExternalPath = $wfLimpExtSumido }
+            )
+        } | ConvertTo-Json -Depth 5)) -Encoding UTF8
+        $wfLimpInvExt = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { $_.External })
+        if ($wfLimpInvExt.Count -ne 2) { Write-Host "  [ERRO] Permissões (externo): o inventário trouxe $($wfLimpInvExt.Count) item(ns) de outro disco, esperado 2" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfLimpExtOk = @($wfLimpInvExt | Where-Object { [string]$_.Path -eq $wfLimpExtArq })
+            $wfLimpExtNao = @($wfLimpInvExt | Where-Object { [string]$_.Path -eq $wfLimpExtSumido })
+            if ($wfLimpExtOk.Count -ne 1) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo que EXISTE não saiu no inventário pelo caminho completo" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfLimpExtOk[0].Missing) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo que existe foi marcado como ausente" -ForegroundColor Red; $wbErrors++ }
+            elseif ([long]$wfLimpExtOk[0].Bytes -le 0) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo saiu sem tamanho" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLimpExtNao.Count -ne 1) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo do disco desligado sumiu do inventário - é justamente ele que não pode ser omitido em silêncio" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wfLimpExtNao[0].Missing) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo ausente não foi marcado com Missing" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O aviso de tamanho fala da PASTA: byte que está em outro disco não entra nessa conta.
+        $wfLimpAvisoExt = Get-WinForgeAclBackupSizeWarning -Root $wfLimpRaiz -LimitBytes 1
+        $wfLimpBytesPasta = [long]0
+        foreach ($wfLimpFP in @(Get-ChildItem -LiteralPath $wfLimpRaiz -File)) { $wfLimpBytesPasta += [long]$wfLimpFP.Length }
+        if ([long]$wfLimpAvisoExt.Bytes -ne $wfLimpBytesPasta) { Write-Host "  [ERRO] Permissões (externo): o aviso de tamanho somou $($wfLimpAvisoExt.Bytes) byte(s) e a pasta tem $wfLimpBytesPasta - arquivo de outro disco entrou na conta da pasta" -ForegroundColor Red; $wbErrors++ }
+        # A simulação lista os dois pelo caminho COMPLETO, e o ausente sai dizendo que o disco não
+        # está disponível - em vez de sumir da lista sem uma palavra.
+        $wfLimpSecoExt = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+        if (-not @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) { Write-Host "  [ERRO] Permissões (externo): a simulação não lista o arquivo de conteúdo que foi para outro disco" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSecoAusente = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtSumido, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if (-not $wfLimpSecoAusente.Count) { Write-Host "  [ERRO] Permissões (externo): a simulação omite o arquivo externo cujo disco não está disponível" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpSecoAusente[0]).IndexOf('disco', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpSecoAusente[0])')" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue
         # E a linha recusa despacho sem ninguém para confirmar.
         $wfLimpDesp = Invoke-WinForgeRepairCommand -Name 'AclCleanup' -NoUI
         if ($wfLimpDesp.Dispatched) { Write-Host "  [ERRO] Permissões (limpeza): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
