@@ -146,6 +146,7 @@ $repairConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-repair-config.ps1"
 $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
 $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
+$netBlock       = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-net.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $appliedBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-applied.ps1")
@@ -376,6 +377,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($profileBlock.T
 
 # ---------------------------------------------------------------- consulta de drivers (rede)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($driversBlock.TrimEnd() + "`n`n") "insert drivers"
+
+# ---------------------------------------------------------------- rede sem fio (rádio, sondas, bloqueios)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($netBlock.TrimEnd() + "`n`n") "insert net"
 
 # ---------------------------------------------------------------- regras de recomendação (motor)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.TrimEnd() + "`n`n") "insert rules"
@@ -7074,6 +7078,165 @@ if ($SelfTest) {
         Remove-Item -Path (Join-Path $wbSelfTestRaiz 'limpeza') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path (Join-Path $wbSelfTestRaiz 'downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path (Join-Path $wbSelfTestRaiz 'downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Rede: rádio, sondas e bloqueios
+    # "Conectado certinho" prova que o rádio associou e autenticou: driver quebrado não associa. O
+    # sintoma é DHCP/APIPA, DNS, rota, proxy ou filtro de software, nessa ordem.
+    try {
+        # O rádio é achado por mídia física, e não por nome: separa o rádio Intel dos sete
+        # adaptadores virtuais de VPN desta máquina, e vale igual num Windows em inglês.
+        #
+        # A quarta linha é o Wi-Fi Direct, que TODO Windows com rádio tem: ele declara a MESMA
+        # mídia física do rádio de verdade e é virtual. Sem ele no gabarito a coluna 'Virtual' seria
+        # enfeite e a exclusão ficaria sem prova - e é justamente ele que uma escolha por "primeiro
+        # da lista" ou por "menor ifIndex" pegaria no lugar do rádio.
+        $wfNetLista = @(
+            [pscustomobject]@{ Name = 'VPN da empresa'; ifIndex = 3;  Status = 'Up';           Virtual = $true;  PhysicalMediaType = 'Unspecified'; DriverProvider = 'Terceiro' },
+            [pscustomobject]@{ Name = 'Wi-Fi';          ifIndex = 12; Status = 'Up';           Virtual = $false; PhysicalMediaType = 'Native 802.11'; DriverProvider = 'Intel' },
+            [pscustomobject]@{ Name = 'Ethernet';       ifIndex = 7;  Status = 'Disconnected'; Virtual = $false; PhysicalMediaType = '802.3';        DriverProvider = 'Realtek' },
+            [pscustomobject]@{ Name = 'Wi-Fi Direct';   ifIndex = 5;  Status = 'Up';           Virtual = $true;  PhysicalMediaType = 'Native 802.11'; DriverProvider = 'Microsoft' }
+        )
+        $wfNetRadio = Get-WinForgeWifiAdapter -Adapters $wfNetLista
+        if (-not $wfNetRadio.Ok) { Write-Host "  [ERRO] Rede (rádio): não achou o adaptador sem fio ('$($wfNetRadio.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        elseif ([int]$wfNetRadio.ifIndex -ne 12) { Write-Host "  [ERRO] Rede (rádio): escolheu ifIndex $($wfNetRadio.ifIndex), esperado 12" -ForegroundColor Red; $wbErrors++ }
+        $wfNetSemRadio = Get-WinForgeWifiAdapter -Adapters @($wfNetLista[0], $wfNetLista[2])
+        if ($wfNetSemRadio.Ok) { Write-Host "  [ERRO] Rede (rádio): achou rádio numa lista sem nenhum" -ForegroundColor Red; $wbErrors++ }
+        # O virtual sozinho não é rádio: ele não tem driver próprio para trocar.
+        $wfNetSoVirtual = Get-WinForgeWifiAdapter -Adapters @($wfNetLista[3])
+        if ($wfNetSoVirtual.Ok) { Write-Host "  [ERRO] Rede (rádio): tomou o adaptador virtual de Wi-Fi Direct por rádio" -ForegroundColor Red; $wbErrors++ }
+        # O virtual NA FRENTE e com ifIndex menor: mata a escolha por "primeiro da lista" e a por
+        # "menor ifIndex" de uma vez, que passariam pelo gabarito na ordem de cima.
+        $wfNetVirtualPrimeiro = Get-WinForgeWifiAdapter -Adapters @($wfNetLista[3], $wfNetLista[1])
+        if (-not $wfNetVirtualPrimeiro.Ok) { Write-Host "  [ERRO] Rede (rádio): com o virtual na frente não achou mais o rádio" -ForegroundColor Red; $wbErrors++ }
+        elseif ([int]$wfNetVirtualPrimeiro.ifIndex -ne 12) { Write-Host "  [ERRO] Rede (rádio): com o virtual na frente escolheu ifIndex $($wfNetVirtualPrimeiro.ifIndex), esperado 12" -ForegroundColor Red; $wbErrors++ }
+        # Dois rádios de VERDADE (o de dentro do notebook mais um dongle USB): ganha o que está
+        # CONECTADO, e não o de menor ifIndex - arrancar o driver do dongle desligado não conserta
+        # o Wi-Fi de ninguém. Sem esta linha, a ordenação por Status seria enfeite.
+        $wfNetDongle = [pscustomobject]@{ Name = 'Wi-Fi 2'; ifIndex = 4; Status = 'Disconnected'; Virtual = $false; PhysicalMediaType = 'Native 802.11'; DriverProvider = 'Realtek' }
+        $wfNetDois = Get-WinForgeWifiAdapter -Adapters @($wfNetDongle, $wfNetLista[1])
+        if (-not $wfNetDois.Ok) { Write-Host "  [ERRO] Rede (rádio): com dois rádios não achou nenhum" -ForegroundColor Red; $wbErrors++ }
+        elseif ([int]$wfNetDois.ifIndex -ne 12) { Write-Host "  [ERRO] Rede (rádio): entre dois rádios escolheu o ifIndex $($wfNetDois.ifIndex), esperado o conectado (12)" -ForegroundColor Red; $wbErrors++ }
+        # O caso que derruba o filtro por nome, e ele é de verdade: um adaptador de CABO que alguém
+        # renomeou para "Wi-Fi de casa" em "Renomear adaptador". Pelo nome ele é o rádio; pela
+        # mídia física, não é. Sem esta linha o filtro por nome passaria em tudo o que está acima,
+        # porque no gabarito o rádio de verdade também se chama 'Wi-Fi'.
+        $wfNetApelido = [pscustomobject]@{ Name = 'Wi-Fi de casa'; ifIndex = 6; Status = 'Up'; Virtual = $false; PhysicalMediaType = '802.3'; DriverProvider = 'Realtek' }
+        if ((Get-WinForgeWifiAdapter -Adapters @($wfNetApelido)).Ok) { Write-Host "  [ERRO] Rede (rádio): adaptador de CABO chamado 'Wi-Fi de casa' foi tomado por rádio" -ForegroundColor Red; $wbErrors++ }
+        $wfNetFonteA = [string](Get-Command Get-WinForgeWifiAdapter).ScriptBlock
+        # A trava pega a FORMA DA CHAMADA com o argumento junto, e não o número solto: '802.11'
+        # aparece no bloco de ajuda da função, que faz parte do corpo do scriptblock, então procurar
+        # só por ele ficaria verde com o filtro trocado por nome.
+        if ($wfNetFonteA -notmatch "PhysicalMediaType[^\r\n]*-like[^\r\n]*'\*802\.11\*'") { Write-Host "  [ERRO] Rede (rádio): o filtro não é PhysicalMediaType -like '*802.11*'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteA -match "Name\s*-like\s*'\*Wi-Fi\*'") { Write-Host "  [ERRO] Rede (rádio): filtro por NOME é dependente de idioma" -ForegroundColor Red; $wbErrors++ }
+        # Sonda de TCP: nada de Test-NetConnection -Port (medido: 5.443 ms por chamada).
+        $wfNetFonteS = [string](Get-Command Test-WinForgeTcpProbe).ScriptBlock
+        if ($wfNetFonteS -match 'Test-NetConnection\s+[^|]*-Port') { Write-Host "  [ERRO] Rede (sonda): Test-NetConnection -Port leva 5,4 s por chamada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteS -notmatch 'BeginConnect|InformationLevel') { Write-Host "  [ERRO] Rede (sonda): a sonda não usa TcpClient/BeginConnect nem -InformationLevel Quiet" -ForegroundColor Red; $wbErrors++ }
+        # Duas travas de FORMA DA CHAMADA, com o argumento junto, e elas existem porque medição de
+        # laço local NÃO dá limite inferior estável: a MESMA porta fechada (127.0.0.1:9) levou
+        # 498 ms fora do build e perto de 0 ms dentro dele, nesta máquina, no mesmo dia. Qualquer
+        # assertiva de "demorou pelo menos X" seria um teste instável. Sem estas duas linhas, dois
+        # mutantes ficavam VERDES na campanha: 'WaitOne(5000)' no lugar do tempo limite recebido, e
+        # 'Ms = 0' no lugar do cronômetro. Nenhuma das duas formas aparece no bloco de ajuda.
+        if ($wfNetFonteS -notmatch 'WaitOne\(\s*\$TimeoutMs') { Write-Host "  [ERRO] Rede (sonda): o tempo limite recebido não chega ao WaitOne" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteS -notmatch 'Ms\s*=\s*\[int\]\$\w+\.ElapsedMilliseconds') { Write-Host "  [ERRO] Rede (sonda): o Ms não sai de um cronômetro" -ForegroundColor Red; $wbErrors++ }
+        $wfNetSonda = Test-WinForgeTcpProbe -TargetHost '127.0.0.1' -Port 9 -TimeoutMs 500
+        if ([int]$wfNetSonda.Ms -gt 3000) { Write-Host "  [ERRO] Rede (sonda): $($wfNetSonda.Ms)ms com tempo limite de 500ms" -ForegroundColor Red; $wbErrors++ }
+        # O relógio sozinho é trava vazia: uma sonda que devolvesse sempre @{ Ok = $false; Ms = 0 }
+        # passaria na linha de cima. As DUAS respostas são cobradas contra um ouvinte de laço local
+        # em porta efêmera - ele nasce e morre dentro deste processo, não toca em adaptador, driver,
+        # pilha nem configuração, e é o único jeito de provar o Ok = $true sem depender de internet.
+        if ($wfNetSonda.Ok) { Write-Host "  [ERRO] Rede (sonda): porta fechada (127.0.0.1:9) respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        $wfNetOuvinte = $null
+        try {
+            $wfNetOuvinte = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $wfNetOuvinte.Start()
+            $wfNetPorta = [int]([System.Net.IPEndPoint]$wfNetOuvinte.LocalEndpoint).Port
+            $wfNetAberta = Test-WinForgeTcpProbe -TargetHost '127.0.0.1' -Port $wfNetPorta -TimeoutMs 500
+            if (-not $wfNetAberta.Ok) { Write-Host "  [ERRO] Rede (sonda): porta aberta (127.0.0.1:$wfNetPorta) respondeu Ok = `$false" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            if ($null -ne $wfNetOuvinte) { try { $wfNetOuvinte.Stop() } catch { } }
+        }
+        # $env:SESSIONNAME veio VAZIA numa sessão de console legítima (Win11 26200): o teste
+        # '-ne Console', conselho mais repetido da internet, bloquearia o botão para toda gente.
+        $wfNetFonteRem = [string](Get-Command Test-WinForgeRemoteSession).ScriptBlock
+        if ($wfNetFonteRem -match 'SESSIONNAME') { Write-Host "  [ERRO] Rede (sessão): o código usa `$env:SESSIONNAME - ele vem vazio em console legítimo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteRem -notmatch 'GetSystemMetrics') { Write-Host "  [ERRO] Rede (sessão): falta GetSystemMetrics(0x1000)" -ForegroundColor Red; $wbErrors++ }
+        # Os nove bloqueios, um a um, com fatos simulados.
+        $wfNetBase = @{ Remote = $false; Build = 26200; OtherAdapter = $true; Inbox = $true; ExportOk = $true; OnBattery = $false; Virtual = $false; Server = $false; NeedRestart = $false; FreeBytes = 50GB; NeedBytes = 200MB }
+        # '@{} + $base + @{ Chave = <outro valor> }' LANÇA quando a chave já existe ("O item já foi
+        # adicionado"): o + de hashtable não sobrescreve, ele soma chaves. A troca de um fato é por
+        # ATRIBUIÇÃO, que é o que o laço logo abaixo já fazia.
+        $wfNetCom = {
+            param([string]$Chave, $Valor)
+            $wfNetUm = @{} + $wfNetBase
+            $wfNetUm[$Chave] = $Valor
+            return $wfNetUm
+        }
+        foreach ($wfNetCaso in @(
+            @{ Nome = 'sessão remota';        Acao = 'WifiDriverReinstall'; Fato = @{ Remote = $true };        Match = 'de longe|remot' },
+            @{ Nome = 'build 17763';          Acao = 'WifiDriverReinstall'; Fato = @{ Build = 17763 };         Match = '1903|17763|versão do Windows' },
+            @{ Nome = 'sem outra via';        Acao = 'WifiDriverGeneric';   Fato = @{ OtherAdapter = $false }; Match = 'cabo' },
+            @{ Nome = 'sem inbox';            Acao = 'WifiDriverGeneric';   Fato = @{ Inbox = $false };        Match = 'básico' },
+            @{ Nome = 'falha ao exportar';    Acao = 'WifiDriverReinstall'; Fato = @{ ExportOk = $false };     Match = 'cópia' },
+            @{ Nome = 'na bateria';           Acao = 'WifiDriverReinstall'; Fato = @{ OnBattery = $true };     Match = 'bateria' },
+            @{ Nome = 'máquina virtual';      Acao = 'WifiDriverRestore';   Fato = @{ Virtual = $true };       Match = 'virtual' },
+            @{ Nome = 'Windows Server';       Acao = 'WifiDriverRestore';   Fato = @{ Server = $true };        Match = 'Server' },
+            @{ Nome = 'reiniciar antes';      Acao = 'WifiDriverReinstall'; Fato = @{ NeedRestart = $true };   Match = 'Reinicie' },
+            @{ Nome = 'espaço em disco';      Acao = 'WifiDriverReinstall'; Fato = @{ FreeBytes = 10MB };      Match = '\d' })) {
+            $wfNetFatos = @{} + $wfNetBase
+            foreach ($wfNetK in $wfNetCaso.Fato.Keys) { $wfNetFatos[$wfNetK] = $wfNetCaso.Fato[$wfNetK] }
+            $wfNetG = Test-WinForgeNetworkGuard -Action ([string]$wfNetCaso.Acao) -Facts $wfNetFatos
+            if ($wfNetG.Ok) { Write-Host "  [ERRO] Rede (bloqueio): '$($wfNetCaso.Nome)' não bloqueou '$($wfNetCaso.Acao)'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfNetG.Reason -notmatch [string]$wfNetCaso.Match) { Write-Host "  [ERRO] Rede (bloqueio): '$($wfNetCaso.Nome)' explicou com '$($wfNetG.Reason)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfNetG.Reason -match 'continuar mesmo assim') { Write-Host "  [ERRO] Rede (bloqueio): '$($wfNetCaso.Nome)' oferece 'continuar mesmo assim'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem inbox, o botão 5 SOME (exceção D3); o 4 só avisa quando não há outra via.
+        if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts (& $wfNetCom 'Inbox' $false)).Hidden) { Write-Host "  [ERRO] Rede (D3): sem driver inbox o botão 5 tem de SUMIR, não ficar desabilitado" -ForegroundColor Red; $wbErrors++ }
+        # ...e o 4 continua de pé no MESMO fato: ele reinstala o driver que já está lá, não o básico.
+        if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Inbox' $false)).Ok) { Write-Host "  [ERRO] Rede (D3): o driver inbox é condição do botão 5, não do 4" -ForegroundColor Red; $wbErrors++ }
+        $wfNetAviso = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'OtherAdapter' $false)
+        if (-not $wfNetAviso.Ok) { Write-Host "  [ERRO] Rede (bloqueio): 'nenhuma outra via' é ABSOLUTO no 5 e só AVISO no 4" -ForegroundColor Red; $wbErrors++ }
+        # '@($null).Count' é 1: contar sozinho deixaria passar Blocks = $null. O aviso tem de estar
+        # LÁ dentro, e tem de ser o da outra via.
+        if (@($wfNetAviso.Blocks).Count -ne 1) { Write-Host "  [ERRO] Rede (bloqueio): o aviso do botão 4 não foi registrado em Blocks (veio $(@($wfNetAviso.Blocks).Count))" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfNetAviso.Blocks)[0] -notmatch 'cabo') { Write-Host "  [ERRO] Rede (bloqueio): o aviso do botão 4 não fala da outra via ('$(@($wfNetAviso.Blocks)[0])')" -ForegroundColor Red; $wbErrors++ }
+        # Build baixo tira os botões 4 e 5 da tela: '/remove-device' e '/scan-devices' só existem a
+        # partir do 1903, e o README declara suporte a Windows 10 (inclui 1809/LTSC 2019).
+        foreach ($wfNetBtn in @('WifiDriverReinstall', 'WifiDriverGeneric')) {
+            if (-not (Test-WinForgeNetworkGuard -Action $wfNetBtn -Facts (& $wfNetCom 'Build' 17763)).Hidden) { Write-Host "  [ERRO] Rede (build): '$wfNetBtn' tem de sumir no build 17763" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ((Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom 'Build' 17763)).Hidden) { Write-Host "  [ERRO] Rede (build): o botão 3 não depende do 1903" -ForegroundColor Red; $wbErrors++ }
+        # O piso é o 1903 = build 18362, e os dois lados dele são cobrados: só 17763 contra 26200
+        # deixaria passar qualquer corte no meio (o 1909, o 2004...), que é regra diferente.
+        if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Build' 18362)).Ok) { Write-Host "  [ERRO] Rede (build): o 1903 (build 18362) é o piso e tem de PASSAR" -ForegroundColor Red; $wbErrors++ }
+        if ((Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Build' 18361)).Ok) { Write-Host "  [ERRO] Rede (build): a build 18361 é anterior ao 1903 e tem de bloquear" -ForegroundColor Red; $wbErrors++ }
+        # Espaço: a conta é contra o NeedBytes dos fatos, e não contra um número escrito no código.
+        # 150 MB é o valor do meio - passa em qualquer corte menor que 200 MB e só morre na conta certa.
+        if ((Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'FreeBytes' 150MB)).Ok) { Write-Host "  [ERRO] Rede (espaço): 150 MB livres não chegam aos 200 MB pedidos e mesmo assim passou" -ForegroundColor Red; $wbErrors++ }
+        # A ORDEM da escada, que é desenho e não acaso: quem está de longe não precisa ouvir sobre
+        # espaço em disco. Com dois fatos ruins ao mesmo tempo, quem explica é o primeiro degrau - e
+        # a escada PARA nele, então Blocks tem um item só.
+        $wfNetDuplo = @{} + $wfNetBase
+        $wfNetDuplo['Remote'] = $true
+        $wfNetDuplo['FreeBytes'] = 10MB
+        $wfNetOrdem = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts $wfNetDuplo
+        if ([string]$wfNetOrdem.Reason -notmatch 'de longe') { Write-Host "  [ERRO] Rede (ordem): com sessão remota E disco cheio, a explicação foi '$($wfNetOrdem.Reason)'" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfNetOrdem.Blocks).Count -ne 1) { Write-Host "  [ERRO] Rede (ordem): a escada não parou no primeiro degrau (Blocks = $(@($wfNetOrdem.Blocks).Count))" -ForegroundColor Red; $wbErrors++ }
+        $wfNetSaudavel = Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts $wfNetBase
+        if ($wfNetSaudavel.Ok -ne $true) { Write-Host "  [ERRO] Rede (bloqueio): máquina saudável bloqueou o botão 3" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfNetSaudavel.Blocks).Count -ne 0) { Write-Host "  [ERRO] Rede (bloqueio): máquina saudável rendeu $(@($wfNetSaudavel.Blocks).Count) aviso(s) no botão 3" -ForegroundColor Red; $wbErrors++ }
+        # O botão 3 é o degrau barato e reversível da escada: renovar endereço e limpar o cache de
+        # nomes não troca driver nenhum, então nada que existe para proteger DRIVER pode derrubá-lo.
+        foreach ($wfNetSo in @('Virtual', 'Server', 'OnBattery', 'NeedRestart')) {
+            if (-not (Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom $wfNetSo $true)).Ok) { Write-Host "  [ERRO] Rede (bloqueio): '$wfNetSo' derrubou o botão 3, que não mexe em driver" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A sessão remota é a exceção e derruba a escada INTEIRA, o botão 3 junto: liberar e renovar
+        # o endereço corta a própria conexão que está trazendo o usuário até a janela.
+        if ((Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom 'Remote' $true)).Ok) { Write-Host "  [ERRO] Rede (bloqueio): de longe até o botão 3 tem de recusar - ele derruba a conexão remota" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (bloqueios): rádio por mídia física, sonda sem Test-NetConnection -Port, sessão remota por GetSystemMetrics, dez recusas sem 'continuar mesmo assim'"
+    } catch {
+        Write-Host "  [ERRO] Rede (bloqueios): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
