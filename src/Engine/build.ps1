@@ -3806,7 +3806,26 @@ if ($SelfTest) {
         $wfCabArq = Join-Path $wfCabDir 'follow.txt'
         [System.IO.File]::WriteAllText($wfCabArq, "primeira linha`r`n", (New-Object System.Text.UTF8Encoding($true)))
         $sync.WinForgeStreamDone[$wfCabArq] = $false
-        $wfCabJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfCabArq -ExpectMinutes 15 -Component 'Repair' -NoShow
+        # A janela principal é SEQUESTRADA por duas cores inventadas. Sem isto, $sync.Form é nulo
+        # neste ponto do -SelfTest (o bloco roda antes do XAML), a janela de saída cai nas cores de
+        # RESERVA e o caminho que lê os tokens do tema NUNCA é exercitado: as três cores diferem
+        # entre si pelas reservas, e a conferência de "cada nível pinta diferente" fica verde mesmo
+        # com a leitura dos tokens removida - MEDIDO, o mutante sobreviveu com zero erros.
+        #
+        # E o estrago que passava batido é grande: as reservas do código são as cores do tema
+        # ESCURO ('#F59E0B' e '#EF4444'), e no tema CLARO elas dão 2,05:1 de contraste - texto de
+        # alerta ilegível, com build verde.
+        $wfCabAvisoTok = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(0x12, 0x34, 0x56))
+        $wfCabUrgTok = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(0x65, 0x43, 0x21))
+        $wfCabFormAntes = $sync.Form
+        $wfCabJan = $null
+        try {
+            $wfCabFalsa = New-Object System.Windows.Window
+            $wfCabFalsa.Resources['HeaderWarningColor'] = $wfCabAvisoTok
+            $wfCabFalsa.Resources['HeaderUrgentColor'] = $wfCabUrgTok
+            $sync.Form = $wfCabFalsa
+            $wfCabJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfCabArq -ExpectMinutes 15 -Component 'Repair' -NoShow
+        } finally { $sync.Form = $wfCabFormAntes }
         if ($wfCabJan -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Cabeçalho (janela): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
         else {
             if ([int]$wfCabJan.Tag.ExpectMinutes -ne 15) { Write-Host "  [ERRO] Cabeçalho (janela): a estimativa não chegou à Tag (veio '$($wfCabJan.Tag.ExpectMinutes)')" -ForegroundColor Red; $wbErrors++ }
@@ -3817,7 +3836,14 @@ if ($SelfTest) {
                 Invoke-WinForgeFollowTick -Window $wfCabJan
                 $wfCabCores[[string]$wfCabCaso[0]] = [string]$wfCabBloco.Foreground.Color
             }
+            # A prova que faltava: as cores da tela são as do TEMA, e não as reservas. Com a leitura
+            # dos tokens removida, aqui chegam '#FFF59E0B' e '#FFEF4444' em vez das duas inventadas.
+            if ([string]$wfCabCores['ambar'] -ne [string]$wfCabAvisoTok.Color) { Write-Host "  [ERRO] Cabeçalho (cor): o âmbar da tela é '$($wfCabCores['ambar'])' e o token do tema é '$($wfCabAvisoTok.Color)' - a cor não vem do tema, vem da reserva do código" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabCores['urgente'] -ne [string]$wfCabUrgTok.Color) { Write-Host "  [ERRO] Cabeçalho (cor): o urgente da tela é '$($wfCabCores['urgente'])' e o token do tema é '$($wfCabUrgTok.Color)' - a cor não vem do tema, vem da reserva do código" -ForegroundColor Red; $wbErrors++ }
+            # A frase do URGENTE na tela, e não a palavra 'Parar': os dois estados falam do botão, e
+            # cobrar só a palavra não separa um do outro - quem separava era a cor, sozinha.
             if ([string]$wfCabBloco.Text -notmatch 'Parar') { Write-Host "  [ERRO] Cabeçalho (janela): com 46 de 15 minutos o texto na tela não fala do Parar ('$($wfCabBloco.Text)')" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabBloco.Text -notmatch 'passou do triplo') { Write-Host "  [ERRO] Cabeçalho (janela): com 46 de 15 minutos a tela mostra o aviso do ÂMBAR - o nível urgente não chegou ao texto" -ForegroundColor Red; $wbErrors++ }
             foreach ($wfCabPar in @(@('normal', 'ambar'), @('normal', 'urgente'), @('ambar', 'urgente'))) {
                 if ([string]$wfCabCores[[string]$wfCabPar[0]] -eq [string]$wfCabCores[[string]$wfCabPar[1]]) { Write-Host "  [ERRO] Cabeçalho (cor): '$($wfCabPar[0])' e '$($wfCabPar[1])' pintam igual ('$($wfCabCores[[string]$wfCabPar[0]])') - o tique não troca a cor" -ForegroundColor Red; $wbErrors++ }
             }
