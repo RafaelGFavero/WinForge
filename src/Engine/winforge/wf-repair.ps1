@@ -4302,6 +4302,20 @@ function Invoke-WinForgeAclRestore {
         Write-Error 'Nenhum backup de permissões pôde ser gravado. Nada foi alterado.'
         return
     }
+    # PARAR na fase 2, e esta é a única porta em que ele desfaz alguma coisa: o índice ainda NÃO foi
+    # escrito, e escrevê-lo agora criaria um conjunto de Desfazer que aponta para um backup que
+    # ninguém vai usar - o disco não foi alterado, e a restauração seguinte seria recusada por
+    # "conjunto pendente". Os arquivos de conteúdo já gravados saem junto, pelo mesmo motivo.
+    if (Test-WinForgeStreamCancelled -Path $fluxo) {
+        foreach ($item in @($indice)) {
+            $soltoParcial = [string]$item.ExternalPath
+            if ([string]::IsNullOrWhiteSpace($soltoParcial) -and -not [string]::IsNullOrWhiteSpace([string]$item.File)) { $soltoParcial = Join-Path $conf.Path ([string]$item.File) }
+            if (-not [string]::IsNullOrWhiteSpace($soltoParcial) -and (Test-Path -LiteralPath $soltoParcial)) { Remove-Item -LiteralPath $soltoParcial -Force -ErrorAction SilentlyContinue }
+        }
+        Write-Host ''
+        Write-Host 'Parado a pedido durante a cópia das permissões. O disco NÃO foi alterado, e o backup parcial foi descartado: não há conjunto novo na fila do Desfazer. Pode rodar a restauração de novo quando quiser.'
+        return
+    }
     $carimbo = (Get-Date).ToString('yyyyMMdd-HHmmss')
     # JSON, e não mais '<arquivo>|<pasta>': o índice passou a carregar a lista e o dono de cada
     # pasta, e um formato de duas colunas não comporta isso sem inventar separador novo.
@@ -4482,6 +4496,55 @@ function Get-WinForgeAclOwnerPendingPath {
     $alvo = if ($Root) { $Root } else { (Join-Path (Get-WinForgeMachineDataRoot) 'WinForge') }
     try { $alvo = [System.IO.Path]::GetFullPath($alvo) } catch { }
     return (Join-Path $alvo 'acl-posse-pendente.json')
+}
+
+function Get-WinForgeAclStopReport {
+    <#
+    .SYNOPSIS
+        O relato que fecha uma restauração de permissões interrompida a pedido. Função pura, só texto.
+    .DESCRIPTION
+        Parar no meio de um reparo de permissões deixa o disco num estado MISTO, e o que a pessoa
+        precisa saber é exatamente qual: o que foi alterado, o que não foi, e que o backup cobre a
+        primeira parte. Um "cancelado" seco deixaria alguém sem saber se pode reiniciar a máquina.
+
+        A frase muda com a FASE porque o estado é diferente em cada uma:
+
+        - Fase 4 (pastas do sistema, uma a uma): as pastas que já passaram estão no padrão, as
+          demais ficaram como estavam. O backup da Fase 2 é anterior a todas, então o Desfazer volta
+          o conjunto inteiro.
+        - Fase 5 (o perfil): a raiz do perfil já foi concedida e a herança do conteúdo ficou pela
+          metade. Aqui a saída natural é RODAR DE NOVO - a restauração é idempotente, e terminar o
+          que faltou é mais simples do que desfazer tudo.
+
+        As pastas citadas são as que ENTRARAM, e não uma lista escrita à mão: relatar pasta que não
+        foi tocada é tão ruim quanto omitir a que foi.
+    .PARAMETER Phase
+        4 ou 5. Qualquer outra fase cai no texto genérico - parar nas fases de leitura não altera
+        nada, e o relato diz isso.
+    .PARAMETER Folders
+        As pastas que a fase chegou a alterar, na ordem em que foram.
+    .PARAMETER Profile
+        A pasta do usuário, para o texto da Fase 5.
+    .OUTPUTS
+        O texto do relato.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Phase,
+        [AllowEmptyCollection()][string[]]$Folders = @(),
+        [string]$Profile = ''
+    )
+
+    $lista = @($Folders | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($Phase -eq 4) {
+        $quais = if ($lista.Count) { "Ficaram no padrão do Windows: $($lista -join ', ') - as demais ficaram como estavam." } else { 'Nenhuma pasta do sistema chegou a ser alterada - todas ficaram como estavam.' }
+        return "Parado a pedido durante as pastas do sistema. $quais`r`n`r`nO backup da Fase 2 está completo e é anterior a qualquer alteração: use 'Permissões do disco C: - Desfazer (restaurar backup)' para voltar tudo ao que era, ou rode a restauração de novo para terminar o que faltou."
+    }
+    if ($Phase -eq 5) {
+        $perfil = if ([string]::IsNullOrWhiteSpace($Profile)) { 'a sua pasta de usuário' } else { $Profile }
+        $quantas = if ($lista.Count) { "$($lista.Count) pasta(s) de dentro já tinham recebido a herança; as demais ficaram como estavam." } else { 'A herança do conteúdo não chegou a ser ligada em pasta nenhuma de dentro.' }
+        return "Parado a pedido durante a herança do perfil. As permissões da raiz de '$perfil' já foram aplicadas. $quantas`r`n`r`nRode a restauração de novo para terminar: ela refaz só o que falta, e o backup deste conjunto continua valendo. Se preferir voltar tudo, use 'Permissões do disco C: - Desfazer (restaurar backup)'."
+    }
+    return "Parado a pedido antes de qualquer alteração: esta fase só lê o disco, e nada foi modificado. Pode rodar a restauração de novo quando quiser."
 }
 
 function Get-WinForgeAclStepOwnerSid {

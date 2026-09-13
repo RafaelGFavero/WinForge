@@ -442,6 +442,34 @@ function Test-WinForgeStreamCancelled {
     } catch { return $false }
 }
 
+function Get-WinForgeStreamStopText {
+    <#
+    .SYNOPSIS
+        O texto da confirmação do botão Parar, conforme o comando já tenha ALTERADO o disco ou não.
+        Função pura.
+    .DESCRIPTION
+        Duas frases, e a diferença entre elas é a única coisa que a pessoa na frente da tela precisa
+        decidir: ela perde alguma coisa parando agora?
+
+        - 'leitura': nada foi alterado até aqui (chkdsk, verificação, backup). Parar é de graça.
+        - 'escrita': o disco já mudou. A frase NÃO promete que está tudo bem; ela diz o que existe -
+          o backup da Fase 2 cobre o que foi alterado, e o Desfazer usa exatamente esse backup.
+
+        Dizer "nada foi alterado" numa parada durante a escrita seria a pior mentira que este botão
+        pode contar: o usuário fecharia o programa achando que o disco está como estava.
+
+        Ser pura é o que permite cobrar as duas frases, literais, sem abrir janela nenhuma.
+    .OUTPUTS
+        O texto da caixa de confirmação.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('leitura', 'escrita')][string]$Phase)
+
+    if ($Phase -eq 'escrita') {
+        return "Parar agora?`r`n`r`nAlgumas pastas já foram alteradas; o Desfazer cobre todas elas - o backup foi gravado antes de a primeira mudança acontecer.`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam. Depois, use 'Permissões do disco C: - Desfazer (restaurar backup)' se quiser voltar tudo ao que era."
+    }
+    return "Parar agora?`r`n`r`nNada foi alterado até agora: esta etapa só lê o disco. Parar aqui não deixa nada pela metade e não precisa de Desfazer.`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam."
+}
+
 function Write-WinForgeStreamCancelNote {
     <#
     .SYNOPSIS
@@ -1121,6 +1149,33 @@ function Show-WinForgeOutputWindow {
     }.GetNewClosure())
     $barra.Children.Add($btnArquivo) | Out-Null
 
+    # O PARAR, e só numa janela que ACOMPANHA um arquivo: numa saída pronta não há o que parar, e um
+    # botão que não faz nada é pior do que botão nenhum. Fica à esquerda do Fechar porque é a ação
+    # menos comum das duas - e porque ninguém deve acertar o Parar mirando no Fechar.
+    $btnParar = $null
+    if (-not [string]::IsNullOrWhiteSpace($FollowPath)) {
+        $btnParar = & $novoBotao 'Parar'
+        $caminhoSeguido = [string]$FollowPath
+        # O clique é um scriptblock de ESCOPO DE ARQUIVO fechado sobre o caminho, como os outros três
+        # desta janela: ele roda na thread da interface e nunca nasce dentro de uma runspace do pool.
+        # Quem cancela é Request-WinForgeStreamCancel; quem obedece é o laço dos passos e a recusa
+        # de ponto único antes de cada processo.
+        $btnParar.Add_Click({
+            # A fase decide o TEXTO, e o texto é a única coisa que a pessoa tem para decidir se
+            # perde algo parando agora. 'escrita' é o reparo que já mexeu no disco.
+            $faseParada = if ([string]$sync.WinForgeStreamKind -eq 'repair') { 'escrita' } else { 'leitura' }
+            $respostaParada = [System.Windows.MessageBox]::Show($janela, (Get-WinForgeStreamStopText -Phase $faseParada), 'WinForge',
+                [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)
+            if ($respostaParada -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            $null = Request-WinForgeStreamCancel -Path $caminhoSeguido
+            # O rótulo e o estado saem do TIQUE, e não daqui: ele já olha as mesmas chaves de meio em
+            # meio segundo, e dois donos do mesmo botão é como um deles acaba dizendo 'Parando…'
+            # depois de o comando ter terminado.
+            Invoke-WinForgeFollowTick -Window $janela
+        }.GetNewClosure())
+        $barra.Children.Add($btnParar) | Out-Null
+    }
+
     $btnFechar = & $novoBotao 'Fechar'
     $btnFechar.Add_Click({ $janela.Close() }.GetNewClosure())
     $barra.Children.Add($btnFechar) | Out-Null
@@ -1129,6 +1184,7 @@ function Show-WinForgeOutputWindow {
     [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
     $janela.RegisterName('WFOutputText', $caixa)
     $janela.RegisterName('WFOutputHeader', $cabecalho)
+    if ($null -ne $btnParar) { $janela.RegisterName('WFOutputStop', $btnParar) }
 
     if (-not [string]::IsNullOrWhiteSpace($FollowPath)) {
         $cabecalho.Visibility = [System.Windows.Visibility]::Visible
@@ -1164,6 +1220,9 @@ function Show-WinForgeOutputWindow {
             # 4 MB por tique só para descobrir que não precisa cortar nada. Com o contador, a caixa
             # só é lida no tique em que o corte acontece.
             Chars         = [int]([string]$caixa.Text).Length
+            # O botão Parar mora na Tag pela mesma razão do resto: o tique é função de ARQUIVO e não
+            # teria outro jeito de alcançá-lo. É ele quem liga, desliga e renomeia o botão.
+            Stop          = $btnParar
         }
         # Primeira leitura antes de mostrar: a janela abre já com o que o arquivo tem, e não em
         # branco por meio segundo.
@@ -1384,7 +1443,8 @@ function Get-WinForgeFollowHeader {
         [int]$ExpectMinutes = 0,
         [switch]$Done,
         $ExitCode = $null,
-        [switch]$Cancelled
+        [switch]$Cancelled,
+        [switch]$Stopping
     )
 
     $minutos = [double]$Elapsed.TotalMinutes
@@ -1393,6 +1453,10 @@ function Get-WinForgeFollowHeader {
     $mmss = '{0:00}:{1:00}' -f [int][math]::Floor($minutos), $segundos
     if ($Cancelled) { return @{ Text = "Cancelado em $mmss"; Level = 'normal' } }
     if ($Done) { return @{ Text = "Concluído em $mmss (código $(if ($null -ne $ExitCode) { $ExitCode } else { 'n/d' }))"; Level = 'normal' } }
+    # Pedido feito e comando ainda andando. Vem DEPOIS de -Done de propósito: pedir para parar a um
+    # comando que já terminou não muda o que aconteceu, e 'Parando' ali seria o programa fingindo
+    # trabalho. E não há aviso de demora junto - quem pediu para parar já sabe que está demorando.
+    if ($Stopping) { return @{ Text = "Parando: $Title ($mmss)"; Level = 'normal' } }
 
     $andamento = "Em andamento: $Title ($mmss)"
     if ($ExpectMinutes -le 0) { return @{ Text = $andamento; Level = 'normal' } }
@@ -1522,10 +1586,26 @@ function Invoke-WinForgeFollowTick {
     # dicionário de recursos de meio em meio segundo é trabalho sem resposta nova.
     $codigo = $null
     if ($concluido) { try { $codigo = $sync.WinForgeStreamExit[[string]$estado.Path] } catch { $codigo = $null } }
-    $cabecalho = Get-WinForgeFollowHeader -Title ([string]$estado.Title) -Elapsed ((Get-Date) - [datetime]$estado.Start) -ExpectMinutes ([int]$estado.ExpectMinutes) -Done:$concluido -ExitCode $codigo
+    # Pedido de parada feito e comando ainda andando: o cabeçalho diz 'Parando: ', que é a resposta
+    # ao clique. Sem ele o cabeçalho continuaria em 'Em andamento' e o botão pareceria não ter feito
+    # nada - a etapa atual ainda termina, e são esses segundos que a frase explica.
+    $parando = $false
+    if (-not $concluido) { try { $parando = [bool]$sync.WinForgeStreamCancel[[string]$estado.Path] } catch { $parando = $false } }
+    $cabecalho = Get-WinForgeFollowHeader -Title ([string]$estado.Title) -Elapsed ((Get-Date) - [datetime]$estado.Start) -ExpectMinutes ([int]$estado.ExpectMinutes) -Done:$concluido -ExitCode $codigo -Stopping:$parando
     $estado.Header.Text = [string]$cabecalho.Text
     $pincel = $estado.Pinceis[[string]$cabecalho.Level]
     if ($null -ne $pincel) { $estado.Header.Foreground = $pincel }
+    # O BOTÃO PARAR, que é do tique e de mais ninguém: um comando terminado não tem o que parar, um
+    # pedido já feito não se faz duas vezes, e na janela protegida da Fase 4 a parada não é imediata
+    # - a troca de posse termina antes, e o rótulo diz isso em vez de deixar a pessoa clicando.
+    $botaoParar = $null
+    try { $botaoParar = $estado.Stop } catch { $botaoParar = $null }
+    if ($null -ne $botaoParar) {
+        $protegido = $false
+        try { $protegido = [bool]$sync.WinForgeStreamProtected[[string]$estado.Path] } catch { $protegido = $false }
+        $botaoParar.Content = $(if ($parando) { 'Parando…' } elseif ($protegido) { 'Parar (aguarde alguns segundos)' } else { 'Parar' })
+        $botaoParar.IsEnabled = (-not $concluido -and -not $parando)
+    }
     if ($concluido -and $null -ne $estado.Timer) { try { $estado.Timer.Stop() } catch { } }
 }
 

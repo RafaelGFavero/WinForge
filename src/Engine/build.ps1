@@ -4061,6 +4061,97 @@ if ($SelfTest) {
     } finally {
         Remove-Item -LiteralPath $wfLacoDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- Parar: botão e textos
+    $wfBtnDir = Join-Path $wbSelfTestRaiz 'parar-botao'
+    try {
+        New-Item -ItemType Directory -Path $wfBtnDir -Force | Out-Null
+        $wfBtnArq = Join-Path $wfBtnDir 'saida.txt'
+        Set-Content -LiteralPath $wfBtnArq -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamDone[$wfBtnArq] = $false
+        $wfBtnJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfBtnArq -Component 'Repair' -NoShow
+        $wfBtnParar = $wfBtnJan.FindName('WFOutputStop')
+        if ($null -eq $wfBtnParar) { Write-Host "  [ERRO] Parar (botão): a janela com -FollowPath não tem o botão Parar" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if (-not $wfBtnParar.IsEnabled) { Write-Host "  [ERRO] Parar (botão): nasce desabilitado com o comando em andamento" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfBtnParar.Content -ne 'Parar') { Write-Host "  [ERRO] Parar (botão): o rótulo é '$($wfBtnParar.Content)'" -ForegroundColor Red; $wbErrors++ }
+            $wfBtnBarra = $wfBtnParar.Parent
+            $wfBtnIdx = $wfBtnBarra.Children.IndexOf($wfBtnParar)
+            $wfBtnFechar = @($wfBtnBarra.Children | Where-Object { [string]$_.Content -eq 'Fechar' })[0]
+            if ($wfBtnIdx -ge $wfBtnBarra.Children.IndexOf($wfBtnFechar)) { Write-Host "  [ERRO] Parar (botão): ele tem de ficar à ESQUERDA do Fechar" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem -FollowPath não existe botão Parar: não há o que parar numa saída pronta.
+        $wfBtnJan2 = Show-WinForgeOutputWindow -Title 'Saída pronta' -Text 'ok' -Component 'Repair' -NoShow
+        if ($null -ne $wfBtnJan2.FindName('WFOutputStop')) { Write-Host "  [ERRO] Parar (botão): janela sem -FollowPath ganhou o botão" -ForegroundColor Red; $wbErrors++ }
+        # Na janela PROTEGIDA da Fase 4 o rótulo avisa que a parada não é imediata - e é o tique que
+        # troca o texto, porque a janela protegida abre e fecha durante o comando.
+        $sync.WinForgeStreamProtected[$wfBtnArq] = $true
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        if ($null -ne $wfBtnParar -and [string]$wfBtnParar.Content -ne 'Parar (aguarde alguns segundos)') { Write-Host "  [ERRO] Parar (botão): na janela protegida o rótulo é '$($wfBtnParar.Content)'" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamProtected.Remove($wfBtnArq)
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        if ($null -ne $wfBtnParar -and [string]$wfBtnParar.Content -ne 'Parar') { Write-Host "  [ERRO] Parar (botão): fechada a janela protegida o rótulo não voltou a 'Parar' ('$($wfBtnParar.Content)')" -ForegroundColor Red; $wbErrors++ }
+        # Pedido feito: o cabeçalho vira 'Parando: ' e o botão desabilita.
+        $sync.WinForgeStreamCancel[$wfBtnArq] = $true
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        $wfBtnCab = $wfBtnJan.FindName('WFOutputHeader')
+        if ([string]$wfBtnCab.Text -notmatch '^Parando: Restaurar padrões \(\d+:\d\d\)$') { Write-Host "  [ERRO] Parar (cabeçalho): com o pedido feito o cabeçalho é '$($wfBtnCab.Text)'" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wfBtnParar -and $wfBtnParar.IsEnabled) { Write-Host "  [ERRO] Parar (botão): continua habilitado depois do pedido" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfBtnArq)
+        # Concluído desabilita o botão no tique seguinte.
+        $sync.WinForgeStreamDone[$wfBtnArq] = $true
+        $sync.WinForgeStreamExit[$wfBtnArq] = 0
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        if ($null -ne $wfBtnParar -and $wfBtnParar.IsEnabled) { Write-Host "  [ERRO] Parar (botão): continua habilitado depois de concluído" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamDone.Remove($wfBtnArq)
+        [void]$sync.WinForgeStreamExit.Remove($wfBtnArq)
+        # Os textos, literais. Eles são a diferença entre "parei" e "parei e você não perdeu nada".
+        $wfBtnLeitura = Get-WinForgeStreamStopText -Phase 'leitura'
+        if ($wfBtnLeitura -notmatch 'Nada foi alterado até agora') { Write-Host "  [ERRO] Parar (texto): fase de leitura sem 'Nada foi alterado até agora'" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnEscrita = Get-WinForgeStreamStopText -Phase 'escrita'
+        if ($wfBtnEscrita -notmatch 'Algumas pastas já foram alteradas; o Desfazer cobre todas elas') { Write-Host "  [ERRO] Parar (texto): fase de escrita sem a frase do Desfazer" -ForegroundColor Red; $wbErrors++ }
+        # E os dois são DIFERENTES: com o mesmo texto nos dois, quem parou durante a escrita leria
+        # 'nada foi alterado' logo depois de o disco ter sido alterado.
+        if ($wfBtnLeitura -eq $wfBtnEscrita) { Write-Host "  [ERRO] Parar (texto): leitura e escrita dizem a mesma coisa" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnLeitura -match 'Desfazer cobre') { Write-Host "  [ERRO] Parar (texto): a fase de leitura promete Desfazer, e não há o que desfazer" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnF4 = Get-WinForgeAclStopReport -Phase 4 -Folders @('C:\Windows', 'C:\ProgramData') -Profile 'C:\Users\fulano'
+        foreach ($wfBtnF in @('Parado a pedido', 'C:\Windows', 'as demais ficaram como estavam', 'O backup da Fase 2 está completo', 'Desfazer (restaurar backup)')) {
+            if ($wfBtnF4 -notmatch [regex]::Escape($wfBtnF)) { Write-Host "  [ERRO] Parar (texto fase 4): falta '$wfBtnF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfBtnF5 = Get-WinForgeAclStopReport -Phase 5 -Folders @() -Profile 'C:\Users\fulano'
+        foreach ($wfBtnF in @('Parado a pedido durante a herança do perfil', 'C:\Users\fulano', 'Rode a restauração de novo para terminar')) {
+            if ($wfBtnF5 -notmatch [regex]::Escape($wfBtnF)) { Write-Host "  [ERRO] Parar (texto fase 5): falta '$wfBtnF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # As pastas citadas são as que ENTRARAM, e o relato não pode inventar nenhuma.
+        if ($wfBtnF4 -match 'C:\\Program Files') { Write-Host "  [ERRO] Parar (texto fase 4): o relato cita uma pasta que não estava na lista" -ForegroundColor Red; $wbErrors++ }
+        # A confirmação tem 'Não' como padrão, e o clique é um scriptblock de escopo de arquivo.
+        $wfBtnFonteJ = [string](Get-Command Show-WinForgeOutputWindow).ScriptBlock
+        if ($wfBtnFonteJ -notmatch 'MessageBoxResult\]::No') { Write-Host "  [ERRO] Parar (confirmação): 'Não' não é o padrão" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteJ.IndexOf('Request-WinForgeStreamCancel -Path $caminhoSeguido', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (botão): o clique não pede o cancelamento do arquivo que a janela acompanha" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
+        if ($wfBtnFonteT.IndexOf('Parar (aguarde alguns segundos)', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (botão): o tique não troca o rótulo na janela protegida" -ForegroundColor Red; $wbErrors++ }
+        # Cancelar na Fase 2 apaga os parciais e NÃO escreve o índice: um índice pela metade faria o
+        # Desfazer apontar para um conjunto que não cobre o que foi alterado.
+        $wfBtnFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        $wfBtnPosCancel = $wfBtnFonteR.IndexOf('Test-WinForgeStreamCancelled -Path $fluxo', [StringComparison]::Ordinal)
+        $wfBtnPosIndice = $wfBtnFonteR.IndexOf('acl-index-', [StringComparison]::Ordinal)
+        if ($wfBtnPosCancel -lt 0 -or $wfBtnPosIndice -lt 0 -or $wfBtnPosCancel -gt $wfBtnPosIndice) { Write-Host "  [ERRO] Parar (fase 2): o cancelamento é conferido DEPOIS de o índice ser escrito - o Desfazer passaria a apontar para um conjunto pela metade" -ForegroundColor Red; $wbErrors++ }
+        # O Add_Closing passa a CANCELAR e ESPERAR, e não só a perguntar.
+        $wfBtnFonteF = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfBtnFonteF = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfBtnFonteF = '' }
+        if ([string]::IsNullOrWhiteSpace($wfBtnFonteF)) { Write-Host "  [ERRO] Parar (fechamento): o próprio arquivo do WinForge não pôde ser lido" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfBtnAlvoF = '$null = Request-WinForge' + 'StreamCancel -Path $wfFechCaminho'
+            if ($wfBtnFonteF.IndexOf($wfBtnAlvoF, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fechamento): o Add_Closing não cancela de verdade - ele abandona a thread e deixa o processo rodando" -ForegroundColor Red; $wbErrors++ }
+            $wfBtnPosPerg = $wfBtnFonteF.IndexOf('fechar agora pode deixar o sistema pela metade', [StringComparison]::Ordinal)
+            $wfBtnPosCanc = $wfBtnFonteF.IndexOf($wfBtnAlvoF, [StringComparison]::Ordinal)
+            if ($wfBtnPosPerg -ge 0 -and $wfBtnPosCanc -ge 0 -and $wfBtnPosCanc -lt $wfBtnPosPerg) { Write-Host "  [ERRO] Parar (fechamento): o cancelamento acontece ANTES da pergunta - responder 'Não' já teria matado o comando" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Parar (botão): à esquerda do Fechar, só com -FollowPath, desabilita no fim, seis textos literais e fechamento que cancela"
+    } catch {
+        Write-Host "  [ERRO] Parar (botão): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfBtnDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Parar: a Fase 4 fora do job
     # KILL_ON_JOB_CLOSE mata a árvore quando o processo dono morre - que é exatamente o que a
     # proibição de cancelar na Fase 4 existe para impedir: morrer entre 'posse aos Admins' e 'posse
@@ -8374,6 +8465,22 @@ $sync["Form"].Add_Closing({
         if ($wfFechResp -ne [System.Windows.MessageBoxResult]::Yes) {
             if ($null -ne $wfFechArgs) { $wfFechArgs.Cancel = $true }
             return
+        }
+        # "Sim" passa a CANCELAR de verdade, e não só a desgrudar do pool. Desgrudar abandona a
+        # thread onde ela estiver: o icacls elevado continuava vivo, órfão, reescrevendo permissão
+        # de pasta do sistema sem janela nenhuma para mostrar o que estava acontecendo.
+        #
+        # A espera é curta e tem teto: o pedido mata o processo da vez e impede os seguintes, e o
+        # que sobra é a etapa atual terminando. Dez segundos é o bastante para um icacls de uma
+        # pasta; passou disso, o fechamento segue - segurar a janela de quem mandou fechar seria
+        # trocar um problema por outro. A janela protegida da Fase 4 é justamente o caso em que
+        # esses segundos existem, e o teto é o que impede a espera de virar travamento.
+        $wfFechCaminho = [string]$sync.WinForgeStreamPath
+        if (-not [string]::IsNullOrWhiteSpace($wfFechCaminho)) {
+            $null = Request-WinForgeStreamCancel -Path $wfFechCaminho
+            $wfFechRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $sync.WinForgeStreamDone[$wfFechCaminho] -and $wfFechRelogio.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 200 }
+            $wfFechRelogio.Stop()
         }
     }
 
