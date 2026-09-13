@@ -422,7 +422,10 @@ function Test-WinForgeNetworkGuard {
            Texto = 'O computador está na bateria. Ligue-o na tomada antes: se ele desligar no meio da troca, a máquina reinicia sem driver de rede nenhum.' },
         @{ Vale = ($livre -lt $preciso); Absolutas = $tiraDriver
            Texto = "Falta espaço no disco do Windows: há $livreMB MB livres e são necessários pelo menos $precisoMB MB para guardar a cópia de segurança do driver atual antes de removê-lo. Libere espaço e tente de novo." },
-        @{ Vale = (-not [bool]$f.Inbox); Absolutas = @('WifiDriverGeneric'); Esconde = $true
+        # '-not SemPerfil' junto: sem perfil NADA foi verificado, e esconder o botão dizendo que
+        # não há driver básico seria afirmar o que não se sabe. Sem perfil quem recusa é o degrau do
+        # diagnóstico, que diz a verdade e NÃO esconde.
+        @{ Vale = ((-not [bool]$f.SemPerfil) -and (-not [bool]$f.Inbox)); Absolutas = @('WifiDriverGeneric'); Esconde = $true
            Texto = 'O Windows não tem driver básico para este rádio sem fio: o único driver que existe para ele é o do fabricante, que já está instalado. Não há por que trocar, e remover o que está lá deixaria a máquina sem Wi-Fi até você instalar o do fabricante de novo por outra via.' },
         @{ Vale = (-not [bool]$f.ExportOk); Absolutas = $tiraDriver
            Texto = 'A cópia de segurança do driver atual falhou, então não há caminho de volta se a troca der errado. Este botão só roda com a cópia guardada.' },
@@ -1156,8 +1159,8 @@ function Select-WinForgeWifiDriverPackage {
         @{ Oem = @(<string>); Original = <string> }
     #>
     param(
-        [Parameter(Mandatory)][object[]]$Entries,
-        [Parameter(Mandatory)][string]$InfName
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$InfName
     )
 
     $rede = @(@($Entries) | Where-Object { $null -ne $_ -and ([string]$_.Class -eq 'Net') -and [bool]$_.IsOem })
@@ -1301,7 +1304,10 @@ function Export-WinForgeWifiDriverBackup {
         @{ Ok = <bool>; Reason = <string>; Path = <string>; Files = <int>; Bytes = <long> }
     #>
     param(
-        [Parameter(Mandatory)][string[]]$Published,
+        # Coleção vazia é ACEITA na assinatura para a recusa amigável lá de baixo ser alcançável:
+        # com o parâmetro obrigatório comum, o PowerShell recusa antes do corpo e o usuário recebe
+        # erro bruto de ligação de parâmetro em vez da frase.
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Published,
         [string]$Root,
         [switch]$DryRun
     )
@@ -1500,7 +1506,53 @@ function Test-WinForgeWifiOutcome {
     if ($Generic -and [string]$Adapter.DriverProvider -ne 'Microsoft') {
         return @{ Outcome = 'restaurar'; Text = "Quem assumiu o adaptador foi '$([string]$Adapter.DriverProvider)', e não o driver básico do Windows. Devolvendo o driver anterior agora, sem perguntar." }
     }
-    return @{ Outcome = 'ok'; Text = "$($null)" + " (fornecedor do driver: $([string]$Adapter.DriverProvider))." }
+    return @{ Outcome = 'ok'; Text = "O adaptador '$([string]$Adapter.Name)' está presente e responde (fornecedor do driver: $([string]$Adapter.DriverProvider))." }
+}
+
+function Wait-WinForgeWifiAdapterSettle {
+    <#
+    .SYNOPSIS
+        Espera o rádio voltar e ASSENTAR depois de uma mexida em driver, com teto de tempo.
+    .DESCRIPTION
+        Existe por causa de um defeito medido: '/remove-device' e '/scan-devices' RETORNAM antes de o
+        Plug and Play terminar de instalar. A leitura feita logo depois encontra o adaptador ausente,
+        o julgamento conclui "sumiu" e dispara a restauração automática DURANTE a instalação em
+        curso - que é exatamente a mistura de duas instalações na mesma pasta de drivers que o
+        degrau de reinício pendente existe para evitar. O efeito era o botão do driver básico se
+        desfazer sozinho e relatar falha, e o de reinstalar relatar falha num caso de SUCESSO.
+
+        Assentar é: presente, código de problema zero e situação em 'Up' ou 'Disconnected'. O laço é
+        LIMITADO - estourado o teto, devolve a última leitura como está e quem chamou julga com ela,
+        que é o comportamento antigo. Esperar para sempre seria trocar um relato errado por uma
+        janela travada.
+    .PARAMETER TimeoutSeconds
+        Teto da espera. O texto do botão promete "um minuto".
+    .PARAMETER IntervalMs
+        Intervalo entre leituras.
+    .PARAMETER Probe
+        Como ler o adaptador. Existe para o -SelfTest exercitar a espera sem mexer em driver nenhum;
+        o padrão é a leitura de verdade.
+    .OUTPUTS
+        A última leitura do adaptador.
+    #>
+    param(
+        [int]$TimeoutSeconds = 60,
+        [int]$IntervalMs = 1000,
+        [scriptblock]$Probe = { Get-WinForgeWifiAdapter }
+    )
+
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $ultima = $null
+    while ($true) {
+        $ultima = & $Probe
+        $assentou = ($null -ne $ultima) -and [bool]$ultima.Ok -and
+                    (($null -eq $ultima.Problem) -or ([string]$ultima.Problem -in @('0', 'CM_PROB_NONE', ''))) -and
+                    ([string]$ultima.Status -in @('Up', 'Disconnected'))
+        if ($assentou) { break }
+        if ($relogio.Elapsed.TotalSeconds -ge $TimeoutSeconds) { break }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+    return $ultima
 }
 
 function Invoke-WinForgeWifiDriverRestore {
@@ -1641,8 +1693,15 @@ function Invoke-WinForgeWifiDriverReinstall {
         $lidos = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
         $pacotes = @((Select-WinForgeWifiDriverPackage -Entries $lidos -InfName $infDoRadio).Oem)
     }
+    # Família vazia é o fim da linha, e ANTES da simulação: dizer que copiaria zero pacotes e depois
+    # tiraria o rádio da lista descreve uma remoção sem rede de segurança nenhuma.
+    if (-not @($pacotes).Count) {
+        $L.Add("Não achei no repositório nenhum pacote da família do rádio ('$infDoRadio'). Sem cópia de segurança não há o que remover, então nada foi alterado.")
+        return @($L.ToArray())
+    }
+    $L.Add("Família do rádio: $($pacotes -join ', ').")
     if ($DryRun) {
-        $L.Add("[simulação] copiaria $(@($pacotes).Count) pacote(s) de rede e depois tiraria o rádio da lista (/remove-device) para o Windows achá-lo de novo (/scan-devices)")
+        $L.Add("[simulação] copiaria $(@($pacotes).Count) pacote(s) e depois tiraria o rádio da lista (/remove-device) para o Windows achá-lo de novo (/scan-devices)")
         return @($L.ToArray())
     }
     Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
@@ -1675,7 +1734,10 @@ function Invoke-WinForgeWifiDriverReinstall {
         if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) { $L.Add("   $([string]$saida.Text)") }
     }
 
-    $desfecho = Test-WinForgeWifiOutcome -Adapter (Get-WinForgeWifiAdapter)
+    # O julgamento espera o Plug and Play assentar. Sem isto, a leitura imediata acha o rádio
+    # ausente e a restauração automática dispara DURANTE a instalação em curso.
+    $assentado = Wait-WinForgeWifiAdapterSettle
+    $desfecho = Test-WinForgeWifiOutcome -Adapter $assentado
     $L.Add([string]$desfecho.Text)
     if ([string]$desfecho.Outcome -ne 'ok') {
         foreach ($linha in @(Invoke-WinForgeWifiDriverRestore)) { $L.Add([string]$linha) }
@@ -1813,7 +1875,9 @@ function Invoke-WinForgeWifiDriverGeneric {
         if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) { $L.Add("   $([string]$saida.Text)") }
     }
 
-    $desfecho = Test-WinForgeWifiOutcome -Adapter (Get-WinForgeWifiAdapter) -Generic
+    # Idem: o apagamento devolve antes de o Windows terminar de instalar o driver básico.
+    $assentado = Wait-WinForgeWifiAdapterSettle
+    $desfecho = Test-WinForgeWifiOutcome -Adapter $assentado -Generic
     $L.Add([string]$desfecho.Text)
     if ([string]$desfecho.Outcome -ne 'ok') {
         foreach ($linha in @(Invoke-WinForgeWifiDriverRestore)) { $L.Add([string]$linha) }

@@ -7923,10 +7923,23 @@ if ($SelfTest) {
         # desta máquina saiu em 35 ms com 3 arquivos e 90 KB. Como esta é a única rede de segurança
         # de quem clica no botão que remove driver, ela é exercitada de verdade em vez de ficar só
         # em gabarito - dentro da raiz isolada desta rodada, e com o pacote escolhido pelo TAMANHO.
+        # O pacote é escolhido FORA da família do rádio, e isso é o que limita o custo: o pacote do
+        # rádio desta máquina exporta 10 arquivos e 120 MB (medido), e o escolhido aqui saiu em
+        # 35 ms com 3 arquivos e 90 KB. Sem esse descarte, numa máquina cujo único pacote de rede
+        # fosse o do rádio o autoteste copiaria 120 MB a cada execução. Quando não sobra candidato,
+        # a prova de fogo é pulada em vez de ficar cara.
         $wfPnpAlvoReal = ''
         try {
-            $wfPnpRede = @(Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text) | Where-Object { [string]$_.Class -eq 'Net' -and [bool]$_.IsOem })
-            if ($wfPnpRede.Count) { $wfPnpAlvoReal = [string]@($wfPnpRede | Sort-Object -Property { [int](([string]$_.Published) -replace '\D', '') } -Descending)[0].Published }
+            $wfPnpLidosR = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
+            $wfPnpRede = @($wfPnpLidosR | Where-Object { [string]$_.Class -eq 'Net' -and [bool]$_.IsOem })
+            $wfPnpFamReal = @()
+            $wfPnpRadioR = Get-WinForgeWifiAdapter
+            if ($wfPnpRadioR.Ok) {
+                $wfPnpObjR = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { [int]$_.ifIndex -eq [int]$wfPnpRadioR.ifIndex })
+                if ($wfPnpObjR.Count) { $wfPnpFamReal = @((Select-WinForgeWifiDriverPackage -Entries $wfPnpLidosR -InfName (Get-WinForgeWifiDriverInfName -PnpDeviceId ([string]$wfPnpObjR[0].PnPDeviceID))).Oem) }
+            }
+            $wfPnpCand = @($wfPnpRede | Where-Object { $wfPnpFamReal -notcontains [string]$_.Published })
+            if ($wfPnpCand.Count) { $wfPnpAlvoReal = [string]@($wfPnpCand | Sort-Object -Property { [int](([string]$_.Published) -replace '\D', '') } -Descending)[0].Published }
         } catch { $wfPnpAlvoReal = '' }
         if ([string]::IsNullOrWhiteSpace($wfPnpAlvoReal)) {
             Write-Host "  Exportação de driver: nenhum pacote de rede de terceiro nesta máquina - a prova de fogo foi pulada"
@@ -8071,10 +8084,46 @@ if ($SelfTest) {
         if ($wfW46Real.Ok -and [int]$wfW46Real.Problem -eq 0 -and ([string]$wfW46Real.Status -in @('Up', 'Disconnected'))) {
             if ([string](Test-WinForgeWifiOutcome -Adapter $wfW46Real).Outcome -ne 'ok') { Write-Host "  [ERRO] Rede (desfecho): o rádio REAL desta máquina está são e foi julgado '$((Test-WinForgeWifiOutcome -Adapter $wfW46Real).Outcome)'" -ForegroundColor Red; $wbErrors++ }
         }
-        # Todo desfecho tem TEXTO: um veredito sem frase é uma janela em branco na cara de quem
-        # acabou de mexer no driver da própria placa de rede.
+        # Todo desfecho tem TEXTO, e o do SUCESSO nomeia o adaptador. "Não está vazio" é trava
+        # vaga: um FRAGMENTO não é vazio. Um mutante que trocou esta frase por um pedaço começando
+        # com espaço sobreviveu à suíte e foi parar num commit - a trava passou a cobrar o nome.
         foreach ($wfW46T in @($wfW46Ok, $wfW46Prob, $wfW46Sumiu)) {
             if ([string]::IsNullOrWhiteSpace([string]$wfW46T.Text)) { Write-Host "  [ERRO] Rede (desfecho): o desfecho '$($wfW46T.Outcome)' veio sem texto" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfW46T.Text -ne ([string]$wfW46T.Text).Trim()) { Write-Host "  [ERRO] Rede (desfecho): o texto de '$($wfW46T.Outcome)' começa ou termina com espaço ('$($wfW46T.Text)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ([string]$wfW46Ok.Text -notmatch 'Wi-Fi') { Write-Host "  [ERRO] Rede (desfecho): a frase de sucesso não nomeia o adaptador ('$($wfW46Ok.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # A ESPERA pelo Plug and Play, que é o que separa "sumiu" de "ainda está instalando". As
+        # duas chamadas do pnputil retornam antes de a instalação terminar, e julgar na hora
+        # dispara a restauração automática DURANTE ela.
+        $wfW46Tics = 0
+        $wfW46Sonda = {
+            $script:wfW46Tics++
+            if ($script:wfW46Tics -lt 3) { return @{ Ok = $false; Reason = 'ainda instalando' } }
+            return @{ Ok = $true; Status = 'Up'; Problem = 0; DriverProvider = 'Intel'; Name = 'Wi-Fi' }
+        }
+        $wfW46Esperou = Wait-WinForgeWifiAdapterSettle -TimeoutSeconds 10 -IntervalMs 1 -Probe $wfW46Sonda
+        if (-not $wfW46Esperou.Ok) { Write-Host "  [ERRO] Rede (espera): desistiu antes de o adaptador voltar" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Tics -lt 3) { Write-Host "  [ERRO] Rede (espera): leu $wfW46Tics vez(es) e o adaptador só voltou na terceira - não esperou" -ForegroundColor Red; $wbErrors++ }
+        # ...e o TETO existe: com o adaptador nunca voltando, ela desiste e devolve a última leitura.
+        $wfW46Nunca = 0
+        $wfW46Relogio = [System.Diagnostics.Stopwatch]::StartNew()
+        $wfW46Fim = Wait-WinForgeWifiAdapterSettle -TimeoutSeconds 1 -IntervalMs 1 -Probe { $script:wfW46Nunca++; return @{ Ok = $false; Reason = 'sumiu de vez' } }
+        $wfW46Relogio.Stop()
+        if ($wfW46Fim.Ok) { Write-Host "  [ERRO] Rede (espera): inventou um adaptador que a sonda nunca devolveu" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Relogio.Elapsed.TotalSeconds -gt 8) { Write-Host "  [ERRO] Rede (espera): o teto de 1 s levou $([math]::Round($wfW46Relogio.Elapsed.TotalSeconds, 1)) s" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Nunca -lt 2) { Write-Host "  [ERRO] Rede (espera): tentou $wfW46Nunca vez(es) antes de desistir" -ForegroundColor Red; $wbErrors++ }
+        # E um adaptador que volta COM PROBLEMA não conta como assentado: sem isto, a espera
+        # devolveria o rádio quebrado na primeira leitura e o julgamento seguiria em frente.
+        $wfW46Quebrado = 0
+        $null = Wait-WinForgeWifiAdapterSettle -TimeoutSeconds 1 -IntervalMs 1 -Probe { $script:wfW46Quebrado++; return @{ Ok = $true; Status = 'Up'; Problem = 43; DriverProvider = 'Intel'; Name = 'Wi-Fi' } }
+        if ($wfW46Quebrado -lt 2) { Write-Host "  [ERRO] Rede (espera): aceitou como assentado um adaptador com código de problema 43" -ForegroundColor Red; $wbErrors++ }
+        # As duas ações JULGAM depois de esperar, e a âncora é a chamada com argumento em cada uma.
+        foreach ($wfW46Fn in @('Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric')) {
+            $wfW46Src = [string](Get-Command $wfW46Fn).ScriptBlock
+            $wfW46PosW = $wfW46Src.IndexOf('Wait-WinForgeWifiAdapterSettle', [StringComparison]::Ordinal)
+            $wfW46PosJ = $wfW46Src.IndexOf('Test-WinForgeWifiOutcome -Adapter $assentado', [StringComparison]::Ordinal)
+            if ($wfW46PosW -lt 0) { Write-Host "  [ERRO] Rede (espera): '$wfW46Fn' julga sem esperar o Plug and Play" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfW46PosJ -lt 0 -or $wfW46PosW -gt $wfW46PosJ) { Write-Host "  [ERRO] Rede (espera): '$wfW46Fn' julga ANTES de esperar" -ForegroundColor Red; $wbErrors++ }
         }
         # A exigência de 'DriverProvider = Microsoft' é cobrada POR COMPORTAMENTO, e não por um
         # '-match "Microsoft"' na fonte - que casaria com o próprio comentário que a explica. Mesmo
@@ -8097,6 +8146,15 @@ if ($SelfTest) {
         # passaria nas duas de cima.
         $wfW46SecoOk = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts $wfW46Base)
         if (-not @($wfW46SecoOk | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): a simulação de uma máquina saudável não descreve o que faria ('$($wfW46SecoOk -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # Família VAZIA não pode virar "copiaria 0 pacote(s) e tiraria o rádio da lista": isso
+        # descreve uma remoção sem rede de segurança nenhuma. E a recusa amigável tem de ser
+        # ALCANÇÁVEL - com parâmetro obrigatório comum, o PowerShell recusa a coleção vazia antes do
+        # corpo e o usuário recebe erro bruto de ligação de parâmetro.
+        $wfW46Vazia = Export-WinForgeWifiDriverBackup -Published @() -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun
+        if ($wfW46Vazia.Ok) { Write-Host "  [ERRO] Rede (exportação): lista vazia foi aceita" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfW46Vazia.Reason -notmatch 'Nenhum pacote') { Write-Host "  [ERRO] Rede (exportação): a recusa da lista vazia não é a frase amigável ('$($wfW46Vazia.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $wfW46FamVazia = Select-WinForgeWifiDriverPackage -Entries @() -InfName ''
+        if (@($wfW46FamVazia.Oem).Count) { Write-Host "  [ERRO] Rede (família): lista vazia rendeu família não vazia" -ForegroundColor Red; $wbErrors++ }
         # O botão 4 tem a MESMA restauração automática do 5.
         $wfW46Fonte4 = [string](Get-Command Invoke-WinForgeWifiDriverReinstall).ScriptBlock
         if ($wfW46Fonte4 -notmatch 'Invoke-WinForgeWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 4): sem restauração automática no desfecho ruim" -ForegroundColor Red; $wbErrors++ }
@@ -8223,6 +8281,15 @@ if ($SelfTest) {
             if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts (& $wfW46Com $wfW5Esc)).Hidden) { Write-Host "  [ERRO] Rede (D3): '$($wfW5Esc.Keys)' não escondeu o botão 5" -ForegroundColor Red; $wbErrors++ }
         }
         if ((Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfW46Base).Hidden) { Write-Host "  [ERRO] Rede (D3): máquina saudável escondeu o botão 5" -ForegroundColor Red; $wbErrors++ }
+        # SEM PERFIL nada foi verificado, então esconder o botão dizendo que não há driver básico
+        # seria afirmar o que não se sabe. Quem recusa é o degrau do diagnóstico, que diz a verdade
+        # e NÃO esconde - o botão volta sozinho quando o diagnóstico termina.
+        $wfW5SemPerfil = @{} + $wfW46Base
+        $wfW5SemPerfil['SemPerfil'] = $true
+        $wfW5Gsp = Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfW5SemPerfil
+        if ($wfW5Gsp.Hidden) { Write-Host "  [ERRO] Rede (D3): sem perfil o botão 5 SUMIU, e nada tinha sido verificado" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfW5Gsp.Reason -match 'driver básico') { Write-Host "  [ERRO] Rede (D3): sem perfil a recusa culpa o driver básico, que não foi verificado ('$($wfW5Gsp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfW5Gsp.Reason -notmatch 'diagnóstico') { Write-Host "  [ERRO] Rede (D3): sem perfil a recusa não fala do diagnóstico ('$($wfW5Gsp.Reason)')" -ForegroundColor Red; $wbErrors++ }
         # A entrada de config CONTINUA existindo (a trava é 63): quem some é o controle na tela.
         if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepWifiDriverGeneric.Description)) { Write-Host "  [ERRO] Rede (botão 5): WPFWFRepWifiDriverGeneric sem Description" -ForegroundColor Red; $wbErrors++ }
         if ([string]$sync.configs.feature.WPFWFRepWifiDriverGeneric.Content -ne [string]$wfW5Cmd.Title) { Write-Host "  [ERRO] Rede (botão 5): o Content da config não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
