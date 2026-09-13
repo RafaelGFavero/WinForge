@@ -1578,8 +1578,8 @@ function Invoke-WinForgeRepairCommand {
     # perguntar primeiro e recusar depois faz a pessoa ler o aviso inteiro, decidir e só então
     # descobrir que o clique não valia nada.
     #
-    # '-ExportOk $true' aqui porque nenhuma linha COM guarda exporta driver; quem exportar passa o
-    # que mediu, no próprio passo que exporta.
+    # O valor verdadeiro vai no argumento da exportação porque nenhuma linha COM guarda exporta
+    # driver; quem exportar passa o que mediu, no próprio passo que exporta, e nunca herda daqui.
     $guardaRede = [string]$cmd.NetworkGuard
     if (-not [string]::IsNullOrWhiteSpace($guardaRede)) {
         try {

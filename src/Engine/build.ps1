@@ -7256,7 +7256,12 @@ if ($SelfTest) {
             $wfNetFatosJ = @{} + $wfNetBase
             $wfNetFatosJ['Inbox'] = $false
             $wfNetFatosJ[$wfNetJunto] = $true
-            if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfNetFatosJ).Hidden) { Write-Host "  [ERRO] Rede (esconder): sem driver básico E '$wfNetJunto' ao mesmo tempo, o botão 5 voltou a aparecer" -ForegroundColor Red; $wbErrors++ }
+            $wfNetGj = Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfNetFatosJ
+            if (-not $wfNetGj.Hidden) { Write-Host "  [ERRO] Rede (esconder): sem driver básico E '$wfNetJunto' ao mesmo tempo, o botão 5 voltou a aparecer" -ForegroundColor Red; $wbErrors++ }
+            # Botão SUMIDO explicado por outro degrau é o que mais confunde: "ligue na tomada" para
+            # um botão que não está na tela não diz nada a ninguém. Quem esconde é quem explica.
+            elseif ([string]$wfNetGj.Reason -notmatch 'básico') { Write-Host "  [ERRO] Rede (esconder): o botão 5 sumiu por falta de driver básico e a explicação fala de outra coisa ('$($wfNetGj.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            elseif (@($wfNetGj.Blocks).Count -ne 1) { Write-Host "  [ERRO] Rede (esconder): Blocks trouxe $(@($wfNetGj.Blocks).Count) item(ns) num botão escondido" -ForegroundColor Red; $wbErrors++ }
         }
         # O mesmo pelo outro lado: a sessão remota é o degrau 1 e NÃO esconde; o build baixo é o 2 e
         # esconde. Com os dois valendo, quem interrompe o laço é o primeiro e o botão tem de sumir
@@ -7386,10 +7391,30 @@ if ($SelfTest) {
         # A frase do servidor de nomes AFIRMA que o 1.1.1.1 responde: com os dois mudos ela seria
         # mentira, e quem explica é a de saída. Sem esta linha, largar o '-and DnsPublicoOk' passaria.
         if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ DnsOk = $false; DnsPublicoOk = $false; SaidaOk = $false })) -ne $wfVerFrases.Fora) { Write-Host "  [ERRO] Rede (veredito): com o DNS do sistema E o 1.1.1.1 mudos a frase não pode ser a do servidor de nomes" -ForegroundColor Red; $wbErrors++ }
-        $wfVerLsp = Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Lsp = @(@{ Name = 'Norton Security'; Path = 'C:\Program Files\Norton\nlsp.dll'; Menu = 'Configurações → Firewall → Proteção da Rede' }) })
+        # O filtro só vira VEREDITO quando há sintoma de falha. Numa máquina saudável ele sai como
+        # OBSERVAÇÃO, nomeando o produto, sem ser apontado como causa - senão o diagnóstico de toda
+        # máquina corporativa com filtro de VPN acusa o filtro, a frase de "nada errado" nunca
+        # aparece, e o relatório deixa de ser confiável justamente onde precisa ser. Medido: esta
+        # máquina, com internet perfeita, apontava o FortiClient como causa.
+        $wfVerFiltro = @(@{ Name = 'Norton Security'; Path = 'C:\Program Files\Norton\nlsp.dll'; Menu = 'Configurações → Firewall → Proteção da Rede' })
+        $wfVerLsp = Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Lsp = $wfVerFiltro; SaidaOk = $false })
         if ($wfVerLsp -notmatch 'Há um filtro do Norton Security preso em todos os adaptadores') { Write-Host "  [ERRO] Rede (veredito): o filtro de terceiro não é nomeado ('$wfVerLsp')" -ForegroundColor Red; $wbErrors++ }
         if ($wfVerLsp -notmatch 'Configurações → Firewall → Proteção da Rede') { Write-Host "  [ERRO] Rede (veredito): o caminho de menu não aparece" -ForegroundColor Red; $wbErrors++ }
         if ($wfVerLsp -notmatch 'antes de mexer em driver') { Write-Host "  [ERRO] Rede (veredito): falta a ordem de testar antes de mexer em driver" -ForegroundColor Red; $wbErrors++ }
+        # A máquina saudável COM filtro instalado: veredito limpo, produto nomeado, e nenhuma ordem
+        # de desligar coisa nenhuma.
+        $wfVerLimpoFiltro = Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Lsp = $wfVerFiltro })
+        if (-not $wfVerLimpoFiltro.StartsWith($wfVerFrases.Limpo, [StringComparison]::Ordinal)) { Write-Host "  [ERRO] Rede (veredito): máquina saudável com filtro não deu veredito limpo ('$wfVerLimpoFiltro')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLimpoFiltro -notmatch 'Norton Security') { Write-Host "  [ERRO] Rede (veredito): a observação não nomeia o produto ('$wfVerLimpoFiltro')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLimpoFiltro -match 'Desligue-o|antes de mexer em driver') { Write-Host "  [ERRO] Rede (veredito): máquina saudável mandou desligar o filtro ('$wfVerLimpoFiltro')" -ForegroundColor Red; $wbErrors++ }
+        # E cada um dos três sintomas, sozinho, faz o filtro voltar a ser a causa: um só deles
+        # testado deixaria os outros dois sem prova.
+        foreach ($wfVerSint in @(@{ Apipa = $true }, @{ DnsOk = $false }, @{ SaidaOk = $false })) {
+            $wfVerFatosS = @{} + $wfVerBase
+            $wfVerFatosS['Lsp'] = $wfVerFiltro
+            foreach ($wfVerKs in $wfVerSint.Keys) { $wfVerFatosS[$wfVerKs] = $wfVerSint[$wfVerKs] }
+            if ((Get-WinForgeNetworkVerdict -Facts $wfVerFatosS) -notmatch 'Há um filtro do Norton Security') { Write-Host "  [ERRO] Rede (veredito): com o sintoma '$($wfVerSint.Keys)' o filtro deixou de ser a causa" -ForegroundColor Red; $wbErrors++ }
+        }
         # O filtro vem ANTES de tudo: com APIPA junto, quem explica continua sendo o filtro. Sem esta
         # linha, a ordem dos dois primeiros degraus seria acaso.
         if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Apipa = $true; Lsp = @(@{ Name = 'Norton Security'; Path = 'C:\x.dll'; Menu = 'Configurações' }) })) -notmatch 'Norton Security') { Write-Host "  [ERRO] Rede (veredito): com filtro E APIPA juntos, quem explica tem de ser o filtro" -ForegroundColor Red; $wbErrors++ }
@@ -7420,6 +7445,23 @@ if ($SelfTest) {
         # numa, 'C:\Windows' noutra), e o registro guarda o que o instalador escreveu. Comparar
         # respeitando maiúsculas acusaria o catálogo inteiro de uma máquina inteira.
         if (-not (Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'Caixa baixa'; Path = ([string][Environment]::GetFolderPath('Windows')).ToLowerInvariant() + '\system32\mswsock.dll'; ChainLength = 1 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): a mesma pasta escrita em caixa baixa foi acusada" -ForegroundColor Red; $wbErrors++ }
+        # CONTRA A MÁQUINA DE VERDADE, e não contra entrada sintética: o catálogo tem DUAS subchaves,
+        # uma por arquitetura, e ler só uma perde metade dos provedores - um filtro de terceiro
+        # registrado só na outra passaria despercebido e o relatório afirmaria um número menor que o
+        # real. A contagem esperada é somada aqui, do registro, então a trava vale em qualquer
+        # máquina; nesta ela dá 14 + 14 = 28, que é o número da especificação.
+        $wfVerSubTotal = 0
+        foreach ($wfVerSub in @('Catalog_Entries', 'Catalog_Entries64')) {
+            $wfVerSubTotal += @(Get-ChildItem -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9\$wfVerSub" -ErrorAction SilentlyContinue).Count
+        }
+        # A contagem sozinha aceitaria ler a MESMA subchave duas vezes; a forma pega as duas pelo nome.
+        $wfVerFonteCat = [string](Get-Command Get-WinForgeWinsockEntries).ScriptBlock
+        if ($wfVerFonteCat -notmatch "'Catalog_Entries'\s*,\s*'Catalog_Entries64'") { Write-Host "  [ERRO] Rede (Winsock): a leitura não percorre as duas subchaves de arquitetura pelo nome" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerSubTotal -lt 2) { Write-Host "  [ERRO] Rede (Winsock): o próprio teste não achou as duas subchaves do catálogo ($wfVerSubTotal) - a conferência abaixo seria vazia" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfVerCatReal = Test-WinForgeWinsockCatalog
+            if ([int]$wfVerCatReal.Count -ne $wfVerSubTotal) { Write-Host "  [ERRO] Rede (Winsock): leu $($wfVerCatReal.Count) provedor(es) de $wfVerSubTotal - uma das duas subchaves de arquitetura ficou de fora" -ForegroundColor Red; $wbErrors++ }
+        }
         # O botão roda INTEIRO nesta máquina e devolve uma das cinco frases.
         $wfVerSaida = [string](Invoke-WinForgeNetworkDiagnostic)
         if ([string]::IsNullOrWhiteSpace($wfVerSaida)) { Write-Host "  [ERRO] Rede (diagnóstico): a saída veio vazia" -ForegroundColor Red; $wbErrors++ }
@@ -7428,6 +7470,12 @@ if ($SelfTest) {
         $wfVerLinhas = @([string]$wfVerSaida -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         $wfVerUltima = if ($wfVerLinhas.Count) { ([string]$wfVerLinhas[-1]).Trim() } else { '' }
         if (-not @(@($wfVerFrases.Values) + 'Há um filtro do' | Where-Object { $wfVerUltima -match [regex]::Escape([string]$_) }).Count) { Write-Host "  [ERRO] Rede (diagnóstico): a saída não TERMINA com uma das cinco frases ('$wfVerUltima')" -ForegroundColor Red; $wbErrors++ }
+        # Quem lê isto clicou porque a internet parou. Índice numérico cru não diz nada a essa
+        # pessoa, e uma parede de 169.254 iguais (nove nesta máquina, dos adaptadores virtuais de
+        # VPN) esconde a única linha que interessa.
+        if ($wfVerSaida -match '(?m)ifIndex \d+, roteador') { Write-Host "  [ERRO] Rede (relatório): a rota mostra índice numérico cru em vez do nome do adaptador" -ForegroundColor Red; $wbErrors++ }
+        $wfVerQtd169 = ([regex]::Matches($wfVerSaida, '169\.254\.\d')).Count
+        if ($wfVerQtd169 -gt 3) { Write-Host "  [ERRO] Rede (relatório): $wfVerQtd169 linhas de 169.254 despejadas sem resumo" -ForegroundColor Red; $wbErrors++ }
         $wfVerCmd = Get-WinForgeRepairCommand -Name 'NetDiagFull'
         if ([string]$wfVerCmd.Kind -ne 'read') { Write-Host "  [ERRO] Rede (diagnóstico): a linha é '$($wfVerCmd.Kind)', esperado 'read'" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfVerCmd.Title -ne 'Rede — Diagnóstico completo') { Write-Host "  [ERRO] Rede (diagnóstico): título '$($wfVerCmd.Title)'" -ForegroundColor Red; $wbErrors++ }
@@ -7481,8 +7529,13 @@ if ($SelfTest) {
         # argumento junto - o nome solto apareceria no comentário que explica a regra.
         if ([string]$wfDnsCmd.NetworkGuard -ne 'NetDnsRenew') { Write-Host "  [ERRO] Rede (DNS): a linha não declara NetworkGuard (veio '$($wfDnsCmd.NetworkGuard)')" -ForegroundColor Red; $wbErrors++ }
         $wfDnsFonte = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
-        if ($wfDnsFonte -notmatch 'Assert-WinForgeNetworkGuard\s+-Action') { Write-Host "  [ERRO] Rede (DNS): o despacho não CHAMA a asserção de rede com -Action" -ForegroundColor Red; $wbErrors++ }
-        if ($wfDnsFonte -notmatch '-ExportOk') { Write-Host "  [ERRO] Rede (DNS): o despacho chama a asserção sem -ExportOk" -ForegroundColor Red; $wbErrors++ }
+        # A CHAMADA COMPLETA numa só expressão: nome da função e os DOIS argumentos juntos. Cobrar
+        # '-ExportOk' em separado é trava vazia - o comentário que explica a passagem fica três
+        # linhas acima da chamada e satisfaz a busca sozinho. Medido pelo revisor: com o argumento
+        # REMOVIDO da chamada de verdade, a trava separada ficava verde, e a asserção de
+        # comportamento também, porque a falha do parâmetro obrigatório cai no mesmo tratamento de
+        # erro e o resultado observado não muda. O botão nunca funcionaria, com o build verde.
+        if ($wfDnsFonte -notmatch 'Assert-WinForgeNetworkGuard\s+-Action\s+\$\w+\s+-ExportOk\s+\$\w+') { Write-Host "  [ERRO] Rede (DNS): o despacho não chama a asserção de rede com -Action E -ExportOk na mesma chamada" -ForegroundColor Red; $wbErrors++ }
         # A asserção vem ANTES da caixa de confirmação: perguntar primeiro e recusar depois faz o
         # usuário ler o aviso inteiro, decidir e só então descobrir que o clique não valia nada. É a
         # mesma regra que as duas travas de "já tem coisa rodando" seguem nesta função.
@@ -7509,6 +7562,12 @@ if ($SelfTest) {
         if ($wfDnsRedefCmd -notmatch 'driver') { Write-Host "  [ERRO] Rede (Redefinir): a reserva da tabela não diz que ele não mexe em driver" -ForegroundColor Red; $wbErrors++ }
         if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Description)) { Write-Host "  [ERRO] Rede (DNS): WPFWFRepNetDnsRenew sem Description" -ForegroundColor Red; $wbErrors++ }
         if ([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Content -ne [string]$wfDnsCmd.Title) { Write-Host "  [ERRO] Rede (DNS): o Content da config ('$($sync.configs.feature.WPFWFRepNetDnsRenew.Content)') não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        # O texto tem de dizer o que o CÓDIGO faz. O degrau da sessão remota recusa, mas não
+        # esconde: o botão aparece e explica no clique, porque quem está de longe TEM como
+        # destravá-lo - basta ir até a máquina -, e botão que some faz a pessoa achar que o recurso
+        # não existe. A descrição prometia que ele sumia.
+        if ((Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom 'Remote' $true)).Hidden) { Write-Host "  [ERRO] Rede (DNS): a sessão remota passou a ESCONDER o botão 3; o texto e a escada têm de concordar" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Description -match 'nem aparece') { Write-Host "  [ERRO] Rede (DNS): a descrição promete que o botão some de longe, e o código só recusa no clique" -ForegroundColor Red; $wbErrors++ }
         Write-Host "  Rede (DNS): quatro passos por caminho absoluto, nenhum argumento concatenado, simulação sem efeito e o Redefinir dizendo o que não faz"
     } catch {
         Write-Host "  [ERRO] Rede (DNS): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++

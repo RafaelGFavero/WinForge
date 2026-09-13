@@ -434,19 +434,29 @@ function Test-WinForgeNetworkGuard {
     #
     # Então basta UM degrau que esconde estar valendo para esta ação: a varredura é sobre a escada
     # inteira e não depende de quem interrompeu o laço.
-    $escondido = [bool]@($escada | Where-Object { $_.Vale -and $_.Esconde -and ($Action -in @($_.Absolutas)) }).Count
+    $queEscondem = @($escada | Where-Object { $_.Vale -and $_.Esconde -and ($Action -in @($_.Absolutas)) })
+    $escondido = [bool]$queEscondem.Count
 
     $blocos = New-Object System.Collections.Generic.List[string]
     $motivo = ''
-    foreach ($degrau in $escada) {
-        if (-not $degrau.Vale) { continue }
-        if ($Action -in @($degrau.Absolutas)) {
-            $blocos.Add([string]$degrau.Texto)
-            $motivo = [string]$degrau.Texto
-            break
-        }
-        if ($Action -in @($degrau.Avisos)) {
-            $blocos.Add([string]$(if ($degrau.ContainsKey('TextoAviso')) { $degrau.TextoAviso } else { $degrau.Texto }))
+    if ($escondido) {
+        # QUEM ESCONDE É QUEM EXPLICA. Um botão que sumiu da tela explicado por outro degrau é a
+        # confusão mais cara desta escada: "ligue o computador na tomada" para um botão que não está
+        # ali não diz nada a ninguém, e quem for procurar o botão vai procurar pelo motivo errado.
+        # Sem isto, um notebook sem driver básico e na bateria some com o botão 5 e culpa a bateria.
+        $motivo = [string]$queEscondem[0].Texto
+        $blocos.Add($motivo)
+    } else {
+        foreach ($degrau in $escada) {
+            if (-not $degrau.Vale) { continue }
+            if ($Action -in @($degrau.Absolutas)) {
+                $blocos.Add([string]$degrau.Texto)
+                $motivo = [string]$degrau.Texto
+                break
+            }
+            if ($Action -in @($degrau.Avisos)) {
+                $blocos.Add([string]$(if ($degrau.ContainsKey('TextoAviso')) { $degrau.TextoAviso } else { $degrau.Texto }))
+            }
         }
     }
 
@@ -543,11 +553,19 @@ function Get-WinForgeWinsockEntries {
     .SYNOPSIS
         Lê o catálogo de protocolos do Winsock no registro e devolve uma entrada por provedor.
     .DESCRIPTION
-        O catálogo mora em
-        HKLM\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9\Catalog_Entries,
-        uma subchave por provedor, e cada uma guarda a estrutura empacotada 'PackedCatalogItem'. O
-        registro é a fonte porque ele não depende de idioma: a saída de texto do netsh muda de língua
-        com o Windows, e esta base de código já perdeu um campo inteiro por parsear texto localizado.
+        O catálogo mora em HKLM\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9,
+        e ele são DOIS: 'Catalog_Entries' e 'Catalog_Entries64', um por arquitetura. Cada um tem uma
+        subchave por provedor, e cada subchave guarda a estrutura empacotada 'PackedCatalogItem'.
+
+        Ler só um dos dois é o defeito que esta função já teve: medido nesta máquina, 14 provedores
+        em cada, 28 no total, e a leitura de um só afirmava 14. O custo não é o número errado no
+        relatório - é um filtro de terceiro registrado apenas no catálogo da OUTRA arquitetura
+        passar despercebido, que é exatamente o que este degrau existe para achar. Entrada sintética
+        não pega isso; só a leitura da máquina de verdade pega.
+
+        O registro é a fonte porque ele não depende de idioma: a saída de texto do netsh muda de
+        língua com o Windows, e esta base de código já perdeu um campo inteiro por parsear texto
+        localizado.
 
         A estrutura foi CONFERIDA byte a byte nesta máquina (Windows 11 26200, 14 provedores, todos
         do sistema, 888 bytes cada):
@@ -568,8 +586,11 @@ function Get-WinForgeWinsockEntries {
     param()
 
     $lidas = @()
-    $raiz = 'HKLM:\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9\Catalog_Entries'
-    try { $chaves = @(Get-ChildItem -LiteralPath $raiz -ErrorAction Stop) } catch { return @() }
+    $chaves = @()
+    foreach ($arquitetura in @('Catalog_Entries', 'Catalog_Entries64')) {
+        $raiz = "HKLM:\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9\$arquitetura"
+        try { $chaves += @(Get-ChildItem -LiteralPath $raiz -ErrorAction Stop) } catch { continue }
+    }
     foreach ($chave in $chaves) {
         try {
             $bytes = (Get-ItemProperty -LiteralPath $chave.PSPath -Name 'PackedCatalogItem' -ErrorAction Stop).PackedCatalogItem
@@ -649,10 +670,19 @@ function Get-WinForgeNetworkVerdict {
     .DESCRIPTION
         Cinco frases, nenhuma inventada na hora, e a ordem é a da escada de reparo:
 
-        1. FILTRO DE TERCEIRO, na frente de tudo. Se um filtro de antivírus ou de VPN é a causa,
-           remover e reinstalar o driver do Wi-Fi não conserta nada e ainda arrisca deixar a máquina
-           sem rádio. É a única frase montada com dados (o nome do produto e onde desligá-lo), e
-           mesmo ela é um molde fixo.
+        1. FILTRO DE TERCEIRO, na frente de tudo - MAS só quando há SINTOMA de falha. Se um filtro
+           de antivírus ou de VPN é a causa, remover e reinstalar o driver do Wi-Fi não conserta
+           nada e ainda arrisca deixar a máquina sem rádio, e por isso ele vem antes de todo degrau
+           que mexe em driver. É a única frase montada com dados (o nome do produto e onde
+           desligá-lo), e mesmo ela é um molde fixo.
+
+           A condição do sintoma foi medida e custou caro: SEM ela, esta máquina de
+           desenvolvimento - com a internet perfeita e um filtro de VPN corporativa instalado -
+           apontava o filtro como causa, e a frase "não encontrei nada errado" nunca apareceria em
+           máquina corporativa nenhuma. Um diagnóstico que acusa sempre não é diagnóstico. Com a
+           rede funcionando, o filtro sai como OBSERVAÇÃO no fim da frase limpa: o produto é
+           nomeado, para quem voltar aqui depois saber por onde começar, e ninguém é mandado
+           desligar coisa nenhuma.
         2. ENDEREÇO. 169.254.x.x é o endereço que o Windows dá a si mesmo quando o roteador não
            respondeu: sem endereço não há nome nem saída, e falar de DNS aqui seria desperdiçar a
            atenção de quem lê.
@@ -670,7 +700,12 @@ function Get-WinForgeNetworkVerdict {
     #>
     param([Parameter(Mandatory)][hashtable]$Facts)
 
-    if (@($Facts.Lsp).Count) {
+    # SINTOMA é falha observada, e são estes três: endereço que o roteador não deu, nome que não
+    # resolve, ou nada saindo para fora. Sem nenhum deles a rede está funcionando, e nada pode ser
+    # apontado como causa de um problema que não existe.
+    $sintoma = ([bool]$Facts.Apipa) -or (-not $Facts.DnsOk) -or (-not $Facts.SaidaOk)
+
+    if (@($Facts.Lsp).Count -and $sintoma) {
         return ("Há um filtro do {0} preso em todos os adaptadores. Desligue-o em {1} e teste de novo antes de mexer em driver." -f [string]@($Facts.Lsp)[0].Name, [string]@($Facts.Lsp)[0].Menu)
     }
     if ($Facts.Apipa) {
@@ -682,7 +717,14 @@ function Get-WinForgeNetworkVerdict {
     if (-not $Facts.SaidaOk) {
         return 'O roteador entrega endereço e nome, mas nada sai para fora. O problema está no roteador ou no provedor, não neste computador.'
     }
-    return 'Não encontrei nada errado na rede deste computador.'
+    $limpo = 'Não encontrei nada errado na rede deste computador.'
+    if (@($Facts.Lsp).Count) {
+        # A OBSERVAÇÃO, e ela vem depois da frase limpa de propósito: quem lê a primeira linha lê
+        # "está tudo bem", que é a verdade medida agora. O nome do produto fica registrado para
+        # quem voltar aqui no dia em que a navegação falhar.
+        return ("{0} Observação: há um filtro do {1} preso em todos os adaptadores; hoje ele não está atrapalhando, mas é o primeiro a testar se a navegação voltar a falhar." -f $limpo, [string]@($Facts.Lsp)[0].Name)
+    }
+    return $limpo
 }
 
 function Invoke-WinForgeNetworkDiagnostic {
@@ -743,7 +785,15 @@ function Invoke-WinForgeNetworkDiagnostic {
     try {
         $enderecos = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { [string]$_.InterfaceAlias -notlike '*Loopback*' })
         if (-not $enderecos.Count) { $L.Add('   Nenhum endereço IPv4 fora do laço local.') }
-        foreach ($e in $enderecos) { $L.Add("   $($e.InterfaceAlias): $($e.IPAddress)/$($e.PrefixLength) (origem $($e.PrefixOrigin)).") }
+        # Quem lê isto clicou porque a internet parou, e uma parede de 169.254 iguais esconde a
+        # única linha que interessa. Medido nesta máquina: NOVE das dez linhas eram 169.254 de
+        # adaptadores virtuais de VPN parados, que é o estado normal deles. As que têm endereço de
+        # verdade saem uma a uma; o resto vira uma linha de resumo, com a explicação junto.
+        $ligados = @($enderecos | Where-Object { [string]$_.IPAddress -notlike '169.254.*' })
+        $parados = @($enderecos | Where-Object { [string]$_.IPAddress -like '169.254.*' })
+        foreach ($e in $ligados) { $L.Add("   $($e.InterfaceAlias): $($e.IPAddress)/$($e.PrefixLength) (origem $($e.PrefixOrigin)).") }
+        if ($parados.Count -eq 1) { $L.Add("   $($parados[0].InterfaceAlias): $($parados[0].IPAddress) - endereço que o Windows dá a si mesmo quando ninguém respondeu.") }
+        elseif ($parados.Count -gt 1) { $L.Add("   Mais $($parados.Count) adaptador(es) em 169.254.x.x ($(@($parados | ForEach-Object { [string]$_.InterfaceAlias }) -join ', ')): é o endereço que o Windows dá a si mesmo quando não há ninguém do outro lado, e é o normal para adaptador de VPN parado ou placa sem cabo.") }
         # 169.254 é o endereço que o Windows dá a si mesmo quando ninguém respondeu ao pedido de
         # DHCP. Só conta nos adaptadores FÍSICOS e LIGADOS, e as duas metades foram medidas nesta
         # máquina: um adaptador desconectado guarda o último endereço que teve (o rádio desta
@@ -762,7 +812,15 @@ function Invoke-WinForgeNetworkDiagnostic {
     try {
         $rotas = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop)
         if (-not $rotas.Count) { $L.Add('   Não há rota padrão: sem ela nada sai desta máquina, mesmo com endereço válido.') }
-        foreach ($r in $rotas) { $L.Add("   saída pelo ifIndex $($r.ifIndex), roteador $($r.NextHop), métrica $($r.RouteMetric).") }
+        # O NOME do adaptador, e não o índice: 'ifIndex 14' não diz nada para quem clicou porque a
+        # internet parou, e é o nome que essa pessoa vê em "Conexões de Rede".
+        $nomePorIndice = @{}
+        try { foreach ($a in @(Get-NetAdapter -ErrorAction Stop)) { $nomePorIndice[[int]$a.ifIndex] = [string]$a.Name } } catch { }
+        foreach ($r in $rotas) {
+            $quem = [string]$nomePorIndice[[int]$r.ifIndex]
+            if ([string]::IsNullOrWhiteSpace($quem)) { $quem = "adaptador $([int]$r.ifIndex)" }
+            $L.Add("   Sai pelo $quem, através do roteador $($r.NextHop) (prioridade $($r.RouteMetric)).")
+        }
     } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
 
     # ---- 5. Servidor de nomes, contra o 1.1.1.1
