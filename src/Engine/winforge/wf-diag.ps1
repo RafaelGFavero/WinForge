@@ -1535,12 +1535,24 @@ footer { margin-top: 40px; color: #7d8288; font-size: 12px;
     $wu = @($sync.DiagWUResults)
     if ($wu.Count -gt 0) {
         [void]$html.AppendLine('<h2>Drivers oferecidos pelo Windows Update</h2>')
-        [void]$html.AppendLine('<table><tr><th>Atualização</th><th>Driver</th><th>Fornecedor</th><th>Versão</th><th>Data</th></tr>')
+        [void]$html.AppendLine('<table><tr><th>Atualização</th><th>Driver</th><th>Classe</th><th>Fornecedor</th><th>Versão</th><th>Data</th></tr>')
         foreach ($u in $wu) {
             if ($null -eq $u) { continue }
-            [void]$html.AppendLine("<tr><td>$(ConvertTo-WinForgeDiagHtml $u.Title)</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Driver))</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Provider))</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Version))</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Date))</td></tr>")
+            [void]$html.AppendLine("<tr><td>$(ConvertTo-WinForgeDiagHtml $u.Title)</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Driver))</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Class))</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Provider))</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Version))</td><td>$(ConvertTo-WinForgeDiagHtml (Format-WinForgeDiagValue $u.Date))</td></tr>")
         }
         [void]$html.AppendLine('</table>')
+        # A tabela acima é CRUA de propósito: uma linha por oferta, como o serviço respondeu, porque
+        # o relatório é o que a pessoa manda para quem for ajudar - dobrar linha ali esconderia o
+        # dado de quem está justamente procurando o que a tela não mostrou.
+        # Quem dobra os lotes de INF sem versão é a ABA, e é ela que publica quantas ofertas dobrou
+        # em $sync.DiagWUGrouped; aqui o número é só REPETIDO. Sem número não sai nota nenhuma: um
+        # relatório gerado antes de a tabela ser montada não pode afirmar um agrupamento que não
+        # aconteceu.
+        $dobradas = 0
+        try { $dobradas = [int]$sync.DiagWUGrouped } catch { $dobradas = 0 }
+        if ($dobradas -gt 0) {
+            [void]$html.AppendLine("<p class=""sub"">Lista crua: uma linha por oferta. A aba Diagnóstico mostra $dobradas dessas ofertas reunidas em linha(s) de grupo.</p>")
+        }
     }
 
     [void]$html.AppendLine("<footer>Gerado pelo WinForge $(ConvertTo-WinForgeDiagHtml $sync.version) em $(ConvertTo-WinForgeDiagHtml (Get-Date).ToString('dd/MM/yyyy HH:mm')). Este relatório descreve o estado do computador; nenhuma alteração foi aplicada ao gerá-lo.</footer>")

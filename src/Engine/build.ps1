@@ -6894,6 +6894,175 @@ if ($SelfTest) {
         # Lista vazia é lista vazia, e não um item nulo.
         $wfWuNada = Select-WinForgeWindowsUpdateLatest -Rows @()
         if (@($wfWuNada.Kept).Count -ne 0 -or @($wfWuNada.Superseded).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo: lista vazia devolveu $(@($wfWuNada.Kept).Count)/$(@($wfWuNada.Superseded).Count)" -ForegroundColor Red; $wbErrors++ }
+        # ---- agrupamento dos INFs sem versão. As três constantes são PROVISÓRIAS: os casos abaixo
+        # leem $script:WinForgeNullDriver*, e nenhum deles escreve 256 KB, 5 ou nome de classe à mão.
+        $wfGrpMax = [int]$script:WinForgeNullDriverMaxBytes
+        $wfGrpMin = [int]$script:WinForgeNullDriverMinGroup
+        $wfGrpClasses = @($script:WinForgeNullDriverClasses)
+        if ($wfGrpMax -le 0 -or $wfGrpMin -le 1 -or -not $wfGrpClasses.Count) { Write-Host "  [ERRO] Agrupamento: as constantes não existem ou estão vazias ($wfGrpMax / $wfGrpMin / $($wfGrpClasses.Count))" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpFonteC = [string](Get-Content -LiteralPath $PSCommandPath -Raw -ErrorAction SilentlyContinue)
+        # A marca é cobrada NA LINHA DA CONSTANTE. Procurar 'PROVISÓRIO' no arquivo inteiro é
+        # autoaprovação: a palavra está neste próprio comentário de teste, e o motor gerado junta
+        # teste e função no mesmo arquivo.
+        foreach ($wfGrpConst in @('WinForgeNullDriverMaxBytes', 'WinForgeNullDriverMinGroup', 'WinForgeNullDriverClasses')) {
+            if ($wfGrpFonteC -notmatch ('\$script:' + $wfGrpConst + '[^\r\n]*#[^\r\n]*PROVISÓRIO')) { Write-Host "  [ERRO] Agrupamento: a constante '$wfGrpConst' não está marcada como PROVISÓRIA na própria linha" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfGrpClasseBoa = [string]@($wfGrpClasses | Where-Object { $_ -ne '' })[0]
+        # Sem uma classe nomeada na lista, TODA linha do fixture sairia com Class = '' - que também é
+        # permitida - e os casos abaixo continuariam verdes sem exercitar a lista de permissão.
+        if ([string]::IsNullOrWhiteSpace($wfGrpClasseBoa)) { Write-Host "  [ERRO] Agrupamento: a lista de classes não tem nenhuma classe nomeada; o fixture abaixo não exercitaria a lista de permissão" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpLinha = {
+            param($Id, $Classe, $Tamanho, $Titulo, $Data, $Fornecedor, $Versao)
+            [pscustomobject]@{ Title = $Titulo; Driver = ''; Provider = $Fornecedor; Class = $Classe; Version = $Versao; Date = $Data; UpdateId = $Id; SizeBytes = $Tamanho; HardwareId = 'PCI\VEN_8086&DEV_8D44'; ProblemCode = 28 }
+        }
+        # 47 ofertas iguais em fornecedor, classe e data: vira UM grupo.
+        $wfGrp47 = @(1..47 | ForEach-Object { & $wfGrpLinha "n-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null })
+        $wfGrpR = Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrp47
+        if (@($wfGrpR.Groups).Count -ne 1) { Write-Host "  [ERRO] Agrupamento: 47 ofertas deram $(@($wfGrpR.Groups).Count) grupo(s)" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfGrpR.Rows).Count -ne 1) { Write-Host "  [ERRO] Agrupamento: sobraram $(@($wfGrpR.Rows).Count) linha(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif (@(@($wfGrpR.Groups)[0].Members).Count -ne 47) { Write-Host "  [ERRO] Agrupamento: o grupo tem $(@(@($wfGrpR.Groups)[0].Members).Count) membro(s)" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfGrpR.Rows)[0].UpdateId -notlike 'grupo:*') { Write-Host "  [ERRO] Agrupamento: o id sintético é '$(@($wfGrpR.Rows)[0].UpdateId)', esperado 'grupo:<hash>'" -ForegroundColor Red; $wbErrors++ }
+        if (@(@($wfGrpR.Groups)[0].Members) -join ',' -ne (@($wfGrp47 | ForEach-Object { $_.UpdateId }) -join ',')) { Write-Host "  [ERRO] Agrupamento: os membros não estão na ordem original" -ForegroundColor Red; $wbErrors++ }
+        # Abaixo de MinGroup, ninguém agrupa: a linha fica sozinha.
+        $wfGrpPoucos = Group-WinForgeWindowsUpdateNullDrivers -Rows @($wfGrp47 | Select-Object -First ($wfGrpMin - 1))
+        if (@($wfGrpPoucos.Groups).Count -ne 0) { Write-Host "  [ERRO] Agrupamento: $($wfGrpMin - 1) ofertas formaram grupo" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfGrpPoucos.Rows).Count -ne ($wfGrpMin - 1)) { Write-Host "  [ERRO] Agrupamento: as linhas soltas sumiram" -ForegroundColor Red; $wbErrors++ }
+        # Qualquer dúvida, a linha fica sozinha: título com versão, classe fora da lista de permissão,
+        # tamanho desconhecido, tamanho acima do corte.
+        foreach ($wfGrpNao in @(
+            @{ Nome = 'título com versão';   Muda = { param($l) $l.Title = 'INTEL - System - 10.1.1.44'; $l } },
+            @{ Nome = 'versão preenchida';   Muda = { param($l) $l.Version = '10.1.1.44'; $l } },
+            @{ Nome = 'classe Display';      Muda = { param($l) $l.Class = 'Display'; $l } },
+            @{ Nome = 'classe Firmware';     Muda = { param($l) $l.Class = 'Firmware'; $l } },
+            @{ Nome = 'classe Extension';    Muda = { param($l) $l.Class = 'Extension'; $l } },
+            @{ Nome = 'classe SoftwareComponent'; Muda = { param($l) $l.Class = 'SoftwareComponent'; $l } },
+            @{ Nome = 'tamanho desconhecido'; Muda = { param($l) $l.SizeBytes = 0; $l } },
+            @{ Nome = 'acima do corte';      Muda = { param($l) $l.SizeBytes = $wfGrpMax + 1; $l } })) {
+            $wfGrpCaso = @(1..47 | ForEach-Object { & $wfGrpNao.Muda (& $wfGrpLinha "x-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null) })
+            $wfGrpRes = Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpCaso
+            if (@($wfGrpRes.Groups).Count -ne 0) { Write-Host "  [ERRO] Agrupamento: '$($wfGrpNao.Nome)' foi agrupado - o erro caro é esconder o driver que o usuário veio buscar" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfGrpRes.Rows).Count -ne 47) { Write-Host "  [ERRO] Agrupamento: '$($wfGrpNao.Nome)' perdeu linha ($(@($wfGrpRes.Rows).Count) de 47)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Fornecedor, classe ou data diferentes dão grupos diferentes - a DATA entra na chave para
+        # amarrar o lote a uma publicação de INF.
+        $wfGrpDatas = @(1..47 | ForEach-Object { & $wfGrpLinha "d1-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null }) +
+                      @(1..47 | ForEach-Object { & $wfGrpLinha "d2-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-07-15' 'INTEL' $null })
+        if (@((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpDatas).Groups).Count -ne 2) { Write-Host "  [ERRO] Agrupamento: datas diferentes não deram dois grupos" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpForn = @(1..47 | ForEach-Object { & $wfGrpLinha "f1-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null }) +
+                     @(1..47 | ForEach-Object { & $wfGrpLinha "f2-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "AMD - System - $_" '2026-03-01' 'AMD' $null })
+        if (@((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpForn).Groups).Count -ne 2) { Write-Host "  [ERRO] Agrupamento: fornecedores diferentes não deram dois grupos" -ForegroundColor Red; $wbErrors++ }
+        # A linha agrupada ocupa a posição da PRIMEIRA que a originou; as não agrupadas mantêm a ordem.
+        $wfGrpMistura = @((& $wfGrpLinha 'solta-a' 'Display' 5000 'Realtek - Display - 1.2.3' '2026-03-01' 'Realtek' '1.2.3')) +
+                        @(1..47 | ForEach-Object { & $wfGrpLinha "m-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null }) +
+                        @((& $wfGrpLinha 'solta-b' 'Net' 5000 'Intel - Net - 22.1' '2026-03-01' 'Intel' '22.1'))
+        $wfGrpOrd = @((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpMistura).Rows)
+        if ($wfGrpOrd.Count -ne 3) { Write-Host "  [ERRO] Agrupamento: a mistura virou $($wfGrpOrd.Count) linha(s), esperado 3" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfGrpOrd[0].UpdateId -ne 'solta-a' -or [string]$wfGrpOrd[1].UpdateId -notlike 'grupo:*' -or [string]$wfGrpOrd[2].UpdateId -ne 'solta-b') { Write-Host "  [ERRO] Agrupamento: a ordem saiu '$(@($wfGrpOrd | ForEach-Object { $_.UpdateId }) -join ', ')'" -ForegroundColor Red; $wbErrors++ }
+        # Lista vazia é lista vazia, e nulo na entrada não vira linha na saída.
+        $wfGrpNada = Group-WinForgeWindowsUpdateNullDrivers -Rows @()
+        if (@($wfGrpNada.Rows).Count -ne 0 -or @($wfGrpNada.Groups).Count -ne 0) { Write-Host "  [ERRO] Agrupamento: lista vazia devolveu $(@($wfGrpNada.Rows).Count)/$(@($wfGrpNada.Groups).Count)" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpNulo = Group-WinForgeWindowsUpdateNullDrivers -Rows @($null, (& $wfGrpLinha 'so-uma' 'Display' 5000 'Realtek - Display - 1.2.3' '2026-03-01' 'Realtek' '1.2.3'), $null)
+        if (@($wfGrpNulo.Rows).Count -ne 1) { Write-Host "  [ERRO] Agrupamento: nulo na entrada virou linha na saída ($(@($wfGrpNulo.Rows).Count) linha(s), esperado 1)" -ForegroundColor Red; $wbErrors++ }
+        # A busca real traz os três campos novos, e 'Categories.Name' continua descartado (vem no
+        # idioma de UserLocale).
+        $wfGrpFonteB = [string]${function:Search-WinForgeWindowsUpdateDrivers}
+        # A âncora é a LEITURA ('$u.<campo>'), e não o nome solto. Com o nome solto a trava era
+        # satisfeita pelo COMENTÁRIO que explica a regra dentro da própria busca: medido, o mutante
+        # que troca a leitura de MinDownloadSize por zero ficava VERDE, porque a palavra continuava
+        # no comentário três linhas acima.
+        foreach ($wfGrpCampo in @('MaxDownloadSize', 'MinDownloadSize', 'DriverHardwareID', 'DeviceProblemNumber')) {
+            if ($wfGrpFonteB -notmatch ('\$u\.' + $wfGrpCampo + '\b')) { Write-Host "  [ERRO] Agrupamento: a busca não lê '`$u.$wfGrpCampo'" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfGrpFonteB -match 'Categories') { Write-Host "  [ERRO] Agrupamento: 'Categories' voltou à busca - ele vem no idioma de UserLocale" -ForegroundColor Red; $wbErrors++ }
+        # Ler o campo do COM não é o mesmo que DEVOLVÊ-LO na linha, e a busca é a única parte deste
+        # caminho que o -SelfTest não executa (fala com o serviço do Windows Update). Sem esta trava,
+        # trocar 'SizeBytes = $sizeBytes' por outro nome no objeto de saída deixava a suíte inteira
+        # verde e o agrupamento sem o campo que ele exige - medido.
+        foreach ($wfGrpProp in @('SizeBytes', 'HardwareId', 'ProblemCode')) {
+            if ($wfGrpFonteB -notmatch ('[\r\n]\s*' + $wfGrpProp + '\s+=\s+\$')) { Write-Host "  [ERRO] Agrupamento: a busca lê o campo mas não devolve '$wfGrpProp' na linha" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfGrpFonteG = [string]${function:Group-WinForgeWindowsUpdateNullDrivers}
+        # 'ProblemCode' no singular é o CRITÉRIO e está proibido; 'ProblemCodes' no plural é o campo
+        # que o grupo TEM de emitir para a Tarefa 22. Proibir a substring reprovaria a implementação
+        # correta - daí o \b(?!s).
+        if ($wfGrpFonteG -match 'ProblemCode\b(?!s)') { Write-Host "  [ERRO] Agrupamento: ProblemCode NÃO participa do critério - as linhas a agrupar são justamente as de problema 28" -ForegroundColor Red; $wbErrors++ }
+        # O grupo emite HardwareIds e ProblemCodes, na ordem original: são o que a Tarefa 22 lê.
+        $wfGrpG0 = @($wfGrpR.Groups)[0]
+        foreach ($wfGrpCampoG in @('HardwareIds', 'ProblemCodes', 'MemberTitles')) {
+            if (@($wfGrpG0.$wfGrpCampoG).Count -ne 47) { Write-Host "  [ERRO] Agrupamento: o grupo emitiu $(@($wfGrpG0.$wfGrpCampoG).Count) item(ns) em '$wfGrpCampoG', esperado 47" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (@($wfGrpG0.HardwareIds)[0] -ne 'PCI\VEN_8086&DEV_8D44') { Write-Host "  [ERRO] Agrupamento: HardwareIds veio '$(@($wfGrpG0.HardwareIds)[0])' - sem ele o reforço PCI\VEN_8086 da §4 lê vazio em produção" -ForegroundColor Red; $wbErrors++ }
+        # A linha de grupo tem de ser LIGÁVEL ao grupo: é por ela que a tabela chega a HardwareIds e
+        # ProblemCodes. Sem esse laço, quem monta a tela recebe um id sintético e mais nada.
+        if (-not @($wfGrpR.Rows)[0].IsGroup -or [string]@($wfGrpR.Rows)[0].Group.Key -ne [string]$wfGrpG0.Key) { Write-Host "  [ERRO] Agrupamento: a linha de grupo não carrega o grupo cru (IsGroup='$(@($wfGrpR.Rows)[0].IsGroup)')" -ForegroundColor Red; $wbErrors++ }
+        # ORDEM e VALOR das listas por membro. O fixture de cima repete o mesmo id de hardware e o
+        # mesmo código nas 47 linhas: ele conta, mas não observaria uma inversão nem um campo
+        # preenchido com zero. Este observa - cada membro com o seu valor - e o lote tem exatamente o
+        # tamanho mínimo, que é o outro lado da fronteira testada logo acima com MinGroup - 1.
+        $wfGrpVar = @(1..$wfGrpMin | ForEach-Object {
+            $wfGrpUm = & $wfGrpLinha "v-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null
+            $wfGrpUm.HardwareId = "PCI\VEN_8086&DEV_000$_"
+            $wfGrpUm.ProblemCode = 20 + $_
+            $wfGrpUm
+        })
+        $wfGrpGVar = @((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpVar).Groups)[0]
+        if ($null -eq $wfGrpGVar) { Write-Host "  [ERRO] Agrupamento: o lote com exatamente $wfGrpMin membro(s) não virou grupo" -ForegroundColor Red; $wbErrors++ }
+        else {
+            foreach ($wfGrpPar in @(
+                @{ Nome = 'HardwareIds';  Veio = @($wfGrpGVar.HardwareIds);  Esperado = @($wfGrpVar | ForEach-Object { $_.HardwareId }) },
+                @{ Nome = 'ProblemCodes'; Veio = @($wfGrpGVar.ProblemCodes); Esperado = @($wfGrpVar | ForEach-Object { $_.ProblemCode }) },
+                @{ Nome = 'MemberTitles'; Veio = @($wfGrpGVar.MemberTitles); Esperado = @($wfGrpVar | ForEach-Object { $_.Title }) }
+            )) {
+                if ((@($wfGrpPar.Veio) -join '|') -ne (@($wfGrpPar.Esperado) -join '|')) { Write-Host "  [ERRO] Agrupamento: '$($wfGrpPar.Nome)' saiu '$(@($wfGrpPar.Veio) -join '|')', esperado '$(@($wfGrpPar.Esperado) -join '|')'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Fornecedor, classe e data saem do primeiro membro COM A CAIXA ORIGINAL: a chave é
+            # minúscula porque o serviço não é consistente nisso, o texto de tela não tem de ser.
+            if ([string]$wfGrpGVar.Provider -ne 'INTEL' -or [string]$wfGrpGVar.Class -ne $wfGrpClasseBoa -or [string]$wfGrpGVar.Date -ne '2026-03-01') { Write-Host "  [ERRO] Agrupamento: o grupo não repetiu fornecedor/classe/data do primeiro membro ('$($wfGrpGVar.Provider)' / '$($wfGrpGVar.Class)' / '$($wfGrpGVar.Date)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A agulha é o VALOR da constante, e ela não pode ser ESCRITA aqui. Escrita à mão nesta mesma
+        # linha, ela ficava a 159, 147 e 127 caracteres da mensagem de erro logo abaixo - dentro da
+        # janela de 200 - e a trava se reprovava sozinha: medido, três vermelhos com a implementação
+        # correta e verde. Lida da constante, a agulha continua exata e a trava deixa de falar de si
+        # mesma. De quebra ela passa a cobrir as QUATRO classes nomeadas, e não duas.
+        $wfGrpProibidos = @([string]$wfGrpMax) + @($wfGrpClasses | Where-Object { $_ -ne '' } | ForEach-Object { "'" + $_ + "'" })
+        foreach ($wfGrpLit in $wfGrpProibidos) {
+            if ($wfGrpFonteC -match ([regex]::Escape($wfGrpLit) + '[\s\S]{0,200}\[ERRO\] Agrupamento')) { Write-Host "  [ERRO] Agrupamento: o teste escreve o literal '$wfGrpLit' em vez de ler a constante" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O relatório HTML continua CRU: ganha a coluna "Classe" e a nota do que a aba agrupou.
+        $wfGrpFonteRel = [string](Get-Command Export-WinForgeDiagnosticsReport).ScriptBlock
+        if ($wfGrpFonteRel -match 'Group-WinForgeWindowsUpdateNullDrivers') { Write-Host "  [ERRO] Agrupamento: o relatório passou a agrupar - ele continua cru" -ForegroundColor Red; $wbErrors++ }
+        if ($wfGrpFonteRel -notmatch '<th>Classe</th>[\s\S]{0,400}Windows Update|Windows Update[\s\S]{0,400}<th>Classe</th>') { Write-Host "  [ERRO] Agrupamento: a tabela do Windows Update no relatório não tem a coluna 'Classe'" -ForegroundColor Red; $wbErrors++ }
+        # E o relatório é conferido pelo que ELE GERA, não só pelo texto da função: âncora de fonte já
+        # passou verde neste repositório com o comportamento quebrado. A tabela do Windows Update só
+        # existe depois de uma busca, então o fixture entra em $sync.DiagWUResults e sai no finally.
+        $wfGrpWuAntes  = $sync.DiagWUResults
+        $wfGrpDobAntes = $sync.DiagWUGrouped
+        $wfGrpRelArq   = Join-Path $env:TEMP 't20-relatorio-agrupamento.html'
+        try {
+            $sync.DiagWUResults = @((& $wfGrpLinha 'rel-1' $wfGrpClasseBoa 7662 'INTEL - registradores de estado - 1' '2016-07-05' 'INTEL' $null))
+            # 43: o número vem da ABA, que é quem agrupa. O relatório só o repete.
+            $sync.DiagWUGrouped = 43
+            $null = Export-WinForgeDiagnosticsReport -Path $wfGrpRelArq -NoOpen
+            $wfGrpRelHtml = [string][System.IO.File]::ReadAllText($wfGrpRelArq, [System.Text.Encoding]::UTF8)
+            if ($wfGrpRelHtml -notmatch '<th>Classe</th>[\s\S]{0,120}<th>Fornecedor</th>') { Write-Host "  [ERRO] Agrupamento (relatório): o HTML gerado não tem a coluna 'Classe' antes de 'Fornecedor'" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelHtml -notmatch ('<td>' + [regex]::Escape($wfGrpClasseBoa) + '</td>')) { Write-Host "  [ERRO] Agrupamento (relatório): a coluna 'Classe' saiu sem o valor da linha" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelHtml -notmatch 'aba Diagnóstico[^<]{0,80}43') { Write-Host "  [ERRO] Agrupamento (relatório): a nota não diz quantas ofertas a aba dobrou" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelHtml -notmatch 'INTEL - registradores de estado - 1') { Write-Host "  [ERRO] Agrupamento (relatório): a oferta crua sumiu da tabela" -ForegroundColor Red; $wbErrors++ }
+            # Sem número publicado pela aba não sai nota: relatório gerado antes de a tabela ser
+            # montada não pode afirmar um agrupamento que não aconteceu.
+            $sync.DiagWUGrouped = 0
+            $null = Export-WinForgeDiagnosticsReport -Path $wfGrpRelArq -NoOpen
+            $wfGrpRelZero = [string][System.IO.File]::ReadAllText($wfGrpRelArq, [System.Text.Encoding]::UTF8)
+            if ($wfGrpRelZero -match 'aba Diagnóstico[^<]{0,80}\d') { Write-Host "  [ERRO] Agrupamento (relatório): sem número da aba o relatório afirmou um agrupamento mesmo assim" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelZero -notmatch 'INTEL - registradores de estado - 1') { Write-Host "  [ERRO] Agrupamento (relatório): a tabela crua depende da nota para existir" -ForegroundColor Red; $wbErrors++ }
+        } catch {
+            Write-Host "  [ERRO] Agrupamento (relatório): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            $sync.DiagWUResults = $wfGrpWuAntes
+            $sync.DiagWUGrouped = $wfGrpDobAntes
+            Remove-Item -LiteralPath $wfGrpRelArq -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "  Agrupamento: 47 -> 1 grupo lendo as constantes provisórias ($wfGrpMax B / $wfGrpMin / $($wfGrpClasses.Count) classes), oito recusas, ordem preservada, relatório cru com a coluna Classe e a nota da aba"
         Write-Host "  Windows Update (uma linha por dispositivo): $($wfWuVerCasos.Count) título(s) lidos | 5 ofertas -> $($wfWuMantidos.Count) dispositivo(s) e $($wfWuOcultos.Count) versão(ões) antiga(s) fora da tabela"
     } catch {
         Write-Host "  [ERRO] Windows Update (uma linha por dispositivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++

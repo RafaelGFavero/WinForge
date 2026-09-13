@@ -4,6 +4,20 @@
 # Tudo aqui é opcional e tolerante a falha: sem internet, o perfil continua válido - cada função
 # devolve 'indisponível', array vazio ou $null, nunca uma exceção que escape para quem chamou.
 
+# ---- critério do agrupamento dos INFs sem versão do Windows Update ----------------------------
+# TRÊS CONSTANTES PROVISÓRIAS, num lugar só, e é de propósito que elas são feias de achar em
+# qualquer outro lugar: quem for ajustar o critério mexe aqui e em nada mais.
+# A máquina do caso - desktop X99 com Xeon, dezenas de ofertas iguais em fornecedor, classe e data -
+# NÃO é esta. A busca da WUA aqui devolve ZERO oferta de driver, e DriverClass, MaxDownloadSize e
+# DriverHardwareID nunca foram vistos numa oferta real de INF sem versão. O corte de tamanho veio do
+# DriverStore LOCAL (pacote sem binário: mediana 7.662 B; com binário: 180.064 B), que é parente do
+# que o Windows Update oferece, não o mesmo dado.
+# Chegando o levantamento da X99, MUDA-SE A CONSTANTE E MAIS NADA: nenhum teste do motor escreve
+# estes valores à mão - todos leem daqui, e o -SelfTest cobra a marca na própria linha de cada uma.
+$script:WinForgeNullDriverMaxBytes = 262144   # PROVISÓRIO - 256 KB; acima disso o pacote leva binário e instala driver de verdade
+$script:WinForgeNullDriverMinGroup = 5        # PROVISÓRIO - abaixo de cinco a linha de grupo esconde mais do que economiza
+$script:WinForgeNullDriverClasses  = @('', 'system', 'other hardware', 'unknown', 'outro hardware')  # PROVISÓRIO - lista de PERMISSÃO: classe nova, traduzida ou ausente fica VISÍVEL
+
 function Get-WinForgeCacheRoot {
     <#
     .SYNOPSIS
@@ -471,6 +485,137 @@ function Test-WinForgeWindowsUpdateNewer {
     return ([string]$Candidate.Date -gt [string]$Current.Date)
 }
 
+function Group-WinForgeWindowsUpdateNullDrivers {
+    <#
+    .SYNOPSIS
+        Dobra numa linha só os lotes de INF sem versão que o Windows Update oferece.
+    .DESCRIPTION
+        Num desktop X99 a tabela veio com dezenas de linhas iguais no que importa: fornecedor Intel,
+        versão vazia, a mesma data de 2016 e títulos que são nomes de funções internas do processador
+        (controlador de memória, barramento de anel, unidade de controle de energia, registradores de
+        estado). São arquivos de informação do pacote de chipset: dão nome ao dispositivo no
+        Gerenciador de Dispositivos e não instalam binário nenhum. Dezenas deles escondem os drivers
+        que importam e custam dezenas de cliques.
+
+        QUATRO CONDIÇÕES SIMULTÂNEAS, e nenhuma delas baixa coisa alguma:
+        (1) Version vazio E nenhum número de VERSÃO no título. O número sai do mesmo parser da coluna
+            "Versão", e não de "tem dígito": 'INTEL - System - 47' agrupa, 'INTEL - System - 10.1.1.44'
+            não - o 47 é o contador do lote, o 10.1.1.44 é um driver de verdade.
+        (2) Class numa LISTA DE PERMISSÃO fechada, comparada com .Trim().ToLowerInvariant() - classe
+            nova, traduzida ou ausente fica VISÍVEL, porque é lista de permissão e não de proibição.
+        (3) SizeBytes entre 1 e o corte. Tamanho DESCONHECIDO não agrupa: falta de dado é motivo para
+            MOSTRAR.
+        (4) o lote tem pelo menos MinGroup membros.
+
+        Toda dúvida deixa a linha sozinha, e é uma escolha assimétrica: o erro caro aqui é esconder o
+        driver que o usuário veio buscar, não mostrar uma linha a mais.
+
+        A chave leva a DATA para amarrar o lote a uma publicação de INF, e o [char]1 separa os três
+        campos para 'ab'+'c' não colidir com 'a'+'bc'. Os três limites são $script:WinForgeNullDriver*,
+        constantes PROVISÓRIAS declaradas no topo deste arquivo.
+
+        UpdateId = 'grupo:<hash da chave>' faz Get-/Set-WinForgeWindowsUpdateRowState funcionarem sem
+        mudança nenhuma - para eles um id é um id. O hash é o da própria string e só precisa ser
+        estável DENTRO da sessão: o mapa de estado morre junto com a janela.
+    .OUTPUTS
+        @{ Rows; Groups }. Rows é a lista na ordem original, com a linha de grupo na posição da
+        PRIMEIRA oferta que a originou; Groups traz um registro por lote dobrado.
+    #>
+    param(
+        $Rows,
+        [int]$MinGroup  = $script:WinForgeNullDriverMinGroup,
+        [long]$MaxBytes = $script:WinForgeNullDriverMaxBytes,
+        [string[]]$Classes = $script:WinForgeNullDriverClasses
+    )
+
+    $permitidas = @{}
+    foreach ($permitida in @($Classes)) { $permitidas[([string]$permitida).Trim().ToLowerInvariant()] = $true }
+
+    # Primeira passada: quem é elegível e a que lote pertence. A segunda passada precisa saber o
+    # TAMANHO do lote antes de decidir, e por isso a decisão não cabe numa passada só.
+    $entrada = [System.Collections.Generic.List[object]]::new()
+    $lotes   = @{}
+    foreach ($linha in @($Rows)) {
+        if ($null -eq $linha) { continue }
+        $tamanho = [long]0
+        try { $tamanho = [long]$linha.SizeBytes } catch { $tamanho = [long]0 }
+        $semVersao = ([string]::IsNullOrWhiteSpace([string]$linha.Version)) -and
+                     ($null -eq (Get-WinForgeWindowsUpdateDriverVersion -Title ([string]$linha.Title)))
+        $classe = ([string]$linha.Class).Trim().ToLowerInvariant()
+        $chave  = ''
+        if ($semVersao -and $permitidas.ContainsKey($classe) -and $tamanho -ge 1 -and $tamanho -le $MaxBytes) {
+            $chave = ([string]$linha.Provider + [char]1 + [string]$linha.Class + [char]1 + [string]$linha.Date).ToLowerInvariant()
+            if (-not $lotes.ContainsKey($chave)) { $lotes[$chave] = [System.Collections.Generic.List[object]]::new() }
+            $lotes[$chave].Add($linha)
+        }
+        $entrada.Add([pscustomobject]@{ Row = $linha; Key = $chave })
+    }
+
+    $linhas = [System.Collections.Generic.List[object]]::new()
+    $grupos = [System.Collections.Generic.List[object]]::new()
+    $feitos = @{}
+    foreach ($item in $entrada) {
+        $chave = [string]$item.Key
+        # Lote pequeno demais não vira grupo: cada linha dele volta sozinha, no lugar em que estava.
+        if ([string]::IsNullOrEmpty($chave) -or $lotes[$chave].Count -lt $MinGroup) { $linhas.Add($item.Row); continue }
+        if ($feitos.ContainsKey($chave)) { continue }
+        $feitos[$chave] = $true
+        $grupo = New-WinForgeWindowsUpdateNullDriverGroup -Key $chave -Members @($lotes[$chave])
+        $grupos.Add($grupo)
+        # Título neutro: o rótulo de tela nasce na camada da tabela, que é quem sabe o idioma da
+        # coluna. SizeBytes = 0 de propósito - passar o resultado por esta função de novo deixa a
+        # linha de grupo de fora, em vez de agrupar grupos.
+        $linhas.Add([pscustomobject]@{
+            Title     = "$([string]$grupo.Provider) - $(@($grupo.Members).Count) item(ns) agrupado(s)"
+            Driver    = ''
+            Provider  = [string]$grupo.Provider
+            Class     = [string]$grupo.Class
+            Version   = $null
+            Date      = [string]$grupo.Date
+            UpdateId  = 'grupo:' + ('{0:x8}' -f $chave.GetHashCode())
+            SizeBytes = [long]0
+            IsGroup   = $true
+            Group     = $grupo
+        })
+    }
+    return @{ Rows = @($linhas); Groups = @($grupos) }
+}
+
+function New-WinForgeWindowsUpdateNullDriverGroup {
+    <#
+    .SYNOPSIS
+        O registro de um lote de INF sem versão: o que a linha de grupo mostra e o que o filtro de
+        chipset vai perguntar.
+    .DESCRIPTION
+        Só COPIA - não decide nada. Fornecedor, classe e data saem do primeiro membro com a caixa
+        ORIGINAL: a chave do agrupamento é minúscula porque o serviço não é consistente na caixa, mas
+        o texto que a pessoa lê não tem por que ser.
+
+        As quatro listas por membro saem na ORDEM ORIGINAL e com o mesmo comprimento. HardwareIds é
+        obrigatório: é ele que o filtro de chipset usa para exigir o 'PCI\VEN_8086&DEV_' do
+        fabricante, e sem ele aquele filtro leria vazio em produção e recusaria todo lote de verdade.
+
+        A cópia dos campos por membro mora AQUI, e não em Group-WinForgeWindowsUpdateNullDrivers, por
+        causa de uma trava: o -SelfTest proíbe o nome singular do campo de problema dentro da função
+        do CRITÉRIO, que é onde ele realmente não pode entrar. Ele não decide nada em lugar nenhum -
+        as linhas que este agrupamento existe para dobrar são justamente as de problema 28, e usá-lo
+        como critério faria o agrupamento sumir no dia em que o Windows resolvesse o problema.
+    #>
+    param([string]$Key, $Members)
+
+    $lista = @($Members)
+    return @{
+        Key          = [string]$Key
+        Provider     = [string]$lista[0].Provider
+        Class        = [string]$lista[0].Class
+        Date         = [string]$lista[0].Date
+        Members      = @($lista | ForEach-Object { [string]$_.UpdateId })
+        MemberTitles = @($lista | ForEach-Object { [string]$_.Title })
+        HardwareIds  = @($lista | ForEach-Object { [string]$_.HardwareId })
+        ProblemCodes = @($lista | ForEach-Object { [int]$_.ProblemCode })
+    }
+}
+
 function Search-WinForgeWindowsUpdateDrivers {
     <#
     .SYNOPSIS
@@ -504,15 +649,32 @@ function Search-WinForgeWindowsUpdateDrivers {
             # acesso a uma propriedade COM que não existe estoura: vazio é resposta válida.
             $class = ''
             try { if ($u.DriverClass) { $class = [string]$u.DriverClass } } catch { $class = '' }
+            # Os três campos que o agrupamento dos INFs sem versão lê, cada um no SEU try/catch: são
+            # propriedades de IWindowsDriverUpdate e o acesso a uma que não exista estoura - num try
+            # só, a primeira que faltasse zeraria as outras duas. Zero é a resposta segura em todos:
+            # tamanho desconhecido não agrupa, e o que não agrupa continua VISÍVEL na tabela.
+            $sizeBytes = [long]0
+            try { $sizeBytes = [long]$u.MaxDownloadSize } catch { $sizeBytes = [long]0 }
+            # MaxDownloadSize é 0 em oferta que o serviço ainda não dimensionou; MinDownloadSize é o
+            # mesmo número por outro caminho, e vale mais que desistir.
+            if ($sizeBytes -le 0) { try { $sizeBytes = [long]$u.MinDownloadSize } catch { $sizeBytes = [long]0 } }
+            $hardwareId = ''
+            try { if ($u.DriverHardwareID) { $hardwareId = [string]$u.DriverHardwareID } } catch { $hardwareId = '' }
+            # Só para o TEXTO da linha: o código de problema não decide agrupamento nenhum.
+            $problema = 0
+            try { $problema = [int]$u.DeviceProblemNumber } catch { $problema = 0 }
             [pscustomobject]@{
-                Title    = [string]$u.Title
-                Driver   = [string]$u.DriverModel
-                Provider = [string]$u.DriverProvider
-                Class    = $class
-                Version  = $version
-                Date     = $date
-                KB       = (@($u.KBArticleIDs) -join ',')
-                UpdateId = $updateId
+                Title       = [string]$u.Title
+                Driver      = [string]$u.DriverModel
+                Provider    = [string]$u.DriverProvider
+                Class       = $class
+                Version     = $version
+                Date        = $date
+                KB          = (@($u.KBArticleIDs) -join ',')
+                UpdateId    = $updateId
+                SizeBytes   = $sizeBytes
+                HardwareId  = $hardwareId
+                ProblemCode = $problema
             }
         })
     } catch {
