@@ -144,6 +144,14 @@ $sync.configs.wfrepair = @'
     "panel": "1",
     "Type": "Button",
     "ButtonWidth": "350"
+  },
+  "WPFWFRepNetDiagFull": {
+    "Content": "Rede — Diagnóstico completo",
+    "Description": "Só lê, sem alterar nada. Levanta doze pontos da rede deste computador: o rádio sem fio, o perfil da rede ativa, o endereço IP e o 169.254 que aparece quando o roteador não responde, a rota padrão, o servidor de nomes comparado com o 1.1.1.1, três sondas de saída para a internet, o proxy do usuário e o do WinHTTP, os filtros de terceiro presos aos adaptadores, o catálogo de protocolos do Winsock, o tamanho máximo de pacote, o IPv6 e o código de problema do dispositivo. Termina com uma frase de veredito, escolhida de uma lista fechada de cinco, dizendo por onde começar. Quando acha filtro de antivírus, firewall ou VPN ligado em todos os adaptadores físicos, ele nomeia o filtro e escreve o caminho de menu do próprio Windows para você desligá-lo à mão: este programa não desliga, não reconfigura e não desinstala produto de segurança de terceiro. Nenhum driver é tocado aqui.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
   }
 }
 '@ | ConvertFrom-Json

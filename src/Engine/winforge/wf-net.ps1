@@ -425,4 +425,402 @@ function Test-WinForgeInboxWifiDriver {
         return $false
     }
 }
+
+function Get-WinForgeWinsockEntries {
+    <#
+    .SYNOPSIS
+        Lê o catálogo de protocolos do Winsock no registro e devolve uma entrada por provedor.
+    .DESCRIPTION
+        O catálogo mora em
+        HKLM\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9\Catalog_Entries,
+        uma subchave por provedor, e cada uma guarda a estrutura empacotada 'PackedCatalogItem'. O
+        registro é a fonte porque ele não depende de idioma: a saída de texto do netsh muda de língua
+        com o Windows, e esta base de código já perdeu um campo inteiro por parsear texto localizado.
+
+        A estrutura foi CONFERIDA byte a byte nesta máquina (Windows 11 26200, 14 provedores, todos
+        do sistema, 888 bytes cada):
+
+          offset   0, 260 bytes  caminho da DLL do provedor, ANSI, terminado em zero (MAX_PATH)
+          offset 260, 628 bytes  WSAPROTOCOL_INFOW, e dentro dela:
+          offset 300,   4 bytes  ProtocolChain.ChainLen (o número de elos da cadeia)
+          offset 376, 512 bytes  szProtocol, o nome do provedor, em UTF-16
+
+        O caminho vem com variável de ambiente por dentro ('%SystemRoot%\system32\mswsock.dll'), que
+        é como o Windows o gravou; ele é expandido aqui para a comparação de pasta poder ser feita.
+
+        Entrada curta demais ou ilegível é PULADA, e não vira entrada vazia: uma linha em branco no
+        relatório seria lida como "tem um provedor estranho aqui".
+    .OUTPUTS
+        Array de @{ Name = <string>; Path = <string>; ChainLength = <int> }.
+    #>
+    param()
+
+    $lidas = @()
+    $raiz = 'HKLM:\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9\Catalog_Entries'
+    try { $chaves = @(Get-ChildItem -LiteralPath $raiz -ErrorAction Stop) } catch { return @() }
+    foreach ($chave in $chaves) {
+        try {
+            $bytes = (Get-ItemProperty -LiteralPath $chave.PSPath -Name 'PackedCatalogItem' -ErrorAction Stop).PackedCatalogItem
+            if ($null -eq $bytes -or $bytes.Length -lt 888) { continue }
+            $caminho = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 260)
+            $zero = $caminho.IndexOf([char]0)
+            if ($zero -ge 0) { $caminho = $caminho.Substring(0, $zero) }
+            $nome = [System.Text.Encoding]::Unicode.GetString($bytes, 376, 512)
+            $zeroN = $nome.IndexOf([char]0)
+            if ($zeroN -ge 0) { $nome = $nome.Substring(0, $zeroN) }
+            $lidas += @{
+                Name        = [string]$nome
+                Path        = [string][Environment]::ExpandEnvironmentVariables([string]$caminho)
+                ChainLength = [int][System.BitConverter]::ToInt32($bytes, 300)
+            }
+        } catch { continue }
+    }
+    return @($lidas)
+}
+
+function Test-WinForgeWinsockCatalog {
+    <#
+    .SYNOPSIS
+        Diz se o catálogo de protocolos do Winsock só tem provedores do próprio Windows.
+    .DESCRIPTION
+        São DOIS sinais, e cada um pega um jeito diferente de se enfiar na pilha de rede:
+
+        1. CAMINHO fora da pasta do Windows. Numa máquina saudável todo provedor aponta para a
+           mswsock.dll debaixo de %SystemRoot%; uma DLL em Program Files é software de terceiro
+           metido entre o programa e o soquete.
+        2. CADEIA com mais de um elo. É a marca do provedor em camadas (o LSP clássico): ele se
+           declara como uma corrente que passa pelo provedor de baixo, e é exatamente assim que ele
+           enxerga e altera o tráfego de todo mundo. Um provedor de base tem cadeia de UM elo.
+
+        Os dois valem sozinhos, e é de propósito: um LSP instalado dentro da pasta do Windows tem
+        caminho de sistema e cadeia longa, e um provedor de base de terceiro tem caminho estranho e
+        cadeia curta. Cobrar os dois juntos deixaria os dois casos passar.
+
+        Este degrau só DETECTA e NOMEIA. O WinForge não desliga, não reconfigura e não desinstala
+        produto de segurança de terceiro - mesma regra que o faz não executar instalador baixado.
+    .PARAMETER Entries
+        As entradas do catálogo, cada uma com Name, Path e ChainLength. Sem o parâmetro, a lista sai
+        de Get-WinForgeWinsockEntries.
+    .OUTPUTS
+        @{ Ok = <bool>; Third = @(@{ Name; Path; ChainLength }); Count = <int> }
+    #>
+    param([object[]]$Entries)
+
+    if (-not $PSBoundParameters.ContainsKey('Entries')) { $Entries = @(Get-WinForgeWinsockEntries) }
+    $lista = @(@($Entries) | Where-Object { $null -ne $_ })
+
+    $pastaWindows = 'C:\Windows'
+    try {
+        $lida = [string][Environment]::GetFolderPath('Windows')
+        if (-not [string]::IsNullOrWhiteSpace($lida)) { $pastaWindows = $lida }
+    } catch { $pastaWindows = 'C:\Windows' }
+    $prefixo = $pastaWindows.TrimEnd('\') + '\'
+
+    $terceiros = @()
+    foreach ($e in $lista) {
+        $caminho = [string]$e.Path
+        # A comparação é sem diferenciar maiúsculas porque o Windows grava 'C:\WINDOWS' numa máquina
+        # e 'C:\Windows' na outra, e as duas são a mesma pasta.
+        $deDentro = $caminho.StartsWith($prefixo, [StringComparison]::OrdinalIgnoreCase)
+        $encadeado = ([int]$e.ChainLength -gt 1)
+        if ((-not $deDentro) -or $encadeado) {
+            $terceiros += @{ Name = [string]$e.Name; Path = $caminho; ChainLength = [int]$e.ChainLength }
+        }
+    }
+    return @{ Ok = (-not @($terceiros).Count); Third = @($terceiros); Count = @($lista).Count }
+}
+
+function Get-WinForgeNetworkVerdict {
+    <#
+    .SYNOPSIS
+        A frase que fecha o relatório de rede, escolhida de uma lista FECHADA de cinco.
+    .DESCRIPTION
+        Cinco frases, nenhuma inventada na hora, e a ordem é a da escada de reparo:
+
+        1. FILTRO DE TERCEIRO, na frente de tudo. Se um filtro de antivírus ou de VPN é a causa,
+           remover e reinstalar o driver do Wi-Fi não conserta nada e ainda arrisca deixar a máquina
+           sem rádio. É a única frase montada com dados (o nome do produto e onde desligá-lo), e
+           mesmo ela é um molde fixo.
+        2. ENDEREÇO. 169.254.x.x é o endereço que o Windows dá a si mesmo quando o roteador não
+           respondeu: sem endereço não há nome nem saída, e falar de DNS aqui seria desperdiçar a
+           atenção de quem lê.
+        3. NOME. Só vale quando o servidor de nomes configurado está mudo E o 1.1.1.1 responde -
+           é essa diferença que separa "o servidor de nomes está errado" de "nada sai daqui". A
+           frase AFIRMA que o 1.1.1.1 responde; sem a segunda metade da condição, ela mentiria.
+        4. SAÍDA. Endereço e nome funcionam e mesmo assim nada chega lá fora: o problema está no
+           roteador ou no provedor, e não neste computador.
+        5. LIMPO, quando nenhuma das outras quatro se aplica.
+    .PARAMETER Facts
+        @{ Apipa; DnsOk; DnsPublicoOk; SaidaOk; Lsp }. 'Lsp' é a lista de filtros de terceiro, cada
+        um com Name e Menu.
+    .OUTPUTS
+        Uma das cinco frases.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Facts)
+
+    if (@($Facts.Lsp).Count) {
+        return ("Há um filtro do {0} preso em todos os adaptadores. Desligue-o em {1} e teste de novo antes de mexer em driver." -f [string]@($Facts.Lsp)[0].Name, [string]@($Facts.Lsp)[0].Menu)
+    }
+    if ($Facts.Apipa) {
+        return 'O computador não pegou endereço do roteador (está em 169.254.x.x). Comece por "Limpar cache de DNS e pegar endereço novo".'
+    }
+    if ((-not $Facts.DnsOk) -and $Facts.DnsPublicoOk) {
+        return 'O endereço está certo, mas o servidor de nomes configurado não responde e o 1.1.1.1 responde. O problema é o servidor de nomes, não o Wi-Fi.'
+    }
+    if (-not $Facts.SaidaOk) {
+        return 'O roteador entrega endereço e nome, mas nada sai para fora. O problema está no roteador ou no provedor, não neste computador.'
+    }
+    return 'Não encontrei nada errado na rede deste computador.'
+}
+
+function Invoke-WinForgeNetworkDiagnostic {
+    <#
+    .SYNOPSIS
+        O relatório de rede do primeiro degrau da escada: doze leituras e uma frase no fim.
+    .DESCRIPTION
+        SÓ LÊ. Este botão não altera adaptador, driver, pilha de rede nem configuração, e é por isso
+        que ele é o primeiro: "conectado certinho e sem navegar" quase nunca é driver, e a única
+        forma de descobrir o que é sem estragar nada é olhar.
+
+        As doze leituras, na ordem: rádio sem fio, perfil da rede, endereço, rota padrão, servidor de
+        nomes contra o 1.1.1.1, saída para a internet (as sondas e o indicador do próprio Windows),
+        proxy, filtros presos aos adaptadores, catálogo de protocolos, MTU, IPv6 e código de problema
+        do dispositivo.
+
+        Cada leitura roda dentro do seu próprio try: uma consulta que falha vira uma linha dizendo
+        que falhou, e não um relatório pela metade. O relatório é para uma pessoa leiga, então cada
+        bloco diz o que leu e o que aquilo significa.
+
+        A frase do fim é o veredito, e ela sai de lista fechada (Get-WinForgeNetworkVerdict).
+    .PARAMETER Facts
+        Fatos prontos para o veredito, no lugar dos levantados aqui. As doze leituras continuam
+        saindo; o que muda é só a frase do fim.
+    .OUTPUTS
+        O texto do relatório, com o veredito na última linha.
+    #>
+    param([hashtable]$Facts)
+
+    $L = New-Object System.Collections.Generic.List[string]
+    $fatos = @{ Apipa = $false; DnsOk = $true; DnsPublicoOk = $true; SaidaOk = $true; Lsp = @() }
+
+    $L.Add('Diagnóstico de rede do WinForge.')
+    $L.Add('Tudo aqui é leitura: nenhum adaptador, driver ou configuração é alterado por este botão.')
+
+    # ---- 1. Rádio sem fio
+    $radio = @{ Ok = $false; Reason = 'não consultado'; ifIndex = 0 }
+    $L.Add('')
+    $L.Add('1. Rádio sem fio')
+    try {
+        $radio = Get-WinForgeWifiAdapter
+        if ($radio.Ok) { $L.Add("   $($radio.Name) (ifIndex $($radio.ifIndex)), driver de $($radio.DriverProvider), mídia $($radio.PhysicalMediaType), situação $($radio.Status).") }
+        else { $L.Add("   $($radio.Reason)") }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 2. Perfil da rede
+    $L.Add('')
+    $L.Add('2. Perfil da rede')
+    try {
+        $perfis = @(Get-NetConnectionProfile -ErrorAction Stop)
+        if (-not $perfis.Count) { $L.Add('   Nenhuma rede ativa: nem cabo nem sem fio estão conectados.') }
+        foreach ($p in $perfis) { $L.Add("   $($p.Name) em $($p.InterfaceAlias): categoria $($p.NetworkCategory), o Windows classifica a conexão como '$($p.IPv4Connectivity)'.") }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 3. Endereço (e o APIPA)
+    $L.Add('')
+    $L.Add('3. Endereço IP')
+    try {
+        $enderecos = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { [string]$_.InterfaceAlias -notlike '*Loopback*' })
+        if (-not $enderecos.Count) { $L.Add('   Nenhum endereço IPv4 fora do laço local.') }
+        foreach ($e in $enderecos) { $L.Add("   $($e.InterfaceAlias): $($e.IPAddress)/$($e.PrefixLength) (origem $($e.PrefixOrigin)).") }
+        # 169.254 é o endereço que o Windows dá a si mesmo quando ninguém respondeu ao pedido de
+        # DHCP. Só conta nos adaptadores FÍSICOS e LIGADOS, e as duas metades foram medidas nesta
+        # máquina: um adaptador desconectado guarda o último endereço que teve (o rádio desta
+        # máquina está em 169.254 com o cabo ligado e navegando), e os sete adaptadores virtuais de
+        # VPN ficam em 169.254 o tempo todo, por desenho. Sem as duas, a frase "o computador não
+        # pegou endereço do roteador" sairia numa máquina com internet perfeita.
+        $ativos = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.Status -eq 'Up' -and -not [bool]$_.Virtual } | ForEach-Object { [int]$_.ifIndex })
+        $apipas = @($enderecos | Where-Object { [string]$_.IPAddress -like '169.254.*' -and ([int]$_.InterfaceIndex -in $ativos) })
+        $fatos.Apipa = [bool]$apipas.Count
+        if ($fatos.Apipa) { $L.Add('   ATENÇÃO: 169.254.x.x é o endereço que o Windows dá a si mesmo quando o roteador não respondeu.') }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 4. Rota padrão
+    $L.Add('')
+    $L.Add('4. Rota padrão (o caminho para fora)')
+    try {
+        $rotas = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop)
+        if (-not $rotas.Count) { $L.Add('   Não há rota padrão: sem ela nada sai desta máquina, mesmo com endereço válido.') }
+        foreach ($r in $rotas) { $L.Add("   saída pelo ifIndex $($r.ifIndex), roteador $($r.NextHop), métrica $($r.RouteMetric).") }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 5. Servidor de nomes, contra o 1.1.1.1
+    $L.Add('')
+    $L.Add('5. Servidor de nomes (DNS)')
+    try {
+        $servidores = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { @($_.ServerAddresses).Count } | ForEach-Object { "$($_.InterfaceAlias): $(@($_.ServerAddresses) -join ', ')" })
+        if ($servidores.Count) { foreach ($s in $servidores) { $L.Add("   $s") } }
+        else { $L.Add('   Nenhum servidor de nomes configurado.') }
+    } catch { $L.Add("   não deu para ler a lista de servidores: $($_.Exception.Message)") }
+    # O mesmo nome é perguntado DUAS vezes: ao servidor configurado e ao 1.1.1.1. É a diferença
+    # entre as duas respostas que separa "o servidor de nomes está errado" de "nada sai daqui" -
+    # uma pergunta só não distingue os dois casos.
+    if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+        $nomeAlvo = 'www.microsoft.com'
+        try { $null = Resolve-DnsName -Name $nomeAlvo -Type A -DnsOnly -QuickTimeout -ErrorAction Stop; $fatos.DnsOk = $true }
+        catch { $fatos.DnsOk = $false }
+        try { $null = Resolve-DnsName -Name $nomeAlvo -Type A -Server '1.1.1.1' -DnsOnly -QuickTimeout -ErrorAction Stop; $fatos.DnsPublicoOk = $true }
+        catch { $fatos.DnsPublicoOk = $false }
+        $L.Add("   '$nomeAlvo' pelo servidor configurado: $(if ($fatos.DnsOk) { 'respondeu' } else { 'NÃO respondeu' }).")
+        $L.Add("   '$nomeAlvo' pelo 1.1.1.1: $(if ($fatos.DnsPublicoOk) { 'respondeu' } else { 'NÃO respondeu' }).")
+    } else {
+        $L.Add('   Resolve-DnsName não existe neste Windows: as duas consultas foram puladas.')
+    }
+
+    # ---- 6. Saída para a internet: as sondas e o indicador do Windows
+    $L.Add('')
+    $L.Add('6. Saída para a internet')
+    $sondas = @(
+        @{ Rotulo = 'DNS do Cloudflare (1.1.1.1:53)'; Alvo = '1.1.1.1'; Porta = 53 },
+        @{ Rotulo = 'DNS do Google (8.8.8.8:53)';     Alvo = '8.8.8.8'; Porta = 53 },
+        @{ Rotulo = 'HTTPS do Cloudflare (1.1.1.1:443)'; Alvo = '1.1.1.1'; Porta = 443 }
+    )
+    $passou = 0
+    foreach ($s in $sondas) {
+        try {
+            $r = Test-WinForgeTcpProbe -TargetHost ([string]$s.Alvo) -Port ([int]$s.Porta) -TimeoutMs 2000
+            if ($r.Ok) { $passou++ }
+            $L.Add("   $($s.Rotulo): $(if ($r.Ok) { 'abriu' } else { 'não abriu' }) em $($r.Ms) ms.")
+        } catch { $L.Add("   $($s.Rotulo): não deu para sondar: $($_.Exception.Message)") }
+    }
+    $fatos.SaidaOk = ($passou -gt 0)
+    try {
+        $conect = @(Get-NetConnectionProfile -ErrorAction Stop | ForEach-Object { [string]$_.IPv4Connectivity })
+        if ($conect.Count) { $L.Add("   O indicador do próprio Windows diz: $($conect -join ', ').") }
+    } catch { }
+
+    # ---- 7. Proxy
+    $L.Add('')
+    $L.Add('7. Proxy')
+    try {
+        $ie = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+        if ([int]$ie.ProxyEnable -eq 1) { $L.Add("   Proxy do usuário LIGADO: $($ie.ProxyServer). Um proxy morto derruba a navegação com a rede intacta.") }
+        else { $L.Add('   Proxy do usuário desligado.') }
+        if (-not [string]::IsNullOrWhiteSpace([string]$ie.AutoConfigURL)) { $L.Add("   Script de configuração automática: $($ie.AutoConfigURL)") }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+    try {
+        # O proxy do WinHTTP é um blob binário, e o TAMANHO dele não diz nada: medido nesta máquina,
+        # ele tem 20 bytes com o netsh respondendo "acesso direto, nenhum servidor proxy". Quem
+        # responde é o campo, não o tamanho:
+        #
+        #   [ 0..3]  versão (24 aqui)
+        #   [ 4..7]  sinalizadores
+        #   [ 8..11] tipo de acesso (1 = sem proxy, 3 = proxy nomeado)
+        #   [12..15] tamanho do texto do servidor, em bytes
+        #   [16.. ]  o texto do servidor, ANSI
+        #
+        # Só há proxy quando o tamanho do texto é maior que zero, e aí o texto é lido e mostrado:
+        # mandar a pessoa procurar um proxy sem dizer qual é não resolve o problema dela.
+        $wh = @((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections' -Name 'WinHttpSettings' -ErrorAction Stop).WinHttpSettings)
+        $tamanho = 0
+        if ($wh.Count -ge 16) { $tamanho = [int][System.BitConverter]::ToInt32([byte[]]$wh, 12) }
+        if ($tamanho -gt 0 -and $wh.Count -ge (16 + $tamanho)) {
+            $L.Add("   O WinHTTP (usado por serviços e pelo Windows Update) aponta para o proxy $([System.Text.Encoding]::ASCII.GetString([byte[]]$wh, 16, $tamanho)).")
+        } else {
+            $L.Add('   O WinHTTP (usado por serviços e pelo Windows Update) está sem proxy.')
+        }
+    } catch { $L.Add('   O WinHTTP (usado por serviços e pelo Windows Update) está sem proxy.') }
+
+    # ---- 8. Filtros presos aos adaptadores
+    # É o degrau que este relatório existe para ter. Filtro de terceiro ligado em TODOS os
+    # adaptadores físicos é o primeiro suspeito de "conecta e não navega", e ele é sempre de um
+    # programa instalado: antivírus, firewall ou cliente de VPN. O WinForge nomeia e diz onde
+    # desligar; quem desliga é a pessoa.
+    $L.Add('')
+    $L.Add('8. Filtros presos aos adaptadores')
+    try {
+        $fisicos = @(Get-NetAdapter -ErrorAction Stop | Where-Object { -not [bool]$_.Virtual })
+        $ligacoes = @(Get-NetAdapterBinding -ErrorAction Stop | Where-Object { [string]$_.ComponentID -notlike 'ms_*' -and $_.Enabled })
+        if (-not $ligacoes.Count) { $L.Add('   Nenhum filtro de terceiro ligado. Só os componentes do próprio Windows.') }
+        foreach ($grupo in @($ligacoes | Group-Object ComponentID)) {
+            $nome = [string]@($grupo.Group)[0].DisplayName
+            $onde = @(@($grupo.Group) | ForEach-Object { [string]$_.Name })
+            $emTodos = ($fisicos.Count -gt 0) -and (@($fisicos | Where-Object { $onde -contains [string]$_.Name }).Count -eq $fisicos.Count)
+            $L.Add("   $nome ($($grupo.Name)): ligado em $($onde.Count) adaptador(es)$(if ($emTodos) { ', inclusive em TODOS os físicos' } else { '' }).")
+            if ($emTodos) {
+                $fatos.Lsp += @{
+                    Name = $nome
+                    Path = [string]$grupo.Name
+                    # O caminho de menu é o do PRÓPRIO WINDOWS, e não o das configurações do
+                    # produto: ele vale para qualquer antivírus, firewall ou cliente de VPN, é
+                    # reversível com um clique e cita o nome exatamente como ele aparece na caixa
+                    # que a pessoa vai abrir. Adivinhar o menu de cada fabricante envelheceria a
+                    # cada atualização deles e mandaria o usuário para uma tela que não existe.
+                    Menu = "Painel de Controle → Rede e Internet → Conexões de Rede → botão direito no adaptador → Propriedades → desmarcar `"$nome`""
+                }
+            }
+        }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 9. Catálogo de protocolos (Winsock)
+    $L.Add('')
+    $L.Add('9. Catálogo de protocolos (Winsock)')
+    try {
+        $cat = Test-WinForgeWinsockCatalog
+        $L.Add("   $($cat.Count) provedor(es) no catálogo.")
+        if ($cat.Ok) { $L.Add('   Todos são do próprio Windows, com cadeia de um elo só.') }
+        foreach ($t in @($cat.Third)) {
+            $L.Add("   DE TERCEIRO: '$($t.Name)' em $($t.Path), cadeia de $($t.ChainLength) elo(s).")
+            $fatos.Lsp += @{
+                Name = [string]$t.Name
+                Path = [string]$t.Path
+                Menu = 'nas configurações do programa que o instalou, na parte de proteção de rede ou firewall'
+            }
+        }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 10. MTU
+    $L.Add('')
+    $L.Add('10. Tamanho máximo de pacote (MTU)')
+    try {
+        # [long], e não [int]: o laço local (Loopback Pseudo-Interface) declara NlMtu 4294967295,
+        # que é UInt32.MaxValue e ESTOURA a conversão para Int32. Medido aqui: a exceção derrubava a
+        # seção inteira no meio da lista, e só a primeira placa aparecia no relatório. O laço local
+        # também sai da lista - o MTU dele não é do interesse de ninguém.
+        foreach ($i in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop | Where-Object { [string]$_.ConnectionState -eq 'Connected' -and [string]$_.InterfaceAlias -notlike '*Loopback*' })) {
+            $mtu = [long]$i.NlMtu
+            $aviso = if ($mtu -lt 1280) { ' (baixo demais: páginas grandes travam pela metade)' } else { '' }
+            $L.Add("   $($i.InterfaceAlias): $mtu bytes$aviso.")
+        }
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 11. IPv6
+    $L.Add('')
+    $L.Add('11. IPv6')
+    try {
+        $v6 = @(Get-NetAdapterBinding -ComponentID 'ms_tcpip6' -ErrorAction Stop | Where-Object { $_.Enabled })
+        $L.Add("   Ligado em $($v6.Count) adaptador(es).")
+    } catch { $L.Add("   não deu para ler: $($_.Exception.Message)") }
+
+    # ---- 12. Código de problema do dispositivo
+    $L.Add('')
+    $L.Add('12. Código de problema do rádio')
+    if ($radio.Ok -and $null -ne $radio.Problem) {
+        $texto = switch ([int]$radio.Problem) {
+            0  { 'sem problema.' }
+            22 { 'o dispositivo está DESABILITADO no Gerenciador de Dispositivos.' }
+            28 { 'faltam os drivers deste dispositivo.' }
+            43 { 'o Windows PAROU o dispositivo porque ele relatou um problema.' }
+            default { 'código do Gerenciador de Dispositivos.' }
+        }
+        $L.Add("   Código $($radio.Problem): $texto")
+    } else {
+        $L.Add('   Sem código para relatar.')
+    }
+
+    if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) { $fatos = $Facts }
+    $L.Add('')
+    $L.Add('Veredito')
+    $L.Add((Get-WinForgeNetworkVerdict -Facts $fatos))
+    return ($L -join "`r`n")
+}
 #endregion

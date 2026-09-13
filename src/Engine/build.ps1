@@ -829,6 +829,7 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFRepAclRestore" {Invoke-WinForgeRepairCommand -Name AclRestore}
         "WPFWFRepAclUndo" {Invoke-WinForgeRepairCommand -Name AclUndo}
         "WPFWFRepAclCleanup" {Invoke-WinForgeRepairCommand -Name AclCleanup}
+        "WPFWFRepNetDiagFull" {Invoke-WinForgeRepairCommand -Name NetDiagFull}
         # Correções (aba Config, vindas da base): mesma tabela e mesma máquina do reparo, com a
         # janela que se enche ao vivo. Antes cada uma destas chaves chamava a função da base pelo
         # campo "function" da config, na thread da janela.
@@ -1191,7 +1192,7 @@ if ($SelfTest) {
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
-    if (@($sync.configs.feature.PSObject.Properties).Count -ne 58) { Write-Host "  [ERRO] Config: esperado 58 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 59) { Write-Host "  [ERRO] Config: esperado 59 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
@@ -7283,6 +7284,93 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Rede (bloqueios): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # ---------------------------------------------------------------- Rede: diagnóstico e veredito
+    # O veredito é o texto mais lido do recurso, e sai de LISTA FECHADA: cinco frases, nenhuma
+    # inventada na hora.
+    #
+    # Lista canônica das linhas de rede, no mesmo espírito de $wfRepNomes e $wfAclNomes: é ela que a
+    # trava dos botões na tela usa lá embaixo, para uma linha nova entrar na conferência sozinha.
+    $wfNetNomes = @('NetDiagFull')
+    try {
+        $wfVerFrases = @{
+            APIPA  = 'O computador não pegou endereço do roteador (está em 169.254.x.x). Comece por "Limpar cache de DNS e pegar endereço novo".'
+            DNS    = 'O endereço está certo, mas o servidor de nomes configurado não responde e o 1.1.1.1 responde. O problema é o servidor de nomes, não o Wi-Fi.'
+            Limpo  = 'Não encontrei nada errado na rede deste computador.'
+            Fora   = 'O roteador entrega endereço e nome, mas nada sai para fora. O problema está no roteador ou no provedor, não neste computador.'
+        }
+        $wfVerBase = @{ Apipa = $false; DnsOk = $true; DnsPublicoOk = $true; SaidaOk = $true; Lsp = @() }
+        # O '+' de hashtable SOMA chaves e LANÇA quando a chave se repete ("O item já foi
+        # adicionado"): trocar um fato é por ATRIBUIÇÃO. Mesma armadilha do bloco da Tarefa 14.
+        $wfVerCom = {
+            param([hashtable]$Troca)
+            $wfVerUm = @{} + $wfVerBase
+            foreach ($wfVerK in $Troca.Keys) { $wfVerUm[$wfVerK] = $Troca[$wfVerK] }
+            return $wfVerUm
+        }
+        if ((Get-WinForgeNetworkVerdict -Facts $wfVerBase) -ne $wfVerFrases.Limpo) { Write-Host "  [ERRO] Rede (veredito): máquina saudável deu '$(Get-WinForgeNetworkVerdict -Facts $wfVerBase)'" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Apipa = $true })) -ne $wfVerFrases.APIPA) { Write-Host "  [ERRO] Rede (veredito): 169.254 não deu a frase do APIPA" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ DnsOk = $false })) -ne $wfVerFrases.DNS) { Write-Host "  [ERRO] Rede (veredito): DNS do sistema mudo com o 1.1.1.1 respondendo não deu a frase do servidor de nomes" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ SaidaOk = $false })) -ne $wfVerFrases.Fora) { Write-Host "  [ERRO] Rede (veredito): sem saída não deu a frase do roteador/provedor" -ForegroundColor Red; $wbErrors++ }
+        # A frase do servidor de nomes AFIRMA que o 1.1.1.1 responde: com os dois mudos ela seria
+        # mentira, e quem explica é a de saída. Sem esta linha, largar o '-and DnsPublicoOk' passaria.
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ DnsOk = $false; DnsPublicoOk = $false; SaidaOk = $false })) -ne $wfVerFrases.Fora) { Write-Host "  [ERRO] Rede (veredito): com o DNS do sistema E o 1.1.1.1 mudos a frase não pode ser a do servidor de nomes" -ForegroundColor Red; $wbErrors++ }
+        $wfVerLsp = Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Lsp = @(@{ Name = 'Norton Security'; Path = 'C:\Program Files\Norton\nlsp.dll'; Menu = 'Configurações → Firewall → Proteção da Rede' }) })
+        if ($wfVerLsp -notmatch 'Há um filtro do Norton Security preso em todos os adaptadores') { Write-Host "  [ERRO] Rede (veredito): o filtro de terceiro não é nomeado ('$wfVerLsp')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLsp -notmatch 'Configurações → Firewall → Proteção da Rede') { Write-Host "  [ERRO] Rede (veredito): o caminho de menu não aparece" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLsp -notmatch 'antes de mexer em driver') { Write-Host "  [ERRO] Rede (veredito): falta a ordem de testar antes de mexer em driver" -ForegroundColor Red; $wbErrors++ }
+        # O filtro vem ANTES de tudo: com APIPA junto, quem explica continua sendo o filtro. Sem esta
+        # linha, a ordem dos dois primeiros degraus seria acaso.
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Apipa = $true; Lsp = @(@{ Name = 'Norton Security'; Path = 'C:\x.dll'; Menu = 'Configurações' }) })) -notmatch 'Norton Security') { Write-Host "  [ERRO] Rede (veredito): com filtro E APIPA juntos, quem explica tem de ser o filtro" -ForegroundColor Red; $wbErrors++ }
+        # A ordem da escada: APIPA antes de DNS, DNS antes de saída, filtro antes de tudo que mexe
+        # em driver. E o filtro NUNCA vira botão.
+        $wfVerFonteD = [string](Get-Command Invoke-WinForgeNetworkDiagnostic).ScriptBlock
+        if ($wfVerFonteD -match 'pnputil') { Write-Host "  [ERRO] Rede (diagnóstico): o botão 1 é de LEITURA e não chama o pnputil" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfVerProibido in @('Remove-Item', 'netsh winsock reset', 'delete-driver', 'remove-device')) {
+            if ($wfVerFonteD -match [regex]::Escape($wfVerProibido)) { Write-Host "  [ERRO] Rede (diagnóstico): o botão 1 escreve ('$wfVerProibido')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Catálogo Winsock: a base medida é 28 entradas, todas mswsock.dll sob %SystemRoot%. Outro
+        # caminho, ou Protocol Chain Length > 1, é LSP de terceiro.
+        $wfVerCat = Test-WinForgeWinsockCatalog -Entries @(
+            @{ Name = 'MSAFD Tcpip [TCP/IP]'; Path = (Join-Path $env:SystemRoot 'system32\mswsock.dll'); ChainLength = 1 },
+            @{ Name = 'Norton LSP';           Path = 'C:\Program Files\Norton\nlsp.dll';                 ChainLength = 3 }
+        )
+        if ($wfVerCat.Ok) { Write-Host "  [ERRO] Rede (Winsock): um LSP de terceiro passou como catálogo limpo" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfVerCat.Third).Count -ne 1) { Write-Host "  [ERRO] Rede (Winsock): $(@($wfVerCat.Third).Count) filtro(s) de terceiro, esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfVerCat.Third)[0].Name -ne 'Norton LSP') { Write-Host "  [ERRO] Rede (Winsock): o acusado foi '$(@($wfVerCat.Third)[0].Name)', e o de terceiro é o 'Norton LSP'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfVerCat.Count -ne 2) { Write-Host "  [ERRO] Rede (Winsock): Count veio $($wfVerCat.Count), esperado 2 (o catálogo INTEIRO, não só os de terceiro)" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'MSAFD'; Path = (Join-Path $env:SystemRoot 'system32\mswsock.dll'); ChainLength = 1 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): catálogo limpo foi acusado" -ForegroundColor Red; $wbErrors++ }
+        # Os DOIS sinais, um de cada vez: a entrada do brief acusa pelos dois juntos, e quem checasse
+        # só um dos dois passaria por ela. O primeiro é o LSP moderno, que se enfia na cadeia sem
+        # sair da pasta do Windows; o segundo é o instalado em Program Files com cadeia de um elo.
+        if ((Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'Encadeado'; Path = (Join-Path $env:SystemRoot 'system32\mswsock.dll'); ChainLength = 3 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): cadeia de 3 elos dentro da pasta do Windows passou" -ForegroundColor Red; $wbErrors++ }
+        if ((Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'Fora'; Path = 'C:\Program Files\Coisa\lsp.dll'; ChainLength = 1 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): caminho fora da pasta do Windows com cadeia de 1 elo passou" -ForegroundColor Red; $wbErrors++ }
+        # A pasta do Windows vem escrita de jeitos diferentes em máquinas diferentes ('C:\WINDOWS'
+        # numa, 'C:\Windows' noutra), e o registro guarda o que o instalador escreveu. Comparar
+        # respeitando maiúsculas acusaria o catálogo inteiro de uma máquina inteira.
+        if (-not (Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'Caixa baixa'; Path = ([string][Environment]::GetFolderPath('Windows')).ToLowerInvariant() + '\system32\mswsock.dll'; ChainLength = 1 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): a mesma pasta escrita em caixa baixa foi acusada" -ForegroundColor Red; $wbErrors++ }
+        # O botão roda INTEIRO nesta máquina e devolve uma das cinco frases.
+        $wfVerSaida = [string](Invoke-WinForgeNetworkDiagnostic)
+        if ([string]::IsNullOrWhiteSpace($wfVerSaida)) { Write-Host "  [ERRO] Rede (diagnóstico): a saída veio vazia" -ForegroundColor Red; $wbErrors++ }
+        # A ÚLTIMA linha, e não "aparece em algum lugar": o veredito é a frase que fecha o relatório,
+        # e uma das cinco citada no meio de um parágrafo não é veredito nenhum.
+        $wfVerLinhas = @([string]$wfVerSaida -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $wfVerUltima = if ($wfVerLinhas.Count) { ([string]$wfVerLinhas[-1]).Trim() } else { '' }
+        if (-not @(@($wfVerFrases.Values) + 'Há um filtro do' | Where-Object { $wfVerUltima -match [regex]::Escape([string]$_) }).Count) { Write-Host "  [ERRO] Rede (diagnóstico): a saída não TERMINA com uma das cinco frases ('$wfVerUltima')" -ForegroundColor Red; $wbErrors++ }
+        $wfVerCmd = Get-WinForgeRepairCommand -Name 'NetDiagFull'
+        if ([string]$wfVerCmd.Kind -ne 'read') { Write-Host "  [ERRO] Rede (diagnóstico): a linha é '$($wfVerCmd.Kind)', esperado 'read'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfVerCmd.Title -ne 'Rede — Diagnóstico completo') { Write-Host "  [ERRO] Rede (diagnóstico): título '$($wfVerCmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfVerCmd.Stream) { Write-Host "  [ERRO] Rede (diagnóstico): a linha não declara Stream - o relatório demora e a janela tem de encher ao vivo" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfVerCmd.Steps).Count -ne 1 -or [string]@($wfVerCmd.Steps)[0].Function -ne 'Invoke-WinForgeNetworkDiagnostic') { Write-Host "  [ERRO] Rede (diagnóstico): os passos da linha não são um Function = 'Invoke-WinForgeNetworkDiagnostic'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepNetDiagFull.Description)) { Write-Host "  [ERRO] Rede (diagnóstico): WPFWFRepNetDiagFull sem Description" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepNetDiagFull.Content -ne [string]$wfVerCmd.Title) { Write-Host "  [ERRO] Rede (diagnóstico): o Content da config ('$($sync.configs.feature.WPFWFRepNetDiagFull.Content)') não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        # A simulação passa pela linha sem rodar o relatório de novo, e o despacho não sai no SelfTest.
+        $wfVerSeco = @(Start-WinForgeStreamedCommand -Name 'NetDiagFull' -Spec $wfVerCmd -DryRun)
+        if ($wfVerSeco.Count -ne 1 -or [string]$wfVerSeco[0] -notmatch 'Invoke-WinForgeNetworkDiagnostic') { Write-Host "  [ERRO] Rede (diagnóstico): a simulação devolveu '$($wfVerSeco -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+        if ((Invoke-WinForgeRepairCommand -Name 'NetDiagFull' -NoUI).Dispatched) { Write-Host "  [ERRO] Rede (diagnóstico): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (diagnóstico): cinco frases fechadas, filtro de terceiro nomeado com caminho de menu, catálogo Winsock conferido, botão roda inteiro"
+    } catch {
+        Write-Host "  [ERRO] Rede (diagnóstico): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
     # qualquer processo de integridade média da mesma conta. Enquanto ele só pintava o rótulo
@@ -7814,7 +7902,7 @@ if ($SelfTest) {
         try {
             # $wfAclNomes traz as linhas de permissões que rodam com fluxo ao vivo: elas não têm
             # 'Command' e por isso ficam fora de $wfRepNomes, mas o botão delas está na mesma aba.
-            $wfRepChaves = @(@($wfRepNomes + $wfAclNomes) | Sort-Object -Unique | ForEach-Object { "WPFWFRep$_" })
+            $wfRepChaves = @(@($wfRepNomes + $wfAclNomes + $wfNetNomes) | Sort-Object -Unique | ForEach-Object { "WPFWFRep$_" })
             $wfRepFaltando = @($wfRepChaves | Where-Object { $sync[$_] -isnot [System.Windows.Controls.Button] })
             if ($wfRepFaltando.Count) { Write-Host "  [ERRO] aba Config (reparo): botão(ões) ausentes: $($wfRepFaltando -join ', ')" -ForegroundColor Red; $wbErrors++ }
             else { Write-Host "  Aba Config (reparo): $($wfRepChaves.Count) botão(ões) na tela" }

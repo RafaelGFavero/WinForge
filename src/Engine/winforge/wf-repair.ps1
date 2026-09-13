@@ -395,6 +395,25 @@ function Get-WinForgeRepairCommand {
                 Confirm  = 'Lista os arquivos da pasta protegida de backup de permissões com tamanho e data e apaga apenas os que nenhum backup pendente usa: os avulsos, que índice nenhum referencia, e os conjuntos que o Desfazer já aplicou. Backup que ninguém desfez nunca sai.'
             }
         }
+        # ---- Rede. O primeiro degrau da escada é de LEITURA, e é de propósito: "conectado certinho
+        # e sem navegar" prova que o rádio associou e autenticou, ou seja, que o driver funciona.
+        # Arrancar driver antes de olhar é trocar um problema que se conserta por um que deixa a
+        # máquina sem rádio.
+        #
+        # 'read' com fluxo ao vivo: são doze leituras, e algumas (as sondas, as duas consultas de
+        # nome) esperam pela rede. Sem o fluxo, a janela abriria só no fim, que é indistinguível de
+        # um botão quebrado - o mesmo motivo que tirou os cinco botões de Correções da thread da
+        # janela.
+        'NetDiagFull' {
+            return @{
+                Title    = 'Rede — Diagnóstico completo'
+                Requires = $null
+                Kind     = 'read'
+                Stream   = $true
+                Steps    = @(@{ Function = 'Invoke-WinForgeNetworkDiagnostic' })
+                Final    = 'Leitura concluída: nada foi alterado nesta máquina.'
+            }
+        }
     }
     throw "Comando de reparo desconhecido: '$Name'."
 }
