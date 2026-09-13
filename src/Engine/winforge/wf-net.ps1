@@ -1714,7 +1714,12 @@ function Invoke-WinForgeWifiDriverReinstall {
     } catch { $idPnp = '' }
     $infDoRadio = $(if ([string]::IsNullOrWhiteSpace($idPnp)) { '' } else { Get-WinForgeWifiDriverInfName -PnpDeviceId $idPnp })
     $pacotes = @()
-    if (-not [string]::IsNullOrWhiteSpace($infDoRadio)) {
+    if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts -and $Facts.ContainsKey('Packages')) {
+        # A porta do -SelfTest para a lista de pacotes, no mesmo espírito de '-Adapters' e '-Probe':
+        # sem ela a recusa de família vazia é inalcançável em qualquer máquina que TENHA rádio, que
+        # são todas as que interessam.
+        $pacotes = @(@($Facts.Packages) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+    } elseif (-not [string]::IsNullOrWhiteSpace($infDoRadio)) {
         $lidos = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
         $pacotes = @((Select-WinForgeWifiDriverPackage -Entries $lidos -InfName $infDoRadio).Oem)
     }

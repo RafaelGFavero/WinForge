@@ -8155,6 +8155,15 @@ if ($SelfTest) {
         elseif ([string]$wfW46Vazia.Reason -notmatch 'Nenhum pacote') { Write-Host "  [ERRO] Rede (exportação): a recusa da lista vazia não é a frase amigável ('$($wfW46Vazia.Reason)')" -ForegroundColor Red; $wbErrors++ }
         $wfW46FamVazia = Select-WinForgeWifiDriverPackage -Entries @() -InfName ''
         if (@($wfW46FamVazia.Oem).Count) { Write-Host "  [ERRO] Rede (família): lista vazia rendeu família não vazia" -ForegroundColor Red; $wbErrors++ }
+        # E a recusa dentro do botão, por COMPORTAMENTO: numa máquina com rádio esta linha nunca
+        # seria alcançada sem a porta de fatos, e "copiaria 0 pacote(s) e tiraria o rádio da lista"
+        # descreve uma remoção sem rede de segurança nenhuma.
+        $wfW46SemPac = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts (& $wfW46Com @{ Packages = @() }))
+        if (-not @($wfW46SemPac | Where-Object { [string]$_ -match 'Sem cópia de segurança não há o que remover' }).Count) { Write-Host "  [ERRO] Rede (botão 4): família vazia não recusou ('$($wfW46SemPac -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW46SemPac | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): família vazia e mesmo assim ele descreveu a remoção" -ForegroundColor Red; $wbErrors++ }
+        # ...e com pacote na lista ele volta a descrever: senão, uma função que recusasse sempre passaria.
+        $wfW46ComPac = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts (& $wfW46Com @{ Packages = @('oem22.inf') }))
+        if (-not @($wfW46ComPac | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): com pacote na família ele deixou de descrever a remoção" -ForegroundColor Red; $wbErrors++ }
         # O botão 4 tem a MESMA restauração automática do 5.
         $wfW46Fonte4 = [string](Get-Command Invoke-WinForgeWifiDriverReinstall).ScriptBlock
         if ($wfW46Fonte4 -notmatch 'Invoke-WinForgeWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 4): sem restauração automática no desfecho ruim" -ForegroundColor Red; $wbErrors++ }
@@ -8243,6 +8252,40 @@ if ($SelfTest) {
         # A palavra digitada aparece no TEXTO: uma caixa que pede para digitar sem dizer o quê é uma
         # caixa que ninguém passa.
         if ([string]$wfW5Conf.Text -notmatch [regex]::Escape([string]$wfW5Conf.Typed)) { Write-Host "  [ERRO] Rede (botão 5): o texto não diz o que digitar" -ForegroundColor Red; $wbErrors++ }
+        # E o texto é CHAMADO por alguém: até aqui ele existia e o botão caía numa caixa de Sim/Não
+        # comum, que é fraca demais para a ação que pode deixar a máquina sem conexão nenhuma.
+        if ([string]$wfW5Cmd.TypedPhrase -ne [string]$wfW5Conf.Typed) { Write-Host "  [ERRO] Rede (botão 5): a linha declara a palavra '$($wfW5Cmd.TypedPhrase)' e a confirmação pede '$($wfW5Conf.Typed)'" -ForegroundColor Red; $wbErrors++ }
+        $wfW5FonteDesp = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        if ($wfW5FonteDesp -notmatch 'Show-WinForgeTypedConfirm\s+-Title[^\r\n]*-Phrase\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): o despacho não usa a caixa de palavra digitada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteDesp -notmatch 'Get-WinForgeWifiGenericConfirmText') { Write-Host "  [ERRO] Rede (botão 5): o despacho não usa o texto escrito para este botão" -ForegroundColor Red; $wbErrors++ }
+        # A DECISÃO é de uma função pura, e não de um 'if' solto dentro do despacho: o caminho do
+        # despacho abre janela e por isso não roda aqui, e uma condição que só vive lá dentro seria
+        # conferida só por leitura de fonte - um 'if ($false)' em volta dela passaria batido.
+        if ($wfW5FonteDesp -notmatch "Get-WinForgeRepairConfirmKind\s+-Name\s+\$\w+") { Write-Host "  [ERRO] Rede (botão 5): o despacho não pergunta o tipo de confirmação" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteDesp -notmatch "if\s*\(\s*\`$\w+\s+-eq\s+'typed'\s*\)") { Write-Host "  [ERRO] Rede (botão 5): o despacho não decide pelo resultado da pergunta" -ForegroundColor Red; $wbErrors++ }
+        # ...e a regra em si, por COMPORTAMENTO, linha por linha.
+        foreach ($wfW5Tipo in @(@('WifiDriverGeneric', 'typed'), @('WifiDriverReinstall', 'yesno'), @('WifiDriverRestore', 'yesno'), @('NetDnsRenew', 'yesno'), @('NetDiagFull', 'none'), @('AclVerify', 'none'), @('AclRestore', 'yesno'))) {
+            $wfW5TipoReal = [string](Get-WinForgeRepairConfirmKind -Name ([string]$wfW5Tipo[0]))
+            if ($wfW5TipoReal -ne [string]$wfW5Tipo[1]) { Write-Host "  [ERRO] Rede (confirmação): '$($wfW5Tipo[0])' pede '$wfW5TipoReal', esperado '$($wfW5Tipo[1])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A caixa genérica, exercitada sem abrir nada: o botão de confirmar NASCE DESABILITADO e só
+        # liga com a palavra certa. Com ele sempre ligado, a digitação seria enfeite.
+        $wfW5Janela = Show-WinForgeTypedConfirm -Title 'x' -Text ([string]$wfW5Conf.Text) -Phrase ([string]$wfW5Conf.Typed) -NoShow
+        if ($wfW5Janela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Rede (botão 5): a caixa de digitação não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfW5BtnOk = $wfW5Janela.FindName('WFTypedConfirmOk')
+            $wfW5Caixa = $wfW5Janela.FindName('WFTypedConfirmPhrase')
+            $wfW5Texto = $wfW5Janela.FindName('WFTypedConfirmText')
+            if ($null -eq $wfW5BtnOk -or $null -eq $wfW5Caixa -or $null -eq $wfW5Texto) { Write-Host "  [ERRO] Rede (botão 5): a caixa não registrou os controles pelo nome" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ($wfW5BtnOk.IsEnabled) { Write-Host "  [ERRO] Rede (botão 5): o botão de confirmar nasceu HABILITADO" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfW5Texto.Text -notmatch 'cabo de rede') { Write-Host "  [ERRO] Rede (botão 5): a caixa não mostra o aviso do cabo" -ForegroundColor Red; $wbErrors++ }
+                foreach ($wfW5Dig in @(@('', $false), @('sim', $false), @('VOLTAR AO GENERIC', $false), @('VOLTAR AO GENERICO EXTRA', $false), @('  voltar ao generico  ', $true), @('VOLTAR AO GENERICO', $true))) {
+                    $wfW5Caixa.Text = [string]$wfW5Dig[0]
+                    if ($wfW5BtnOk.IsEnabled -ne [bool]$wfW5Dig[1]) { Write-Host "  [ERRO] Rede (botão 5): com '$($wfW5Dig[0])' digitado o botão ficou '$($wfW5BtnOk.IsEnabled)', esperado '$($wfW5Dig[1])'" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+        }
         $wfW5Fonte = [string](Get-Command Invoke-WinForgeWifiDriverGeneric).ScriptBlock
         if ($wfW5Fonte -notmatch 'delete-driver') { Write-Host "  [ERRO] Rede (botão 5): falta o '/delete-driver /uninstall'" -ForegroundColor Red; $wbErrors++ }
         if ($wfW5Fonte -match '/force') { Write-Host "  [ERRO] Rede (botão 5): '/force' apaga o pacote em uso e é o caminho para ficar sem rádio" -ForegroundColor Red; $wbErrors++ }
@@ -8298,8 +8341,12 @@ if ($SelfTest) {
         # SEM PERFIL nada foi verificado, então esconder o botão dizendo que não há driver básico
         # seria afirmar o que não se sabe. Quem recusa é o degrau do diagnóstico, que diz a verdade
         # e NÃO esconde - o botão volta sozinho quando o diagnóstico termina.
+        # 'Inbox = $false' junto, porque é o que o levantamento REAL produz: sem perfil ele para
+        # antes de medir o embutido e o fato fica no padrão seguro. Com 'Inbox = $true' no gabarito,
+        # o degrau do embutido não dispararia de qualquer jeito e a conferência seria vazia.
         $wfW5SemPerfil = @{} + $wfW46Base
         $wfW5SemPerfil['SemPerfil'] = $true
+        $wfW5SemPerfil['Inbox'] = $false
         $wfW5Gsp = Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfW5SemPerfil
         if ($wfW5Gsp.Hidden) { Write-Host "  [ERRO] Rede (D3): sem perfil o botão 5 SUMIU, e nada tinha sido verificado" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfW5Gsp.Reason -match 'driver básico') { Write-Host "  [ERRO] Rede (D3): sem perfil a recusa culpa o driver básico, que não foi verificado ('$($wfW5Gsp.Reason)')" -ForegroundColor Red; $wbErrors++ }

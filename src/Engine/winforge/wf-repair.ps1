@@ -478,6 +478,9 @@ function Get-WinForgeRepairCommand {
                 Stream        = $true
                 ExpectMinutes = 5
                 NetworkGuard  = 'WifiDriverGeneric'
+                # Ela pede PALAVRA DIGITADA, e não Sim: ver o bloco de confirmação em
+                # Invoke-WinForgeRepairCommand. É a única linha da tabela com isto.
+                TypedPhrase   = 'VOLTAR AO GENERICO'
                 Steps         = @(@{ Function = 'Invoke-WinForgeWifiDriverGeneric' })
                 Final   = 'Se o Wi-Fi não voltar, use "Voltar para o driver que estava antes". Se nem assim, traga o driver do fabricante por cabo ou pen drive.'
                 Confirm = 'APAGA do computador os pacotes de driver do seu rádio sem fio e deixa o Windows instalar o driver básico dele. Uma cópia conferida é guardada antes, e a volta é automática se o rádio não responder no fim. Se o driver básico não servir para este rádio, a máquina fica sem rede sem fio até você trazer o driver do fabricante de outro computador - tenha um cabo à mão. Aviso: a detecção de acesso remoto cobre a Área de Trabalho Remota do Windows, e NÃO enxerga AnyDesk, TeamViewer ou RustDesk - se você estiver usando um desses agora, vai perder a conexão.'
@@ -1638,6 +1641,23 @@ function Invoke-WinForgeRepairCommand {
         if ($NoUI) {
             Write-WinForgeLog -Component "Repair" -Message "$Name não despachado: ação do tipo '$kind' precisa de confirmação e não há ninguém para confirmar."
             return @{ Dispatched = $false; Reason = 'confirmação'; Kind = $kind }
+        }
+        # A linha que declara 'TypedPhrase' não passa pela caixa de Sim/Não: ela exige uma PALAVRA
+        # DIGITADA. Um Sim é clicado por reflexo, e a ação mais perigosa desta escada - a que pode
+        # deixar a máquina sem nenhuma via de conexão - merece uma decisão, não um reflexo.
+        $palavraExigida = [string]$cmd.TypedPhrase
+        $tipoConfirmacao = [string](Get-WinForgeRepairConfirmKind -Name $Name)
+        if ($tipoConfirmacao -eq 'typed') {
+            Assert-WinForgeNotSelfTest -Name "Invoke-WinForgeRepairCommand ($Name)"
+            $pedido = Get-WinForgeWifiGenericConfirmText
+            if (-not (Show-WinForgeTypedConfirm -Title ([string]$cmd.Title) -Text ([string]$pedido.Text) -Phrase $palavraExigida -OkContent 'Trocar pelo básico')) {
+                Write-WinForgeLog -Component "Repair" -Message "$Name cancelado na confirmação por digitação. Nada foi alterado."
+                return
+            }
+            Write-WinForgeLog -Component "Repair" -Message "$Name confirmado por digitação."
+            if ($cmd.Stream) { Start-WinForgeStreamedCommand -Name $Name -Spec $cmd; return }
+            Invoke-WinForgeCommandButton -Spec $cmd -Name $Name -Component 'Repair' -Prefix 'repair'
+            return
         }
         # Segunda camada da trava de SelfTest: com -NoUI o caminho já morreu acima, mas quem chamar
         # sem -NoUI durante um SelfTest não pode abrir caixa nenhuma (não há ninguém para responder e
@@ -6273,6 +6293,148 @@ function Test-WinForgeAclCleanupPhrase {
     return [string]::Equals(([string]$Typed).Trim(), ([string]$Phrase).Trim(), [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-WinForgeRepairConfirmKind {
+    <#
+    .SYNOPSIS
+        Diz QUE TIPO de confirmação uma linha da tabela exige antes de rodar.
+    .DESCRIPTION
+        Três respostas, e a regra é do dado, não do nome:
+
+        - 'none'  : leitura. Confirmar cada leitura treinaria o usuário a clicar em Sim sem ler,
+                    que é exatamente o hábito que a confirmação do reparo precisa combater.
+        - 'yesno' : o padrão de tudo que altera a máquina.
+        - 'typed' : a linha declara 'TypedPhrase'. Uma PALAVRA DIGITADA, e não um Sim, porque um Sim
+                    é clicado por reflexo e estas ações não têm volta barata.
+
+        Existe como função, e não como um 'if' dentro do despacho, para a regra ser exercitável: o
+        caminho do despacho abre janela e por isso não roda no -SelfTest, e uma decisão que só vive
+        lá dentro só seria conferida por leitura de fonte.
+    .PARAMETER Name
+        O nome curto da linha.
+    .OUTPUTS
+        'none', 'yesno' ou 'typed'.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    $cmd = Get-WinForgeRepairCommand -Name $Name
+    $kind = [string]$cmd.Kind
+    if ([string]::IsNullOrWhiteSpace($kind)) { $kind = 'read' }
+    if ($kind -eq 'read') { return 'none' }
+    if (-not [string]::IsNullOrWhiteSpace([string]$cmd.TypedPhrase)) { return 'typed' }
+    return 'yesno'
+}
+
+function Show-WinForgeTypedConfirm {
+    <#
+    .SYNOPSIS
+        A caixa que exige uma PALAVRA DIGITADA antes de uma ação que não tem volta barata.
+    .DESCRIPTION
+        Nasceu como a caixa do descarte de backup de permissões e virou genérica quando o botão que
+        troca o driver de rede pelo básico precisou da mesma coisa - e ele precisa mais: é a ação
+        que pode deixar a máquina sem nenhuma via de conexão.
+
+        Montada em código, e não em XAML, pelo mesmo motivo de Show-WinForgeOutputWindow: ela nasce
+        de um caminho que o -SelfTest precisa exercitar sem abrir nada na tela, e o '-NoShow'
+        devolve a janela pronta para o teste ler os controles por nome.
+
+        O botão de confirmar nasce DESABILITADO e só liga quando o que está na caixa passa pela
+        conferência da palavra. É a diferença entre uma trava e um aviso: com o botão sempre ligado,
+        a palavra digitada seria enfeite.
+
+        A conferência é Test-WinForgeAclCleanupPhrase, que já nasceu parametrizada pela palavra. O
+        nome dela é do lugar onde nasceu, e as folgas que ela aceita (espaço em volta, maiúscula e
+        minúscula) valem aqui pelo mesmo motivo: são as que um humano comete sem mudar a intenção.
+    .PARAMETER Title
+        O título da janela.
+    .PARAMETER Text
+        O aviso. Quem chega aqui precisa saber o que perde, e não só que é perigoso.
+    .PARAMETER Phrase
+        A palavra exigida. ASCII, porque um acento num teclado que a pessoa pode não ter viraria
+        trava impossível em vez de trava deliberada.
+    .PARAMETER OkContent
+        O rótulo do botão que confirma.
+    .PARAMETER NamePrefix
+        O prefixo dos nomes registrados na janela, para o -SelfTest achar os controles.
+    .PARAMETER NoShow
+        Devolve a janela sem mostrar. É o que o -SelfTest usa.
+    .OUTPUTS
+        Com -NoShow, a janela ([System.Windows.Window]). Sem ele, $true se o usuário confirmou.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$Phrase,
+        [string]$OkContent = 'Continuar',
+        [string]$NamePrefix = 'WFTypedConfirm',
+        [switch]$NoShow
+    )
+
+    # Em uso normal o WPF já está carregado desde a montagem da janela principal. No -SelfTest não:
+    # sem os dois assemblies o primeiro [System.Windows.*] do corpo falharia.
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
+    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationcore')
+
+    $janela = New-Object System.Windows.Window
+    $janela.Title = $Title
+    $janela.Width = 620
+    $janela.SizeToContent = [System.Windows.SizeToContent]::Height
+    $janela.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+    if ($null -ne $sync -and $null -ne $sync.Form -and $sync.Form.IsVisible) {
+        try {
+            $janela.Owner = $sync.Form
+            $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+        } catch { }
+    }
+
+    $pilha = New-Object System.Windows.Controls.StackPanel
+    $pilha.Margin = New-Object System.Windows.Thickness 14
+
+    $aviso = New-Object System.Windows.Controls.TextBlock
+    $aviso.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $aviso.Text = $Text
+    $pilha.Children.Add($aviso) | Out-Null
+
+    $caixa = New-Object System.Windows.Controls.TextBox
+    $caixa.Margin = New-Object System.Windows.Thickness (0, 12, 0, 0)
+    $caixa.FontSize = 14
+    $pilha.Children.Add($caixa) | Out-Null
+
+    $barra = New-Object System.Windows.Controls.StackPanel
+    $barra.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $barra.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+    $barra.Margin = New-Object System.Windows.Thickness (0, 14, 0, 0)
+    $pilha.Children.Add($barra) | Out-Null
+
+    $btnOk = New-Object System.Windows.Controls.Button
+    $btnOk.Content = $OkContent
+    $btnOk.MinWidth = 120
+    $btnOk.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+    $btnOk.IsEnabled = $false
+    $barra.Children.Add($btnOk) | Out-Null
+
+    $btnCancelar = New-Object System.Windows.Controls.Button
+    $btnCancelar.Content = 'Cancelar'
+    $btnCancelar.MinWidth = 120
+    $btnCancelar.Margin = New-Object System.Windows.Thickness (8, 0, 0, 0)
+    $btnCancelar.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
+    $btnCancelar.IsCancel = $true
+    $barra.Children.Add($btnCancelar) | Out-Null
+
+    $exigida = [string]$Phrase
+    $caixa.Add_TextChanged({ $btnOk.IsEnabled = [bool](Test-WinForgeAclCleanupPhrase -Typed ([string]$caixa.Text) -Phrase $exigida) }.GetNewClosure())
+    $btnOk.Add_Click({ $janela.DialogResult = $true }.GetNewClosure())
+
+    $janela.Content = $pilha
+    [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
+    $janela.RegisterName(($NamePrefix + 'Text'), $aviso)
+    $janela.RegisterName(($NamePrefix + 'Phrase'), $caixa)
+    $janela.RegisterName(($NamePrefix + 'Ok'), $btnOk)
+
+    if ($NoShow) { return $janela }
+    return [bool]($janela.ShowDialog() -eq $true)
+}
+
 function Show-WinForgeAclCleanupConfirm {
     <#
     .SYNOPSIS
@@ -6300,70 +6462,9 @@ function Show-WinForgeAclCleanupConfirm {
         [switch]$NoShow
     )
 
-    # Em uso normal o WPF já está carregado desde a montagem da janela principal. No -SelfTest não:
-    # sem os dois assemblies o primeiro [System.Windows.*] do corpo falharia.
-    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationframework')
-    [void][System.Reflection.Assembly]::LoadWithPartialName('presentationcore')
-
-    $janela = New-Object System.Windows.Window
-    $janela.Title = 'WinForge - Descartar backup de permissões'
-    $janela.Width = 620
-    $janela.SizeToContent = [System.Windows.SizeToContent]::Height
-    $janela.ResizeMode = [System.Windows.ResizeMode]::NoResize
-    $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
-    if ($null -ne $sync -and $null -ne $sync.Form -and $sync.Form.IsVisible) {
-        try {
-            $janela.Owner = $sync.Form
-            $janela.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
-        } catch { }
-    }
-
-    $pilha = New-Object System.Windows.Controls.StackPanel
-    $pilha.Margin = New-Object System.Windows.Thickness 14
-
     $tamanho = if ($Bytes -ge 1GB) { '{0:N1} GB' -f ($Bytes / 1GB) } else { '{0:N1} MB' -f ($Bytes / 1MB) }
-    $aviso = New-Object System.Windows.Controls.TextBlock
-    $aviso.TextWrapping = [System.Windows.TextWrapping]::Wrap
-    $aviso.Text = "Estes backups de permissões NÃO foram desfeitos, e descartá-los é definitivo: depois disso o botão Desfazer não tem mais o que devolver.`r`n`r`nConjunto(s): $(@($Stamps) -join ', ')`r`nTotal a apagar: $tamanho`r`n`r`nSe você ainda quer as permissões antigas de volta, feche esta caixa e use 'Permissões do disco C: - Desfazer (restaurar backup)' primeiro.`r`n`r`nPara descartar mesmo assim, digite APAGAR abaixo."
-    $pilha.Children.Add($aviso) | Out-Null
-
-    $caixa = New-Object System.Windows.Controls.TextBox
-    $caixa.Margin = New-Object System.Windows.Thickness (0, 12, 0, 0)
-    $caixa.FontSize = 14
-    $pilha.Children.Add($caixa) | Out-Null
-
-    $barra = New-Object System.Windows.Controls.StackPanel
-    $barra.Orientation = [System.Windows.Controls.Orientation]::Horizontal
-    $barra.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
-    $barra.Margin = New-Object System.Windows.Thickness (0, 14, 0, 0)
-    $pilha.Children.Add($barra) | Out-Null
-
-    $btnDescartar = New-Object System.Windows.Controls.Button
-    $btnDescartar.Content = 'Descartar'
-    $btnDescartar.MinWidth = 120
-    $btnDescartar.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
-    $btnDescartar.IsEnabled = $false
-    $barra.Children.Add($btnDescartar) | Out-Null
-
-    $btnCancelar = New-Object System.Windows.Controls.Button
-    $btnCancelar.Content = 'Cancelar'
-    $btnCancelar.MinWidth = 120
-    $btnCancelar.Margin = New-Object System.Windows.Thickness (8, 0, 0, 0)
-    $btnCancelar.Padding = New-Object System.Windows.Thickness (10, 4, 10, 4)
-    $btnCancelar.IsCancel = $true
-    $barra.Children.Add($btnCancelar) | Out-Null
-
-    $caixa.Add_TextChanged({ $btnDescartar.IsEnabled = [bool](Test-WinForgeAclCleanupPhrase -Typed ([string]$caixa.Text)) }.GetNewClosure())
-    $btnDescartar.Add_Click({ $janela.DialogResult = $true }.GetNewClosure())
-
-    $janela.Content = $pilha
-    [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
-    $janela.RegisterName('WFAclCleanupText', $aviso)
-    $janela.RegisterName('WFAclCleanupPhrase', $caixa)
-    $janela.RegisterName('WFAclCleanupOk', $btnDescartar)
-
-    if ($NoShow) { return $janela }
-    return [bool]($janela.ShowDialog() -eq $true)
+    $texto = "Estes backups de permissões NÃO foram desfeitos, e descartá-los é definitivo: depois disso o botão Desfazer não tem mais o que devolver.`r`n`r`nConjunto(s): $(@($Stamps) -join ', ')`r`nTotal a apagar: $tamanho`r`n`r`nSe você ainda quer as permissões antigas de volta, feche esta caixa e use 'Permissões do disco C: - Desfazer (restaurar backup)' primeiro.`r`n`r`nPara descartar mesmo assim, digite APAGAR abaixo."
+    return (Show-WinForgeTypedConfirm -Title 'WinForge - Descartar backup de permissões' -Text $texto -Phrase 'APAGAR' -OkContent 'Descartar' -NamePrefix 'WFAclCleanup' -NoShow:$NoShow)
 }
 
 # O pedido de descarte esperando a thread da janela: quem escreve é o runspace do fluxo ao vivo,
