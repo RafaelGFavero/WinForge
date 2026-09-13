@@ -7572,6 +7572,197 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Rede (DNS): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # ---------------------------------------------------------------- Rede: pnputil
+    # A saída do pnputil é LOCALIZADA: os rótulos não servem de âncora, os valores sim. Dentro de
+    # cada bloco, o primeiro valor terminado em '.inf' é o nome PUBLICADO; casa '^oem\d+\.inf$' ->
+    # é de terceiro, não casa -> é inbox. Medido: o bloco do inbox tem UMA só linha '.inf', os OEM
+    # têm duas ("Nome Original:" é a segunda, e confundi-la com um inbox some com o botão 5).
+    try {
+        # O autoteste pode ser chamado de qualquer pasta, e o motor gerado mora em <repo>\dist\engine:
+        # sem a segunda tentativa, rodar o -SelfTest de fora da raiz do repositório acusaria amostra
+        # faltando em vez de conferir o que ela existe para conferir.
+        $wfPnpRaiz = Join-Path (Get-Location) 'tests\samples'
+        if (-not (Test-Path -LiteralPath $wfPnpRaiz)) {
+            $wfPnpAlt = Join-Path (Split-Path -Parent (Split-Path -Parent ([string]$sync.ScriptRoot))) 'tests\samples'
+            if (Test-Path -LiteralPath $wfPnpAlt) { $wfPnpRaiz = $wfPnpAlt }
+        }
+        $wfPnpAmostra = Join-Path $wfPnpRaiz 'pnputil-enum-drivers-ptbr.txt'
+        if (-not (Test-Path -LiteralPath $wfPnpAmostra)) { Write-Host "  [ERRO] Rede (pnputil): falta a amostra real em '$wfPnpAmostra'" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfPnpTexto = [string](Get-Content -LiteralPath $wfPnpAmostra -Raw -Encoding UTF8)
+            $wfPnpEnt = @(Get-WinForgeDriverStoreEntry -Text $wfPnpTexto)
+            if ($wfPnpEnt.Count -lt 2) { Write-Host "  [ERRO] Rede (pnputil): a amostra rendeu $($wfPnpEnt.Count) entrada(s)" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfPnpEnt | Where-Object { [string]$_.Published -eq 'oem22.inf' }).Count) { Write-Host "  [ERRO] Rede (pnputil): 'oem22.inf' não foi encontrado na amostra" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfPnpE in $wfPnpEnt) {
+                if ([string]$wfPnpE.Published -notmatch '\.inf$') { Write-Host "  [ERRO] Rede (pnputil): entrada sem nome publicado ('$($wfPnpE.Published)')" -ForegroundColor Red; $wbErrors++ }
+                if (([string]$wfPnpE.Published -match '^oem\d+\.inf$') -ne [bool]$wfPnpE.IsOem) { Write-Host "  [ERRO] Rede (pnputil): IsOem errado para '$($wfPnpE.Published)'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # O bloco do oem22 é captura REAL desta máquina, e os quatro campos dele são cobrados um
+            # a um: sem isto, um parser que só preenchesse Published/IsOem passaria inteiro.
+            $wfPnp22 = @($wfPnpEnt | Where-Object { [string]$_.Published -eq 'oem22.inf' })[0]
+            if ($wfPnp22) {
+                foreach ($wfPnpCampo in @(@('Original', 'netwbw02.inf'), @('Provider', 'Intel'), @('Class', 'Net'), @('Version', '18.33.17.1'), @('Date', '04/29/2019'))) {
+                    if ([string]$wfPnp22.($wfPnpCampo[0]) -ne [string]$wfPnpCampo[1]) { Write-Host "  [ERRO] Rede (pnputil): '$($wfPnpCampo[0])' do oem22 veio '$($wfPnp22.($wfPnpCampo[0]))', esperado '$($wfPnpCampo[1])'" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+            $wfPnpInbox = Select-WinForgeWifiInboxDriver -Entries $wfPnpEnt
+            if (-not $wfPnpInbox.Found) { Write-Host "  [ERRO] Rede (pnputil): a amostra tem um inbox e ele não foi achado" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfPnpInbox.Published -match '^oem\d+\.inf$') { Write-Host "  [ERRO] Rede (pnputil): o 'inbox' achado é um oem ('$($wfPnpInbox.Published)') - a linha 'Nome Original:' do bloco OEM foi confundida com um inbox" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfPnpEnt | Where-Object { -not $_.IsOem }).Count -ne 1) { Write-Host "  [ERRO] Rede (pnputil): $(@($wfPnpEnt | Where-Object { -not $_.IsOem }).Count) inbox na amostra, esperado exatamente 1" -ForegroundColor Red; $wbErrors++ }
+            # Os OEM de rede saem nomeados: é a lista que o botão 4 exporta antes de remover, e uma
+            # lista vazia mandaria remover sem cópia de segurança.
+            if (@($wfPnpInbox.Oem).Count -ne 2) { Write-Host "  [ERRO] Rede (pnputil): $(@($wfPnpInbox.Oem).Count) pacote(s) OEM de rede, esperado 2" -ForegroundColor Red; $wbErrors++ }
+            elseif (@($wfPnpInbox.Oem) -notcontains 'oem22.inf') { Write-Host "  [ERRO] Rede (pnputil): a lista de OEM não traz o 'oem22.inf' ('$(@($wfPnpInbox.Oem) -join ', ')')" -ForegroundColor Red; $wbErrors++ }
+            # Sem inbox, o botão 5 some (a decisão é de Test-WinForgeNetworkGuard, a informação é daqui).
+            $wfPnpSoOem = Select-WinForgeWifiInboxDriver -Entries @($wfPnpEnt | Where-Object { $_.IsOem })
+            if ($wfPnpSoOem.Found) { Write-Host "  [ERRO] Rede (pnputil): achou inbox numa lista só de oem" -ForegroundColor Red; $wbErrors++ }
+            # A lista real desta máquina traz VINTE E QUATRO classes (impressora, vídeo, áudio,
+            # câmera...), e a amostra só tem rede: sem uma entrada de outra classe aqui, esquecer o
+            # filtro de classe passaria batido e o botão exportaria 120 MB do driver errado.
+            $wfPnpMisto = @($wfPnpEnt) + @(@{ Published = 'oem99.inf'; Original = 'prn.inf'; Provider = 'HP'; Class = 'Printer'; Date = ''; Version = ''; IsOem = $true })
+            if (@((Select-WinForgeWifiInboxDriver -Entries $wfPnpMisto).Oem) -contains 'oem99.inf') { Write-Host "  [ERRO] Rede (pnputil): um pacote de impressora entrou na lista de pacotes de REDE a exportar" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A PROVA de que os rótulos não são âncora: o MESMO bloco em inglês tem de dar o mesmo
+        # resultado. Um parser que procure 'Nome Publicado' passa na amostra pt-BR e devolve lista
+        # vazia num Windows em inglês - e lista vazia aqui significa "não há driver embutido", que
+        # some com o botão 5 na máquina inteira.
+        # Montado como LISTA DE LINHAS de propósito: um here-string aqui fecharia o here-string que
+        # carrega este bloco inteiro para dentro do motor gerado - o terminador dele precisa ficar
+        # na coluna 1, e é a mesma coluna do terminador de fora.
+        $wfPnpIngles = @(
+            'Microsoft PnP Utility',
+            '',
+            'Published Name:     oem77.inf',
+            'Original Name:      netwtw10.inf',
+            'Provider Name:      Intel',
+            'Class Name:         Net',
+            'Class GUID:         {4d36e972-e325-11ce-bfc1-08002be10318}',
+            'Driver Version:     07/14/2023 23.20.0.6',
+            'Signer Name:        Microsoft Windows'
+        ) -join "`r`n"
+        $wfPnpEn = @(Get-WinForgeDriverStoreEntry -Text $wfPnpIngles)
+        if ($wfPnpEn.Count -ne 1) { Write-Host "  [ERRO] Rede (pnputil): o bloco em inglês rendeu $($wfPnpEn.Count) entrada(s), esperado 1 - os rótulos viraram âncora" -ForegroundColor Red; $wbErrors++ }
+        else {
+            foreach ($wfPnpCampoEn in @(@('Published', 'oem77.inf'), @('Original', 'netwtw10.inf'), @('Provider', 'Intel'), @('Class', 'Net'))) {
+                if ([string]$wfPnpEn[0].($wfPnpCampoEn[0]) -ne [string]$wfPnpCampoEn[1]) { Write-Host "  [ERRO] Rede (pnputil/en): '$($wfPnpCampoEn[0])' veio '$($wfPnpEn[0].($wfPnpCampoEn[0]))', esperado '$($wfPnpCampoEn[1])'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # (a) '$LASTEXITCODE -gt 0' transformaria -536870340 em SUCESSO, e o código seguiria para o
+        # delete-driver. Só 0 é sucesso.
+        foreach ($wfPnpCod in @(0, 1, -536870340, 3010)) {
+            $wfPnpOk = Test-WinForgePnputilExit -ExitCode $wfPnpCod
+            if ($wfPnpCod -eq 0 -and -not $wfPnpOk) { Write-Host "  [ERRO] Rede (pnputil): código 0 recusado" -ForegroundColor Red; $wbErrors++ }
+            if ($wfPnpCod -ne 0 -and $wfPnpOk) { Write-Host "  [ERRO] Rede (pnputil): código $wfPnpCod aceito como sucesso" -ForegroundColor Red; $wbErrors++ }
+        }
+        # (c) '/enum-devices /class Net /problem' achou dispositivo em falha e SAIU COM CÓDIGO 0:
+        # é obrigatório interpretar a saída.
+        $wfPnpProbArq = Join-Path $wfPnpRaiz 'pnputil-enum-devices-net-problem-ptbr.txt'
+        if (-not (Test-Path -LiteralPath $wfPnpProbArq)) { Write-Host "  [ERRO] Rede (pnputil): falta a amostra real em '$wfPnpProbArq'" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfPnpProb = Test-WinForgePnputilProblem -Text ([string](Get-Content -LiteralPath $wfPnpProbArq -Raw -Encoding UTF8))
+            if (-not $wfPnpProb.Any) { Write-Host "  [ERRO] Rede (pnputil): a amostra tem dispositivo em falha e a leitura disse que não" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfPnpProb.Devices).Count) { Write-Host "  [ERRO] Rede (pnputil): nenhum dispositivo nomeado no relato de falha" -ForegroundColor Red; $wbErrors++ }
+            else {
+                # Contar sem olhar o conteúdo aceitaria um relato de dispositivo sem nome e sem
+                # código, que na tela é uma linha em branco.
+                if ([string]@($wfPnpProb.Devices)[0].Name -notmatch 'Fortinet') { Write-Host "  [ERRO] Rede (pnputil): o dispositivo em falha não foi nomeado ('$(@($wfPnpProb.Devices)[0].Name)')" -ForegroundColor Red; $wbErrors++ }
+                if ([int]@($wfPnpProb.Devices)[0].Problem -ne 10) { Write-Host "  [ERRO] Rede (pnputil): código do problema veio $(@($wfPnpProb.Devices)[0].Problem), esperado 10" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        if ((Test-WinForgePnputilProblem -Text '').Any) { Write-Host "  [ERRO] Rede (pnputil): saída vazia virou dispositivo em falha" -ForegroundColor Red; $wbErrors++ }
+        # (b) decodificação ANSI, não OEM: o pnputil escreve CP1252 quando redirecionado.
+        $wfPnpFonteE = [string](Get-Command Export-WinForgeWifiDriverBackup).ScriptBlock
+        if ($wfPnpFonteE -notmatch "Encoding\s*=\s*'ansi'") { Write-Host "  [ERRO] Rede (pnputil): o passo não leva Encoding = 'ansi'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPnpFonteE -match "Encoding\s*=\s*'oem'") { Write-Host "  [ERRO] Rede (pnputil): 'oem' embaralha o acento da saída do pnputil" -ForegroundColor Red; $wbErrors++ }
+        # '/force' nunca; '/reboot' nunca.
+        foreach ($wfPnpFn in @('Export-WinForgeWifiDriverBackup', 'Get-WinForgeWifiDriverBackupSet')) {
+            $wfPnpF = [string](Get-Command $wfPnpFn).ScriptBlock
+            foreach ($wfPnpProibido in @('/force', '/reboot')) {
+                if ($wfPnpF -match [regex]::Escape($wfPnpProibido)) { Write-Host "  [ERRO] Rede (pnputil): '$wfPnpProibido' aparece em $wfPnpFn - é a diferença entre 'não deu, nada mudou' e 'não deu, e agora não há driver'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # As QUATRO conferências depois do comando, cada uma pela FORMA DA CHAMADA com o argumento
+        # junto. O nome solto e o '\.inf' cru são satisfeitos pela prosa do bloco de ajuda, que faz
+        # parte do corpo do scriptblock - foi assim que uma trava desta leva ficou verde com o
+        # argumento removido da chamada de verdade.
+        foreach ($wfPnpConf in @(
+            @{ Nome = 'o código de saída';   Forma = 'Test-WinForgePnputilExit\s+-ExitCode\s+\$\w+' },
+            @{ Nome = 'o .inf no destino';   Forma = "-Filter\s+'\*\.inf'" },
+            @{ Nome = 'o .cat no destino';   Forma = "-Filter\s+'\*\.cat'" },
+            @{ Nome = 'o total em bytes';    Forma = 'Bytes\s*=\s*\[long\]\$\w+' })) {
+            if ($wfPnpFonteE -notmatch [string]$wfPnpConf.Forma) { Write-Host "  [ERRO] Rede (exportação): falta a conferência de $($wfPnpConf.Nome)" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfPnpFonteE -match '\$env:TEMP') { Write-Host "  [ERRO] Rede (exportação): o backup de 120 MB não pode ir para o %TEMP%" -ForegroundColor Red; $wbErrors++ }
+        # A raiz padrão é cobrada por COMPORTAMENTO, e não procurando 'CommonApplicationData' na
+        # fonte: a montagem do caminho mora numa função só (para as duas pontas, cópia e leitura,
+        # nunca divergirem), então o nome da API não aparece no corpo de quem exporta. Perguntar ao
+        # -DryRun para onde ele iria é prova mais forte do que qualquer busca de texto.
+        $wfPnpPadrao = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -DryRun
+        $wfPnpProgramData = [string][Environment]::GetFolderPath('CommonApplicationData')
+        if ([string]::IsNullOrWhiteSpace($wfPnpProgramData)) { Write-Host "  [ERRO] Rede (exportação): o próprio teste não resolveu %ProgramData%" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not ([string]$wfPnpPadrao.Path).StartsWith($wfPnpProgramData, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Rede (exportação): sem -Root o destino seria '$($wfPnpPadrao.Path)', fora de '$wfPnpProgramData'" -ForegroundColor Red; $wbErrors++ }
+        if (([string]$wfPnpPadrao.Path) -match '(?i)\\Temp\\') { Write-Host "  [ERRO] Rede (exportação): o destino padrão passa por uma pasta temporária ('$($wfPnpPadrao.Path)')" -ForegroundColor Red; $wbErrors++ }
+        # Exportação com destino inexistente aborta SEM TOCAR EM NADA.
+        $wfPnpSeco = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun
+        if ($wfPnpSeco.Ok -and $wfPnpSeco.Files -gt 0) { Write-Host "  [ERRO] Rede (exportação): o -DryRun exportou arquivo" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath (Join-Path $wbSelfTestRaiz 'driver-backup')) { Write-Host "  [ERRO] Rede (exportação): o -DryRun criou a pasta de destino" -ForegroundColor Red; $wbErrors++ }
+        # NENHUM nome que não seja 'oem<N>.inf' vira argumento de comando. É a regra de não agir com
+        # dado não conferido: o nome vem de uma leitura de texto, e um '..\..\algo' ali seria um
+        # caminho escolhido por quem escreveu a saída, não por nós.
+        foreach ($wfPnpRuim in @('..\..\evil.inf', 'oem22.inf /force', 'netwtw10.inf', 'oem22.in', 'oem22.inf ', '')) {
+            # A cadeia vazia é recusada pelo próprio PowerShell, na ligação do parâmetro
+            # obrigatório, antes de a função começar: recusa também é recusa, e aqui ela conta.
+            $wfPnpRec = $null
+            try { $wfPnpRec = Export-WinForgeWifiDriverBackup -Published @($wfPnpRuim) -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun } catch { $wfPnpRec = @{ Ok = $false; Reason = [string]$_.Exception.Message } }
+            if ($wfPnpRec.Ok) { Write-Host "  [ERRO] Rede (exportação): o nome '$wfPnpRuim' foi aceito como pacote a exportar" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]::IsNullOrWhiteSpace([string]$wfPnpRec.Reason)) { Write-Host "  [ERRO] Rede (exportação): recusou '$wfPnpRuim' sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o nome BOM continua passando: sem esta linha, uma função que recusasse tudo passaria em
+        # todas as de cima.
+        if (-not (Export-WinForgeWifiDriverBackup -Published @('oem22.inf', 'oem49.inf') -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun).Ok) { Write-Host "  [ERRO] Rede (exportação): nomes de pacote válidos foram recusados" -ForegroundColor Red; $wbErrors++ }
+        # E sem -DryRun ela RECUSA em modo SelfTest: esta é a função que mexe no repositório de
+        # drivers da máquina de quem compila.
+        $wfPnpTrava = $null
+        try { $null = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -Root (Join-Path $wbSelfTestRaiz 'driver-backup') } catch { $wfPnpTrava = [string]$_.Exception.Message }
+        if ($null -eq $wfPnpTrava) { Write-Host "  [ERRO] Rede (exportação): sem -DryRun ela deveria recusar em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPnpTrava -notmatch 'SelfTest') { Write-Host "  [ERRO] Rede (exportação): a recusa não fala em SelfTest ('$wfPnpTrava')" -ForegroundColor Red; $wbErrors++ }
+        # Sem pasta de backup, o botão 6 não tem o que restaurar.
+        if ((Get-WinForgeWifiDriverBackupSet -Root (Join-Path $wbSelfTestRaiz 'driver-backup-vazio')).Found) { Write-Host "  [ERRO] Rede (backup): achou cópia numa pasta que não existe" -ForegroundColor Red; $wbErrors++ }
+        # ...e COM cópia guardada ele acha, com carimbo, contagem e tamanho. Só a metade negativa
+        # seria trava vazia: uma função que devolvesse 'Found = $false' sempre passaria nela, e o
+        # botão que restaura nunca enxergaria backup nenhum. O fixture nasce e morre dentro da raiz
+        # isolada desta rodada.
+        $wfPnpCheio = Join-Path $wbSelfTestRaiz 'driver-backup-cheio'
+        try {
+            # DOIS conjuntos, e o mais velho entra primeiro: com um só, a escolha do mais recente
+            # não é observada, e pegar o mais antigo passaria. Aqui o certo é o MAIS RECENTE - ele
+            # é o estado imediatamente anterior à mexida que se quer desfazer. (A restauração de
+            # permissões escolhe o mais ANTIGO não consumido, por outro motivo; são regras
+            # diferentes de propósito.)
+            $wfPnpVelho = Join-Path $wfPnpCheio 'oem22-20250101-000000'
+            New-Item -ItemType Directory -Path $wfPnpVelho -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfPnpVelho 'antigo.inf') -Value 'abcdefghij' -Encoding Ascii
+            $wfPnpConj = Join-Path $wfPnpCheio 'oem22-20260913-010203'
+            New-Item -ItemType Directory -Path $wfPnpConj -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfPnpConj 'netwbw02.inf') -Value 'abc' -Encoding Ascii
+            $wfPnpSet = Get-WinForgeWifiDriverBackupSet -Root $wfPnpCheio
+            if (-not $wfPnpSet.Found) { Write-Host "  [ERRO] Rede (backup): não achou a cópia guardada" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfPnpSet.Stamp -ne '20260913-010203') { Write-Host "  [ERRO] Rede (backup): carimbo '$($wfPnpSet.Stamp)', esperado '20260913-010203'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([int]$wfPnpSet.Files -ne 1) { Write-Host "  [ERRO] Rede (backup): $($wfPnpSet.Files) arquivo(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+            elseif ([long]$wfPnpSet.Bytes -le 0) { Write-Host "  [ERRO] Rede (backup): tamanho $($wfPnpSet.Bytes)" -ForegroundColor Red; $wbErrors++ }
+            # Pasta que EXISTE e não tem conjunto de carimbo nenhum também é "não há o que
+            # restaurar": só a inexistente seria fácil demais.
+            $wfPnpSemConj = Join-Path $wbSelfTestRaiz 'driver-backup-sem-conjunto'
+            New-Item -ItemType Directory -Path (Join-Path $wfPnpSemConj 'pasta-qualquer') -Force | Out-Null
+            if ((Get-WinForgeWifiDriverBackupSet -Root $wfPnpSemConj).Found) { Write-Host "  [ERRO] Rede (backup): uma pasta sem conjunto de carimbo virou cópia guardada" -ForegroundColor Red; $wbErrors++ }
+            Remove-Item -LiteralPath $wfPnpSemConj -Recurse -Force -ErrorAction SilentlyContinue
+        } finally {
+            Remove-Item -LiteralPath $wfPnpCheio -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "  Rede (pnputil): amostra pt-BR com oem22.inf e exatamente 1 inbox, só código 0 é sucesso, saída interpretada, decodificação ansi, sem /force e sem /reboot"
+    } catch {
+        Write-Host "  [ERRO] Rede (pnputil): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
     # qualquer processo de integridade média da mesma conta. Enquanto ele só pintava o rótulo

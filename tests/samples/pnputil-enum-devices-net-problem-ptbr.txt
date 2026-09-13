@@ -1,0 +1,12 @@
+﻿Utilitário PnP da Microsoft
+
+ID da Instância:                ROOT\NET\0005
+Descrição do Dispositivo:         Fortinet SSL VPN Virtual Ethernet Adapter #2
+Nome da Classe:                 Net
+GUID de Classe:                 {4d36e972-e325-11ce-bfc1-08002be10318}
+Nome do Fabricante:          Fortinet Inc
+Status:                     Problema
+Código do Problema:               10 (0x0A) [CM_PROB_FAILED_START]
+Status do Problema:             0xC0000001
+Nome do Driver:                oem49.inf
+

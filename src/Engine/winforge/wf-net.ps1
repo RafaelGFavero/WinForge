@@ -993,4 +993,346 @@ function Invoke-WinForgeNetworkDiagnostic {
     $L.Add((Get-WinForgeNetworkVerdict -Facts $fatos))
     return ($L -join "`r`n")
 }
+
+# =============================================================== o pnputil, e as três armadilhas
+# Daqui para baixo é o mecanismo que REMOVE e INSTALA driver de rede. A régua sobe: uma máquina que
+# erra aqui fica sem nenhum meio de conexão, e o caso que abriu esta leva é um notebook.
+#
+# Três armadilhas, todas MEDIDAS nesta máquina, e nenhuma delas aparece com entrada sintética:
+#
+# (a) CÓDIGO DE SAÍDA. '$LASTEXITCODE -gt 0' trata -536870340 como sucesso, porque ele é NEGATIVO.
+#     Só 0 é sucesso, e é por isso que a pergunta virou função em vez de comparação solta.
+# (b) DECODIFICAÇÃO. O pnputil escreve CP1252 quando a saída é redirecionada, e não OEM 850 -
+#     medido: a code page ANSI desta máquina é 1252, e 'Versão do Driver' volta com o acento certo
+#     em 'ansi' e embaralhado em 'oem'.
+# (c) SAÍDA COM CÓDIGO 0 E DISPOSITIVO EM FALHA. Medido: '/enum-devices /class Net /problem'
+#     devolveu o 'Fortinet SSL VPN Virtual Ethernet Adapter #2' com
+#     'Código do Problema: 10 (0x0A) [CM_PROB_FAILED_START]' e SAIU COM 0. Confiar no código de
+#     saída para saber se há dispositivo quebrado é confiar em nada; a saída tem de ser lida.
+#
+# E uma quarta coisa, que não é armadilha e sim limite: 'pnputil /enum-drivers' lista SÓ pacotes de
+# terceiro. Medido aqui: 96 blocos, 96 deles 'oemNN.inf', NENHUM com uma só linha '.inf'. Não há
+# opção de listar os embutidos (o /? mostra /class, /files, /ids e /devices, e nada de inbox). Ou
+# seja: alimentado com a saída de uma máquina de verdade, Select-WinForgeWifiInboxDriver responde
+# "não há embutido" SEMPRE. Quem responde de fato a essa pergunta é a varredura de INF de
+# Test-WinForgeInboxWifiDriver; esta função existe para a outra metade, que é saber QUAIS pacotes
+# de terceiro estão instalados para exportar antes de mexer neles.
+
+function Get-WinForgeDriverStoreEntry {
+    <#
+    .SYNOPSIS
+        Quebra a saída de 'pnputil /enum-drivers' em uma entrada por pacote de driver.
+    .DESCRIPTION
+        A saída é LOCALIZADA, e por isso os RÓTULOS não servem de âncora: o mesmo campo é
+        'Published Name', 'Nome Publicado' ou 'Nome do arquivo INF publicado' conforme a versão e o
+        idioma. Os VALORES servem, e são eles que ancoram tudo aqui:
+
+        - Os blocos são separados por linha em branco.
+        - Dentro do bloco, o PRIMEIRO valor terminado em '.inf' é o nome publicado, e o SEGUNDO,
+          quando existe, é o nome original. Medido: o bloco de um pacote de terceiro tem DUAS
+          linhas '.inf' e o de um embutido teria UMA. Confundir a segunda com um embutido é o que
+          some com o botão do driver básico.
+        - A linha do GUID de classe é reconhecível pelo VALOR ({8-4-4-4-12}), e ela ancora as duas
+          de cima: o provedor e o nome da classe. É posição, mas posição RELATIVA a uma linha que se
+          identifica sozinha, e não contagem a partir do topo do bloco.
+        - A data e a versão saem do único valor com a forma 'dd/mm/aaaa <números e pontos>'.
+
+        'Get-WindowsDriver -Online -All' traz um campo '.Inbox' que responderia parte disto de forma
+        direta, e foi descartado: ele EXIGE ELEVAÇÃO, e o -SelfTest roda sem administrador.
+    .PARAMETER Text
+        A saída do comando, já decodificada.
+    .OUTPUTS
+        Array de @{ Published; Original; Provider; Class; Date; Version; IsOem = <bool> }.
+    #>
+    param([string]$Text)
+
+    $entradas = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+
+    foreach ($bloco in @($Text -split "(?:\r?\n){2,}")) {
+        $infs = @([regex]::Matches($bloco, '(?m)^\s*[^:\r\n]+:\s*(\S+\.inf)\s*$') | ForEach-Object { $_.Groups[1].Value })
+        if (-not $infs.Count) { continue }
+        $linhas = @(@($bloco -split "\r?\n") | Where-Object { $_ -match ':' })
+
+        $iGuid = -1
+        for ($k = 0; $k -lt $linhas.Count; $k++) {
+            if ($linhas[$k] -match ':\s*\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\s*$') { $iGuid = $k; break }
+        }
+        $provedor = ''
+        $classe = ''
+        if ($iGuid -ge 1) { $classe = ((($linhas[$iGuid - 1]) -split ':', 2)[1]).Trim() }
+        if ($iGuid -ge 2) { $provedor = ((($linhas[$iGuid - 2]) -split ':', 2)[1]).Trim() }
+
+        $data = ''
+        $versao = ''
+        foreach ($linha in $linhas) {
+            if ($linha -match ':\s*(\d{1,2}/\d{1,2}/\d{4})\s+([\d.]+)\s*$') { $data = $Matches[1]; $versao = $Matches[2]; break }
+        }
+
+        $publicado = [string]$infs[0]
+        $entradas += @{
+            Published = $publicado
+            Original  = $(if ($infs.Count -gt 1) { [string]$infs[1] } else { '' })
+            Provider  = $provedor
+            Class     = $classe
+            Date      = $data
+            Version   = $versao
+            IsOem     = [bool]($publicado -match '^oem\d+\.inf$')
+        }
+    }
+    return @($entradas)
+}
+
+function Select-WinForgeWifiInboxDriver {
+    <#
+    .SYNOPSIS
+        Separa, entre os pacotes lidos, o driver embutido do Windows e os pacotes de terceiro, só na
+        classe de rede.
+    .DESCRIPTION
+        A classe é filtrada porque a lista traz a máquina inteira: impressora, vídeo e áudio não
+        têm nada a ver com o rádio, e um pacote de terceiro de outra classe na lista de exportação
+        significaria copiar 120 MB do driver errado.
+
+        'Found' é a informação, e não a decisão: quem decide se o botão do driver básico aparece é
+        Test-WinForgeNetworkGuard, pelo fato 'Inbox'.
+
+        LIMITE, e está medido no comentário da região: alimentada com a saída de uma máquina de
+        verdade, esta função responde 'Found = $false' SEMPRE, porque o pnputil não lista pacote
+        embutido nenhum. Ela responde de verdade quando a lista vem de outra fonte - e a metade que
+        importa hoje é 'Oem', que é o que o botão exporta antes de mexer.
+    .PARAMETER Entries
+        As entradas devolvidas por Get-WinForgeDriverStoreEntry.
+    .OUTPUTS
+        @{ Found = <bool>; Published = <string>; Oem = @(<string>) }
+    #>
+    param([Parameter(Mandatory)][object[]]$Entries)
+
+    $rede = @(@($Entries) | Where-Object { $null -ne $_ -and ([string]$_.Class -eq 'Net') })
+    $embutidos = @($rede | Where-Object { -not [bool]$_.IsOem })
+    $terceiros = @($rede | Where-Object { [bool]$_.IsOem } | ForEach-Object { [string]$_.Published })
+    return @{
+        Found     = [bool]$embutidos.Count
+        Published = $(if ($embutidos.Count) { [string]$embutidos[0].Published } else { '' })
+        Oem       = @($terceiros)
+    }
+}
+
+function Test-WinForgePnputilExit {
+    <#
+    .SYNOPSIS
+        Diz se uma execução do pnputil deu certo. Só o código 0 dá.
+    .DESCRIPTION
+        Existe como função, e não como comparação solta, por causa de um número: -536870340. Ele é
+        NEGATIVO, então '$LASTEXITCODE -gt 0' o trata como sucesso - e o passo seguinte do botão
+        seria remover o driver de rede achando que a cópia de segurança tinha sido feita.
+
+        3010 também não passa. Ele significa "deu certo, mas precisa reiniciar", e para esta escada
+        isso não é sucesso: a próxima coisa que o botão faria é mexer no driver de uma máquina com
+        operação pendente, que é o degrau 'reinício pendente' inteiro sendo pulado por dentro.
+    .OUTPUTS
+        [bool]
+    #>
+    param([Parameter(Mandatory)][int]$ExitCode)
+
+    return ($ExitCode -eq 0)
+}
+
+function Test-WinForgePnputilProblem {
+    <#
+    .SYNOPSIS
+        Lê a saída de 'pnputil /enum-devices /class Net /problem' e diz se há dispositivo de rede em
+        falha, nomeando cada um.
+    .DESCRIPTION
+        É obrigatório LER a saída, e a medição é a razão: nesta máquina o comando achou o
+        'Fortinet SSL VPN Virtual Ethernet Adapter #2' com código de problema 10 e SAIU COM CÓDIGO
+        0. Quem confiar no código de saída para saber se há dispositivo quebrado não descobre nada.
+
+        Duas âncoras, as duas por VALOR e não por rótulo:
+
+        - O código do problema vem da linha cujo valor tem a forma '<n> (0x..) [CM_PROB_...]'. O
+          'CM_PROB_' é constante do Windows e não é traduzido.
+        - O nome vem da linha SEGUINTE à da ID de instância, que se identifica pelo valor
+          ('ROOT\NET\0005', 'PCI\VEN_...': letras, barra invertida e o resto).
+    .PARAMETER Text
+        A saída do comando, já decodificada.
+    .OUTPUTS
+        @{ Any = <bool>; Devices = @(@{ Name; Problem }) }
+    #>
+    param([string]$Text)
+
+    $dispositivos = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @{ Any = $false; Devices = @() } }
+
+    foreach ($bloco in @($Text -split "(?:\r?\n){2,}")) {
+        $linhas = @($bloco -split "\r?\n")
+        $codigo = -1
+        foreach ($linha in $linhas) {
+            if ($linha -match ':\s*(\d+)\s*\(0x[0-9A-Fa-f]+\)\s*\[CM_PROB_') { $codigo = [int]$Matches[1]; break }
+        }
+        if ($codigo -lt 0) { continue }
+        $nome = ''
+        for ($k = 0; $k -lt ($linhas.Count - 1); $k++) {
+            if ($linhas[$k] -match ':\s*[A-Za-z]+\\\S+\s*$') {
+                $seguinte = [string]$linhas[$k + 1]
+                if ($seguinte -match ':') { $nome = (($seguinte -split ':', 2)[1]).Trim() }
+                break
+            }
+        }
+        $dispositivos += @{ Name = $nome; Problem = $codigo }
+    }
+    return @{ Any = [bool]@($dispositivos).Count; Devices = @($dispositivos) }
+}
+
+function Get-WinForgeWifiDriverBackupRoot {
+    <#
+    .SYNOPSIS
+        A pasta onde as cópias de segurança de driver de rede ficam.
+    .DESCRIPTION
+        %ProgramData%\WinForge\driver-backup, pela API de pastas e nunca por variável de ambiente -
+        a mesma regra do resto do programa.
+
+        NUNCA o %TEMP%, e isto é medição e não gosto: o export de um pacote de driver de rede desta
+        família deu 10 arquivos e 120 MB, com um 'WiFi.msi' e um 'Setup.exe' de 17 MB. O %TEMP% é
+        apagado por limpeza de disco, pelo próprio Windows e por qualquer faxina que o usuário rode -
+        e o que estaria sendo apagado é a única volta depois de remover o driver da placa.
+    .OUTPUTS
+        Caminho da pasta raiz.
+    #>
+    param()
+
+    $base = [string][Environment]::GetFolderPath('CommonApplicationData')
+    if ([string]::IsNullOrWhiteSpace($base)) { $base = 'C:\ProgramData' }
+    return (Join-Path (Join-Path $base 'WinForge') 'driver-backup')
+}
+
+function Export-WinForgeWifiDriverBackup {
+    <#
+    .SYNOPSIS
+        Copia os pacotes de driver indicados para fora do repositório de drivers, e CONFERE a cópia
+        antes de dizer que deu certo.
+    .DESCRIPTION
+        É a rede de segurança do botão que remove driver: sem ela, "não deu certo" vira "não deu
+        certo e agora não há driver".
+
+        O NOME DO PACOTE É CONFERIDO antes de virar argumento. Ele vem de uma leitura de texto, e
+        texto lido é dado, não comando: só '^oem<números>.inf$' passa. Um '..\..\algo' ali seria um
+        caminho escolhido por quem escreveu a saída, e não por nós, e um nome com um espaço e mais
+        alguma coisa atrás seria uma OPÇÃO a mais na linha de comando - inclusive uma das duas que
+        esta função existe para nunca passar. Nome fora da forma aborta tudo, sem criar pasta
+        nenhuma.
+
+        A chamada não leva a opção que força nem a que reinicia. As duas transformam "não deu, nada
+        mudou" em "não deu, e agora não há driver" - e os nomes delas não são citados nesta ajuda de
+        propósito, porque a trava que as proíbe lê o corpo do scriptblock, e o bloco de ajuda faz
+        parte do corpo.
+
+        QUATRO CONFERÊNCIAS depois do comando, e qualquer uma que falhe aborta sem seguir adiante:
+
+        1. O código de saída, por Test-WinForgePnputilExit (ver a armadilha (a) da região).
+        2. Um '.inf' no destino. Sem ele não há o que reinstalar.
+        3. Um '.cat' no destino. É o catálogo de assinatura; sem ele o Windows recusa o pacote na
+           volta, e a recusa só apareceria na hora do desespero.
+        4. O total em bytes, que é o que a tela mostra: um export de 0 byte com código 0 é o pior
+           dos casos, porque parece ter dado certo.
+
+        O 'Ok' devolvido é o que o passo que exporta passa adiante como argumento obrigatório da
+        asserção de rede. Ninguém herda esse valor de lugar nenhum.
+    .PARAMETER Published
+        Os nomes publicados dos pacotes ('oem22.inf').
+    .PARAMETER Root
+        A pasta raiz das cópias. Sem o parâmetro, a de Get-WinForgeWifiDriverBackupRoot.
+    .PARAMETER DryRun
+        Diz o que faria e para por aí: nada roda, nenhuma pasta é criada.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <string>; Files = <int>; Bytes = <long> }
+    #>
+    param(
+        [Parameter(Mandatory)][string[]]$Published,
+        [string]$Root,
+        [switch]$DryRun
+    )
+
+    $raiz = $(if ([string]::IsNullOrWhiteSpace($Root)) { Get-WinForgeWifiDriverBackupRoot } else { [string]$Root })
+    $vazio = @{ Ok = $false; Reason = ''; Path = ''; Files = 0; Bytes = [long]0 }
+
+    $nomes = @(@($Published) | ForEach-Object { [string]$_ })
+    if (-not $nomes.Count) { $vazio.Reason = 'Nenhum pacote de driver foi indicado para copiar.'; return $vazio }
+    foreach ($nome in $nomes) {
+        if ($nome -notmatch '^oem\d+\.inf$') {
+            $vazio.Reason = "O nome de pacote '$nome' não tem a forma 'oem<número>.inf' e não vira argumento de comando."
+            return $vazio
+        }
+    }
+    if (-not [System.IO.Path]::IsPathRooted($raiz)) { $vazio.Reason = "A pasta de destino '$raiz' não é um caminho absoluto."; return $vazio }
+
+    $carimbo = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $destino = Join-Path $raiz ("{0}-{1}" -f ([string]$nomes[0]).Replace('.inf', ''), $carimbo)
+
+    if ($DryRun) {
+        return @{ Ok = $true; Reason = "[simulação] copiaria $($nomes.Count) pacote(s) para '$destino'"; Path = $destino; Files = 0; Bytes = [long]0 }
+    }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    New-Item -ItemType Directory -Path $destino -Force -ErrorAction Stop | Out-Null
+    foreach ($nome in $nomes) {
+        $passo = @{
+            FilePath  = (Get-WinForgeSystemExe -Name 'pnputil.exe')
+            Arguments = @('/export-driver', $nome, $destino)
+            # 'ansi' porque o pnputil escreve CP1252 quando a saída é redirecionada; lida como a
+            # code page de console, a mensagem dele chega com o acento embaralhado.
+            Encoding  = 'ansi'
+        }
+        $saida = Invoke-WinForgeNativeCommand -FilePath $passo.FilePath -Arguments $passo.Arguments -Encoding $passo.Encoding
+        $codigo = [int]$saida.ExitCode
+        if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) {
+            return @{ Ok = $false; Reason = "A cópia de '$nome' falhou com o código $codigo. $([string]$saida.Text)"; Path = $destino; Files = 0; Bytes = [long]0 }
+        }
+    }
+
+    $infs = @(Get-ChildItem -LiteralPath $destino -Filter '*.inf' -File -Recurse -ErrorAction SilentlyContinue)
+    $cats = @(Get-ChildItem -LiteralPath $destino -Filter '*.cat' -File -Recurse -ErrorAction SilentlyContinue)
+    $todos = @(Get-ChildItem -LiteralPath $destino -File -Recurse -ErrorAction SilentlyContinue)
+    $soma = [long](@($todos | Measure-Object -Property Length -Sum).Sum)
+    if (-not $infs.Count) { return @{ Ok = $false; Reason = "A cópia terminou sem nenhum arquivo .inf em '$destino': não haveria o que reinstalar."; Path = $destino; Files = @($todos).Count; Bytes = $soma } }
+    if (-not $cats.Count) { return @{ Ok = $false; Reason = "A cópia terminou sem nenhum catálogo .cat em '$destino': o Windows recusaria o pacote na volta."; Path = $destino; Files = @($todos).Count; Bytes = $soma } }
+    if ($soma -le 0) { return @{ Ok = $false; Reason = "A cópia terminou com 0 byte em '$destino'."; Path = $destino; Files = @($todos).Count; Bytes = $soma } }
+
+    return @{ Ok = $true; Reason = ''; Path = $destino; Files = @($todos).Count; Bytes = [long]$soma }
+}
+
+function Get-WinForgeWifiDriverBackupSet {
+    <#
+    .SYNOPSIS
+        Acha a cópia de segurança de driver mais recente, para o botão que restaura saber se tem o
+        que restaurar. SÓ LÊ.
+    .DESCRIPTION
+        Pasta inexistente e pasta vazia são a mesma resposta: 'Found = $false'. O botão que restaura
+        usa isso para dizer que não há nada guardado, em vez de tentar e falhar no meio.
+    .PARAMETER Root
+        A pasta raiz das cópias. Sem o parâmetro, a de Get-WinForgeWifiDriverBackupRoot.
+    .OUTPUTS
+        @{ Found = <bool>; Path = <string>; Stamp = <string>; Files = <int>; Bytes = <long> }
+    #>
+    param([string]$Root)
+
+    $raiz = $(if ([string]::IsNullOrWhiteSpace($Root)) { Get-WinForgeWifiDriverBackupRoot } else { [string]$Root })
+    $nada = @{ Found = $false; Path = ''; Stamp = ''; Files = 0; Bytes = [long]0 }
+    if (-not (Test-Path -LiteralPath $raiz)) { return $nada }
+
+    $conjuntos = @()
+    try { $conjuntos = @(Get-ChildItem -LiteralPath $raiz -Directory -ErrorAction Stop | Where-Object { [string]$_.Name -match '-(\d{8}-\d{6})$' }) } catch { return $nada }
+    if (-not $conjuntos.Count) { return $nada }
+
+    $novo = @($conjuntos | Sort-Object -Property Name -Descending)[0]
+    $carimbo = ''
+    if ([string]$novo.Name -match '-(\d{8}-\d{6})$') { $carimbo = [string]$Matches[1] }
+    $arquivos = @(Get-ChildItem -LiteralPath $novo.FullName -File -Recurse -ErrorAction SilentlyContinue)
+    return @{
+        Found = $true
+        Path  = [string]$novo.FullName
+        Stamp = $carimbo
+        Files = @($arquivos).Count
+        Bytes = [long](@($arquivos | Measure-Object -Property Length -Sum).Sum)
+    }
+}
 #endregion

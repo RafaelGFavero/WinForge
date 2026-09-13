@@ -1,0 +1,30 @@
+﻿Utilitário PnP da Microsoft
+
+Nome Publicado:     oem22.inf
+Nome Original:      netwbw02.inf
+Nome do Provedor:      Intel
+Nome da Classe:         Net
+GUID de Classe:         {4d36e972-e325-11ce-bfc1-08002be10318}
+Versão do Driver:     04/29/2019 18.33.17.1
+Nome do Signatário:        Microsoft Windows Hardware Compatibility Publisher
+Atributos:         Legacy
+Versão do WHCP:       Desconhecido
+
+Nome Publicado:     oem49.inf
+Nome Original:      ftsvnic.inf
+Nome do Provedor:      Fortinet Inc
+Nome da Classe:         Net
+GUID de Classe:         {4d36e972-e325-11ce-bfc1-08002be10318}
+Versão do Driver:     01/28/2025 17.1.29.118
+Nome do Signatário:        Microsoft Windows Hardware Compatibility Publisher
+Atributos:         Universal
+Versão do WHCP:       Desconhecido
+
+Nome Publicado:     netwtw10.inf
+Nome do Provedor:      Intel
+Nome da Classe:         Net
+GUID de Classe:         {4d36e972-e325-11ce-bfc1-08002be10318}
+Versão do Driver:     07/14/2023 23.20.0.6
+Nome do Signatário:        Microsoft Windows
+Atributos:         Universal
+Versão do WHCP:       Desconhecido
