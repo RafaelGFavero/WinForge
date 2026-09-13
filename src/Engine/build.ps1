@@ -3974,6 +3974,99 @@ if ($SelfTest) {
     } finally {
         Remove-Item -LiteralPath $wfParRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- Parar: a Fase 4 fora do job
+    # KILL_ON_JOB_CLOSE mata a árvore quando o processo dono morre - que é exatamente o que a
+    # proibição de cancelar na Fase 4 existe para impedir: morrer entre 'posse aos Admins' e 'posse
+    # de volta' deixa uma pasta de sistema aberta a qualquer processo elevado.
+    $wfF4Raiz = Join-Path $wbSelfTestRaiz 'posse'
+    try {
+        if (Test-Path -LiteralPath $wfF4Raiz) { Remove-Item -LiteralPath $wfF4Raiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfF4Raiz -Force | Out-Null
+        $wfF4Fonte = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
+        if ($wfF4Fonte -notmatch 'Enter-WinForgeStreamProtected -Path') { Write-Host "  [ERRO] Posse: Invoke-WinForgeAclOwnerFallback não abre a janela protegida" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch '(?s)finally\s*\{[^}]*Exit-WinForgeStreamProtected') { Write-Host "  [ERRO] Posse: a janela protegida não fecha no 'finally' - uma exceção deixaria o cancelamento morto para sempre" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch 'Write-WinForgeAclOwnerPending -Folder') { Write-Host "  [ERRO] Posse: o marcador não é escrito antes da troca de posse" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch '(?s)finally\s*\{[^}]*Clear-WinForgeAclOwnerPending') { Write-Host "  [ERRO] Posse: o marcador não é apagado no 'finally', depois de devolver a posse" -ForegroundColor Red; $wbErrors++ }
+        $wfF4PosMarca = $wfF4Fonte.IndexOf('Write-WinForgeAclOwnerPending -Folder', [StringComparison]::Ordinal)
+        $wfF4PosTroca = $wfF4Fonte.IndexOf('-Step $socorro[0]', [StringComparison]::Ordinal)
+        if ($wfF4PosMarca -lt 0 -or $wfF4PosTroca -lt 0 -or $wfF4PosMarca -gt $wfF4PosTroca) { Write-Host "  [ERRO] Posse: o marcador é escrito DEPOIS da troca de posse - a janela sem marcador é justamente a que precisa dele" -ForegroundColor Red; $wbErrors++ }
+        $wfF4PosEntra = $wfF4Fonte.IndexOf('Enter-WinForgeStreamProtected -Path', [StringComparison]::Ordinal)
+        if ($wfF4PosEntra -lt 0 -or $wfF4PosEntra -gt $wfF4PosTroca) { Write-Host "  [ERRO] Posse: a janela protegida abre DEPOIS da troca de posse - o instante desprotegido é o único que importa" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch 'Invoke-WinForgeAclStreamStep') { Write-Host "  [ERRO] Posse: a Fase 4 ficou fora do fluxo ao vivo - ela é a fase que mais escreve" -ForegroundColor Red; $wbErrors++ }
+        # Marcador: escrito ANTES da troca, apagado depois de devolver, e na abertura seguinte ele
+        # RELATA - nunca conserta sozinho.
+        $wfF4SelfAntes = $sync.SelfTest
+        try {
+            $sync.SelfTest = $false
+            $wfF4Marca = Write-WinForgeAclOwnerPending -Folder 'C:\Windows' -OwnerSid 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -Root $wfF4Raiz
+        } finally { $sync.SelfTest = $wfF4SelfAntes }
+        if (-not $wfF4Marca.Ok) { Write-Host "  [ERRO] Posse (marcador): a gravação falhou ('$($wfF4Marca.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $wfF4Lido = Get-WinForgeAclOwnerPending -Root $wfF4Raiz
+        if (-not $wfF4Lido.Present) { Write-Host "  [ERRO] Posse (marcador): o marcador plantado não foi lido" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF4Lido.Folder -ne 'C:\Windows') { Write-Host "  [ERRO] Posse (marcador): a pasta lida é '$($wfF4Lido.Folder)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF4Lido.Text -notmatch 'Devolver ao padrão do Windows') { Write-Host "  [ERRO] Posse (marcador): o relato não oferece o botão ('$($wfF4Lido.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # O relato traz o DONO ORIGINAL: sem ele a frase diz "alguma pasta está com o dono errado" e
+        # não diz para quem ela tem de voltar, que é a única coisa acionável ali.
+        if ([string]$wfF4Lido.Text -notmatch [regex]::Escape('S-1-5-80-956008885')) { Write-Host "  [ERRO] Posse (marcador): o relato não diz o dono original ('$($wfF4Lido.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # E a gravação é o único ponto que escreve: com SelfTest ligado ela LANÇA.
+        $wfF4Lancou = $false
+        try { $null = Write-WinForgeAclOwnerPending -Folder 'C:\Windows' -OwnerSid 'S-1-5-18' -Root $wfF4Raiz } catch { $wfF4Lancou = $true }
+        if (-not $wfF4Lancou) { Write-Host "  [ERRO] Posse (marcador): a gravação passou com `$sync.SelfTest ligado - falta Assert-WinForgeNotSelfTest" -ForegroundColor Red; $wbErrors++ }
+        # A leitura não ESCREVE, e a prova principal é comportamento (o marcador continua no disco
+        # depois do relato, mais abaixo). As formas proibidas são de CHAMADA, e não nomes soltos: a
+        # descrição desta função precisa dizer que ela não roda icacls nem apaga nada, e uma lista de
+        # nomes soltos ficaria vermelha por causa da própria frase que explica a regra.
+        $wfF4FonteM = [string](Get-Command Get-WinForgeAclOwnerPending).ScriptBlock
+        foreach ($wfF4Proibido in @('Remove-Item -LiteralPath', 'Set-Content -LiteralPath', "Get-WinForgeSystemExe -Name 'icacls.exe'", 'Invoke-WinForgeAclStreamStep -Path')) {
+            if ($wfF4FonteM.IndexOf($wfF4Proibido, [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Posse (marcador): a leitura da abertura ESCREVE ('$wfF4Proibido') - ela só relata" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E ler duas vezes não muda nada: o marcador é do disco, não da leitura.
+        if (-not (Get-WinForgeAclOwnerPending -Root $wfF4Raiz).Present) { Write-Host "  [ERRO] Posse (marcador): a segunda leitura não achou o marcador - a primeira consumiu ele" -ForegroundColor Red; $wbErrors++ }
+        # De ONDE sai o dono original: do passo de devolução do PLANO. A extração era embutida na
+        # Fase 4 e por isso não era exercitada - MEDIDO, um mutante que a apagava SOBREVIVEU, e o
+        # marcador teria saído sem dono (e um marcador sem dono nem é lido de volta).
+        $wfF4Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wfF4Raiz 'plano') -Stamp '20260912-101010')
+        $wfF4Dev = @($wfF4Plano | Where-Object { [int]$_.Phase -eq 4 -and [string]$_.Kind -eq 'setowner-devolver' })
+        if (-not $wfF4Dev.Count) { Write-Host "  [ERRO] Posse (dono): o plano não tem passo de devolução de posse" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfF4Extraidos = 0
+            foreach ($wfF4P in $wfF4Dev) {
+                $wfF4Sid = [string](Get-WinForgeAclStepOwnerSid -Step $wfF4P)
+                if ($wfF4Sid -notmatch '^S-1-') { Write-Host "  [ERRO] Posse (dono): o passo de devolução de '$($wfF4P.Folder)' devolveu o SID '$wfF4Sid'" -ForegroundColor Red; $wbErrors++ }
+                elseif (@($wfF4P.Arguments | ForEach-Object { [string]$_ }) -notcontains "*$wfF4Sid") { Write-Host "  [ERRO] Posse (dono): o SID '$wfF4Sid' não é o que o passo entrega ao icacls" -ForegroundColor Red; $wbErrors++ }
+                else { $wfF4Extraidos++ }
+            }
+            if ($wfF4Extraidos -ne $wfF4Dev.Count) { Write-Host "  [ERRO] Posse (dono): $wfF4Extraidos de $($wfF4Dev.Count) passo(s) de devolução tiveram o dono extraído" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Passo sem SID devolve vazio e NÃO estoura: é o ramo que impede a Fase 4 de morrer por causa
+        # do aviso que existe para protegê-la.
+        if ([string](Get-WinForgeAclStepOwnerSid -Step @{ Arguments = @('C:\Windows', '/setowner') }) -ne '') { Write-Host "  [ERRO] Posse (dono): passo sem SID não devolveu vazio" -ForegroundColor Red; $wbErrors++ }
+        # E a Fase 4 USA a função, em vez de voltar a garimpar o vetor à mão.
+        if ($wfF4Fonte.IndexOf('Get-WinForgeAclStepOwnerSid -Step', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Posse (dono): a Fase 4 não usa Get-WinForgeAclStepOwnerSid" -ForegroundColor Red; $wbErrors++ }
+        # A ABERTURA relata e NÃO conserta: o marcador continua lá depois do relato. É a diferença
+        # entre avisar e mexer sozinho na posse de uma pasta do Windows.
+        $wfF4Relatou = Show-WinForgeAclOwnerPending -Root $wfF4Raiz
+        if (-not $wfF4Relatou) { Write-Host "  [ERRO] Posse (abertura): com o marcador plantado, a abertura não relatou nada" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Get-WinForgeAclOwnerPending -Root $wfF4Raiz).Present) { Write-Host "  [ERRO] Posse (abertura): o relato APAGOU o marcador - ele tem de aparecer em toda abertura até alguém resolver" -ForegroundColor Red; $wbErrors++ }
+        $wfF4FonteS = [string](Get-Command Show-WinForgeAclOwnerPending).ScriptBlock
+        if ($wfF4FonteS -match 'MessageBox') { Write-Host "  [ERRO] Posse (abertura): o relato abre caixa de mensagem - ele escreve no log e na barra, e nada mais" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfF4Esp in @('Write-WinForgeLog', 'Set-WinForgeProfileProgress')) {
+            if ($wfF4FonteS.IndexOf($wfF4Esp, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Posse (abertura): o relato não usa '$wfF4Esp'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Pendurado no MESMO gancho da varredura da Tarefa 6, e pela forma da chamada.
+        $wfF4FonteJ = [string](Get-Command Start-WinForgeProfileJob).ScriptBlock
+        if ($wfF4FonteJ.IndexOf('$null = Show-WinForgeAclOwnerPending', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Posse (abertura): o diagnóstico não CHAMA o relato do marcador - a posse pendente ficaria calada" -ForegroundColor Red; $wbErrors++ }
+        # Sem marcador não há relato: um aviso que sai em toda abertura vira ruído e deixa de ser lido.
+        $wfF4SelfAntes2 = $sync.SelfTest
+        try { $sync.SelfTest = $false; $null = Clear-WinForgeAclOwnerPending -Root $wfF4Raiz } finally { $sync.SelfTest = $wfF4SelfAntes2 }
+        if ((Get-WinForgeAclOwnerPending -Root $wfF4Raiz).Present) { Write-Host "  [ERRO] Posse (marcador): o marcador não foi apagado" -ForegroundColor Red; $wbErrors++ }
+        if (Show-WinForgeAclOwnerPending -Root $wfF4Raiz) { Write-Host "  [ERRO] Posse (abertura): sem marcador o relato saiu assim mesmo" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Posse: janela protegida aberta e fechada no finally, marcador escrito antes da troca, leitura da abertura só relata"
+    } catch {
+        Write-Host "  [ERRO] Posse: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfF4Raiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Permissões do disco do sistema
     # O caso real: uma atualização de fabricante derrubou a cadeia de permissões do disco do Windows,
     # e o dono da máquina ficou sem acesso às próprias pastas. São três botões - Verificar (só lê),
@@ -4250,7 +4343,10 @@ if ($SelfTest) {
         # concessão, DEVOLVER a posse. Sem o terceiro a pasta do sistema fica com os
         # Administradores como dona e passa a aceitar alteração de qualquer processo elevado.
         $wfAclFonteFb = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
-        $wfAclPosFb = @('-Step $socorro[0]', '-Step $Step', '-Step $devolver[0]') | ForEach-Object { $wfAclFonteFb.IndexOf($_, [StringComparison]::Ordinal) }
+        # As três âncoras são a CHAMADA que executa o movimento, e não '-Step <passo>' solto: o
+        # mesmo passo de devolução é citado antes, para tirar dele o SID do dono original, e com a
+        # âncora curta a ordem medida passava a ser a dessa citação.
+        $wfAclPosFb = @('Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $socorro[0]', 'Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $Step', 'Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $devolver[0]') | ForEach-Object { $wfAclFonteFb.IndexOf($_, [StringComparison]::Ordinal) }
         if (@($wfAclPosFb | Where-Object { $_ -lt 0 }).Count) { Write-Host "  [ERRO] Permissões (socorro): a função não roda os três movimentos (posse, segunda tentativa, devolução)" -ForegroundColor Red; $wbErrors++ }
         elseif (-not ($wfAclPosFb[0] -lt $wfAclPosFb[1] -and $wfAclPosFb[1] -lt $wfAclPosFb[2])) { Write-Host "  [ERRO] Permissões (socorro): a ordem é posse -> segunda tentativa -> devolução, e o fonte está em outra" -ForegroundColor Red; $wbErrors++ }
         # Fase 5: conceder na RAIZ do perfil antes de ligar a herança do conteúdo. Ao contrário, a

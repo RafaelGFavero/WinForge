@@ -4445,6 +4445,202 @@ function Invoke-WinForgeAclRestore {
     Write-Host 'O Desfazer devolve a lista de permissões de cada pasta guardada e TENTA devolver o dono. Devolver a posse ao TrustedInstaller nem sempre é possível, mesmo com o WinForge como administrador: quando falhar, o Desfazer diz em qual pasta.'
 }
 
+function Get-WinForgeAclOwnerPendingPath {
+    <#
+    .SYNOPSIS
+        O caminho do marcador de posse pendente. Só calcula.
+    .DESCRIPTION
+        Mora em '%ProgramData%\WinForge', ao lado da pasta de backup e pelo mesmo motivo: ele fala de
+        uma pasta do SISTEMA, e o aviso tem de aparecer para qualquer usuário da máquina, não só
+        para quem clicou no botão.
+
+        O '-Root' existe pela mesma razão de Get-WinForgeAclBackupRoot - sem ele o -SelfTest
+        escreveria em '%ProgramData%\WinForge' de verdade.
+    .OUTPUTS
+        O caminho do arquivo.
+    #>
+    param([string]$Root)
+
+    $alvo = if ($Root) { $Root } else { (Join-Path (Get-WinForgeMachineDataRoot) 'WinForge') }
+    try { $alvo = [System.IO.Path]::GetFullPath($alvo) } catch { }
+    return (Join-Path $alvo 'acl-posse-pendente.json')
+}
+
+function Get-WinForgeAclStepOwnerSid {
+    <#
+    .SYNOPSIS
+        O SID que um passo '/setowner' do plano entrega à pasta. Função pura.
+    .DESCRIPTION
+        O passo de devolução de posse carrega o dono padrão como '*<SID>' no vetor de argumentos -
+        é o formato que o icacls exige. Quem precisa do SID cru é o marcador de posse pendente: sem
+        ele o aviso da abertura diz que algo está errado e não diz para onde a posse tem de voltar,
+        que é a única parte acionável.
+
+        Ser pura é o que permite provar a extração contra o plano de verdade, sem trocar a posse de
+        pasta nenhuma. Estava embutida em Invoke-WinForgeAclOwnerFallback e por isso não era
+        exercitada: um mutante que a apagava SOBREVIVEU, e o marcador teria saído sem dono.
+
+        Passo sem SID devolve texto vazio, e não estoura: quem chama decide o que fazer com isso.
+    .OUTPUTS
+        O SID, ou '' quando o passo não traz nenhum.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Step)
+
+    foreach ($arg in @($Step.Arguments)) {
+        $texto = [string]$arg
+        if ($texto.StartsWith('*S-1-', [StringComparison]::OrdinalIgnoreCase)) { return $texto.Substring(1) }
+    }
+    return ''
+}
+
+function Write-WinForgeAclOwnerPending {
+    <#
+    .SYNOPSIS
+        Grava o marcador de "esta pasta está com a posse trocada agora". Escreve.
+    .DESCRIPTION
+        A Fase 4 troca a posse de uma pasta do sistema para os Administradores, repete a concessão e
+        devolve a posse ao dono padrão. Entre o primeiro e o terceiro movimento existe uma janela em
+        que a pasta do Windows pertence aos Administradores - e aceita alteração de qualquer processo
+        elevado. A janela protegida impede que o Parar caia ali; este marcador cobre o que nenhuma
+        trava de software cobre: queda de energia, tela azul, Gerenciador de Tarefas.
+
+        Ele é gravado ANTES da troca, e não depois. O instante que precisa dele é justamente aquele
+        em que o programa pode não chegar à linha seguinte - gravar depois seria gravar para o caso
+        que não interessa.
+
+        Um marcador só: a Fase 4 troca a posse de uma pasta por vez, e sobrescrever é o certo -
+        chegar à segunda pasta significa que a primeira devolveu a posse.
+
+        NÃO conserta nada, e nada aqui conserta: quem relata é a abertura seguinte, quem resolve é o
+        usuário no botão. Um programa que devolve posse de pasta de sistema sozinho, na abertura, sem
+        ninguém olhando, é o oposto do que estes botões prometem.
+    .PARAMETER Folder
+        A pasta cuja posse está trocada agora.
+    .PARAMETER OwnerSid
+        O SID do dono ORIGINAL - para quem a posse tem de voltar. É o que torna o aviso acionável.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <string> }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string]$OwnerSid,
+        [string]$Root
+    )
+
+    Assert-WinForgeNotSelfTest -Name 'Write-WinForgeAclOwnerPending'
+    $caminho = Get-WinForgeAclOwnerPendingPath -Root $Root
+    try {
+        $pasta = Split-Path -Parent $caminho
+        if (-not (Test-Path -LiteralPath $pasta)) { New-Item -ItemType Directory -Path $pasta -Force -ErrorAction Stop | Out-Null }
+        Set-Content -LiteralPath $caminho -Value ([pscustomobject]@{
+            Folder   = [string]$Folder
+            OwnerSid = [string]$OwnerSid
+            Stamp    = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        } | ConvertTo-Json -Depth 3) -Encoding UTF8 -ErrorAction Stop
+        return @{ Ok = $true; Reason = ''; Path = [string]$caminho }
+    } catch {
+        # Falhar aqui NÃO derruba a Fase 4: o marcador é uma rede de segurança para o caso raro, e
+        # recusar a troca de posse porque o aviso não pôde ser escrito deixaria a pasta do sistema
+        # sem o conserto que o usuário pediu. Quem chama registra o motivo e segue.
+        return @{ Ok = $false; Reason = [string]$_.Exception.Message; Path = [string]$caminho }
+    }
+}
+
+function Clear-WinForgeAclOwnerPending {
+    <#
+    .SYNOPSIS
+        Apaga o marcador de posse pendente, depois de a posse ter voltado ao dono padrão. Escreve.
+    .DESCRIPTION
+        Roda no 'finally' da Fase 4, junto com o fechamento da janela protegida: a essa altura a
+        devolução já foi tentada, e o marcador deixa de descrever o disco.
+
+        Marcador ausente é sucesso, e não erro: a Fase 4 pode ter parado antes de gravá-lo.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string> }.
+    #>
+    param([string]$Root)
+
+    Assert-WinForgeNotSelfTest -Name 'Clear-WinForgeAclOwnerPending'
+    $caminho = Get-WinForgeAclOwnerPendingPath -Root $Root
+    try {
+        if (Test-Path -LiteralPath $caminho) { Remove-Item -LiteralPath $caminho -Force -ErrorAction Stop }
+        return @{ Ok = $true; Reason = '' }
+    } catch {
+        return @{ Ok = $false; Reason = [string]$_.Exception.Message }
+    }
+}
+
+function Get-WinForgeAclOwnerPending {
+    <#
+    .SYNOPSIS
+        Lê o marcador de posse pendente e monta a frase do relato. SÓ LÊ.
+    .DESCRIPTION
+        É a função que a abertura consulta. Ela não apaga o marcador, não roda icacls e não devolve
+        posse nenhuma: o marcador some quando a Fase 4 termina, ou quando o usuário usa o botão. Um
+        relato que "conserta sozinho" mexeria na posse de uma pasta do Windows na abertura do
+        programa, sem ninguém olhando - exatamente o estrago que o marcador existe para denunciar.
+
+        A frase traz a PASTA e o DONO ORIGINAL. Sem o segundo, o aviso diz que algo está errado e não
+        diz para onde voltar, que é a única parte acionável.
+
+        Arquivo ausente, ilegível ou sem os campos responde 'Present = $false'. Um marcador que não
+        pode ser lido não é um alarme: é um arquivo estranho na pasta, e alarmar com base nele seria
+        assustar sem ter o que dizer.
+    .OUTPUTS
+        @{ Present = <bool>; Folder = <string>; OwnerSid = <string>; Stamp = <string>; Text = <string> }.
+    #>
+    param([string]$Root)
+
+    $vazio = @{ Present = $false; Folder = ''; OwnerSid = ''; Stamp = ''; Text = '' }
+    $caminho = Get-WinForgeAclOwnerPendingPath -Root $Root
+    if (-not (Test-Path -LiteralPath $caminho -PathType Leaf)) { return $vazio }
+    $dados = $null
+    try { $dados = Get-Content -LiteralPath $caminho -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json } catch { return $vazio }
+    if ($null -eq $dados) { return $vazio }
+    $pasta = ''
+    $dono = ''
+    $carimbo = ''
+    try { $pasta = ([string]$dados.Folder).Trim() } catch { $pasta = '' }
+    try { $dono = ([string]$dados.OwnerSid).Trim() } catch { $dono = '' }
+    try { $carimbo = ([string]$dados.Stamp).Trim() } catch { $carimbo = '' }
+    if ([string]::IsNullOrWhiteSpace($pasta) -or [string]::IsNullOrWhiteSpace($dono)) { return $vazio }
+    return @{
+        Present  = $true
+        Folder   = $pasta
+        OwnerSid = $dono
+        Stamp    = $carimbo
+        Text     = "A restauração de permissões de $carimbo parou no meio da troca de posse: '$pasta' pode ter ficado com os Administradores como dona, em vez de '$dono'. Enquanto estiver assim, qualquer processo elevado altera essa pasta. Use o botão 'Permissões do disco C: - Devolver ao padrão do Windows', na aba Config, para devolver a posse."
+    }
+}
+
+function Show-WinForgeAclOwnerPending {
+    <#
+    .SYNOPSIS
+        Põe o relato da posse pendente no log e na barra de status, na abertura. Não conserta nada.
+    .DESCRIPTION
+        Pendurada no mesmo gancho da varredura da pasta de backup, e pelos mesmos motivos: é leitura
+        de um arquivo só, não justifica runspace, e não pode segurar a janela antes de ela aparecer.
+
+        Log e barra, e nunca caixa de mensagem - mesma regra da varredura. E nada escapa daqui: o que
+        roda no Dispatcher roda na thread da interface, e uma exceção solta derrubaria o programa na
+        abertura por causa de um aviso.
+    .OUTPUTS
+        $true se relatou, $false se não há marcador (ou se ele não pôde ser lido).
+    #>
+    param([string]$Root)
+
+    try {
+        $pendente = Get-WinForgeAclOwnerPending -Root $Root
+        if (-not $pendente.Present) { return $false }
+        Write-WinForgeLog -Component "Repair" -Level "WARN" -Message ([string]$pendente.Text)
+        $null = Set-WinForgeProfileProgress -Label ([string]$pendente.Text) -Percent 100
+        return $true
+    } catch {
+        try { Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "O marcador de posse pendente não pôde ser lido: $($_.Exception.Message)" } catch { }
+        return $false
+    }
+}
+
 function Invoke-WinForgeAclOwnerFallback {
     <#
     .SYNOPSIS
@@ -4493,19 +4689,53 @@ function Invoke-WinForgeAclOwnerFallback {
         Write-Warning "Acesso negado em '$pasta' e esta pasta não tem dono padrão no plano: a posse fica como está."
         return 5
     }
-    Write-Host ''
-    Write-Host "Acesso negado. $($socorro[0].Title)"
-    $codigoSocorro = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $socorro[0])
-    if ($codigoSocorro -ne 0) {
-        Write-Error "A posse de '$pasta' não pôde ser assumida (código $codigoSocorro); a concessão fica sem a segunda tentativa."
-        return $codigoSocorro
+    # O dono ORIGINAL sai do passo de devolução do plano, que é quem sabe qual é. É ele que vai para
+    # o marcador - sem o SID, o aviso da abertura diz que algo está errado e não diz para onde a
+    # posse tem de voltar.
+    $donoOriginal = [string](Get-WinForgeAclStepOwnerSid -Step $devolver[0])
+    # A CHAVE da janela protegida. Fora de um comando com fluxo ao vivo não há arquivo de saída nem
+    # job para proteger, e uma chave fixa mantém a função linear - o dicionário é só nosso, a chave
+    # não colide com caminho nenhum e sai no 'finally' como qualquer outra.
+    $chaveProtegida = [string]$StreamPath
+    if ([string]::IsNullOrWhiteSpace($chaveProtegida)) { $chaveProtegida = '(fase 4 sem fluxo)' }
+    # Daqui até o 'finally' o cancelamento NÃO vale, e os processos destes três passos ficam FORA do
+    # job: um job com KILL_ON_JOB_CLOSE mata a árvore quando o dono morre, e morrer entre a posse
+    # tomada e a posse devolvida é exatamente o estrago que esta janela existe para impedir - uma
+    # pasta do Windows com os Administradores como dona aceita alteração de qualquer processo
+    # elevado. A janela abre ANTES da primeira troca; se ficasse aberta por causa de uma exceção, o
+    # Parar morreria para o resto da sessão, e é por isso que o fechamento é no 'finally'.
+    Enter-WinForgeStreamProtected -Path $chaveProtegida
+    try {
+        Write-Host ''
+        Write-Host "Acesso negado. $($socorro[0].Title)"
+        # ANTES da troca, e não depois: o instante que precisa do marcador é justamente aquele em
+        # que o programa pode não chegar à linha seguinte (queda de energia, tela azul, Gerenciador
+        # de Tarefas). Falhar ao gravá-lo não cancela a Fase 4 - ele é rede de segurança, não porta.
+        if ([string]::IsNullOrWhiteSpace($donoOriginal)) {
+            # Sem SID não há marcador: '-OwnerSid' é obrigatório e vazio ESTOURARIA aqui dentro,
+            # derrubando a troca de posse por causa do aviso que existe para protegê-la.
+            Write-Warning "O passo de devolução da posse de '$pasta' não traz o SID do dono padrão: a troca continua, mas uma interrupção aqui não teria para onde apontar."
+        } else {
+            $marcaPosse = Write-WinForgeAclOwnerPending -Folder $pasta -OwnerSid $donoOriginal
+            if (-not $marcaPosse.Ok) { Write-Warning "O marcador de posse pendente de '$pasta' não pôde ser gravado ($($marcaPosse.Reason)); a troca de posse continua, mas uma interrupção aqui não será relatada na próxima abertura." }
+        }
+        $codigoSocorro = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $socorro[0])
+        if ($codigoSocorro -ne 0) {
+            Write-Error "A posse de '$pasta' não pôde ser assumida (código $codigoSocorro); a concessão fica sem a segunda tentativa."
+            return $codigoSocorro
+        }
+        Write-Host 'Segunda e última tentativa desta etapa.'
+        $codigoRetentativa = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $Step)
+        Write-Host $devolver[0].Title
+        $codigoDevolver = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $devolver[0])
+        if ($codigoDevolver -ne 0) { Write-Error "A posse de '$pasta' NÃO voltou ao dono padrão (código $codigoDevolver): a pasta ficou com os Administradores como dona." }
+        return $codigoRetentativa
+    } finally {
+        # Os dois na mesma saída, e esta é a única: o 'return' do socorro que falhou passa por aqui,
+        # e uma exceção no meio também.
+        $null = Clear-WinForgeAclOwnerPending
+        Exit-WinForgeStreamProtected -Path $chaveProtegida
     }
-    Write-Host 'Segunda e última tentativa desta etapa.'
-    $codigoRetentativa = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $Step)
-    Write-Host $devolver[0].Title
-    $codigoDevolver = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $devolver[0])
-    if ($codigoDevolver -ne 0) { Write-Error "A posse de '$pasta' NÃO voltou ao dono padrão (código $codigoDevolver): a pasta ficou com os Administradores como dona." }
-    return $codigoRetentativa
 }
 
 function Invoke-WinForgeAclDenyRemoval {

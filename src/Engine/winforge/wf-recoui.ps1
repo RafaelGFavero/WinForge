@@ -306,6 +306,11 @@ function Start-WinForgeProfileJob {
             # nada, e o aviso ia só para o arquivo de log. Aqui ela é a ÚLTIMA a escrever.
             # Só relata - quem apaga é o botão, com a lista na tela e sob confirmação.
             $null = Show-WinForgeAclBackupSizeWarning
+            # E o marcador de posse pendente, no mesmo gancho e DEPOIS da varredura: ele é mais
+            # grave (uma pasta do Windows pode estar com o dono errado agora) e a barra guarda a
+            # ÚLTIMA mensagem escrita. Só relata - devolver posse de pasta de sistema sozinho, na
+            # abertura, sem ninguém olhando, é o oposto do que estes botões prometem.
+            $null = Show-WinForgeAclOwnerPending
         } catch {
             # a barra fica visível com o erro: o usuário precisa saber que não há recomendação nenhuma
             $null = Set-WinForgeProfileProgress -Label "Diagnóstico falhou: $($_.Exception.Message)" -Percent 0
