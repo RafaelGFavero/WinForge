@@ -3931,6 +3931,30 @@ if ($SelfTest) {
         if ($wfParTexto -match '(?m)^fim$') { Write-Host "  [ERRO] Parar: a frase final de sucesso saiu numa sequência CANCELADA" -ForegroundColor Red; $wbErrors++ }
         [void]$sync.WinForgeStreamCancel.Remove($wfParSeq)
         [void]$sync.WinForgeStreamDone.Remove($wfParSeq)
+        # E o Parar clicado DENTRO de um passo, que é o caso real: a restauração de permissões
+        # inteira é UM passo, e a marca só era conferida ENTRE passos. Medido com dublê: parar
+        # durante a fase 2 imprimia '== Passo 1: ... código 0 ==' e o '== Concluído ==' com a frase
+        # final mandando reiniciar o computador. Vale igual para o Desfazer e para a Limpeza.
+        $wfParDentro = Join-Path $wfParRaiz 'dentro.txt'
+        Set-Content -LiteralPath $wfParDentro -Value 'cab' -Encoding UTF8
+        function Test-WinForgeStopDuranteOPasso {
+            # O dublê faz o que a restauração faz: escreve, e no meio do caminho o usuário clica em
+            # Parar. Ele NÃO devolve código de erro - a função termina normalmente.
+            Write-Host 'trabalhando'
+            $sync.WinForgeStreamCancel[$sync.WinForgeSelfTestPassoArq] = $true
+            Write-Host 'parou no meio'
+        }
+        $sync.WinForgeSelfTestPassoArq = $wfParDentro
+        $wfParCodDentro = Invoke-WinForgeStreamedSteps -Path $wfParDentro -Steps @(@{ Function = 'Test-WinForgeStopDuranteOPasso' }) -Final 'Reinicie o computador.'
+        Close-WinForgeStreamWriter -Path $wfParDentro
+        $wfParTxtDentro = [string](Get-Content -LiteralPath $wfParDentro -Raw)
+        if ($wfParTxtDentro -match '(?m)^== Conclu') { Write-Host "  [ERRO] Parar (dentro do passo): o arquivo diz '== Concluído ==' depois de uma interrupção" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTxtDentro -match '(?m)^Reinicie o computador\.') { Write-Host "  [ERRO] Parar (dentro do passo): a frase final saiu num comando interrompido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTxtDentro -match 'código 0 ==') { Write-Host "  [ERRO] Parar (dentro do passo): o passo interrompido foi dado como terminado com código 0" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTxtDentro -notmatch 'Interrompido a pedido') { Write-Host "  [ERRO] Parar (dentro do passo): o arquivo não diz que foi interrompido" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfParDentro)
+        [void]$sync.WinForgeStreamDone.Remove($wfParDentro)
+        [void]$sync.Remove('WinForgeSelfTestPassoArq')
         # Add-Type GUARDADO, dentro do scriptblock do POOL.
         $wfParCorpo = [string]$sync.WinForgeStreamBody
         if ($wfParCorpo -notmatch "'WfJob'\s*-as\s*\[type\]") { Write-Host "  [ERRO] Parar: o Add-Type do job não está guardado por ('WfJob' -as [type])" -ForegroundColor Red; $wbErrors++ }
@@ -3938,10 +3962,14 @@ if ($SelfTest) {
         # A guarda roda DUAS VEZES seguidas sem estourar - e com o MESMO nome nas duas pontas: com
         # '-Namespace WinForgeProva' o tipo nasceria 'WinForgeProva.WfJobProva', a guarda
         # ('WfJobProva' -as [type]) daria $null para sempre e o segundo Add-Type é que estouraria.
-        $wfParDef = '[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);' +
-                    '[DllImport("kernel32.dll")] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);' +
-                    '[DllImport("kernel32.dll")] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);' +
-                    '[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);'
+        # 'SetLastError = true' aqui também, e pelo mesmo motivo do tipo de produção: a mensagem de
+        # falha logo abaixo imprime GetLastWin32Error, e sem a chave esse número é o erro de outra
+        # chamada qualquer, feita antes, por outro código - diagnóstico falso no teste que existe
+        # justamente para diagnosticar.
+        $wfParDef = '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);' +
+                    '[DllImport("kernel32.dll", SetLastError = true)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);' +
+                    '[DllImport("kernel32.dll", SetLastError = true)] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);' +
+                    '[DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr h);'
         $wfParGuarda = { if (-not ('WfJobProva' -as [type])) { Add-Type -Namespace '' -Name 'WfJobProva' -MemberDefinition $wfParDef } }
         & $wfParGuarda; & $wfParGuarda
         if (-not ('WfJobProva' -as [type])) { Write-Host "  [ERRO] Parar: a guarda não criou o tipo" -ForegroundColor Red; $wbErrors++ }
@@ -4125,6 +4153,16 @@ if ($SelfTest) {
         foreach ($wfBtnF in @('Parado a pedido durante a herança do perfil', 'C:\Users\fulano', 'Rode a restauração de novo para terminar')) {
             if ($wfBtnF5 -notmatch [regex]::Escape($wfBtnF)) { Write-Host "  [ERRO] Parar (texto fase 5): falta '$wfBtnF'" -ForegroundColor Red; $wbErrors++ }
         }
+        # A contagem da fase 5 é das pastas DE DENTRO do perfil, e vem da fase 5. Ela era alimentada
+        # só pelo laço da fase 4: parando durante a fase 5, o texto declarava pastas do SISTEMA como
+        # se fossem subpastas do perfil - 'duas pastas de dentro já tinham recebido a herança',
+        # citando C:\Windows e C:\Program Files.
+        $wfBtnFonteR5 = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfBtnFonteR5.IndexOf('$pastasFase5 += [string]$p5.Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase 5): a fase 5 não anota as pastas que receberam a herança" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteR5.IndexOf('if ($faseParada -eq 5) { $pastasFase5 } else { $pastasFeitas }', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase 5): o relato recebe a lista da fase 4 mesmo parando na fase 5 - ele chamaria pasta do sistema de subpasta do perfil" -ForegroundColor Red; $wbErrors++ }
+        # E as duas listas não se misturam: a da fase 4 tem pasta de sistema, a da fase 5 tem pasta
+        # de dentro do perfil, e o texto de cada fase fala de uma delas.
+        if ((Get-WinForgeAclStopReport -Phase 5 -Folders @('C:\Users\fulano\A', 'C:\Users\fulano\B') -Profile 'C:\Users\fulano') -notmatch '2 pasta\(s\) de dentro') { Write-Host "  [ERRO] Parar (texto fase 5): a contagem das pastas de dentro não aparece" -ForegroundColor Red; $wbErrors++ }
         # As pastas citadas são as que ENTRARAM, e o relato não pode inventar nenhuma.
         if ($wfBtnF4 -match 'C:\\Program Files') { Write-Host "  [ERRO] Parar (texto fase 4): o relato cita uma pasta que não estava na lista" -ForegroundColor Red; $wbErrors++ }
         # A FASE sai do NOME do comando, e não do tipo dele. Pelo tipo, os SEIS outros comandos de
@@ -4173,6 +4211,13 @@ if ($SelfTest) {
         $wfBtnFonteJ = [string](Get-Command Show-WinForgeOutputWindow).ScriptBlock
         # E o clique USA o nome do comando, em vez de decidir pelo TIPO dele.
         if ($wfBtnFonteJ.IndexOf('Get-WinForgeStreamStopPhase -Command', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase): o clique não pergunta pelo NOME do comando - ele volta a afirmar escrita pelo tipo" -ForegroundColor Red; $wbErrors++ }
+        # E o MOTIVO do pedido não é descartado: quando o processo em andamento não pôde ser
+        # encerrado, é ele que diz que o comando ainda vai até o fim da etapa atual.
+        if ($wfBtnFonteJ.IndexOf('$pedidoParada = Request-WinForgeStreamCancel -Path $caminhoSeguido', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (motivo): o clique descarta o motivo que o pedido devolve" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteJ -notmatch '(?s)\$pedidoParada\.Reason.{0,400}Write-WinForgeStreamLine') { Write-Host "  [ERRO] Parar (motivo): o motivo não vai para o arquivo, que é onde a pessoa está olhando" -ForegroundColor Red; $wbErrors++ }
+        # O comentário do clique não pode voltar a dizer que a fase sai do ARQUIVO: essa é a
+        # abordagem descartada, e um texto que descreve o que o código NÃO faz induz ao erro.
+        if ($wfBtnFonteJ -match 'Ela sai do ARQUIVO') { Write-Host "  [ERRO] Parar (fase): o comentário do clique diz que a fase é lida do arquivo, e o código lê o nome do comando" -ForegroundColor Red; $wbErrors++ }
         if ($wfBtnFonteJ -match "WinForgeStreamKind -eq 'repair'\) \{ 'escrita'") { Write-Host "  [ERRO] Parar (fase): o clique voltou a decidir a fase pelo tipo do comando" -ForegroundColor Red; $wbErrors++ }
         # O FIM de um comando interrompido diz 'Cancelado', nunca 'Concluído'. A marca do desfecho é
         # gravada ANTES de a conclusão ser ligada - na ordem contrária, o cabeçalho saía
@@ -5913,7 +5958,7 @@ if ($SelfTest) {
         # respondeu daria o mesmo resultado de não chamar - e a linha acima passaria. As duas agulhas
         # são montadas por concatenação: escritas inteiras, elas contêm o próprio '$sumidas5' e
         # ficariam sujeitas à expansão de variável na hora do teste.
-        foreach ($wfF5Fio in @(("'ok'" + ') { continue }'), ("'sumida'" + ') { $sumidas5++'))) {
+        foreach ($wfF5Fio in @(("'ok'" + ') { $pastasFase5 +='), ("'sumida'" + ') { $sumidas5++'), ("'cancelada'" + ') { $canceladas5 ='))) {
             if ($wfF5Fonte.IndexOf($wfF5Fio, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): o veredito da classificação não está ligado aos contadores (falta ""$wfF5Fio"")" -ForegroundColor Red; $wbErrors++ }
         }
         # A medição errada não pode voltar à descrição: era ela que atribuía o código 3 ao curinga, e

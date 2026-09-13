@@ -4087,7 +4087,11 @@ function Invoke-WinForgeAclRestore {
     # laços, à medida que as coisas acontecem: adivinhar isso no fim daria um relato que descreve o
     # que o programa acha, e não o que ele fez.
     $faseParada = 0
+    # DUAS listas, e elas não se misturam: a da fase 4 tem pasta do SISTEMA, a da fase 5 tem pasta
+    # de dentro do PERFIL. Com uma só, parar durante a fase 5 fazia o relato dizer "2 pasta(s) de
+    # dentro já tinham recebido a herança" citando C:\Windows e C:\Program Files.
     $pastasFeitas = @()
+    $pastasFase5 = @()
 
     # A elevação vem antes de QUALQUER efeito colateral, inclusive o de criar a pasta de backup:
     # sem elevação ela nasceria com a identidade atual como dona e ficaria plantada, fazendo a
@@ -4373,6 +4377,9 @@ function Invoke-WinForgeAclRestore {
         foreach ($passo in @($plano | Where-Object { [int]$_.Phase -eq 3 -and [string]$_.Kind -eq 'grant-extra' })) {
             Write-Host "Fase 3 de 6 - $($passo.Title)"
             $codigoExtra = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $passo)
+            # SAI na primeira recusa, como os outros laços: seguir renderia um 'terminou com código
+            # 1223' por passo restante - erro espúrio para quem só clicou em Parar.
+            if ($codigoExtra -eq 1223) { if ($faseParada -eq 0) { $faseParada = 3 }; break }
             if ($codigoExtra -ne 0) { Write-Error "Esta etapa terminou com código $codigoExtra." }
         }
     }
@@ -4455,7 +4462,7 @@ function Invoke-WinForgeAclRestore {
                 $vistas5++
                 $codigo5 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $p5)
                 $veredito5 = [string](Get-WinForgeAclInheritOutcome -Path ([string]$p5.Path) -ExitCode $codigo5)
-                if ($veredito5 -eq 'ok') { continue }
+                if ($veredito5 -eq 'ok') { $pastasFase5 += [string]$p5.Path; continue }
                 # Pasta que não chegou a ser tocada depois do Parar. O laço SAI na primeira: da
                 # primeira recusa em diante todas as outras seriam recusa também, e contá-las uma a
                 # uma é trabalho para dizer o que já se sabe. As que sobraram entram no resumo pela
@@ -4478,6 +4485,9 @@ function Invoke-WinForgeAclRestore {
             Write-Host "Fase 5 de 6 - $($passo.Title)"
         }
         $codigoPasso = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $passo)
+        # Mesma regra dos outros laços: na primeira recusa o laço SAI, em vez de acumular um erro
+        # espúrio por passo que ninguém tentou.
+        if ($codigoPasso -eq 1223) { if ($faseParada -eq 0) { $faseParada = 5 }; break }
         if ($codigoPasso -ne 0) { Write-Error "Esta etapa terminou com código $codigoPasso." }
     }
 
@@ -4487,7 +4497,7 @@ function Invoke-WinForgeAclRestore {
     if ($faseParada -gt 0 -or (Test-WinForgeStreamCancelled -Path $fluxo)) {
         if ($faseParada -eq 0) { $faseParada = 5 }
         Write-Host ''
-        Write-Host (Get-WinForgeAclStopReport -Phase $faseParada -Folders @($pastasFeitas | Sort-Object -Unique) -Profile $perfil)
+        Write-Host (Get-WinForgeAclStopReport -Phase $faseParada -Folders @(@(if ($faseParada -eq 5) { $pastasFase5 } else { $pastasFeitas }) | Sort-Object -Unique) -Profile $perfil)
         return
     }
 

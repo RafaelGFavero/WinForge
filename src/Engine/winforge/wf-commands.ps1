@@ -1223,14 +1223,22 @@ function Show-WinForgeOutputWindow {
         # de ponto único antes de cada processo.
         $btnParar.Add_Click({
             # A fase decide o TEXTO, e o texto é a única coisa que a pessoa tem para decidir se
-            # perde algo parando agora. Ela sai do ARQUIVO - do 'Fase N de 6' que o motor já
-            # escreveu -, e não do tipo do comando: pelo tipo, um Parar durante o chkdsk da fase 1
-            # ofereceria um Desfazer que ainda não existe.
+            # perde algo parando agora. Ela sai do NOME do comando e da chave da escrita - ver
+            # Get-WinForgeStreamStopPhase, que tem o porquê de não sair do TIPO: pelo tipo, oito
+            # comandos ofereciam um Desfazer que só um deles tem, e clicar nele destruiria o backup
+            # da restauração anterior.
             $faseParada = [string](Get-WinForgeStreamStopPhase -Command ([string]$sync.WinForgeStreamCommand) -Writing:([bool]$sync.WinForgeStreamWriting))
             $respostaParada = [System.Windows.MessageBox]::Show($janela, (Get-WinForgeStreamStopText -Phase $faseParada), 'WinForge',
                 [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)
             if ($respostaParada -ne [System.Windows.MessageBoxResult]::Yes) { return }
-            $null = Request-WinForgeStreamCancel -Path $caminhoSeguido
+            # O MOTIVO não é descartado: quando o processo em andamento não pôde ser encerrado, é
+            # ele que diz que o comando ainda vai até o fim da etapa atual. Vai para o arquivo, que
+            # é onde a pessoa já está olhando, e para o log.
+            $pedidoParada = Request-WinForgeStreamCancel -Path $caminhoSeguido
+            if (-not [string]::IsNullOrWhiteSpace([string]$pedidoParada.Reason)) {
+                Write-WinForgeStreamLine -Path $caminhoSeguido -Text ("== Parar: {0} ==" -f [string]$pedidoParada.Reason)
+                Write-WinForgeLog -Component $componenteLog -Level "WARN" -Message "Parar pedido em '$caminhoSeguido': $([string]$pedidoParada.Reason)"
+            }
             # O rótulo e o estado saem do TIQUE, e não daqui: ele já olha as mesmas chaves de meio em
             # meio segundo, e dois donos do mesmo botão é como um deles acaba dizendo 'Parando…'
             # depois de o comando ter terminado.
@@ -1994,6 +2002,7 @@ function Invoke-WinForgeStreamedSteps {
     $codigo = 0
     $falhou = ''
     $n = 0
+    $concluidos = 0
     $cancelado = $false
     foreach ($passo in @($Steps)) {
         # ENTRE passos, e não dentro de um: o processo que já está rodando é morto pelo job (ver
@@ -2003,7 +2012,18 @@ function Invoke-WinForgeStreamedSteps {
         $n++
         $titulo = if ($passo.Function) { [string]$passo.Function } else { [string](Split-Path -Leaf ([string]$passo.FilePath)) }
         $passoCodigo = [int](Invoke-WinForgeStreamStep -Path $Path -Step $passo)
+        # E DEPOIS do passo, porque a marca pode ter sido levantada NO MEIO dele: a restauração de
+        # permissões inteira é UM passo, e o Desfazer e a Limpeza também são. Sem esta conferência,
+        # parar durante a fase 2 escrevia '== Passo 1: ... código 0 ==' e, logo abaixo,
+        # '== Concluído ==' com a frase final mandando reiniciar o computador - o programa dizendo
+        # que fez o que foi mandado parar.
+        if (Test-WinForgeStreamCancelled -Path $Path) {
+            Write-WinForgeStreamLine -Path $Path -Text ("== Passo {0}: {1} — interrompido a pedido ==" -f $n, $titulo)
+            $cancelado = $true
+            break
+        }
         Write-WinForgeStreamLine -Path $Path -Text ("== Passo {0}: {1} — código {2} ==" -f $n, $titulo, $passoCodigo)
+        $concluidos++
         if ($codigo -eq 0 -and $passoCodigo -ne 0) { $codigo = $passoCodigo; $falhou = "$n ($titulo)" }
     }
     Write-WinForgeStreamLine -Path $Path -Text ""
@@ -2011,13 +2031,16 @@ function Invoke-WinForgeStreamedSteps {
         # A frase de fechamento ($Final) NÃO sai aqui, pelo mesmo motivo que não sai num comando que
         # falhou: ela está no presente do indicativo ("Configuração de rede redefinida."), e
         # imprimi-la depois de uma interrupção é dizer que fez o que não fez.
-        Write-WinForgeStreamLine -Path $Path -Text ("== Interrompido a pedido depois de {0} passo(s): os seguintes não rodaram. ==" -f $n)
+        #
+        # A conta é de passos CONCLUÍDOS, e não de passos iniciados: o passo em que o Parar pegou
+        # não terminou, e contá-lo seria a mesma mentira em tamanho menor.
+        Write-WinForgeStreamLine -Path $Path -Text ("== Interrompido a pedido depois de {0} passo(s) concluído(s): o resto não rodou. ==" -f $concluidos)
         Write-WinForgeStreamLine -Path $Path -Text ""
         Write-WinForgeStreamLine -Path $Path -Text "O que já tinha sido feito continua feito; o que faltava não foi começado."
         return $codigo
     }
     if ($codigo -eq 0) {
-        Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $n)
+        Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $concluidos)
         if (-not [string]::IsNullOrWhiteSpace($Final)) {
             Write-WinForgeStreamLine -Path $Path -Text ""
             Write-WinForgeStreamLine -Path $Path -Text ([string]$Final)
