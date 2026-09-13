@@ -8177,6 +8177,20 @@ if ($SelfTest) {
             if ($wfW46Fonte6 -notmatch [regex]::Escape($wfW46F)) { Write-Host "  [ERRO] Rede (botão 6): sem rádio no fim, o texto não manda '$wfW46F'" -ForegroundColor Red; $wbErrors++ }
         }
         if ($wfW46Fonte6 -notmatch 'add-driver') { Write-Host "  [ERRO] Rede (botão 6): falta o '/add-driver … /install'" -ForegroundColor Red; $wbErrors++ }
+        # O guarda roda no botão 6 como nas irmãs (defesa em profundidade), e o SOCORRO é a exceção
+        # EXPLÍCITA. Sem o parâmetro, correr a escada durante o socorro recusaria justamente o
+        # socorro: 'não há outra via de rede' e 'o rádio sumiu' podem ter virado verdadeiros por
+        # causa do ato que acabou de acontecer.
+        $wfW46Volta = @(Invoke-WinForgeWifiDriverRestore -DryRun -Facts (& $wfW46Com @{ OnBattery = $true; BackupRoot = (Join-Path $wbSelfTestRaiz 'driver-backup-vazio') }))
+        if (-not @($wfW46Volta | Where-Object { [string]$_ -match 'bateria' }).Count) { Write-Host "  [ERRO] Rede (botão 6): sem -Rescue ele não passa pela escada ('$($wfW46Volta -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        $wfW46Socorro = @(Invoke-WinForgeWifiDriverRestore -DryRun -Rescue -Facts (& $wfW46Com @{ OnBattery = $true; BackupRoot = (Join-Path $wbSelfTestRaiz 'driver-backup-vazio') }))
+        if (@($wfW46Socorro | Where-Object { [string]$_ -match 'bateria' }).Count) { Write-Host "  [ERRO] Rede (socorro): com -Rescue a escada ainda recusou - o socorro seria barrado pelo que ele existe para consertar" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfW46Socorro | Where-Object { [string]$_ -match 'Socorro automático' }).Count) { Write-Host "  [ERRO] Rede (socorro): o relato não DIZ que pulou a escada ('$($wfW46Socorro -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # E as duas ações que podem precisar de socorro chamam a volta COM o parâmetro: sem ele, a
+        # volta automática seria recusada exatamente na máquina que acabou de ficar sem rádio.
+        foreach ($wfW46Fn2 in @('Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric')) {
+            if ([string](Get-Command $wfW46Fn2).ScriptBlock -notmatch 'Invoke-WinForgeWifiDriverRestore\s+-Rescue') { Write-Host "  [ERRO] Rede (socorro): '$wfW46Fn2' chama a volta sem declarar que é socorro" -ForegroundColor Red; $wbErrors++ }
+        }
         # Sem cópia conferida em disco, o botão 6 fica DESABILITADO (não some: a exceção D3 vale só
         # para o botão 5) e a dica diz por quê.
         $wfW46Seco = @(Invoke-WinForgeWifiDriverRestore -DryRun -Facts @{ BackupRoot = (Join-Path $wbSelfTestRaiz 'driver-backup-vazio') })

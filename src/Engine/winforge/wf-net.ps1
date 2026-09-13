@@ -1573,8 +1573,21 @@ function Invoke-WinForgeWifiDriverRestore {
 
         Quando nem assim o rádio volta, o texto manda a pessoa trazer o driver do fabricante por
         cabo de rede ou por pen drive, que é o único caminho que sobra numa máquina sem Wi-Fi.
+        O GUARDA RODA AQUI TAMBÉM, e isso é defesa em profundidade: esta função é a única das três
+        que não remove nada, mas ela ainda mexe no repositório de drivers, e a chamada de um lugar
+        novo não pode escapar da escada por omissão.
+
+        A EXCEÇÃO é o socorro, e ela é EXPLÍCITA (-Rescue). Quando o julgamento de outra ação
+        conclui que o rádio ficou ruim, esta função é chamada para devolver o driver - e aí correr a
+        escada seria recusar justamente o socorro: dois dos fatos que ela pesa ('não há outra via de
+        rede', e o próprio rádio ausente) podem ter virado verdadeiros POR CAUSA do ato que acabou
+        de acontecer. A alternativa seria um degrau que distinguisse socorro de ação normal, e isso
+        espalharia a regra pelos onze degraus em vez de deixá-la num parâmetro só. Com -Rescue, o
+        relato DIZ que pulou, para quem lê o arquivo de saída não descobrir isso por dedução.
     .PARAMETER DryRun
         Diz o que faria e para por aí.
+    .PARAMETER Rescue
+        Pula o guarda porque isto é socorro, e não ação escolhida no botão. Ver acima.
     .PARAMETER Facts
         Fatos prontos para o guarda, e opcionalmente 'BackupRoot' para a pasta das cópias. É a porta
         do -SelfTest.
@@ -1583,10 +1596,22 @@ function Invoke-WinForgeWifiDriverRestore {
     #>
     param(
         [switch]$DryRun,
+        [switch]$Rescue,
         [hashtable]$Facts
     )
 
     $L = New-Object System.Collections.Generic.List[string]
+    if ($Rescue) {
+        $L.Add('Socorro automático: a escada de bloqueios não se aplica aqui, porque quem está devolvendo o driver é o próprio conserto que acabou de dar errado.')
+    } else {
+        $fatosVolta = $(if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) { $Facts } else { Get-WinForgeNetworkFacts -Action 'WifiDriverRestore' })
+        $guardaVolta = Test-WinForgeNetworkGuard -Action 'WifiDriverRestore' -Facts $fatosVolta
+        if (-not $guardaVolta.Ok) {
+            $L.Add('Este botão não pode rodar nesta máquina agora.')
+            $L.Add([string]$guardaVolta.Reason)
+            return @($L.ToArray())
+        }
+    }
     $raizCopias = ''
     if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts -and $Facts.ContainsKey('BackupRoot')) { $raizCopias = [string]$Facts.BackupRoot }
 
@@ -1740,7 +1765,7 @@ function Invoke-WinForgeWifiDriverReinstall {
     $desfecho = Test-WinForgeWifiOutcome -Adapter $assentado
     $L.Add([string]$desfecho.Text)
     if ([string]$desfecho.Outcome -ne 'ok') {
-        foreach ($linha in @(Invoke-WinForgeWifiDriverRestore)) { $L.Add([string]$linha) }
+        foreach ($linha in @(Invoke-WinForgeWifiDriverRestore -Rescue)) { $L.Add([string]$linha) }
     }
     return @($L.ToArray())
 }
@@ -1880,7 +1905,7 @@ function Invoke-WinForgeWifiDriverGeneric {
     $desfecho = Test-WinForgeWifiOutcome -Adapter $assentado -Generic
     $L.Add([string]$desfecho.Text)
     if ([string]$desfecho.Outcome -ne 'ok') {
-        foreach ($linha in @(Invoke-WinForgeWifiDriverRestore)) { $L.Add([string]$linha) }
+        foreach ($linha in @(Invoke-WinForgeWifiDriverRestore -Rescue)) { $L.Add([string]$linha) }
     }
     return @($L.ToArray())
 }
