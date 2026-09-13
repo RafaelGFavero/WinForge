@@ -368,7 +368,7 @@ $sync.WinForgeI18n = @{
     }
     'WPFFixesNetwork' = @{
         Content     = 'Rede - Redefinir'
-        Description = 'Redefine a pilha de rede com "netsh winsock reset" e "netsh int ip reset": as configurações de TCP/IP e do Winsock voltam ao padrão do Windows. É o caminho para "conectado, sem internet" e para DNS que parou de resolver depois de um antivírus ou VPN mal desinstalado. Conexões de VPN ou proxy podem precisar ser refeitas, e é preciso reiniciar o computador para concluir.'
+        Description = 'Redefine a pilha de rede com "netsh winsock reset" e "netsh int ip reset": as configurações de TCP/IP e do Winsock voltam ao padrão do Windows. É o caminho para "conectado, sem internet" e para DNS que parou de resolver depois de um antivírus ou VPN mal desinstalado. O que ele NÃO faz, porque é a confusão mais comum: não reinstala driver, não troca o driver da placa de rede e não mexe em antivírus, firewall nem VPN que ainda estejam instalados. Conexões de VPN ou proxy podem precisar ser refeitas, e é preciso reiniciar o computador para concluir.'
     }
     'WPFPanelDISM' = @{
         Content     = 'Verificação de corrupção do sistema - Executar'

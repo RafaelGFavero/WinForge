@@ -830,6 +830,7 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFRepAclUndo" {Invoke-WinForgeRepairCommand -Name AclUndo}
         "WPFWFRepAclCleanup" {Invoke-WinForgeRepairCommand -Name AclCleanup}
         "WPFWFRepNetDiagFull" {Invoke-WinForgeRepairCommand -Name NetDiagFull}
+        "WPFWFRepNetDnsRenew" {Invoke-WinForgeRepairCommand -Name NetDnsRenew}
         # Correções (aba Config, vindas da base): mesma tabela e mesma máquina do reparo, com a
         # janela que se enche ao vivo. Antes cada uma destas chaves chamava a função da base pelo
         # campo "function" da config, na thread da janela.
@@ -1192,7 +1193,7 @@ if ($SelfTest) {
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
-    if (@($sync.configs.feature.PSObject.Properties).Count -ne 59) { Write-Host "  [ERRO] Config: esperado 59 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 60) { Write-Host "  [ERRO] Config: esperado 60 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
@@ -3784,7 +3785,7 @@ if ($SelfTest) {
         if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text -ne 'Em andamento: X (00:00)') { Write-Host "  [ERRO] Cabeçalho: tempo negativo (o w32tm /resync recuou o relógio) virou '$([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text)'" -ForegroundColor Red; $wbErrors++ }
         # Toda linha que ALTERA a máquina declara ExpectMinutes. A varredura usa as listas canônicas
         # das outras travas, e não uma cópia à mão: linha nova numa delas entra aqui sozinha.
-        foreach ($wfCabNome in @(@($wfRepNomes) + @($wfStrNomes) + @('AclRestore', 'AclUndo', 'AclCleanup'))) {
+        foreach ($wfCabNome in @(@($wfRepNomes) + @($wfStrNomes) + @('AclRestore', 'AclUndo', 'AclCleanup', 'NetDnsRenew'))) {
             $wfCabCmd = Get-WinForgeRepairCommand -Name $wfCabNome
             if ([string]$wfCabCmd.Kind -eq 'read') { continue }
             if (-not ([int]$wfCabCmd.ExpectMinutes -gt 0)) { Write-Host "  [ERRO] Cabeçalho: a linha '$wfCabNome' não declara ExpectMinutes" -ForegroundColor Red; $wbErrors++ }
@@ -7240,7 +7241,32 @@ if ($SelfTest) {
         # Sem inbox, o botão 5 SOME (exceção D3); o 4 só avisa quando não há outra via.
         if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts (& $wfNetCom 'Inbox' $false)).Hidden) { Write-Host "  [ERRO] Rede (D3): sem driver inbox o botão 5 tem de SUMIR, não ficar desabilitado" -ForegroundColor Red; $wbErrors++ }
         # ...e o 4 continua de pé no MESMO fato: ele reinstala o driver que já está lá, não o básico.
-        if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Inbox' $false)).Ok) { Write-Host "  [ERRO] Rede (D3): o driver inbox é condição do botão 5, não do 4" -ForegroundColor Red; $wbErrors++ }
+        $wfNetInbox4 = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Inbox' $false)
+        if (-not $wfNetInbox4.Ok) { Write-Host "  [ERRO] Rede (D3): o driver inbox é condição do botão 5, não do 4" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetInbox4.Hidden) { Write-Host "  [ERRO] Rede (D3): sem driver básico o botão 4 sumiu junto, e a condição não é dele" -ForegroundColor Red; $wbErrors++ }
+        # DOIS degraus valendo AO MESMO TEMPO, que é onde o buraco estava: esconder é propriedade do
+        # BOTÃO, e não da explicação. Um notebook sem driver básico E na bateria: quem explica é a
+        # bateria, mas o botão 5 tem de continuar SUMINDO. Se ele aparecer desabilitado dizendo
+        # "ligue na tomada", a pessoa vai procurar na internet como habilitá-lo - e o que ela acha é
+        # a opção de forçar, que é o caminho para ficar sem rádio.
+        #
+        # Cada fato testado SOZINHO contra a base saudável nunca pega isto: com um degrau só, o que
+        # interrompe o laço é sempre o mesmo que esconde.
+        foreach ($wfNetJunto in @('OnBattery', 'NeedRestart', 'Virtual', 'Server', 'Remote')) {
+            $wfNetFatosJ = @{} + $wfNetBase
+            $wfNetFatosJ['Inbox'] = $false
+            $wfNetFatosJ[$wfNetJunto] = $true
+            if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfNetFatosJ).Hidden) { Write-Host "  [ERRO] Rede (esconder): sem driver básico E '$wfNetJunto' ao mesmo tempo, o botão 5 voltou a aparecer" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O mesmo pelo outro lado: a sessão remota é o degrau 1 e NÃO esconde; o build baixo é o 2 e
+        # esconde. Com os dois valendo, quem interrompe o laço é o primeiro e o botão tem de sumir
+        # assim mesmo.
+        $wfNetFatosB = @{} + $wfNetBase
+        $wfNetFatosB['Build'] = 17763
+        $wfNetFatosB['Remote'] = $true
+        foreach ($wfNetBtnB in @('WifiDriverReinstall', 'WifiDriverGeneric')) {
+            if (-not (Test-WinForgeNetworkGuard -Action $wfNetBtnB -Facts $wfNetFatosB).Hidden) { Write-Host "  [ERRO] Rede (esconder): build 17763 com sessão remota junto, '$wfNetBtnB' voltou a aparecer" -ForegroundColor Red; $wbErrors++ }
+        }
         $wfNetAviso = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'OtherAdapter' $false)
         if (-not $wfNetAviso.Ok) { Write-Host "  [ERRO] Rede (bloqueio): 'nenhuma outra via' é ABSOLUTO no 5 e só AVISO no 4" -ForegroundColor Red; $wbErrors++ }
         # '@($null).Count' é 1: contar sozinho deixaria passar Blocks = $null. O aviso tem de estar
@@ -7280,7 +7306,53 @@ if ($SelfTest) {
         # A sessão remota é a exceção e derruba a escada INTEIRA, o botão 3 junto: liberar e renovar
         # o endereço corta a própria conexão que está trazendo o usuário até a janela.
         if ((Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom 'Remote' $true)).Ok) { Write-Host "  [ERRO] Rede (bloqueio): de longe até o botão 3 tem de recusar - ele derruba a conexão remota" -ForegroundColor Red; $wbErrors++ }
+        # O guarda é ESTRUTURAL, e não consultivo. O precedente está neste repositório:
+        # Assert-WinForgeNotSelfTest existe porque o mecanismo consultivo já falhou aqui - um helper
+        # sem param() engoliu o -DryRun e instalador rodou de verdade na máquina de um usuário. Uma
+        # função que devolve @{ Ok = $false } depende de alguém lembrar de olhar; uma que LANÇA, não.
+        $wfNetAsErro = $null
+        try { $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -ExportOk $false -Facts $wfNetBase } catch { $wfNetAsErro = [string]$_.Exception.Message }
+        if ($null -eq $wfNetAsErro) { Write-Host "  [ERRO] Rede (asserção): a cópia de segurança falhada NÃO fez a asserção lançar" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfNetAsErro -notmatch 'cópia') { Write-Host "  [ERRO] Rede (asserção): a recusa não diz por quê ('$wfNetAsErro')" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfNetAsErro -notmatch 'WifiDriverReinstall') { Write-Host "  [ERRO] Rede (asserção): a recusa não diz QUAL ação foi recusada ('$wfNetAsErro')" -ForegroundColor Red; $wbErrors++ }
+        # ...e passa na MESMA base quando a cópia deu certo: o que mudou foi só o argumento.
+        $wfNetAsOk = $null
+        try { $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -ExportOk $true -Facts $wfNetBase } catch { $wfNetAsOk = [string]$_.Exception.Message }
+        if ($null -ne $wfNetAsOk) { Write-Host "  [ERRO] Rede (asserção): máquina saudável foi recusada ('$wfNetAsOk')" -ForegroundColor Red; $wbErrors++ }
+        # O argumento OBRIGATÓRIO é a metade que importa: sem ele, a exportação voltaria a depender
+        # de alguém lembrar de passá-la. A conferência é sobre os METADADOS do parâmetro - chamar
+        # sem o argumento faria o PowerShell PERGUNTAR no console e penduraria o build.
+        foreach ($wfNetPar in @('Action', 'ExportOk')) {
+            $wfNetMand = @((Get-Command Assert-WinForgeNetworkGuard).Parameters[$wfNetPar].Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] -and $_.Mandatory })
+            if (-not $wfNetMand.Count) { Write-Host "  [ERRO] Rede (asserção): '$wfNetPar' não é parâmetro obrigatório" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o argumento MANDA sobre a hashtable: uma tabela de fatos dizendo que a cópia deu certo
+        # não pode desfazer o que quem executa acabou de medir.
+        $wfNetAsMand = $null
+        try { $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -ExportOk $false -Facts (& $wfNetCom 'ExportOk' $true) } catch { $wfNetAsMand = [string]$_.Exception.Message }
+        if ($null -eq $wfNetAsMand) { Write-Host "  [ERRO] Rede (asserção): o argumento obrigatório perdeu para a hashtable de fatos" -ForegroundColor Red; $wbErrors++ }
+        # 'SemPerfil' é degrau, e não porta de saída: sem o perfil não dá para saber se a máquina é
+        # virtual ou um servidor, e responder "não é" seria inventar. Ele recusa os três botões de
+        # driver e NÃO recusa o 3, que não depende de nada disso.
+        $wfNetSemPerfil = @{} + $wfNetBase
+        $wfNetSemPerfil['SemPerfil'] = $true
+        foreach ($wfNetBtnP in @('WifiDriverReinstall', 'WifiDriverGeneric', 'WifiDriverRestore')) {
+            $wfNetGp = Test-WinForgeNetworkGuard -Action $wfNetBtnP -Facts $wfNetSemPerfil
+            if ($wfNetGp.Ok) { Write-Host "  [ERRO] Rede (perfil): '$wfNetBtnP' rodou sem o diagnóstico ter terminado" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfNetGp.Reason -notmatch 'diagnóstico') { Write-Host "  [ERRO] Rede (perfil): a recusa de '$wfNetBtnP' não fala do diagnóstico ('$($wfNetGp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (-not (Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts $wfNetSemPerfil).Ok) { Write-Host "  [ERRO] Rede (perfil): o botão 3 não depende do perfil e foi recusado" -ForegroundColor Red; $wbErrors++ }
+        # O levantamento na máquina, que até aqui não tinha trava nenhuma. Para o botão 3 ele é
+        # barato e seguro: só a API da sessão e o número do build, nada de adaptador nem de driver.
+        $wfNetLev = Get-WinForgeNetworkFacts -Action 'NetDnsRenew'
+        foreach ($wfNetChave in @('Remote', 'Build', 'OtherAdapter', 'Inbox', 'ExportOk', 'OnBattery', 'Virtual', 'Server', 'NeedRestart', 'FreeBytes', 'NeedBytes')) {
+            if (-not $wfNetLev.ContainsKey($wfNetChave)) { Write-Host "  [ERRO] Rede (levantamento): a chave '$wfNetChave' não foi levantada" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ([int]$wfNetLev.Build -ne [int][Environment]::OSVersion.Version.Build) { Write-Host "  [ERRO] Rede (levantamento): build $($wfNetLev.Build), esperado $([Environment]::OSVersion.Version.Build)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetLev.Remote -isnot [bool]) { Write-Host "  [ERRO] Rede (levantamento): 'Remote' veio '$($wfNetLev.Remote)', que não é booleano - a API da sessão não foi chamada" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfNetLev.NeedBytes -le 0) { Write-Host "  [ERRO] Rede (levantamento): 'NeedBytes' veio $($wfNetLev.NeedBytes)" -ForegroundColor Red; $wbErrors++ }
         Write-Host "  Rede (bloqueios): rádio por mídia física, sonda sem Test-NetConnection -Port, sessão remota por GetSystemMetrics, dez recusas sem 'continuar mesmo assim'"
+        Write-Host "  Rede (guarda): esconder avaliado sobre a escada inteira, asserção que LANÇA com ação e exportação obrigatórias, levantamento com as onze chaves"
     } catch {
         Write-Host "  [ERRO] Rede (bloqueios): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
@@ -7290,7 +7362,7 @@ if ($SelfTest) {
     #
     # Lista canônica das linhas de rede, no mesmo espírito de $wfRepNomes e $wfAclNomes: é ela que a
     # trava dos botões na tela usa lá embaixo, para uma linha nova entrar na conferência sozinha.
-    $wfNetNomes = @('NetDiagFull')
+    $wfNetNomes = @('NetDiagFull', 'NetDnsRenew')
     try {
         $wfVerFrases = @{
             APIPA  = 'O computador não pegou endereço do roteador (está em 169.254.x.x). Comece por "Limpar cache de DNS e pegar endereço novo".'
@@ -7370,6 +7442,76 @@ if ($SelfTest) {
         Write-Host "  Rede (diagnóstico): cinco frases fechadas, filtro de terceiro nomeado com caminho de menu, catálogo Winsock conferido, botão roda inteiro"
     } catch {
         Write-Host "  [ERRO] Rede (diagnóstico): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Rede: DNS e endereço novo
+    try {
+        $wfDnsCmd = Get-WinForgeRepairCommand -Name 'NetDnsRenew'
+        if ([string]$wfDnsCmd.Title -ne 'Rede — Limpar cache de DNS e pegar endereço novo') { Write-Host "  [ERRO] Rede (DNS): título '$($wfDnsCmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfDnsCmd.Kind -ne 'repair') { Write-Host "  [ERRO] Rede (DNS): a linha é '$($wfDnsCmd.Kind)', esperado 'repair'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfDnsCmd.ExpectMinutes -ne 2) { Write-Host "  [ERRO] Rede (DNS): ExpectMinutes $($wfDnsCmd.ExpectMinutes), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        $wfDnsPassos = @($wfDnsCmd.Steps)
+        if ($wfDnsPassos.Count -ne 4) { Write-Host "  [ERRO] Rede (DNS): $($wfDnsPassos.Count) passo(s), esperado 4 (flushdns, release, renew, nbtstat -R)" -ForegroundColor Red; $wbErrors++ }
+        $wfDnsLinha = @($wfDnsPassos | ForEach-Object { "$($_.FilePath) $(@($_.Arguments) -join ' ')" }) -join ' | '
+        foreach ($wfDnsExig in @('/flushdns', '/release', '/renew', '-R')) {
+            if ($wfDnsLinha -notmatch [regex]::Escape($wfDnsExig)) { Write-Host "  [ERRO] Rede (DNS): falta '$wfDnsExig' nos passos ('$wfDnsLinha')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A ORDEM é a do conserto, e não acaso: esvaziar o cache de nomes, devolver o endereço e só
+        # então pedir outro. Devolver depois de pedir jogaria fora o endereço que acabou de chegar.
+        if ($wfDnsPassos.Count -eq 4) {
+            $wfDnsOrdem = @($wfDnsPassos | ForEach-Object { [string]@($_.Arguments)[0] })
+            if (($wfDnsOrdem -join ',') -ne '/flushdns,/release,/renew,-R') { Write-Host "  [ERRO] Rede (DNS): a ordem dos passos é '$($wfDnsOrdem -join ',')'" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfDnsP in $wfDnsPassos) {
+            if (-not ([System.IO.Path]::IsPathRooted([string]$wfDnsP.FilePath))) { Write-Host "  [ERRO] Rede (DNS): '$($wfDnsP.FilePath)' não é caminho absoluto do System32" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfDnsP.FilePath -notlike ([string][Environment]::SystemDirectory + '*')) { Write-Host "  [ERRO] Rede (DNS): '$($wfDnsP.FilePath)' está fora de [Environment]::SystemDirectory" -ForegroundColor Red; $wbErrors++ }
+            # netsh e ipconfig escrevem UTF-8 quando a saída é um cano (medido em wf-commands.ps1):
+            # lidos como OEM, os acentos chegam embaralhados à janela que a pessoa está olhando.
+            if ([string]$wfDnsP.Encoding -ne 'utf8') { Write-Host "  [ERRO] Rede (DNS): o passo '$(@($wfDnsP.Arguments) -join ' ')' declara Encoding '$($wfDnsP.Encoding)', esperado 'utf8'" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfDnsA in @($wfDnsP.Arguments)) {
+                if ([string]$wfDnsA -match '\$|\+') { Write-Host "  [ERRO] Rede (DNS): argumento montado por concatenação ('$wfDnsA')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # A simulação passa por ele sem redefinir a rede de quem compila, e o despacho recusa no SelfTest.
+        $wfDnsSeco = @(Start-WinForgeStreamedCommand -Name 'NetDnsRenew' -Spec $wfDnsCmd -DryRun)
+        if ($wfDnsSeco.Count -ne 4) { Write-Host "  [ERRO] Rede (DNS): a simulação devolveu $($wfDnsSeco.Count) linha(s)" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfDnsSeco | Where-Object { ([string]$_).StartsWith('[simulação] ') }).Count) { Write-Host "  [ERRO] Rede (DNS): a simulação não é prefixada" -ForegroundColor Red; $wbErrors++ }
+        if ((Invoke-WinForgeRepairCommand -Name 'NetDnsRenew' -NoUI).Dispatched) { Write-Host "  [ERRO] Rede (DNS): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        # O guarda de rede é ESTRUTURAL nesta linha: ela declara a ação, e o despacho passa pela
+        # asserção que LANÇA antes de qualquer coisa rodar. A trava pega a FORMA DA CHAMADA com o
+        # argumento junto - o nome solto apareceria no comentário que explica a regra.
+        if ([string]$wfDnsCmd.NetworkGuard -ne 'NetDnsRenew') { Write-Host "  [ERRO] Rede (DNS): a linha não declara NetworkGuard (veio '$($wfDnsCmd.NetworkGuard)')" -ForegroundColor Red; $wbErrors++ }
+        $wfDnsFonte = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        if ($wfDnsFonte -notmatch 'Assert-WinForgeNetworkGuard\s+-Action') { Write-Host "  [ERRO] Rede (DNS): o despacho não CHAMA a asserção de rede com -Action" -ForegroundColor Red; $wbErrors++ }
+        if ($wfDnsFonte -notmatch '-ExportOk') { Write-Host "  [ERRO] Rede (DNS): o despacho chama a asserção sem -ExportOk" -ForegroundColor Red; $wbErrors++ }
+        # A asserção vem ANTES da caixa de confirmação: perguntar primeiro e recusar depois faz o
+        # usuário ler o aviso inteiro, decidir e só então descobrir que o clique não valia nada. É a
+        # mesma regra que as duas travas de "já tem coisa rodando" seguem nesta função.
+        # As DUAS pontas ancoram na FORMA DA CHAMADA com o argumento junto, e não no nome solto: o
+        # bloco de ajuda desta mesma função cita 'Get-WinForgeRepairConfirmText' em prosa, LOGO NO
+        # COMEÇO, e o nome solto media a posição do comentário em vez da do código. A trava ficou
+        # vermelha com a ordem certa até esta linha ser corrigida.
+        $wfDnsPosG = $wfDnsFonte.IndexOf('Assert-WinForgeNetworkGuard -Action', [StringComparison]::Ordinal)
+        $wfDnsPosC = $wfDnsFonte.IndexOf('Get-WinForgeRepairConfirmText -Name', [StringComparison]::Ordinal)
+        if ($wfDnsPosG -lt 0 -or $wfDnsPosC -lt 0 -or $wfDnsPosG -gt $wfDnsPosC) { Write-Host "  [ERRO] Rede (DNS): a asserção de rede roda DEPOIS da caixa de confirmação" -ForegroundColor Red; $wbErrors++ }
+        # O botão 2 (Redefinir, que já existe) ganha o texto do que NÃO faz.
+        $wfDnsAchou = $false
+        $wfDnsRedef = [string]$sync.configs.feature.WPFFixesNetwork.Description
+        foreach ($wfDnsF in @('não reinstala driver', 'não troca o driver')) {
+            if ($wfDnsRedef -match [regex]::Escape($wfDnsF)) { $wfDnsAchou = $true }
+        }
+        if (-not $wfDnsAchou) { Write-Host "  [ERRO] Rede (Redefinir): a descrição não diz o que ele NÃO faz ('$wfDnsRedef')" -ForegroundColor Red; $wbErrors++ }
+        # 'antivírus' sozinho é trava vazia: a descrição antiga já citava a palavra ("depois de um
+        # antivírus ou VPN mal desinstalado"). O que se cobra é a NEGAÇÃO, com as duas juntas.
+        if ($wfDnsRedef -notmatch 'não mexe em antivírus') { Write-Host "  [ERRO] Rede (Redefinir): a descrição não avisa que ele não mexe em antivírus" -ForegroundColor Red; $wbErrors++ }
+        # O mesmo texto na RESERVA da tabela: é ela que monta a caixa quando a entrada da config
+        # some, e um texto que envelhece pela metade é o defeito que a reserva existe para evitar.
+        $wfDnsRedefCmd = [string](Get-WinForgeRepairCommand -Name 'NetworkReset').Confirm
+        if ($wfDnsRedefCmd -notmatch 'driver') { Write-Host "  [ERRO] Rede (Redefinir): a reserva da tabela não diz que ele não mexe em driver" -ForegroundColor Red; $wbErrors++ }
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Description)) { Write-Host "  [ERRO] Rede (DNS): WPFWFRepNetDnsRenew sem Description" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Content -ne [string]$wfDnsCmd.Title) { Write-Host "  [ERRO] Rede (DNS): o Content da config ('$($sync.configs.feature.WPFWFRepNetDnsRenew.Content)') não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (DNS): quatro passos por caminho absoluto, nenhum argumento concatenado, simulação sem efeito e o Redefinir dizendo o que não faz"
+    } catch {
+        Write-Host "  [ERRO] Rede (DNS): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por

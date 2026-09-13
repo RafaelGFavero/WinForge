@@ -152,6 +152,14 @@ $sync.configs.wfrepair = @'
     "panel": "1",
     "Type": "Button",
     "ButtonWidth": "350"
+  },
+  "WPFWFRepNetDnsRenew": {
+    "Content": "Rede — Limpar cache de DNS e pegar endereço novo",
+    "Description": "ALTERA O SISTEMA. Esvazia o cache de nomes do Windows, devolve ao roteador o endereço que esta máquina está usando, pede outro no lugar e limpa também o cache de nomes NetBIOS, nessa ordem. É o primeiro conserto a tentar quando o diagnóstico aponta endereço 169.254 ou servidor de nomes mudo, e é reversível por natureza: o roteador entrega outro endereço em segundos. A rede cai durante a troca; se você estiver usando este computador de longe, por Área de Trabalho Remota, a sua própria conexão cai junto e o botão nem aparece por causa disso. Não toca em driver, em antivírus nem na pilha de rede: para essas coisas há outros botões, e o diagnóstico diz qual.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
   }
 }
 '@ | ConvertFrom-Json

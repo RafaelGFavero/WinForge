@@ -26,7 +26,8 @@
 # 3. "Ache o Wi-Fi procurando 'Wi-Fi' no nome do adaptador." O nome muda com o idioma do Windows e
 #    com o que o dono da máquina digitou em "Renomear adaptador". A pergunta certa é sobre a MÍDIA
 #    FÍSICA, que é 'Native 802.11' em qualquer idioma. Nesta máquina o filtro por mídia separa o
-#    rádio Intel dos sete adaptadores virtuais de VPN (OpenVPN e Fortinet) numa linha.
+#    rádio Intel dos seis adaptadores virtuais de VPN (OpenVPN e Fortinet) numa linha - medido:
+#    8 adaptadores visíveis, 6 virtuais e 2 físicos; com os ocultos, 23.
 
 function Test-WinForgeRemoteSession {
     <#
@@ -62,8 +63,9 @@ function Get-WinForgeWifiAdapter {
     .DESCRIPTION
         Dois descartes, e os dois são necessários nesta máquina:
 
-        1. Mídia física fora de '*802.11*'. É o que separa o rádio dos sete adaptadores virtuais de
-           VPN (OpenVPN, Fortinet) e da placa de cabo, sem olhar para o nome de ninguém.
+        1. Mídia física fora de '*802.11*'. É o que separa o rádio dos seis adaptadores virtuais de
+           VPN (OpenVPN, Fortinet) e da placa de cabo, sem olhar para o nome de ninguém. Medido
+           nesta máquina: 8 adaptadores visíveis, 6 virtuais e 2 físicos.
         2. Adaptador marcado como virtual. 'Microsoft Wi-Fi Direct Virtual Adapter' e 'Microsoft
            Hosted Network Virtual Adapter' declaram a MESMA mídia física do rádio de verdade,
            porque é em cima dele que eles andam. Eles não têm driver próprio para remover, e trocar
@@ -182,6 +184,158 @@ function Test-WinForgeTcpProbe {
     return @{ Ok = $ok; Ms = [int]$relogio.ElapsedMilliseconds }
 }
 
+function Get-WinForgeNetworkFacts {
+    <#
+    .SYNOPSIS
+        Levanta NA MÁQUINA os fatos que a escada de bloqueios pesa, e só os que a ação pedida usa.
+    .DESCRIPTION
+        Os padrões são o LADO SEGURO de cada pergunta: o que não deu para responder BLOQUEIA em vez
+        de liberar. 'ExportOk' é a exceção e nasce $true, porque ele não é uma pergunta sobre a
+        máquina - é o resultado da cópia de segurança que quem executa acabou de tentar, e antes de
+        tentar não há falha nenhuma. Quem executa passa o valor medido por argumento OBRIGATÓRIO em
+        Assert-WinForgeNetworkGuard; aqui ele é só o ponto de partida.
+
+        O botão 3 (endereço e cache de nomes) não mexe em driver, então para ele só a sessão e o
+        número do build são levantados: nada de adaptador, de perfil nem de varredura de INF.
+
+        'SemPerfil' é fato, e não porta de saída. "É virtual?" é a única pergunta desta lista sem
+        resposta barata e confiável fora do perfil - quem separa um convidado de VMware de uma
+        máquina física com Hyper-V ligado é a assinatura de fabricante/modelo que
+        Get-WinForgeSystemProfile já monta, e uma segunda cópia dessa assinatura aqui só teria como
+        futuro divergir da primeira. Sem perfil, a resposta honesta não é "não é virtual", é "ainda
+        não sei", e ela vira um degrau da escada como qualquer outro, na posição que lhe cabe.
+
+        A hora deste levantamento importa: dois dos fatos são VOLÁTEIS entre pintar a aba e clicar
+        no botão (o cabo ainda ligado, a máquina ainda na tomada). Por isso quem executa chama a
+        asserção, que chama isto de novo, em vez de reusar o que a pintura levantou.
+    .PARAMETER Action
+        Qual ação vai ser pesada. É ela que decide o que é caro o bastante para não ser levantado.
+    .OUTPUTS
+        Hashtable com Remote, Build, OtherAdapter, Inbox, ExportOk, OnBattery, Virtual, Server,
+        NeedRestart, FreeBytes, NeedBytes e SemPerfil.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverGeneric', 'WifiDriverRestore')][string]$Action)
+
+    $f = @{
+        Remote = $false; Build = 0; OtherAdapter = $false; Inbox = $false; ExportOk = $true
+        OnBattery = $false; Virtual = $false; Server = $false; NeedRestart = $false
+        SemPerfil = $false
+        FreeBytes = 0
+        # O pacote de driver de rede exportado cabe folgado nisto; é piso, não estimativa fina.
+        NeedBytes = 200MB
+    }
+    try { $f.Remote = [bool](Test-WinForgeRemoteSession) } catch { $f.Remote = $false }
+    try { $f.Build = [int][Environment]::OSVersion.Version.Build } catch { $f.Build = 0 }
+    if ($Action -eq 'NetDnsRenew') { return $f }
+
+    $perfil = $null
+    try { $perfil = $sync.Profile } catch { $perfil = $null }
+    if ($null -eq $perfil -or $null -eq $perfil.Machine -or $null -eq $perfil.OS -or $null -eq $perfil.Power) {
+        # Sem perfil não há o que levantar daqui para baixo, e os padrões seguros já estão postos.
+        $f.SemPerfil = $true
+        return $f
+    }
+    $f.Virtual   = [bool]$perfil.Machine.IsVirtual
+    $f.Server    = [bool]$perfil.OS.IsServer
+    $f.OnBattery = [bool]$perfil.Power.OnBattery
+
+    # Reinício pendente: as três marcas clássicas, na ordem em que são baratas de ler.
+    foreach ($chave in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+                         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
+        if (Test-Path -LiteralPath $chave) { $f.NeedRestart = $true }
+    }
+    if (-not $f.NeedRestart) {
+        try {
+            $pendentes = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction Stop).PendingFileRenameOperations
+            $f.NeedRestart = (@(@($pendentes) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
+        } catch { }
+    }
+
+    # A lista de adaptadores é consultada UMA vez e reaproveitada pelos dois fatos que dependem
+    # dela: Get-NetAdapter custa perto de 200 ms.
+    #
+    # "Outra via" é outro caminho para a internet enquanto o rádio está sem driver: cabo, celular
+    # por USB, outro dongle. O próprio rádio não conta, e os virtuais também não - VPN, Wi-Fi Direct
+    # e comutador de máquina virtual andam EM CIMA de um adaptador de verdade e caem junto com ele.
+    # Medido nesta máquina: 8 adaptadores visíveis, 6 deles virtuais (OpenVPN e Fortinet) e 2
+    # físicos; com os ocultos são 23. Sem esse descarte, a resposta seria "tem outra via" com o cabo
+    # desligado e o Wi-Fi sendo a única saída.
+    $adaptadores = @()
+    $radio = @{ Ok = $false; ifIndex = 0 }
+    try {
+        $adaptadores = @(Get-NetAdapter -ErrorAction Stop)
+        $radio = Get-WinForgeWifiAdapter -Adapters $adaptadores
+        $indiceRadio = [int]$radio.ifIndex
+        $f.OtherAdapter = (@($adaptadores | Where-Object {
+            ([string]$_.Status) -eq 'Up' -and -not [bool]$_.Virtual -and [int]$_.ifIndex -ne $indiceRadio
+        }).Count -gt 0)
+    } catch { $f.OtherAdapter = $false }
+
+    try {
+        $raizWindows = [string][Environment]::GetFolderPath('Windows')
+        $f.FreeBytes = [long](New-Object System.IO.DriveInfo ([System.IO.Path]::GetPathRoot($raizWindows))).AvailableFreeSpace
+    } catch { $f.FreeBytes = 0 }
+
+    # O driver básico só é condição do botão que troca por ele; para os outros a pergunta não
+    # existe, e nem a varredura de INF nem a consulta de IDs de hardware são pagas.
+    if ($Action -eq 'WifiDriverGeneric') {
+        $idRadio = ''
+        if ($radio.Ok) {
+            $objRadio = @($adaptadores | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
+            if ($objRadio.Count) { $idRadio = [string]$objRadio[0].PnPDeviceID }
+        }
+        $f.Inbox = (-not [string]::IsNullOrWhiteSpace($idRadio)) -and (Test-WinForgeInboxWifiDriver -PnpDeviceId $idRadio)
+    }
+    return $f
+}
+
+function Assert-WinForgeNetworkGuard {
+    <#
+    .SYNOPSIS
+        LANÇA quando a ação de rede pedida não pode rodar nesta máquina. É a porta do caminho de
+        execução, e não um conselho.
+    .DESCRIPTION
+        Test-WinForgeNetworkGuard devolve um objeto, e objeto devolvido depende de alguém lembrar de
+        olhar. Esta base de código já pagou por isso uma vez: o bloco de ajuda de
+        Assert-WinForgeNotSelfTest registra o estrago de quando a trava de simulação era consultiva -
+        helpers sem param() engoliram o -DryRun e instaladores rodaram de verdade na máquina de um
+        usuário. A conclusão de lá vale aqui: a trava que importa é a que LANÇA.
+
+        Duas coisas que ela resolve além de lançar:
+
+        1. O MOMENTO. Os fatos são levantados AQUI, no caminho de execução, e não na pintura do
+           botão. Dois deles mudam entre uma coisa e outra - se ainda há cabo ligado e se a máquina
+           ainda está na tomada -, e são justamente os que decidem se a ação é segura.
+        2. A EXPORTAÇÃO. 'ExportOk' não é detectável: é o resultado da cópia de segurança que quem
+           executa acabou de tentar. Como argumento OBRIGATÓRIO, ele deixa de depender de alguém
+           lembrar de passá-lo - sem ele a chamada nem compila. E ele MANDA sobre qualquer tabela de
+           fatos recebida: uma tabela dizendo que a cópia deu certo não pode desfazer o que quem
+           executa acabou de medir.
+    .PARAMETER Action
+        A ação que está prestes a rodar.
+    .PARAMETER ExportOk
+        Se a cópia de segurança do driver atual deu certo. Quem não exporta nada passa $true.
+    .PARAMETER Facts
+        Fatos prontos, no lugar dos levantados na máquina. É a porta do -SelfTest; 'ExportOk'
+        continua vindo do argumento obrigatório, e não daqui.
+    .OUTPUTS
+        O resultado do guarda quando ele libera. Quando ele recusa, uma exceção com o motivo.
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverGeneric', 'WifiDriverRestore')][string]$Action,
+        [Parameter(Mandatory)][bool]$ExportOk,
+        [hashtable]$Facts
+    )
+
+    $f = $(if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) { @{} + $Facts } else { Get-WinForgeNetworkFacts -Action $Action })
+    $f['ExportOk'] = $ExportOk
+    $guarda = Test-WinForgeNetworkGuard -Action $Action -Facts $f
+    if (-not $guarda.Ok) {
+        throw "Recusado: '$Action' não pode rodar nesta máquina. $([string]$guarda.Reason)"
+    }
+    return $guarda
+}
+
 function Test-WinForgeNetworkGuard {
     <#
     .SYNOPSIS
@@ -232,95 +386,7 @@ function Test-WinForgeNetworkGuard {
     $driver     = @('WifiDriverReinstall', 'WifiDriverGeneric', 'WifiDriverRestore')
     $tiraDriver = @('WifiDriverReinstall', 'WifiDriverGeneric')
 
-    if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) {
-        $f = $Facts
-    } else {
-        # ------------------------------------------------------------------ levantamento na máquina
-        # Os padrões são o LADO SEGURO de cada pergunta: o que não deu para responder bloqueia em
-        # vez de liberar. 'ExportOk' é a exceção e nasce $true, porque ele não é uma pergunta sobre
-        # a máquina - é o resultado da cópia de segurança que o próprio chamador acabou de tentar,
-        # e antes de tentar não há falha nenhuma.
-        $f = @{
-            Remote = $false; Build = 0; OtherAdapter = $false; Inbox = $false; ExportOk = $true
-            OnBattery = $false; Virtual = $false; Server = $false; NeedRestart = $false
-            FreeBytes = 0
-            # O pacote de driver de rede exportado cabe folgado nisto; é piso, não estimativa fina.
-            NeedBytes = 200MB
-        }
-        try { $f.Remote = [bool](Test-WinForgeRemoteSession) } catch { $f.Remote = $false }
-        try { $f.Build = [int][Environment]::OSVersion.Version.Build } catch { $f.Build = 0 }
-
-        if ($Action -ne 'NetDnsRenew') {
-            # "É virtual?" é a única pergunta desta lista sem resposta barata e confiável fora do
-            # perfil: quem separa um convidado de VMware de uma máquina física com Hyper-V ligado é
-            # a assinatura de fabricante/modelo que Get-WinForgeSystemProfile já monta, e uma
-            # segunda cópia dessa assinatura aqui só teria como futuro divergir da primeira.
-            # Sem perfil, a resposta honesta não é "não é virtual" - é "ainda não sei", e a recusa
-            # diz isso. Os botões de driver moram na aba Diagnóstico, que só se pinta depois do
-            # perfil; o botão 3 não depende de nada disto e segue em frente.
-            #
-            # Esta porta é do LEVANTAMENTO, e não um degrau da escada: ela responde ANTES porque sem
-            # perfil não há fato para a escada ler. Consequência assumida: numa sessão remota com o
-            # diagnóstico pela metade o usuário lê esta frase em vez da do degrau 1. As duas
-            # recusam, e esta ainda manda esperar - o que também é verdade.
-            $perfil = $null
-            try { $perfil = $sync.Profile } catch { $perfil = $null }
-            if ($null -eq $perfil -or $null -eq $perfil.Machine -or $null -eq $perfil.OS -or $null -eq $perfil.Power) {
-                $aindaNao = 'O diagnóstico desta aba ainda não terminou. Espere o cartão do computador aparecer e tente de novo: sem ele não dá para saber se esta máquina é virtual ou um Windows Server, e é aí que mexer no driver de rede sai caro.'
-                return @{ Ok = $false; Hidden = $false; Reason = $aindaNao; Blocks = @($aindaNao) }
-            }
-            $f.Virtual   = [bool]$perfil.Machine.IsVirtual
-            $f.Server    = [bool]$perfil.OS.IsServer
-            $f.OnBattery = [bool]$perfil.Power.OnBattery
-
-            # Reinício pendente: as três marcas clássicas, na ordem em que são baratas de ler.
-            foreach ($chave in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
-                                 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
-                if (Test-Path -LiteralPath $chave) { $f.NeedRestart = $true }
-            }
-            if (-not $f.NeedRestart) {
-                try {
-                    $pendentes = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction Stop).PendingFileRenameOperations
-                    $f.NeedRestart = (@(@($pendentes) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
-                } catch { }
-            }
-
-            # A lista de adaptadores é consultada UMA vez e reaproveitada pelos dois fatos que
-            # dependem dela: Get-NetAdapter custa perto de 200 ms, e isto roda ao pintar a aba.
-            #
-            # "Outra via" é outro caminho para a internet enquanto o rádio está sem driver: cabo,
-            # celular por USB, outro dongle. O próprio rádio não conta, e os virtuais também não -
-            # VPN, Wi-Fi Direct e comutador de máquina virtual andam EM CIMA de um adaptador de
-            # verdade e caem junto com ele. Nesta máquina são sete deles, e sem esse descarte a
-            # resposta seria "tem outra via" com o cabo desligado.
-            $adaptadores = @()
-            $radio = @{ Ok = $false; ifIndex = 0 }
-            try {
-                $adaptadores = @(Get-NetAdapter -ErrorAction Stop)
-                $radio = Get-WinForgeWifiAdapter -Adapters $adaptadores
-                $indiceRadio = [int]$radio.ifIndex
-                $f.OtherAdapter = (@($adaptadores | Where-Object {
-                    ([string]$_.Status) -eq 'Up' -and -not [bool]$_.Virtual -and [int]$_.ifIndex -ne $indiceRadio
-                }).Count -gt 0)
-            } catch { $f.OtherAdapter = $false }
-
-            try {
-                $raizWindows = [string][Environment]::GetFolderPath('Windows')
-                $f.FreeBytes = [long](New-Object System.IO.DriveInfo ([System.IO.Path]::GetPathRoot($raizWindows))).AvailableFreeSpace
-            } catch { $f.FreeBytes = 0 }
-
-            # O driver básico só é condição do botão que troca por ele; para os outros a pergunta
-            # não existe, e nem a varredura de INF nem a consulta de IDs de hardware são pagas.
-            if ($Action -eq 'WifiDriverGeneric') {
-                $idRadio = ''
-                if ($radio.Ok) {
-                    $objRadio = @($adaptadores | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
-                    if ($objRadio.Count) { $idRadio = [string]$objRadio[0].PnPDeviceID }
-                }
-                $f.Inbox = (-not [string]::IsNullOrWhiteSpace($idRadio)) -and (Test-WinForgeInboxWifiDriver -PnpDeviceId $idRadio)
-            }
-        }
-    }
+    $f = $(if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) { $Facts } else { Get-WinForgeNetworkFacts -Action $Action })
 
     $build      = [int]$f.Build
     $livre      = [long]$f.FreeBytes
@@ -335,6 +401,8 @@ function Test-WinForgeNetworkGuard {
            Texto = 'Você está usando este computador de longe, por Área de Trabalho Remota. Toda ação desta escada mexe na conexão que está te trazendo até aqui, e se ela cair não há como desfazer de longe. Faça isto sentado na frente da máquina.' },
         @{ Vale = ($build -lt 18362); Absolutas = $tiraDriver; Esconde = $true
            Texto = "A versão do Windows desta máquina (build $build) é anterior à 1903, e os comandos que removem e reinstalam o driver não existem nela. Atualize o Windows para usar este botão." },
+        @{ Vale = [bool]$f.SemPerfil; Absolutas = $driver
+           Texto = 'O diagnóstico desta aba ainda não terminou. Espere o cartão do computador aparecer e tente de novo: sem ele não dá para saber se esta máquina é virtual ou um Windows Server, e é aí que mexer no driver de rede sai caro.' },
         @{ Vale = [bool]$f.Virtual; Absolutas = $driver
            Texto = 'Esta é uma máquina virtual. A placa de rede que você está vendo é do programa de virtualização, não do computador: trocar o driver dela não conserta o Wi-Fi da máquina de verdade e derruba a rede do convidado. Faça isto no computador que hospeda a máquina virtual.' },
         @{ Vale = [bool]$f.Server; Absolutas = $driver
@@ -354,15 +422,27 @@ function Test-WinForgeNetworkGuard {
            Texto = 'A cópia de segurança do driver atual falhou, então não há caminho de volta se a troca der errado. Este botão só roda com a cópia guardada.' }
     )
 
+    # ESCONDER é propriedade do BOTÃO; EXPLICAR é do degrau. Os dois são decididos separadamente, e
+    # de propósito.
+    #
+    # O laço abaixo para no primeiro degrau absoluto, porque a explicação que o usuário lê é a do
+    # motivo mais fundamental. Se 'Hidden' saísse desse mesmo laço - como saía -, bastaria um degrau
+    # anterior disparar para o botão voltar a aparecer: um notebook SEM driver básico e na BATERIA
+    # mostrava o botão mais perigoso da escada desabilitado, dizendo "ligue na tomada". É o estado
+    # exato que a decisão de ESCONDER existe para impedir, porque botão desabilitado faz a pessoa
+    # procurar na internet como habilitá-lo, e o que ela acha é a opção de forçar.
+    #
+    # Então basta UM degrau que esconde estar valendo para esta ação: a varredura é sobre a escada
+    # inteira e não depende de quem interrompeu o laço.
+    $escondido = [bool]@($escada | Where-Object { $_.Vale -and $_.Esconde -and ($Action -in @($_.Absolutas)) }).Count
+
     $blocos = New-Object System.Collections.Generic.List[string]
     $motivo = ''
-    $escondido = $false
     foreach ($degrau in $escada) {
         if (-not $degrau.Vale) { continue }
         if ($Action -in @($degrau.Absolutas)) {
             $blocos.Add([string]$degrau.Texto)
             $motivo = [string]$degrau.Texto
-            $escondido = [bool]$degrau.Esconde
             break
         }
         if ($Action -in @($degrau.Avisos)) {
@@ -393,9 +473,27 @@ function Test-WinForgeInboxWifiDriver {
         e o botão some. É o lado seguro do erro: arrancar o driver que funciona pela metade sem ter
         o que pôr no lugar deixa a máquina sem rede nenhuma.
 
-        LIMITE CONHECIDO: 'net*.inf' é convenção, não regra do sistema. Um INF de rede da Microsoft
-        com outro nome seria lido como ausente e o botão sumiria numa máquina em que ele
-        funcionaria - erro para o lado de não estragar nada.
+        DESVIO DECLARADO da especificação, que manda analisar a saída da ferramenta de drivers. Ela
+        NÃO responde a esta pergunta, e a medição é esta, feita nesta máquina:
+
+        - 'pnputil /enum-drivers' devolveu 985 linhas e 95 pacotes, e os 95 são 'oemNN.inf' - só os
+          pacotes de TERCEIRO publicados no repositório de drivers. Os INF embutidos que moram em
+          %SystemRoot%\INF não aparecem.
+        - Nenhuma linha da saída traz ID DE HARDWARE. Sem ele não há como responder "o Windows tem
+          driver para ESTE rádio": sobraria adivinhar pelo nome do arquivo, que é exatamente a
+          fragilidade que se quer evitar.
+        - A saída é LOCALIZADA ('Nome Original:', 'Nome do Provedor:'). Parseá-la quebraria num
+          Windows em inglês, falha que este repositório já pagou duas vezes (o takeown do Plano 7 e
+          o campo de TCP da aba Servidor).
+
+        O que a crítica do revisor tinha de certo foi consertado: a busca não é mais no arquivo
+        inteiro. Linha de comentário (que começa por ';') e a seção [Strings] ficam de fora, que são
+        os dois lugares onde um ID de hardware aparece sem ser declaração de modelo.
+
+        LIMITE CONHECIDO que fica: 'net*.inf' é convenção, não regra do sistema, e a conferência não
+        interpreta as diretivas do INF. Um INF de rede da Microsoft com outro nome seria lido como
+        ausente e o botão sumiria numa máquina em que ele funcionaria - erro para o lado de não
+        estragar nada.
     .PARAMETER PnpDeviceId
         Identificador do dispositivo do rádio (PnPDeviceID do adaptador).
     .OUTPUTS
@@ -414,10 +512,24 @@ function Test-WinForgeInboxWifiDriver {
         $relogio = [System.Diagnostics.Stopwatch]::StartNew()
         foreach ($arquivo in @(Get-ChildItem -LiteralPath $pastaInf -Filter 'net*.inf' -File -ErrorAction Stop)) {
             if ($relogio.ElapsedMilliseconds -gt 3000) { return $false }
-            $texto = $null
-            try { $texto = [System.IO.File]::ReadAllText($arquivo.FullName) } catch { continue }
-            foreach ($id in $ids) {
-                if ($texto.IndexOf([string]$id, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+            $linhas = $null
+            try { $linhas = [System.IO.File]::ReadAllLines($arquivo.FullName) } catch { continue }
+            $naTabelaDeTextos = $false
+            foreach ($linha in $linhas) {
+                $corte = ([string]$linha).Trim()
+                if ($corte.Length -eq 0) { continue }
+                # Comentário não declara modelo nenhum: um ID citado ali é prosa.
+                if ($corte[0] -eq ';') { continue }
+                if ($corte[0] -eq '[') {
+                    # A tabela de textos guarda os nomes bonitos dos dispositivos, e alguns deles
+                    # trazem o ID escrito por extenso - de novo, não é declaração de modelo.
+                    $naTabelaDeTextos = $corte.StartsWith('[Strings', [StringComparison]::OrdinalIgnoreCase)
+                    continue
+                }
+                if ($naTabelaDeTextos) { continue }
+                foreach ($id in $ids) {
+                    if ($corte.IndexOf([string]$id, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+                }
             }
         }
         return $false
@@ -635,7 +747,7 @@ function Invoke-WinForgeNetworkDiagnostic {
         # 169.254 é o endereço que o Windows dá a si mesmo quando ninguém respondeu ao pedido de
         # DHCP. Só conta nos adaptadores FÍSICOS e LIGADOS, e as duas metades foram medidas nesta
         # máquina: um adaptador desconectado guarda o último endereço que teve (o rádio desta
-        # máquina está em 169.254 com o cabo ligado e navegando), e os sete adaptadores virtuais de
+        # máquina está em 169.254 com o cabo ligado e navegando), e os seis adaptadores virtuais de
         # VPN ficam em 169.254 o tempo todo, por desenho. Sem as duas, a frase "o computador não
         # pegou endereço do roteador" sairia numa máquina com internet perfeita.
         $ativos = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.Status -eq 'Up' -and -not [bool]$_.Virtual } | ForEach-Object { [int]$_.ifIndex })

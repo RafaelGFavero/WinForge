@@ -213,7 +213,7 @@ function Get-WinForgeRepairCommand {
                     @{ FilePath = (Get-WinForgeSystemExe -Name 'netsh.exe'); Arguments = @('int', 'ip', 'reset'); Encoding = 'utf8' }
                 )
                 Final     = 'Configuração de rede redefinida. Reinicie o computador.'
-                Confirm   = 'Redefine a pilha de rede com "netsh winsock reset" e "netsh int ip reset": as configurações de TCP/IP e do Winsock voltam ao padrão do Windows. É preciso reiniciar o computador para concluir.'
+                Confirm   = 'Redefine a pilha de rede com "netsh winsock reset" e "netsh int ip reset": as configurações de TCP/IP e do Winsock voltam ao padrão do Windows. Não reinstala nem troca driver de rede, e não mexe em antivírus, firewall ou VPN. É preciso reiniciar o computador para concluir.'
             }
         }
         'NtpPool' {
@@ -412,6 +412,34 @@ function Get-WinForgeRepairCommand {
                 Stream   = $true
                 Steps    = @(@{ Function = 'Invoke-WinForgeNetworkDiagnostic' })
                 Final    = 'Leitura concluída: nada foi alterado nesta máquina.'
+            }
+        }
+        # O segundo degrau, e o primeiro que MEXE. Quatro passos, e a ordem é o conserto: esvaziar o
+        # cache de nomes, devolver o endereço, pedir outro e limpar o cache de nomes NetBIOS.
+        # Devolver DEPOIS de pedir jogaria fora o endereço que acabou de chegar.
+        #
+        # 'utf8' nos quatro: o ipconfig e o nbtstat escrevem UTF-8 quando a saída é um cano, medido
+        # em wf-commands.ps1 junto com o netsh. Lidos como OEM, os acentos chegam embaralhados à
+        # janela que a pessoa está olhando enquanto a rede dela cai.
+        #
+        # 'NetworkGuard' é o que prende esta linha à asserção que LANÇA: ver o bloco de guarda em
+        # Invoke-WinForgeRepairCommand.
+        'NetDnsRenew' {
+            return @{
+                Title         = 'Rede — Limpar cache de DNS e pegar endereço novo'
+                Requires      = (Get-WinForgeSystemExe -Name 'ipconfig.exe')
+                Kind          = 'repair'
+                Stream        = $true
+                ExpectMinutes = 2
+                NetworkGuard  = 'NetDnsRenew'
+                Steps         = @(
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'ipconfig.exe'); Arguments = @('/flushdns'); Encoding = 'utf8' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'ipconfig.exe'); Arguments = @('/release');  Encoding = 'utf8' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'ipconfig.exe'); Arguments = @('/renew');    Encoding = 'utf8' }
+                    @{ FilePath = (Get-WinForgeSystemExe -Name 'nbtstat.exe');  Arguments = @('-R');        Encoding = 'utf8' }
+                )
+                Final   = 'Cache de nomes esvaziado e endereço pedido de novo ao roteador. Se o endereço continuar em 169.254, o problema está entre este computador e o roteador.'
+                Confirm = 'Esvazia o cache de nomes, devolve o endereço atual ao roteador e pede outro no lugar. A rede cai por alguns segundos.'
             }
         }
     }
@@ -1536,6 +1564,33 @@ function Invoke-WinForgeRepairCommand {
         if ($NoUI) { return @{ Dispatched = $false; Reason = 'ocupado'; Kind = $kind } }
         [System.Windows.MessageBox]::Show($ocupado, "WinForge", "OK", "Warning") | Out-Null
         return
+    }
+
+    # O guarda de rede é ESTRUTURAL, e não conselho: linha que declara 'NetworkGuard' não chega ao
+    # despacho sem passar por uma asserção que LANÇA. Devolver @{ Ok = $false } e esperar que alguém
+    # olhe é o mecanismo que já falhou neste repositório - ver o bloco de ajuda de
+    # Assert-WinForgeNotSelfTest, onde um helper sem param() engoliu o -DryRun e instalador rodou de
+    # verdade na máquina de um usuário.
+    #
+    # Ele fica AQUI, no caminho de execução, e não na pintura do botão: dois dos fatos que ele pesa
+    # mudam entre pintar a aba e clicar - se o cabo ainda está ligado e se a máquina ainda está na
+    # tomada. E vem ANTES da caixa de confirmação pelo mesmo motivo das duas travas acima:
+    # perguntar primeiro e recusar depois faz a pessoa ler o aviso inteiro, decidir e só então
+    # descobrir que o clique não valia nada.
+    #
+    # '-ExportOk $true' aqui porque nenhuma linha COM guarda exporta driver; quem exportar passa o
+    # que mediu, no próprio passo que exporta.
+    $guardaRede = [string]$cmd.NetworkGuard
+    if (-not [string]::IsNullOrWhiteSpace($guardaRede)) {
+        try {
+            $null = Assert-WinForgeNetworkGuard -Action $guardaRede -ExportOk $true
+        } catch {
+            $motivoRede = [string]$_.Exception.Message
+            Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$Name não despachado: $motivoRede"
+            if ($NoUI) { return @{ Dispatched = $false; Reason = 'rede'; Kind = $kind } }
+            [System.Windows.MessageBox]::Show($motivoRede, "WinForge", "OK", "Warning") | Out-Null
+            return
+        }
     }
 
     if ($kind -ne 'read') {
