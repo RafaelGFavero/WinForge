@@ -4722,6 +4722,12 @@ function Invoke-WinForgeAclOwnerFallback {
     # pasta do Windows com os Administradores como dona aceita alteração de qualquer processo
     # elevado. A janela abre ANTES da primeira troca; se ficasse aberta por causa de uma exceção, o
     # Parar morreria para o resto da sessão, e é por isso que o fechamento é no 'finally'.
+    # Os dois estados que o 'finally' consulta. 'Tomada' vira verdadeiro assim que o /setowner dos
+    # Administradores responde zero; 'Voltou', só quando a devolução responde zero. Enquanto a
+    # primeira for verdadeira e a segunda falsa, a pasta do sistema está com o dono errado AGORA - e
+    # é exatamente esse par que decide se o marcador fica no disco.
+    $posseTomada = $false
+    $posseVoltou = $false
     Enter-WinForgeStreamProtected -Path $chaveProtegida
     try {
         Write-Host ''
@@ -4742,17 +4748,28 @@ function Invoke-WinForgeAclOwnerFallback {
             Write-Error "A posse de '$pasta' não pôde ser assumida (código $codigoSocorro); a concessão fica sem a segunda tentativa."
             return $codigoSocorro
         }
+        # Daqui em diante a pasta do sistema está com os Administradores como dona.
+        $posseTomada = $true
         Write-Host 'Segunda e última tentativa desta etapa.'
         $codigoRetentativa = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $Step)
         Write-Host $devolver[0].Title
         $codigoDevolver = [int](Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $devolver[0])
         if ($codigoDevolver -ne 0) { Write-Error "A posse de '$pasta' NÃO voltou ao dono padrão (código $codigoDevolver): a pasta ficou com os Administradores como dona." }
+        # SÓ com código zero. Devolver a posse ao TrustedInstaller nem sempre é possível, mesmo
+        # elevado, e este é o caso em que o marcador MAIS importa: a pasta ficou mesmo com os
+        # Administradores como dona. Apagá-lo aqui daria silêncio na abertura seguinte justamente
+        # sobre a pasta que ele existe para denunciar.
+        $posseVoltou = ($codigoDevolver -eq 0)
         return $codigoRetentativa
     } finally {
-        # Os dois na mesma saída, e esta é a única: o 'return' do socorro que falhou passa por aqui,
-        # e uma exceção no meio também.
-        $null = Clear-WinForgeAclOwnerPending
+        # A saída da janela protegida vem PRIMEIRO: a limpeza do marcador toca no disco e pode
+        # estourar, e com ela na frente uma falha ali deixaria o Parar ignorado até o fim do comando
+        # inteiro. O que protege o sistema sai antes do que informa sobre ele.
         Exit-WinForgeStreamProtected -Path $chaveProtegida
+        # '$posseVoltou' nasce falso e só vira verdadeiro na linha acima: o 'return' do socorro que
+        # falhou passa por aqui com ele falso, e ali a posse nunca chegou a ser tomada - é o outro
+        # caminho que limpa, e por isso a condição é sobre a posse, não sobre o código de retorno.
+        if ($posseVoltou -or -not $posseTomada) { $null = Clear-WinForgeAclOwnerPending }
     }
 }
 

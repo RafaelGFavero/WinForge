@@ -183,9 +183,9 @@ function Get-WinForgeCommandOutputPath {
         o fluxo ao vivo do reparo -, e pendurar a limpeza em quem CRIA o arquivo deixava de fora
         todos menos um: era só 'repair' que encolhia, e 'server' e 'command' cresciam para sempre.
 
-        A limpeza roda antes de o arquivo desta execução existir, então a pasta fica com os 20
-        anteriores MAIS o de agora. O teto é da fila que já estava lá, e não do conteúdo da pasta no
-        instante seguinte - 21 arquivos em vez de 20 não é o que essa retenção existe para evitar.
+        A limpeza roda ANTES de o arquivo desta execução existir, e é por isso que ela vai com
+        '-Incoming': o teto é do que a pasta fica DEPOIS. Sem a chave, ela deixava 20 e o de agora
+        fechava 21 - um a mais do que a especificação diz.
     #>
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -193,7 +193,7 @@ function Get-WinForgeCommandOutputPath {
     )
 
     $dir = Get-WinForgeCommandOutputRoot
-    [void](Remove-WinForgeOldCommandOutput -Prefix $Prefix -Root $dir)
+    [void](Remove-WinForgeOldCommandOutput -Prefix $Prefix -Root $dir -Incoming)
     return (Join-Path $dir ("{0}-{1}-{2}.txt" -f $Prefix, $Name, (Get-Date -Format 'yyyyMMdd-HHmmss')))
 }
 
@@ -611,7 +611,13 @@ function Invoke-WinForgeStreamedProcess {
                     try {
                         for ($z = 0; $z -lt $tamanho; $z += 4) { [System.Runtime.InteropServices.Marshal]::WriteInt32($info, $z, 0) }
                         [System.Runtime.InteropServices.Marshal]::WriteInt32($info, 16, 0x2000)
-                        [void][WfJob]::SetInformationJobObject($trabalho, 9, $info, [uint32]$tamanho)
+                        # As duas chamadas devolvem booleano, e ele NÃO é para ser jogado fora.
+                        # Aqui, falso (com tamanho errado o Windows responde erro 24) custa só a
+                        # morte automática da árvore quando o WinForge é encerrado por fora: o
+                        # botão Parar continua funcionando. É aviso, não recusa.
+                        if (-not [WfJob]::SetInformationJobObject($trabalho, 9, $info, [uint32]$tamanho)) {
+                            Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "O job do comando não aceitou KILL_ON_JOB_CLOSE (erro $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())): o botão Parar continua valendo, mas fechar o WinForge à força pode deixar o processo filho vivo."
+                        }
                     } finally { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($info) }
                     $sync.WinForgeStreamJob[$StreamTo] = $trabalho
                 }
@@ -626,7 +632,18 @@ function Invoke-WinForgeStreamedProcess {
         # sem parar, e um Get-Item por linha seria um acesso a disco por linha.
         $desdeAConta = 0
         [void]$processo.Start()
-        if ($trabalho -ne [IntPtr]::Zero) { try { [void][WfJob]::AssignProcessToJobObject($trabalho, $processo.Handle) } catch { } }
+        # Falhar AQUI é pior do que falhar no KILL_ON_JOB_CLOSE: o job fica vazio, o pedido de
+        # encerramento não mata nada e o Parar vira um botão que não para. O handle sai do
+        # dicionário junto com o aviso, para Request-WinForgeStreamCancel não prometer uma morte
+        # que não vai acontecer e dizer, em vez disso, que o comando para no próximo passo.
+        if ($trabalho -ne [IntPtr]::Zero) {
+            $atribuiu = $false
+            try { $atribuiu = [bool][WfJob]::AssignProcessToJobObject($trabalho, $processo.Handle) } catch { $atribuiu = $false }
+            if (-not $atribuiu) {
+                Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "O processo não pôde ser atribuído ao job (erro $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())): o botão Parar não vai encerrar este processo, só impedir os passos seguintes."
+                [void]$sync.WinForgeStreamJob.Remove($StreamTo)
+            }
+        }
         $tSaida = $processo.StandardOutput.ReadLineAsync()
         $tErro = $processo.StandardError.ReadLineAsync()
         while ($null -ne $tSaida -or $null -ne $tErro) {
@@ -1294,6 +1311,11 @@ function Remove-WinForgeOldCommandOutput {
         fica, e a limpeza da execução seguinte tenta de novo.
     .PARAMETER Root
         A pasta. Vazio, é a mesma de Get-WinForgeCommandOutputPath.
+    .PARAMETER Incoming
+        Um arquivo novo vai nascer logo depois desta limpeza, e ele conta no teto. Com a chave, a
+        fila é cortada em 'MaxFiles - 1' para que a pasta fique com MaxFiles DEPOIS de o novo
+        aparecer. Sem ela a limpeza deixava 20 e o de agora fechava 21, que não é o que a
+        especificação diz.
     .OUTPUTS
         @{ Removed = @(<string>) } com os nomes apagados.
     #>
@@ -1301,7 +1323,8 @@ function Remove-WinForgeOldCommandOutput {
         [Parameter(Mandatory)][string]$Prefix,
         [int]$MaxAgeDays = 30,
         [int]$MaxFiles = 20,
-        [string]$Root = ''
+        [string]$Root = '',
+        [switch]$Incoming
     )
 
     # Get-WinForgeCommandOutputRoot, e NÃO Get-WinForgeCommandOutputPath: aquela dispara esta
@@ -1312,10 +1335,12 @@ function Remove-WinForgeOldCommandOutput {
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return @{ Removed = @() } }
     $arquivos = @(Get-ChildItem -LiteralPath $dir -File -Filter ("{0}-*.txt" -f $Prefix) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
     $limite = (Get-Date).AddDays(-[math]::Abs($MaxAgeDays))
+    $teto = $(if ($Incoming) { $MaxFiles - 1 } else { $MaxFiles })
+    if ($teto -lt 0) { $teto = 0 }
     $n = 0
     foreach ($f in $arquivos) {
         $n++
-        if ($n -le $MaxFiles -and [datetime]$f.LastWriteTime -ge $limite) { continue }
+        if ($n -le $teto -and [datetime]$f.LastWriteTime -ge $limite) { continue }
         Remove-Item -LiteralPath ([string]$f.FullName) -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath ([string]$f.FullName))) { $apagados += [string]$f.Name }
     }
@@ -1449,11 +1474,13 @@ function Invoke-WinForgeFollowTick {
                 # fim, e a linha seguinte chegando à janela com as primeiras letras comidas.
                 #
                 # É o mesmo cuidado que o corte na última quebra de linha já tem com o FIM da
-                # janela. Só vale quando houve salto: no começo do arquivo o primeiro byte nunca é
-                # continuação, e pular bytes ali comeria texto de verdade.
-                if ([long]$janelaLeitura.Start -gt 0) {
-                    while ($inicio -lt $lidos -and ($bytes[$inicio] -band 0xC0) -eq 0x80) { $inicio++ }
-                }
+                # janela. E o laço é INCONDICIONAL: havia aqui uma guarda de "só quando houve salto",
+                # com a justificativa de que no começo do arquivo pular bytes comeria texto de
+                # verdade. Era o contrário - num arquivo que começasse por byte de continuação, a
+                # guarda PRESERVARIA o desvio em vez de evitá-lo. Sem ela o começo do arquivo não
+                # muda (o motor sempre escreve cabeçalho com BOM, e depois dele vem byte inicial de
+                # caractere), e o caso impossível fica tratado de graça.
+                while ($inicio -lt $lidos -and ($bytes[$inicio] -band 0xC0) -eq 0x80) { $inicio++ }
                 $texto = [System.Text.Encoding]::UTF8.GetString($bytes, $inicio, $lidos - $inicio)
                 if (-not $concluido) {
                     $corte = $texto.LastIndexOf("`n")

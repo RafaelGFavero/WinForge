@@ -3610,7 +3610,12 @@ if ($SelfTest) {
             }
             $wfRetNovo = Get-WinForgeCommandOutputPath -Name 'Teste' -Prefix 'server'
             if ((Split-Path -Parent $wfRetNovo) -ne $wfRetDir) { Write-Host "  [ERRO] Tetos (retenção): o caminho preparado não caiu na pasta de logs desta rodada ('$wfRetNovo')" -ForegroundColor Red; $wbErrors++ }
-            if (@(Get-ChildItem -LiteralPath $wfRetDir -Filter 'server-*.txt').Count -gt 20) { Write-Host "  [ERRO] Tetos (retenção): preparar um caminho 'server' não limpou os antigos - sobraram $(@(Get-ChildItem -LiteralPath $wfRetDir -Filter 'server-*.txt').Count)" -ForegroundColor Red; $wbErrors++ }
+            # O arquivo desta execução nasce agora, como nasce no produto logo depois do preparo: o
+            # teto é do que a pasta fica DEPOIS dele. Sem o '-Incoming', a limpeza deixava 20 e este
+            # fechava 21 - um a mais do que a especificação diz.
+            Set-Content -LiteralPath $wfRetNovo -Value 'novo' -Encoding UTF8
+            $wfRetQuantos = @(Get-ChildItem -LiteralPath $wfRetDir -Filter 'server-*.txt').Count
+            if ($wfRetQuantos -ne 20) { Write-Host "  [ERRO] Tetos (retenção): a pasta ficou com $wfRetQuantos arquivo(s) 'server' depois do novo, e o teto é 20" -ForegroundColor Red; $wbErrors++ }
             if (Test-Path -LiteralPath (Join-Path $wfRetDir 'server-X-20260901-101010.txt')) { Write-Host "  [ERRO] Tetos (retenção): o 'server' mais velho ficou" -ForegroundColor Red; $wbErrors++ }
             if (-not (Test-Path -LiteralPath (Join-Path $wfRetDir 'server-X-20260925-101010.txt'))) { Write-Host "  [ERRO] Tetos (retenção): o 'server' mais novo foi apagado" -ForegroundColor Red; $wbErrors++ }
             # E só o prefixo da vez: os outros dois não podem ter sido tocados.
@@ -3964,6 +3969,19 @@ if ($SelfTest) {
         $wfParPosJob = $wfParFonteP.IndexOf('$trabalho = [WfJob]::CreateJobObject(', [StringComparison]::Ordinal)
         $wfParPosStart = $wfParFonteP.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
         if ($wfParPosJob -lt 0 -or $wfParPosStart -lt 0 -or $wfParPosJob -gt $wfParPosStart) { Write-Host "  [ERRO] Parar: o job é criado DEPOIS do Start() - há uma janela em que o filho não pertence a job nenhum" -ForegroundColor Red; $wbErrors++ }
+        # As duas chamadas de API do job devolvem booleano, e ele NÃO pode ser descartado. Com
+        # tamanho errado a primeira responde falso (erro 24) e custa só a morte automática da árvore;
+        # a segunda falhando é pior - o job fica VAZIO, o encerramento não mata nada e o Parar vira
+        # um botão que não para. As duas formas de descarte ficam proibidas, e cada falha avisa.
+        foreach ($wfParDescarte in @('[void][WfJob]::SetInformationJobObject', '[void][WfJob]::AssignProcessToJobObject')) {
+            if ($wfParFonteP.IndexOf($wfParDescarte, [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Parar (job): o retorno de '$wfParDescarte' é descartado - a falha passaria calada" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfParFonteP.IndexOf('if (-not [WfJob]::SetInformationJobObject(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (job): ninguém confere se o job aceitou KILL_ON_JOB_CLOSE" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParFonteP.IndexOf('$atribuiu = [bool][WfJob]::AssignProcessToJobObject(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (job): ninguém confere se o processo entrou no job" -ForegroundColor Red; $wbErrors++ }
+        # E a atribuição que falha TIRA o handle do dicionário: senão o pedido de cancelamento
+        # prometeria matar uma árvore que não está no job.
+        if ($wfParFonteP -notmatch '(?s)-not \$atribuiu.{0,400}WinForgeStreamJob\.Remove') { Write-Host "  [ERRO] Parar (job): com a atribuição falhando o handle continua no dicionário - o Parar prometeria uma morte que não acontece" -ForegroundColor Red; $wbErrors++ }
+        if (@([regex]::Matches($wfParFonteP, 'Write-WinForgeLog -Component "Repair" -Level "WARN"')).Count -lt 2) { Write-Host "  [ERRO] Parar (job): as duas falhas de API do job não avisam no log" -ForegroundColor Red; $wbErrors++ }
         # '-NoElevate' não promete Parar: medido, OpenProcess sobre processo elevado, de pai não
         # elevado, devolve handle=0 err=5.
         $wfParFonteR = [string](Get-Command Request-WinForgeStreamCancel).ScriptBlock
@@ -4112,6 +4130,66 @@ if ($SelfTest) {
         if ([string](Get-WinForgeAclStepOwnerSid -Step @{ Arguments = @('C:\Windows', '/setowner') }) -ne '') { Write-Host "  [ERRO] Posse (dono): passo sem SID não devolveu vazio" -ForegroundColor Red; $wbErrors++ }
         # E a Fase 4 USA a função, em vez de voltar a garimpar o vetor à mão.
         if ($wfF4Fonte.IndexOf('Get-WinForgeAclStepOwnerSid -Step', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Posse (dono): a Fase 4 não usa Get-WinForgeAclStepOwnerSid" -ForegroundColor Red; $wbErrors++ }
+        # A DEVOLUÇÃO QUE FALHA é o caso em que o marcador mais importa, e era onde ele era apagado:
+        # devolver a posse ao TrustedInstaller nem sempre é possível, mesmo elevado, e a função já
+        # diz isso. Com a limpeza incondicional, a abertura seguinte ficava em silêncio justamente
+        # sobre a pasta que ficou com o dono errado.
+        #
+        # A prova é o par de estados que o 'finally' consulta, e a FORMA da condição: a limpeza é
+        # condicional, e a condição é sobre a POSSE, não sobre o código de retorno da função.
+        if ($wfF4Fonte -notmatch '\$posseVoltou = \(\$codigoDevolver -eq 0\)') { Write-Host "  [ERRO] Posse (devolução): a volta da posse não é marcada só com código zero" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch 'if \(\$posseVoltou -or -not \$posseTomada\) \{ \$null = Clear-WinForgeAclOwnerPending \}') { Write-Host "  [ERRO] Posse (devolução): o marcador é apagado sem olhar se a posse voltou - o caso que ele existe para denunciar fica calado" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch '\$posseTomada = \$true') { Write-Host "  [ERRO] Posse (devolução): ninguém anota que a posse foi tomada - sem isso o caminho que nem tomou a posse deixaria o marcador para trás" -ForegroundColor Red; $wbErrors++ }
+        # E a ORDEM dentro do 'finally': a saída da janela protegida vem ANTES da limpeza. A limpeza
+        # toca no disco e pode estourar; na frente, uma falha ali deixaria o Parar ignorado até o fim
+        # do comando inteiro.
+        $wfF4PosSai = $wfF4Fonte.IndexOf('Exit-WinForgeStreamProtected -Path $chaveProtegida', [StringComparison]::Ordinal)
+        $wfF4PosLimpa = $wfF4Fonte.IndexOf('Clear-WinForgeAclOwnerPending }', [StringComparison]::Ordinal)
+        if ($wfF4PosSai -lt 0 -or $wfF4PosLimpa -lt 0) { Write-Host "  [ERRO] Posse (finally): não achei a saída da janela protegida ou a limpeza do marcador" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfF4PosSai -gt $wfF4PosLimpa) { Write-Host "  [ERRO] Posse (finally): a limpeza do marcador vem ANTES da saída da janela protegida - se ela estourar, o Parar fica ignorado até o fim do comando" -ForegroundColor Red; $wbErrors++ }
+        # E o COMPORTAMENTO dos três desfechos, com os colaboradores sombreados. A Fase 4 de verdade
+        # roda icacls contra pasta do sistema e não tem como ser exercitada aqui; o que dá para
+        # exercitar - e é o que interessa - é QUEM ela chama em cada desfecho.
+        $wfF4OrigStep = ${function:Invoke-WinForgeAclStreamStep}
+        $wfF4OrigWrite = ${function:Write-WinForgeAclOwnerPending}
+        $wfF4OrigClear = ${function:Clear-WinForgeAclOwnerPending}
+        $wfF4ErrAntes = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'SilentlyContinue'
+            ${function:Write-WinForgeAclOwnerPending} = { param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$OwnerSid, [string]$Root) $sync.WinForgeSelfTestPosse.Escreveu++; return @{ Ok = $true; Reason = ''; Path = 'sombra' } }
+            ${function:Clear-WinForgeAclOwnerPending} = { param([string]$Root) $sync.WinForgeSelfTestPosse.Limpou++; return @{ Ok = $true; Reason = '' } }
+            ${function:Invoke-WinForgeAclStreamStep} = {
+                param([Parameter(Mandatory)][hashtable]$Step, [string]$Path = '')
+                if ([string]$Step.Kind -eq 'setowner-socorro') { return [int]$sync.WinForgeSelfTestPosse.CodigoSocorro }
+                if ([string]$Step.Kind -eq 'setowner-devolver') { return [int]$sync.WinForgeSelfTestPosse.CodigoDevolver }
+                return 0
+            }
+            $wfF4PlanoFake = @(
+                @{ Phase = 4; Kind = 'setowner-socorro'; Folder = 'C:\PastaDeTeste'; Title = 'posse aos Administradores'; FilePath = 'x'; Arguments = @('C:\PastaDeTeste', '/setowner', '*S-1-5-32-544') }
+                @{ Phase = 4; Kind = 'setowner-devolver'; Folder = 'C:\PastaDeTeste'; Title = 'posse de volta'; FilePath = 'x'; Arguments = @('C:\PastaDeTeste', '/setowner', '*S-1-5-80-956008885') }
+            )
+            $wfF4PassoFake = @{ Phase = 4; Kind = 'grant'; Folder = 'C:\PastaDeTeste'; Title = 'concessão'; FilePath = 'x'; Arguments = @('C:\PastaDeTeste', '/grant:r', '*S-1-5-32-544:(OI)(CI)F') }
+            foreach ($wfF4Caso in @(
+                @{ Nome = 'devolução OK';          Socorro = 0; Devolver = 0; Escreveu = 1; Limpou = 1; Porque = 'a posse voltou: o marcador tem de sair' },
+                @{ Nome = 'devolução FALHOU';      Socorro = 0; Devolver = 5; Escreveu = 1; Limpou = 0; Porque = 'a pasta ficou com os Administradores como dona: o marcador tem de FICAR' },
+                @{ Nome = 'posse nem foi tomada';  Socorro = 5; Devolver = 0; Escreveu = 1; Limpou = 1; Porque = 'a posse nunca foi trocada: não há o que denunciar' }
+            )) {
+                $sync.WinForgeSelfTestPosse = @{ Escreveu = 0; Limpou = 0; CodigoSocorro = [int]$wfF4Caso.Socorro; CodigoDevolver = [int]$wfF4Caso.Devolver }
+                $null = Invoke-WinForgeAclOwnerFallback -Plan $wfF4PlanoFake -Step $wfF4PassoFake -StreamPath '' 6>$null 2>$null
+                if ([int]$sync.WinForgeSelfTestPosse.Escreveu -ne [int]$wfF4Caso.Escreveu) { Write-Host "  [ERRO] Posse ($($wfF4Caso.Nome)): o marcador foi escrito $($sync.WinForgeSelfTestPosse.Escreveu) vez(es), esperado $($wfF4Caso.Escreveu)" -ForegroundColor Red; $wbErrors++ }
+                if ([int]$sync.WinForgeSelfTestPosse.Limpou -ne [int]$wfF4Caso.Limpou) { Write-Host "  [ERRO] Posse ($($wfF4Caso.Nome)): o marcador foi apagado $($sync.WinForgeSelfTestPosse.Limpou) vez(es), esperado $($wfF4Caso.Limpou) - $($wfF4Caso.Porque)" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WinForgeStreamProtected.ContainsKey('(fase 4 sem fluxo)')) { Write-Host "  [ERRO] Posse ($($wfF4Caso.Nome)): a janela protegida ficou aberta depois da Fase 4" -ForegroundColor Red; $wbErrors++; [void]$sync.WinForgeStreamProtected.Remove('(fase 4 sem fluxo)') }
+            }
+        } finally {
+            ${function:Invoke-WinForgeAclStreamStep} = $wfF4OrigStep
+            ${function:Write-WinForgeAclOwnerPending} = $wfF4OrigWrite
+            ${function:Clear-WinForgeAclOwnerPending} = $wfF4OrigClear
+            $ErrorActionPreference = $wfF4ErrAntes
+            [void]$sync.Remove('WinForgeSelfTestPosse')
+        }
+        # E as três voltaram: sem isto, um 'finally' quebrado deixaria os testes seguintes rodando
+        # contra sombras, e a Fase 4 de verdade nunca mais seria conferida.
+        if ([string]${function:Invoke-WinForgeAclStreamStep} -match 'WinForgeSelfTestPosse') { Write-Host "  [ERRO] Posse (sombra): Invoke-WinForgeAclStreamStep não voltou ao original" -ForegroundColor Red; $wbErrors++ }
         # A ABERTURA relata e NÃO conserta: o marcador continua lá depois do relato. É a diferença
         # entre avisar e mexer sozinho na posse de uma pasta do Windows.
         $wfF4Relatou = Show-WinForgeAclOwnerPending -Root $wfF4Raiz
@@ -6066,6 +6144,14 @@ if ($SelfTest) {
         if ($wfLimpPosJ -lt 0) { Write-Host "  [ERRO] Permissões (varredura): o diagnóstico não CHAMA a varredura no fim - a pasta cresceria calada" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfLimpPosD -lt 0) { Write-Host "  [ERRO] Permissões (varredura): a mensagem final do diagnóstico mudou de forma e a trava de ordem deixou de valer" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfLimpPosJ -lt $wfLimpPosD) { Write-Host "  [ERRO] Permissões (varredura): a varredura é chamada ANTES da mensagem 'Diagnóstico pronto' - o job cobre o aviso na barra em milissegundos" -ForegroundColor Red; $wbErrors++ }
+        # E a SEGUNDA ordem, pelo mesmo padrão: a posse pendente vem DEPOIS da varredura. A barra
+        # guarda a última mensagem escrita, e a posse é a mais grave das duas - uma pasta do Windows
+        # pode estar com o dono errado AGORA, enquanto a pasta cheia espera. Isto era só comentário:
+        # trocar as duas linhas de lugar deixava o build verde e enterrava a mensagem mais grave.
+        $wfLimpPosP = $wfLimpFonteJ.IndexOf('$null = Show-WinForgeAclOwnerPending', [StringComparison]::Ordinal)
+        if ($wfLimpPosP -lt 0) { Write-Host "  [ERRO] Permissões (varredura): o diagnóstico não CHAMA o relato da posse pendente" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosJ -lt 0) { Write-Host "  [ERRO] Permissões (varredura): sem a varredura não dá para prender a ordem das duas mensagens" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosP -lt $wfLimpPosJ) { Write-Host "  [ERRO] Permissões (varredura): a posse pendente é relatada ANTES da varredura - a barra guarda a última, e a posse é a mais grave" -ForegroundColor Red; $wbErrors++ }
         $wfLimpFonteG = ''
         try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfLimpFonteG = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfLimpFonteG = '' }
         # A agulha é MONTADA, e não escrita inteira: esta linha mora no mesmo arquivo que ela
