@@ -3490,8 +3490,13 @@ function Get-WinForgeAclInheritOutcome {
 
         Caminho vazio é 'falha', e não 'sumida': não dá para AFIRMAR que sumiu o que não foi
         nomeado, e o lado seguro do erro aqui é o que aparece no log.
+
+        1223 (ERROR_CANCELLED) é 'cancelada', e vem antes de qualquer pergunta ao disco: é o código
+        que o fluxo ao vivo devolve para um passo que NÃO chegou a ser iniciado, depois do Parar.
+        Sem essa resposta, parar no meio de um perfil com 338 pastas fecharia com "a herança não
+        pôde ser ligada em 334 pasta(s)" - o programa culpando o usuário por ter clicado em Parar.
     .OUTPUTS
-        'ok', 'sumida' ou 'falha'.
+        'ok', 'cancelada', 'sumida' ou 'falha'.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
@@ -3499,6 +3504,7 @@ function Get-WinForgeAclInheritOutcome {
     )
 
     if ($ExitCode -eq 0) { return 'ok' }
+    if ($ExitCode -eq 1223) { return 'cancelada' }
     if ([string]::IsNullOrWhiteSpace($Path)) { return 'falha' }
     $longo = if ([string]$Path -like '\\?\*') { [string]$Path } else { '\\?\' + [string]$Path }
     if ([System.IO.Directory]::Exists($longo)) { return 'falha' }
@@ -3934,6 +3940,13 @@ function Invoke-WinForgeAclStreamStep {
         [string]$Path = ''
     )
 
+    # Parado: nem o cabeçalho sai. Quem impede o processo de nascer é a conferência de ponto único
+    # dentro de Invoke-WinForgeStreamedProcess - esta aqui é sobre o ARQUIVO não mostrar um
+    # '> icacls <pasta>' para cada uma das centenas de pastas que nunca chegaram a ser tocadas.
+    if (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-WinForgeStreamCancelled -Path $Path)) {
+        Write-WinForgeStreamCancelNote -Path $Path
+        return 1223
+    }
     $cabecalho = ("> {0} {1}" -f [string]$Step.FilePath, (@($Step.Arguments) -join ' ')).TrimEnd()
     if ([string]::IsNullOrWhiteSpace($Path)) {
         Write-Host $cabecalho
@@ -4406,18 +4419,23 @@ function Invoke-WinForgeAclRestore {
             # Get-WinForgeAclInheritOutcome, com o porquê medido lá.
             $falhas5 = 0
             $sumidas5 = 0
+            $canceladas5 = 0
             foreach ($p5 in $passos5) {
                 $codigo5 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $p5)
                 $veredito5 = [string](Get-WinForgeAclInheritOutcome -Path ([string]$p5.Path) -ExitCode $codigo5)
                 if ($veredito5 -eq 'ok') { continue }
+                # Pasta que não chegou a ser tocada depois do Parar. Ela NÃO entra na conta das
+                # falhas: quem pediu para parar não errou nada.
+                if ($veredito5 -eq 'cancelada') { $canceladas5++; continue }
                 if ($veredito5 -eq 'sumida') { $sumidas5++; continue }
                 $falhas5++
                 # Sem o texto do icacls: ele acabou de sair no arquivo, logo acima desta linha, e
                 # repeti-lo aqui seria trazer de volta pela memória o que o fluxo ao vivo tirou dela.
                 Write-Host ("  '{0}': código {1}." -f $p5.Path, $codigo5)
             }
-            $resumo5 = "Herança ligada em $($passos5.Count - $falhas5 - $sumidas5) de $($passos5.Count) pasta(s) que o backup cobre."
+            $resumo5 = "Herança ligada em $($passos5.Count - $falhas5 - $sumidas5 - $canceladas5) de $($passos5.Count) pasta(s) que o backup cobre."
             if ($sumidas5) { $resumo5 += " $sumidas5 já não existia(m) desde a cópia das permissões - não havia o que ligar nelas." }
+            if ($canceladas5) { $resumo5 += " $canceladas5 não foram tocadas porque você pediu para parar; elas continuam como estavam, e o backup delas segue no conjunto do Desfazer." }
             Write-Host $resumo5
             if ($falhas5) { Write-Error "A herança não pôde ser ligada em $falhas5 pasta(s) do perfil; elas continuam como estavam, e o backup delas segue no conjunto do Desfazer." }
             continue

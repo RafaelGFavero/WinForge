@@ -3974,6 +3974,75 @@ if ($SelfTest) {
     } finally {
         Remove-Item -LiteralPath $wfParRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # ---------------------------------------------------------------- Parar: o laço para no meio
+    # A restauração de permissões INTEIRA é UM passo do ponto de vista do motor, e a marca de
+    # cancelamento só era lida ENTRE passos. Os laços das fases 3 a 5 disparam um processo atrás do
+    # outro: com o Parar clicado no meio da fase 5, o job matava o icacls da pasta da vez e o laço
+    # lançava o da pasta seguinte, com um job novo, até o fim - a janela dizia "Parando" enquanto o
+    # reparo terminava inteiro.
+    #
+    # A conferência é de PONTO ÚNICO, antes do Start(): todo laço fica coberto sem ninguém precisar
+    # lembrar de checar em cada um.
+    $wfLacoDir = Join-Path $wbSelfTestRaiz 'laco'
+    try {
+        if (Test-Path -LiteralPath $wfLacoDir) { Remove-Item -LiteralPath $wfLacoDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfLacoDir -Force | Out-Null
+        $wfLacoExe = Get-WinForgeSystemExe -Name 'cmd.exe'
+        # 1. O PONTO ÚNICO, direto: com a marca levantada, o processo não chega a ser iniciado.
+        $wfLacoUm = Join-Path $wfLacoDir 'ponto.txt'
+        Set-Content -LiteralPath $wfLacoUm -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamCancel[$wfLacoUm] = $true
+        $wfLacoRes = Invoke-WinForgeNativeCommand -FilePath $wfLacoExe -Arguments @('/c', 'echo NAO-DEVIA-RODAR') -StreamTo $wfLacoUm -Encoding 'oem' -NoCapture
+        Close-WinForgeStreamWriter -Path $wfLacoUm
+        $wfLacoTextoUm = [string](Get-Content -LiteralPath $wfLacoUm -Raw)
+        if ([int]$wfLacoRes.ExitCode -ne 1223) { Write-Host "  [ERRO] Parar (laço): com a marca levantada o processo devolveu $($wfLacoRes.ExitCode), esperado 1223 (ERROR_CANCELLED)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLacoTextoUm -match 'NAO-DEVIA-RODAR') { Write-Host "  [ERRO] Parar (laço): o processo rodou mesmo com a marca levantada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLacoTextoUm -notmatch 'Parado a pedido') { Write-Host "  [ERRO] Parar (laço): o arquivo não diz que os passos seguintes não foram iniciados" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfLacoUm)
+        [void]$sync.WinForgeStreamCancelNoted.Remove($wfLacoUm)
+        # 2. O LAÇO LONGO, que é o cenário relatado: 20 chamadas, Parar na quinta. As quatro
+        #    primeiras rodam; da quinta em diante, nenhuma - e o cabeçalho '> cmd.exe ...' também
+        #    não sai, senão o arquivo mostraria comandos que nunca foram executados.
+        $wfLacoArq = Join-Path $wfLacoDir 'laco.txt'
+        Set-Content -LiteralPath $wfLacoArq -Value 'cab' -Encoding UTF8
+        $wfLacoRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+        foreach ($wfLacoI in 1..20) {
+            if ($wfLacoI -eq 5) { $sync.WinForgeStreamCancel[$wfLacoArq] = $true }
+            $null = Invoke-WinForgeAclStreamStep -Path $wfLacoArq -Step @{ FilePath = $wfLacoExe; Arguments = @('/c', "echo MARCA-$wfLacoI") }
+        }
+        $wfLacoRelogio.Stop()
+        Close-WinForgeStreamWriter -Path $wfLacoArq
+        $wfLacoTexto = [string](Get-Content -LiteralPath $wfLacoArq -Raw)
+        foreach ($wfLacoI in 1..4) {
+            if ($wfLacoTexto -notmatch "(?m)^MARCA-$wfLacoI\s*$") { Write-Host "  [ERRO] Parar (laço): a marca $wfLacoI não saiu - ela é ANTES do Parar e tinha de rodar" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfLacoI in 5..20) {
+            if ($wfLacoTexto -match "(?m)^MARCA-$wfLacoI\s*$") { Write-Host "  [ERRO] Parar (laço): o processo $wfLacoI rodou DEPOIS do Parar - o laço não parou no meio" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLacoTexto -match "(?m)^> .*MARCA-$wfLacoI\s*$") { Write-Host "  [ERRO] Parar (laço): o cabeçalho do passo $wfLacoI foi escrito - o arquivo mostra um comando que nunca rodou" -ForegroundColor Red; $wbErrors++ }
+        }
+        [void]$sync.WinForgeStreamCancel.Remove($wfLacoArq)
+        [void]$sync.WinForgeStreamCancelNoted.Remove($wfLacoArq)
+        # A linha explicativa sai UMA vez, e não uma por chamada pulada: numa fase 5 de 338 pastas,
+        # uma por chamada seria o próximo despejo a encher a janela.
+        if (@([regex]::Matches($wfLacoTexto, 'Parado a pedido')).Count -ne 1) { Write-Host "  [ERRO] Parar (laço): a linha do cancelamento saiu $(@([regex]::Matches($wfLacoTexto, 'Parado a pedido')).Count) vez(es), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # E o veredito da fase 5 separa 'cancelada' de 'falha': sem isso, parar no meio de um perfil
+        # com 338 pastas fecharia com "a herança não pôde ser ligada em 334 pasta(s)", que é o
+        # programa culpando o usuário por ter clicado em Parar.
+        if ([string](Get-WinForgeAclInheritOutcome -Path 'C:\Windows' -ExitCode 1223) -ne 'cancelada') { Write-Host "  [ERRO] Parar (laço): o código do cancelamento vira 'falha' no veredito da fase 5" -ForegroundColor Red; $wbErrors++ }
+        $wfLacoFonte5 = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfLacoFonte5 -notmatch "veredito5 -eq 'cancelada'") { Write-Host "  [ERRO] Parar (laço): o laço da fase 5 não trata o veredito 'cancelada'" -ForegroundColor Red; $wbErrors++ }
+        # A conferência é de ponto único, ANTES do Start(), e pela forma da chamada.
+        $wfLacoFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        $wfLacoPosChk = $wfLacoFonteP.IndexOf('Test-WinForgeStreamCancelled -Path $StreamTo', [StringComparison]::Ordinal)
+        $wfLacoPosStart = $wfLacoFonteP.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
+        if ($wfLacoPosChk -lt 0) { Write-Host "  [ERRO] Parar (laço): quem roda o processo não confere a marca de cancelamento" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLacoPosStart -lt 0 -or $wfLacoPosChk -gt $wfLacoPosStart) { Write-Host "  [ERRO] Parar (laço): a marca é conferida DEPOIS do Start() - o processo já saiu" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Parar (laço): 20 chamadas com o Parar na quinta - 4 rodaram, 16 não foram iniciadas, uma linha de aviso"
+    } catch {
+        Write-Host "  [ERRO] Parar (laço): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfLacoDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Parar: a Fase 4 fora do job
     # KILL_ON_JOB_CLOSE mata a árvore quando o processo dono morre - que é exatamente o que a
     # proibição de cancelar na Fase 4 existe para impedir: morrer entre 'posse aos Admins' e 'posse

@@ -442,6 +442,30 @@ function Test-WinForgeStreamCancelled {
     } catch { return $false }
 }
 
+function Write-WinForgeStreamCancelNote {
+    <#
+    .SYNOPSIS
+        Escreve, UMA vez por arquivo, a linha que diz que o resto não foi iniciado.
+    .DESCRIPTION
+        Depois do Parar, TODO passo seguinte passa pela recusa - e numa fase 5 de perfil são
+        centenas deles. Uma linha por recusa seria o próximo despejo a encher a janela, e diria
+        sempre a mesma coisa. A marca de "já avisei" mora em '$sync.WinForgeStreamCancelNoted', pela
+        mesma chave e com o mesmo tempo de vida do escritor.
+
+        Dois chamadores, e é por isso que ela é função: quem recusa o processo
+        (Invoke-WinForgeStreamedProcess) e quem recusa o passo antes de escrever o cabeçalho
+        (Invoke-WinForgeAclStreamStep). A contagem tem de ser a mesma para os dois.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        if ([bool]$sync.WinForgeStreamCancelNoted[$Path]) { return }
+        $sync.WinForgeStreamCancelNoted[$Path] = $true
+    } catch { return }
+    Write-WinForgeStreamLine -Path $Path -Text ''
+    Write-WinForgeStreamLine -Path $Path -Text '== Parado a pedido: os passos seguintes não foram iniciados. =='
+}
+
 function Request-WinForgeStreamCancel {
     <#
     .SYNOPSIS
@@ -561,6 +585,18 @@ function Invoke-WinForgeStreamedProcess {
         #
         # Sem o tipo (chamada fora do corpo da runspace, como no -SelfTest) o comando roda igual,
         # só sem Parar: o job é um extra, não um pré-requisito.
+        # O PARAR, conferido AQUI e não só entre passos. A restauração de permissões inteira é UM
+        # passo para o motor, e as fases 3 a 5 disparam um processo atrás do outro: matar o processo
+        # da vez não adiantava nada, porque o laço lançava o seguinte, com um job novo, até o fim -
+        # a janela dizia "Parando" enquanto o reparo terminava inteiro.
+        #
+        # Esta é a conferência de PONTO ÚNICO: todo laço fica coberto sem ninguém precisar lembrar de
+        # checar em cada um, porque todo processo do fluxo ao vivo passa por aqui. 1223 é
+        # ERROR_CANCELLED, e não um código que algum icacls possa devolver por conta própria.
+        if (Test-WinForgeStreamCancelled -Path $StreamTo) {
+            Write-WinForgeStreamCancelNote -Path $StreamTo
+            return @{ Text = ''; ExitCode = 1223 }
+        }
         $trabalho = [IntPtr]::Zero
         $protegido = $false
         try { $protegido = [bool]$sync.WinForgeStreamProtected[$StreamTo] } catch { $protegido = $false }
@@ -1508,6 +1544,11 @@ $sync.WinForgeStreamProtected = [System.Collections.Hashtable]::Synchronized(@{}
 # de chamadas sobre o mesmo arquivo.
 $sync.WinForgeStreamCapped = [System.Collections.Hashtable]::Synchronized(@{})
 
+# Em quais arquivos a linha "Parado a pedido" já foi escrita. Mesma chave e mesmo tempo de vida dos
+# de cima, e existe pelo mesmo motivo do teto: depois do Parar, todo passo seguinte passa pela
+# recusa, e uma linha por recusa seriam centenas delas numa fase 5 de perfil. A frase sai UMA vez.
+$sync.WinForgeStreamCancelNoted = [System.Collections.Hashtable]::Synchronized(@{})
+
 # O arquivo que o comando com fluxo ao vivo está escrevendo AGORA. É como um passo do tipo
 # 'Function' - que roda com todos os fluxos redirecionados para o arquivo, sem receber argumento
 # nenhum - descobre para onde escrever quando ele próprio quer mandar a saída de um executável
@@ -1859,6 +1900,7 @@ $sync.WinForgeStreamBody = {
         # do arquivo ficaria aberto até o programa fechar.
         Close-WinForgeStreamWriter -Path $wfCaminho
         [void]$sync.WinForgeStreamCapped.Remove($wfCaminho)
+        [void]$sync.WinForgeStreamCancelNoted.Remove($wfCaminho)
         # O encanamento do Parar sai junto: pedido, handle de job e janela protegida são deste
         # comando e de mais nenhum. Deixá-los para trás faria o comando SEGUINTE, com outro arquivo,
         # conviver com lixo - e um pedido esquecido no dicionário é um Parar que ninguém pediu.
