@@ -470,6 +470,19 @@ function Get-WinForgeRepairCommand {
                 Confirm = 'Propõe ao Windows o driver de rede guardado na última cópia de segurança. Quem decide qual pacote assume o dispositivo é o próprio Windows, então isto propõe, não impõe. Sem cópia guardada o botão fica desabilitado.'
             }
         }
+        'WifiDriverGeneric' {
+            return @{
+                Title         = 'Rede sem fio — Trocar pelo driver básico do Windows (pode ficar sem Wi-Fi)'
+                Requires      = (Get-WinForgeSystemExe -Name 'pnputil.exe')
+                Kind          = 'repair'
+                Stream        = $true
+                ExpectMinutes = 5
+                NetworkGuard  = 'WifiDriverGeneric'
+                Steps         = @(@{ Function = 'Invoke-WinForgeWifiDriverGeneric' })
+                Final   = 'Se o Wi-Fi não voltar, use "Voltar para o driver que estava antes". Se nem assim, traga o driver do fabricante por cabo ou pen drive.'
+                Confirm = 'APAGA do computador os pacotes de driver do seu rádio sem fio e deixa o Windows instalar o driver básico dele. Uma cópia conferida é guardada antes, e a volta é automática se o rádio não responder no fim. Se o driver básico não servir para este rádio, a máquina fica sem rede sem fio até você trazer o driver do fabricante de outro computador - tenha um cabo à mão. Aviso: a detecção de acesso remoto cobre a Área de Trabalho Remota do Windows, e NÃO enxerga AnyDesk, TeamViewer ou RustDesk - se você estiver usando um desses agora, vai perder a conexão.'
+            }
+        }
     }
     throw "Comando de reparo desconhecido: '$Name'."
 }

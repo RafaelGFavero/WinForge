@@ -1683,6 +1683,144 @@ function Invoke-WinForgeWifiDriverReinstall {
     return @($L.ToArray())
 }
 
+function Get-WinForgeWifiGenericConfirmText {
+    <#
+    .SYNOPSIS
+        O texto da confirmação POR DIGITAÇÃO do botão que troca pelo driver básico.
+    .DESCRIPTION
+        Este é o único botão do WinForge que pede uma palavra digitada em vez de um Sim. O motivo é
+        o que está em jogo: se o driver básico não servir para este rádio, a máquina fica sem rede
+        sem fio, e a única saída é trazer o driver do fabricante de outro computador. Um "Sim" é
+        clicado por reflexo; uma palavra é digitada por decisão.
+
+        A palavra vai SEM acento de propósito: quem estiver com a máquina em outro idioma, ou num
+        teclado emprestado, não pode ser barrado por uma cedilha.
+    .OUTPUTS
+        @{ Text = <string>; Typed = 'VOLTAR AO GENERICO' }
+    #>
+    param()
+
+    $palavra = 'VOLTAR AO GENERICO'
+    $linhas = @(
+        'Você está prestes a apagar do computador os pacotes de driver do seu rádio sem fio e deixar o Windows instalar o driver básico dele.',
+        '',
+        'Se o driver básico não funcionar com este Wi-Fi, o computador fica sem rede sem fio até você trazer o driver por cabo ou pen drive, de outro computador.',
+        'Tenha um cabo de rede à mão antes de continuar.',
+        '',
+        'Uma cópia do driver atual é guardada antes, e o botão "Voltar para o driver que estava antes" usa essa cópia.',
+        '',
+        ("Para confirmar, digite: {0}" -f $palavra)
+    )
+    return @{ Text = ($linhas -join "`r`n"); Typed = $palavra }
+}
+
+function Invoke-WinForgeWifiDriverGeneric {
+    <#
+    .SYNOPSIS
+        Apaga do repositório os pacotes de driver da família do rádio e deixa o Windows instalar o
+        driver básico dele.
+    .DESCRIPTION
+        É o degrau mais perigoso da escada, e o único que apaga pacote. A ordem é a rede de
+        segurança, e ela não tem atalho:
+
+        1. O guarda pesa a máquina. Recusou, acabou.
+        2. O driver embutido é RECONFIRMADO, pela varredura de arquivos de informação - a mesma que
+           alimenta o guarda. Não pela consulta ao repositório: medido na Tarefa 17, ela responde
+           "não há embutido" em TODA máquina real, porque o repositório só lista pacote de terceiro.
+        3. A família do rádio é identificada pelo arquivo de origem do pacote que ele usa hoje.
+           FAMÍLIA, e não "todo pacote de rede": a segunda coisa apagaria o driver do cabo junto, e
+           o cabo é a via de socorro que este botão exige existir.
+        4. Tudo é EXPORTADO e conferido antes de qualquer apagamento. Falhou, acabou.
+        5. Só então os pacotes saem, um a um, sem a opção que força e sem a que reinicia.
+        6. O desfecho é julgado exigindo que quem assumiu o rádio seja o driver básico, e se não for
+           a volta acontece AGORA, sem perguntar.
+
+        Por que a família inteira, e não só o pacote instalado: o rádio tem mais de um candidato no
+        repositório, e quando o instalado sai é a versão ANTIGA que assume. Apagar só o instalado
+        entregaria um driver de anos atrás e mentiria sobre o que o botão fez.
+    .PARAMETER DryRun
+        Diz o que faria e para por aí.
+    .PARAMETER Facts
+        Fatos prontos para o guarda. É a porta do -SelfTest.
+    .OUTPUTS
+        As linhas do relato.
+    #>
+    param(
+        [switch]$DryRun,
+        [hashtable]$Facts
+    )
+
+    $L = New-Object System.Collections.Generic.List[string]
+    $fatos = $(if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) { $Facts } else { Get-WinForgeNetworkFacts -Action 'WifiDriverGeneric' })
+    $guarda = Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $fatos
+    if (-not $guarda.Ok) {
+        $L.Add('Este botão não pode rodar nesta máquina agora.')
+        $L.Add([string]$guarda.Reason)
+        return @($L.ToArray())
+    }
+
+    $radio = Get-WinForgeWifiAdapter
+    if (-not $radio.Ok) {
+        $L.Add("Não há rádio sem fio para mexer: $([string]$radio.Reason)")
+        return @($L.ToArray())
+    }
+    $idPnp = ''
+    try {
+        $obj = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
+        if ($obj.Count) { $idPnp = [string]$obj[0].PnPDeviceID }
+    } catch { $idPnp = '' }
+    if ([string]::IsNullOrWhiteSpace($idPnp)) {
+        $L.Add('Não deu para descobrir o identificador do rádio. Nada foi alterado.')
+        return @($L.ToArray())
+    }
+
+    # A reconfirmação do embutido, na hora de agir. O guarda decidiu com o mesmo dado, mas entre
+    # pintar o botão e clicar nele pode ter passado uma atualização de driver.
+    if (-not (Test-WinForgeInboxWifiDriver -PnpDeviceId $idPnp)) {
+        $L.Add('O Windows não tem driver básico para este rádio, então não há por onde trocar. Nada foi alterado.')
+        return @($L.ToArray())
+    }
+
+    $infDoRadio = Get-WinForgeWifiDriverInfName -PnpDeviceId $idPnp
+    $lidos = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
+    $familia = Select-WinForgeWifiDriverPackage -Entries $lidos -InfName $infDoRadio
+    $pacotes = @($familia.Oem)
+    if (-not $pacotes.Count) {
+        $L.Add("Não achei no repositório nenhum pacote da família do rádio ('$infDoRadio'). Nada foi alterado.")
+        return @($L.ToArray())
+    }
+    $L.Add("Família do rádio ($([string]$familia.Original)): $($pacotes -join ', ').")
+
+    if ($DryRun) {
+        $L.Add("[simulação] copiaria os $(@($pacotes).Count) pacote(s) acima e depois os apagaria do repositório (delete-driver), deixando o Windows instalar o driver básico")
+        return @($L.ToArray())
+    }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    $copia = Export-WinForgeWifiDriverBackup -Published $pacotes
+    if (-not $copia.Ok) {
+        $L.Add('A cópia de segurança do driver atual falhou, e sem ela não há caminho de volta. Nada foi alterado.')
+        $L.Add([string]$copia.Reason)
+        return @($L.ToArray())
+    }
+    $L.Add("Cópia de segurança guardada em '$([string]$copia.Path)': $([int]$copia.Files) arquivo(s), $([math]::Round([long]$copia.Bytes / 1MB)) MB.")
+    $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -ExportOk ([bool]$copia.Ok)
+
+    foreach ($pacote in $pacotes) {
+        $saida = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/delete-driver', [string]$pacote, '/uninstall') -Encoding 'ansi'
+        $codigo = [int]$saida.ExitCode
+        $L.Add("Apagando '$pacote': código $codigo.")
+        if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) { $L.Add("   $([string]$saida.Text)") }
+    }
+
+    $desfecho = Test-WinForgeWifiOutcome -Adapter (Get-WinForgeWifiAdapter) -Generic
+    $L.Add([string]$desfecho.Text)
+    if ([string]$desfecho.Outcome -ne 'ok') {
+        foreach ($linha in @(Invoke-WinForgeWifiDriverRestore)) { $L.Add([string]$linha) }
+    }
+    return @($L.ToArray())
+}
+
 function Update-WinForgeNetworkButtons {
     <#
     .SYNOPSIS
@@ -1697,6 +1835,17 @@ function Update-WinForgeNetworkButtons {
 
         O botão que volta fica DESABILITADO quando não há cópia guardada, com o motivo na dica.
         Desabilitado, e não escondido: a regra do projeto é "botão desabilitado, não removido".
+
+        A EXCEÇÃO, e ela vale SÓ para o botão que troca pelo driver básico: quando o guarda manda
+        esconder, o controle sai da tela (Collapsed) em vez de ficar desabilitado.
+
+        ISSO É DECISÃO DE PRODUTO, e não limitação técnica. Ela foi tomada pelo dono do recurso,
+        depois de as duas opções serem apresentadas, e o motivo dele foi: botão desabilitado faz a
+        pessoa procurar na internet como habilitá-lo, e o que ela acha é a opção que FORÇA a
+        remoção do pacote em uso - que é exatamente o caminho para ficar sem rádio. Um botão que
+        não está lá não convida a essa busca. Para MediaTek, Realtek recentes, Intel AX/BE novos e
+        Qualcomm frequentemente não há driver básico nenhum, e é nessas máquinas que a ausência
+        importa.
     .OUTPUTS
         Nada. Mexe nos controles.
     #>
@@ -1707,7 +1856,8 @@ function Update-WinForgeNetworkButtons {
 
     foreach ($par in @(
         @{ Chave = 'WPFWFRepWifiDriverReinstall'; Acao = 'WifiDriverReinstall' },
-        @{ Chave = 'WPFWFRepWifiDriverRestore';   Acao = 'WifiDriverRestore' })) {
+        @{ Chave = 'WPFWFRepWifiDriverRestore';   Acao = 'WifiDriverRestore' },
+        @{ Chave = 'WPFWFRepWifiDriverGeneric';   Acao = 'WifiDriverGeneric' })) {
         $controle = $null
         try { $controle = $sync[[string]$par.Chave] } catch { $controle = $null }
         if ($null -eq $controle) { continue }
@@ -1716,6 +1866,7 @@ function Update-WinForgeNetworkButtons {
         if ($null -eq $g) { $g = Test-WinForgeNetworkGuard -Action ([string]$par.Acao) }
         $controle.IsEnabled = [bool]$g.Ok
         if (-not $g.Ok) { $controle.ToolTip = [string]$g.Reason }
+        if ($g.Hidden) { $controle.Visibility = 'Collapsed' }
     }
 }
 #endregion

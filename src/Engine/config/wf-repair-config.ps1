@@ -176,6 +176,14 @@ $sync.configs.wfrepair = @'
     "panel": "1",
     "Type": "Button",
     "ButtonWidth": "350"
+  },
+  "WPFWFRepWifiDriverGeneric": {
+    "Content": "Rede sem fio — Trocar pelo driver básico do Windows (pode ficar sem Wi-Fi)",
+    "Description": "ALTERA O SISTEMA E PODE DEIXAR A MÁQUINA SEM WI-FI. É o último degrau da escada de rede e o único que APAGA pacote de driver. Guarda uma cópia conferida, apaga do repositório os pacotes da família do rádio - só a família dele, identificada pelo arquivo de origem que o dispositivo realmente usa, e nunca os das outras placas - e deixa o Windows instalar o driver básico. Apaga a família inteira, e não só o pacote em uso, porque quando o instalado sai é a versão antiga que assume o dispositivo: apagar um só entregaria um driver de anos atrás e mentiria sobre o que o botão fez. Nunca usa a opção que força a remoção de pacote em uso. Pede uma palavra digitada em vez de um Sim, porque um Sim é clicado por reflexo. No fim, só conta como sucesso se quem assumiu o rádio for mesmo o driver básico da Microsoft; qualquer outro desfecho devolve o driver guardado na hora, sem perguntar. Este botão não aparece em computadores para os quais o Windows não tem driver básico, que é o caso comum em MediaTek, Realtek recentes e Intel novos.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
   }
 }
 '@ | ConvertFrom-Json

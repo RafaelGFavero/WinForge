@@ -833,6 +833,7 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFRepNetDnsRenew" {Invoke-WinForgeRepairCommand -Name NetDnsRenew}
         "WPFWFRepWifiDriverReinstall" {Invoke-WinForgeRepairCommand -Name WifiDriverReinstall}
         "WPFWFRepWifiDriverRestore" {Invoke-WinForgeRepairCommand -Name WifiDriverRestore}
+        "WPFWFRepWifiDriverGeneric" {Invoke-WinForgeRepairCommand -Name WifiDriverGeneric}
         # Correções (aba Config, vindas da base): mesma tabela e mesma máquina do reparo, com a
         # janela que se enche ao vivo. Antes cada uma destas chaves chamava a função da base pelo
         # campo "function" da config, na thread da janela.
@@ -1195,7 +1196,7 @@ if ($SelfTest) {
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
-    if (@($sync.configs.feature.PSObject.Properties).Count -ne 62) { Write-Host "  [ERRO] Config: esperado 62 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 63) { Write-Host "  [ERRO] Config: esperado 63 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
@@ -3787,7 +3788,7 @@ if ($SelfTest) {
         if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text -ne 'Em andamento: X (00:00)') { Write-Host "  [ERRO] Cabeçalho: tempo negativo (o w32tm /resync recuou o relógio) virou '$([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text)'" -ForegroundColor Red; $wbErrors++ }
         # Toda linha que ALTERA a máquina declara ExpectMinutes. A varredura usa as listas canônicas
         # das outras travas, e não uma cópia à mão: linha nova numa delas entra aqui sozinha.
-        foreach ($wfCabNome in @(@($wfRepNomes) + @($wfStrNomes) + @('AclRestore', 'AclUndo', 'AclCleanup', 'NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverRestore'))) {
+        foreach ($wfCabNome in @(@($wfRepNomes) + @($wfStrNomes) + @('AclRestore', 'AclUndo', 'AclCleanup', 'NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverRestore', 'WifiDriverGeneric'))) {
             $wfCabCmd = Get-WinForgeRepairCommand -Name $wfCabNome
             if ([string]$wfCabCmd.Kind -eq 'read') { continue }
             if (-not ([int]$wfCabCmd.ExpectMinutes -gt 0)) { Write-Host "  [ERRO] Cabeçalho: a linha '$wfCabNome' não declara ExpectMinutes" -ForegroundColor Red; $wbErrors++ }
@@ -7369,7 +7370,7 @@ if ($SelfTest) {
     #
     # Lista canônica das linhas de rede, no mesmo espírito de $wfRepNomes e $wfAclNomes: é ela que a
     # trava dos botões na tela usa lá embaixo, para uma linha nova entrar na conferência sozinha.
-    $wfNetNomes = @('NetDiagFull', 'NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverRestore')
+    $wfNetNomes = @('NetDiagFull', 'NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverRestore', 'WifiDriverGeneric')
     try {
         $wfVerFrases = @{
             APIPA  = 'O computador não pegou endereço do roteador (está em 169.254.x.x). Comece por "Limpar cache de DNS e pegar endereço novo".'
@@ -7827,8 +7828,14 @@ if ($SelfTest) {
             $wfPnpDepois = Get-WinForgeWifiDriverBackupSet -Root $wfPnpCheio
             if ([string]$wfPnpDepois.Stamp -eq '20270101-000000') { Write-Host "  [ERRO] Rede (backup): a pasta parcial (sem .cat) foi oferecida como cópia conferida" -ForegroundColor Red; $wbErrors++ }
             elseif ([string]$wfPnpDepois.Stamp -ne '20260913-010203') { Write-Host "  [ERRO] Rede (backup): com uma parcial no meio, o conjunto bom deixou de ser achado ('$($wfPnpDepois.Stamp)')" -ForegroundColor Red; $wbErrors++ }
-            # A conferência, direta, nas três formas de dar errado e na boa.
-            foreach ($wfPnpCf in @(@($wfPnpConj, $true), @($wfPnpParcial, $false), @((Join-Path $wfPnpCheio 'nao-existe'), $false))) {
+            # ...e a pasta com o CATÁLOGO e sem o .inf, que é a outra metade da conferência. Sem
+            # ela, dispensar o '.inf' passava batido: a parcial de cima não tem o .cat, então quem
+            # a reprova é sempre a mesma linha.
+            $wfPnpSoCat = Join-Path $wfPnpCheio 'oem88-20270202-000000'
+            New-Item -ItemType Directory -Path $wfPnpSoCat -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfPnpSoCat 'so-o-cat.cat') -Value 'abc' -Encoding Ascii
+            # A conferência, direta, nas quatro formas de dar errado e na boa.
+            foreach ($wfPnpCf in @(@($wfPnpConj, $true), @($wfPnpParcial, $false), @($wfPnpSoCat, $false), @((Join-Path $wfPnpCheio 'nao-existe'), $false))) {
                 if ((Test-WinForgeWifiDriverBackupFolder -Path ([string]$wfPnpCf[0])).Ok -ne [bool]$wfPnpCf[1]) { Write-Host "  [ERRO] Rede (backup): a conferência de '$([System.IO.Path]::GetFileName([string]$wfPnpCf[0]))' deu o contrário de '$($wfPnpCf[1])'" -ForegroundColor Red; $wbErrors++ }
             }
             # Pasta que EXISTE e não tem conjunto de carimbo nenhum também é "não há o que
@@ -7957,6 +7964,11 @@ if ($SelfTest) {
         foreach ($wfW46Outro in @('WifiDriverReinstall', 'NetDnsRenew')) {
             if (-not (Test-WinForgeNetworkGuard -Action $wfW46Outro -Facts (& $wfW46Com @{ BackupFound = $false })).Ok) { Write-Host "  [ERRO] Rede (botão 6): a falta de cópia derrubou '$wfW46Outro', que não depende dela" -ForegroundColor Red; $wbErrors++ }
         }
+        # E quem NÃO levanta o fato não pode ser recusado por ele: uma hashtable sem a chave é
+        # "não perguntei", e não "não achou". $wfW46Base não tem 'BackupFound' de propósito - é
+        # a forma de todo chamador anterior a este degrau.
+        if ($wfW46Base.ContainsKey('BackupFound')) { Write-Host "  [ERRO] Rede (botão 6): o próprio gabarito já traz 'BackupFound' - a conferência abaixo seria vazia" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverRestore' -Facts $wfW46Base).Ok) { Write-Host "  [ERRO] Rede (botão 6): fatos SEM a chave da cópia recusaram o botão - ausência de pergunta virou ausência de cópia" -ForegroundColor Red; $wbErrors++ }
         # A ressalva de AnyDesk/TeamViewer entra na confirmação do botão 4 (a do 5 é cobrada pelo
         # teste da Tarefa 19, junto da linha que a cria).
         $wfW46C = [string](Get-WinForgeRepairCommand -Name 'WifiDriverReinstall').Confirm
@@ -7970,6 +7982,87 @@ if ($SelfTest) {
         Write-Host "  Rede (botões 4 e 6): exportar antes de remover, três desfechos, restauração automática também no 4, '/install' que propõe e botão 6 desabilitado sem cópia"
     } catch {
         Write-Host "  [ERRO] Rede (botões 4/6): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Rede: botão 5
+    # Medido: o rádio tem MAIS DE UM candidato no repositório e a classificação menor vence. Apagar
+    # só o instalado entregaria a versão antiga e MENTIRIA sobre o que fez - por isso apaga a
+    # FAMÍLIA inteira do rádio. Família, e não "todo pacote de rede": nesta máquina isso é a
+    # diferença entre 2 e 10 pacotes, e os 8 de fora incluem o driver do cabo.
+    try {
+        $wfW5Cmd = Get-WinForgeRepairCommand -Name 'WifiDriverGeneric'
+        if ([string]$wfW5Cmd.Title -ne 'Rede sem fio — Trocar pelo driver básico do Windows (pode ficar sem Wi-Fi)') { Write-Host "  [ERRO] Rede (botão 5): título '$($wfW5Cmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfW5Cmd.Kind -ne 'repair') { Write-Host "  [ERRO] Rede (botão 5): a linha é '$($wfW5Cmd.Kind)'" -ForegroundColor Red; $wbErrors++ }
+        if ((Invoke-WinForgeRepairCommand -Name 'WifiDriverGeneric' -NoUI).Dispatched) { Write-Host "  [ERRO] Rede (botão 5): foi despachado no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfW5Cmd.NetworkGuard -ne 'WifiDriverGeneric') { Write-Host "  [ERRO] Rede (botão 5): a linha não declara NetworkGuard" -ForegroundColor Red; $wbErrors++ }
+        $wfW5Conf = Get-WinForgeWifiGenericConfirmText
+        if ([string]$wfW5Conf.Typed -ne 'VOLTAR AO GENERICO') { Write-Host "  [ERRO] Rede (botão 5): a confirmação por digitação é '$($wfW5Conf.Typed)'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW5F in @('Se o driver básico não funcionar com este Wi-Fi, o computador fica sem rede sem fio até você trazer o driver por cabo ou pen drive', 'Tenha um cabo de rede à mão antes de continuar')) {
+            if ([string]$wfW5Conf.Text -notmatch [regex]::Escape($wfW5F)) { Write-Host "  [ERRO] Rede (botão 5): falta '$wfW5F' na confirmação" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A palavra digitada aparece no TEXTO: uma caixa que pede para digitar sem dizer o quê é uma
+        # caixa que ninguém passa.
+        if ([string]$wfW5Conf.Text -notmatch [regex]::Escape([string]$wfW5Conf.Typed)) { Write-Host "  [ERRO] Rede (botão 5): o texto não diz o que digitar" -ForegroundColor Red; $wbErrors++ }
+        $wfW5Fonte = [string](Get-Command Invoke-WinForgeWifiDriverGeneric).ScriptBlock
+        if ($wfW5Fonte -notmatch 'delete-driver') { Write-Host "  [ERRO] Rede (botão 5): falta o '/delete-driver /uninstall'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -match '/force') { Write-Host "  [ERRO] Rede (botão 5): '/force' apaga o pacote em uso e é o caminho para ficar sem rádio" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -match '/reboot') { Write-Host "  [ERRO] Rede (botão 5): '/reboot' tira a decisão de reiniciar do usuário" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -notmatch 'Invoke-WinForgeWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 5): sem restauração automática no desfecho ruim" -ForegroundColor Red; $wbErrors++ }
+        # Exporta TODOS os OEM antes de apagar qualquer um.
+        # As DUAS pontas pela FORMA DA CHAMADA com argumento: 'delete-driver' solto aparece antes,
+        # no texto da simulação que diz o que o botão faria, e a trava mediria a posição da FRASE em
+        # vez da do comando. Nona aparição desta família na leva.
+        $wfW5PosExport = $wfW5Fonte.IndexOf('Export-WinForgeWifiDriverBackup -Published', [StringComparison]::Ordinal)
+        $wfW5PosDelete = $wfW5Fonte.IndexOf("@('/delete-driver'", [StringComparison]::Ordinal)
+        if ($wfW5PosExport -lt 0 -or $wfW5PosDelete -lt 0 -or $wfW5PosExport -gt $wfW5PosDelete) { Write-Host "  [ERRO] Rede (botão 5): o apagamento vem antes da exportação (export em $wfW5PosExport, apagamento em $wfW5PosDelete)" -ForegroundColor Red; $wbErrors++ }
+        # A FAMÍLIA do rádio, e não a classe de rede inteira. Cobrado pela chamada completa: 'Oem'
+        # solto casaria com o comentário que explica a regra, e a diferença aqui é apagar 2 pacotes
+        # ou 10, sendo que entre os 10 está o driver do cabo - a via de socorro deste botão.
+        if ($wfW5Fonte -notmatch 'Select-WinForgeWifiDriverPackage\s+-Entries\s+\$\w+\s+-InfName\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): ele não restringe à família do rádio - apagaria o driver do cabo junto" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -match 'Where-Object\s*\{[^}]*Class[^}]*-eq\s*''Net''') { Write-Host "  [ERRO] Rede (botão 5): ele monta a lista pela CLASSE de rede, que é o defeito consertado na Tarefa 17" -ForegroundColor Red; $wbErrors++ }
+        # O embutido é reconfirmado ANTES de apagar, e pela MESMA varredura de INF que alimenta o
+        # guarda: a função que consulta a ferramenta de drivers responde "não há embutido" em toda
+        # máquina real, e usá-la aqui esconderia o botão em qualquer computador.
+        if ($wfW5Fonte -notmatch 'Test-WinForgeInboxWifiDriver\s+-PnpDeviceId\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): não reconfirma o driver embutido pela varredura de INF antes de apagar" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -match 'Select-WinForgeWifiInboxDriver') { Write-Host "  [ERRO] Rede (botão 5): usa a consulta à ferramenta de drivers para saber do embutido - ela responde 'não há' em toda máquina real" -ForegroundColor Red; $wbErrors++ }
+        # A verificação de sucesso exige DriverProvider = Microsoft - cobrada POR COMPORTAMENTO, e
+        # não por '-match "Microsoft"' na fonte, que casaria com o comentário que explica a regra.
+        if ($wfW5Fonte -notmatch 'Test-WinForgeWifiOutcome[^\r\n]*-Generic') { Write-Host "  [ERRO] Rede (botão 5): a verificação não passa '-Generic' - sem ele não se distingue 'o básico entrou' de 'outro OEM venceu'" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $true; Status = 'Up'; Problem = 'CM_PROB_NONE'; DriverProvider = 'Intel'; Name = 'Wi-Fi' }) -Generic).Outcome -eq 'ok') { Write-Host "  [ERRO] Rede (botão 5): um driver Intel passou como 'o básico entrou'" -ForegroundColor Red; $wbErrors++ }
+        # E a ressalva de AnyDesk/TeamViewer, que a Tarefa 18 deixou para cá junto com esta linha.
+        if ([string]$wfW5Cmd.Confirm -notmatch 'AnyDesk') { Write-Host "  [ERRO] Rede (botão 5): a confirmação não avisa que AnyDesk e TeamViewer não são detectados" -ForegroundColor Red; $wbErrors++ }
+        # A função é CHAMADA, não só lida: bloqueada, ela recusa dizendo por quê e não lista o que
+        # apagaria.
+        $wfW5SecoBloq = @(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts (& $wfW46Com @{ Inbox = $false }))
+        if (-not @($wfW5SecoBloq | Where-Object { [string]$_ -match 'básico' }).Count) { Write-Host "  [ERRO] Rede (botão 5): sem driver embutido ele não recusou dizendo por quê ('$($wfW5SecoBloq -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW5SecoBloq | Where-Object { [string]$_ -match 'delete-driver' }).Count) { Write-Host "  [ERRO] Rede (botão 5): bloqueado, ele ainda listou o apagamento" -ForegroundColor Red; $wbErrors++ }
+        $wfW5SecoExp = @(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts (& $wfW46Com @{ ExportOk = $false }))
+        if (-not @($wfW5SecoExp | Where-Object { [string]$_ -match 'cópia' }).Count) { Write-Host "  [ERRO] Rede (botão 5): falha na cópia de segurança não bloqueou ('$($wfW5SecoExp -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # ...e a máquina saudável não é bloqueada: sem isto, uma função que recusasse sempre passaria.
+        if (-not @(@(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts $wfW46Base) | Where-Object { [string]$_ -match 'delete-driver|apagaria' }).Count) { Write-Host "  [ERRO] Rede (botão 5): a simulação de uma máquina saudável não descreve o que faria" -ForegroundColor Red; $wbErrors++ }
+        # Exceção D3: SEM inbox o botão SOME. Botão desabilitado convida a procurar como habilitá-lo,
+        # e o que se acha na internet é "use /force".
+        $wfW5FonteUI = [string](Get-Command Update-WinForgeNetworkButtons).ScriptBlock
+        if ($wfW5FonteUI -notmatch 'WPFWFRepWifiDriverGeneric') { Write-Host "  [ERRO] Rede (D3): nada esconde o botão 5" -ForegroundColor Red; $wbErrors++ }
+        # A FORMA DA ATRIBUIÇÃO, e não a palavra: 'Collapsed' aparece na documentação da função,
+        # que explica a exceção, e o nome solto ficava verde com a linha que esconde REMOVIDA.
+        # Décima aparição desta família na leva, e a segunda contra uma trava minha.
+        if ($wfW5FonteUI -notmatch "Visibility\s*=\s*'Collapsed'") { Write-Host "  [ERRO] Rede (D3): o botão 5 é desabilitado em vez de escondido" -ForegroundColor Red; $wbErrors++ }
+        # ...e SÓ ele some: os outros dois continuam sendo desabilitados, que é a regra do projeto.
+        if ($wfW5FonteUI -match "WPFWFRepWifiDriverRestore[^\r\n]*Collapsed") { Write-Host "  [ERRO] Rede (D3): a exceção de esconder vazou para o botão 6" -ForegroundColor Red; $wbErrors++ }
+        # O guarda é quem decide, e ele esconde por DOIS motivos: sem embutido e build antigo.
+        foreach ($wfW5Esc in @(@{ Inbox = $false }, @{ Build = 17763 })) {
+            if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts (& $wfW46Com $wfW5Esc)).Hidden) { Write-Host "  [ERRO] Rede (D3): '$($wfW5Esc.Keys)' não escondeu o botão 5" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ((Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfW46Base).Hidden) { Write-Host "  [ERRO] Rede (D3): máquina saudável escondeu o botão 5" -ForegroundColor Red; $wbErrors++ }
+        # A entrada de config CONTINUA existindo (a trava é 63): quem some é o controle na tela.
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepWifiDriverGeneric.Description)) { Write-Host "  [ERRO] Rede (botão 5): WPFWFRepWifiDriverGeneric sem Description" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepWifiDriverGeneric.Content -ne [string]$wfW5Cmd.Title) { Write-Host "  [ERRO] Rede (botão 5): o Content da config não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        # A DECISÃO DE PRODUTO fica registrada na documentação da função, e não só no plano: a
+        # ausência do botão é escolha de quem pediu o recurso, não limitação técnica.
+        if ($wfW5FonteUI -notmatch 'decisão de produto') { Write-Host "  [ERRO] Rede (D3): a documentação não registra que esconder é decisão de produto" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (botão 5): confirmação por digitação, exporta todos os OEM antes de apagar, sem /force, sucesso só com DriverProvider Microsoft e o botão some sem inbox"
+    } catch {
+        Write-Host "  [ERRO] Rede (botão 5): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
