@@ -160,6 +160,22 @@ $sync.configs.wfrepair = @'
     "panel": "1",
     "Type": "Button",
     "ButtonWidth": "350"
+  },
+  "WPFWFRepWifiDriverReinstall": {
+    "Content": "Rede sem fio — Reinstalar o driver que já está instalado",
+    "Description": "ALTERA O SISTEMA. É o degrau mais conservador dos que mexem em driver: nenhum pacote é apagado do repositório, então o Windows repõe exatamente o mesmo driver que já estava. Serve para quando o driver é o certo e a instalação dele é que azedou. Antes de qualquer coisa ele guarda uma cópia conferida do driver atual em %ProgramData%\\WinForge\\driver-backup e confere arquivo por arquivo; se a cópia falhar, a ação para ali e nada é alterado, porque sem ela não existe caminho de volta. Depois tira o rádio da lista de dispositivos e manda o Windows procurar de novo. Se o rádio voltar com problema, sumido ou em situação estranha, o driver guardado é devolvido NA HORA, sem perguntar - num notebook sem porta de rede, mandar você clicar noutro botão para voltar seria mandar clicar sem rede. A detecção de acesso remoto cobre a Área de Trabalho Remota do Windows e não enxerga AnyDesk, TeamViewer ou RustDesk.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepWifiDriverRestore": {
+    "Content": "Rede sem fio — Voltar para o driver que estava antes",
+    "Description": "ALTERA O SISTEMA. Pega o pacote de driver guardado na última cópia de segurança e o PROPÕE ao Windows: quem decide qual pacote assume o dispositivo é o mecanismo de classificação do próprio Windows, que pode escolher outro, e por isso o relatório conta o que o adaptador virou em vez de afirmar que a volta aconteceu. É a rede de segurança dos outros dois botões de driver, e existe antes deles de propósito: sem volta, não se oferece a ida. Aparece habilitado depois que 'Reinstalar' ou 'Trocar pelo driver básico' guardarem uma cópia conferida em disco; sem cópia nenhuma ele fica desabilitado e a dica diz isso. Se nem assim o rádio voltar, o texto manda trazer o driver do fabricante por cabo ou pen drive, de outro computador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
   }
 }
 '@ | ConvertFrom-Json

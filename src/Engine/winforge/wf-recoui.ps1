@@ -311,6 +311,18 @@ function Start-WinForgeProfileJob {
             # ÚLTIMA mensagem escrita. Só relata - devolver posse de pasta de sistema sozinho, na
             # abertura, sem ninguém olhando, é o oposto do que estes botões prometem.
             $null = Show-WinForgeAclOwnerPending
+
+            # Os botões que mexem no driver de rede dependem do PERFIL (é ele que diz se a máquina
+            # é virtual ou um servidor), então eles só podem ser pintados DEPOIS dele. As decisões
+            # são tomadas AQUI, no job: levantar os fatos custa perto de meio segundo por botão
+            # (adaptadores, identificadores de hardware e a varredura de INF), e meio segundo na
+            # thread da janela é travamento visível. Para lá vai só o resultado.
+            $wfNetDecisoes = @{}
+            foreach ($wfNetAcao in @('WifiDriverReinstall', 'WifiDriverRestore', 'WifiDriverGeneric')) {
+                try { $wfNetDecisoes[$wfNetAcao] = Test-WinForgeNetworkGuard -Action $wfNetAcao } catch { }
+            }
+            $sync.WinForgeNetworkGuards = $wfNetDecisoes
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread { Update-WinForgeNetworkButtons } }
         } catch {
             # a barra fica visível com o erro: o usuário precisa saber que não há recomendação nenhuma
             $null = Set-WinForgeProfileProgress -Label "Diagnóstico falhou: $($_.Exception.Message)" -Percent 0

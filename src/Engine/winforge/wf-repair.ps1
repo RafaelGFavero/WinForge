@@ -442,6 +442,34 @@ function Get-WinForgeRepairCommand {
                 Confirm = 'Esvazia o cache de nomes, devolve o endereço atual ao roteador e pede outro no lugar. A rede cai por alguns segundos.'
             }
         }
+        # Os dois botões que mexem no driver do rádio, e eles nascem juntos porque o que VOLTA é a
+        # condição do que VAI: sem volta, não se oferece a ida.
+        'WifiDriverReinstall' {
+            return @{
+                Title         = 'Rede sem fio — Reinstalar o driver que já está instalado'
+                Requires      = (Get-WinForgeSystemExe -Name 'pnputil.exe')
+                Kind          = 'repair'
+                Stream        = $true
+                ExpectMinutes = 5
+                NetworkGuard  = 'WifiDriverReinstall'
+                Steps         = @(@{ Function = 'Invoke-WinForgeWifiDriverReinstall' })
+                Final   = 'Se o rádio não voltar sozinho em um minuto, reinicie o computador antes de tentar qualquer outra coisa.'
+                Confirm = 'Guarda uma cópia conferida do driver de rede atual, tira o rádio sem fio da lista de dispositivos e manda o Windows encontrá-lo de novo, o que reinstala o MESMO driver que já estava. Nenhum pacote é apagado. A rede sem fio cai durante a troca e volta em segundos; se o rádio voltar com problema, o driver guardado é devolvido na hora, sem perguntar. Aviso: a detecção de acesso remoto cobre a Área de Trabalho Remota do Windows, e NÃO enxerga AnyDesk, TeamViewer ou RustDesk - se você estiver usando um desses agora, vai perder a conexão.'
+            }
+        }
+        'WifiDriverRestore' {
+            return @{
+                Title         = 'Rede sem fio — Voltar para o driver que estava antes'
+                Requires      = (Get-WinForgeSystemExe -Name 'pnputil.exe')
+                Kind          = 'repair'
+                Stream        = $true
+                ExpectMinutes = 5
+                NetworkGuard  = 'WifiDriverRestore'
+                Steps         = @(@{ Function = 'Invoke-WinForgeWifiDriverRestore' })
+                Final   = 'Confira na lista de redes sem fio se o Wi-Fi voltou. Se não voltou, traga o driver do fabricante por cabo ou pen drive.'
+                Confirm = 'Propõe ao Windows o driver de rede guardado na última cópia de segurança. Quem decide qual pacote assume o dispositivo é o próprio Windows, então isto propõe, não impõe. Sem cópia guardada o botão fica desabilitado.'
+            }
+        }
     }
     throw "Comando de reparo desconhecido: '$Name'."
 }

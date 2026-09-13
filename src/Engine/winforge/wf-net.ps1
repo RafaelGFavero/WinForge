@@ -279,6 +279,10 @@ function Get-WinForgeNetworkFacts {
     # O driver básico só é condição do botão que troca por ele; para os outros a pergunta não
     # existe, e nem a varredura de INF nem a consulta de IDs de hardware são pagas.
     if ($Action -eq 'WifiDriverGeneric') {
+        # A fonte deste fato é a varredura de INF, e NÃO Select-WinForgeWifiInboxDriver. Medido na
+        # Tarefa 17: 'pnputil /enum-drivers' lista só pacotes de terceiro (96 blocos, 96 oemNN.inf),
+        # então aquela função responde "não há embutido" em TODA máquina real - e o botão sumiria em
+        # qualquer computador. A varredura devolve verdadeiro para o rádio Intel desta máquina.
         $idRadio = ''
         if ($radio.Ok) {
             $objRadio = @($adaptadores | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
@@ -286,6 +290,8 @@ function Get-WinForgeNetworkFacts {
         }
         $f.Inbox = (-not [string]::IsNullOrWhiteSpace($idRadio)) -and (Test-WinForgeInboxWifiDriver -PnpDeviceId $idRadio)
     }
+    # Só o botão que volta precisa saber se há cópia guardada, e a pergunta é uma leitura de pasta.
+    if ($Action -eq 'WifiDriverRestore') { $f.BackupFound = [bool](Get-WinForgeWifiDriverBackupSet).Found }
     return $f
 }
 
@@ -419,7 +425,14 @@ function Test-WinForgeNetworkGuard {
         @{ Vale = (-not [bool]$f.Inbox); Absolutas = @('WifiDriverGeneric'); Esconde = $true
            Texto = 'O Windows não tem driver básico para este rádio sem fio: o único driver que existe para ele é o do fabricante, que já está instalado. Não há por que trocar, e remover o que está lá deixaria a máquina sem Wi-Fi até você instalar o do fabricante de novo por outra via.' },
         @{ Vale = (-not [bool]$f.ExportOk); Absolutas = $tiraDriver
-           Texto = 'A cópia de segurança do driver atual falhou, então não há caminho de volta se a troca der errado. Este botão só roda com a cópia guardada.' }
+           Texto = 'A cópia de segurança do driver atual falhou, então não há caminho de volta se a troca der errado. Este botão só roda com a cópia guardada.' },
+        # Só o botão que VOLTA depende de haver o que voltar, e ele fica DESABILITADO, não escondido:
+        # a regra do projeto é "botão desabilitado, não removido", e a exceção de esconder vale só
+        # para o botão do driver básico. A chave é lida com ContainsKey de propósito: quem não
+        # levanta este fato (os outros três botões, e todo chamador anterior a ele) não pode ser
+        # recusado por um $null que parece "não achou".
+        @{ Vale = ($f.ContainsKey('BackupFound') -and -not $f.BackupFound); Absolutas = @('WifiDriverRestore')
+           Texto = 'Não há nenhuma cópia de segurança de driver guardada nesta máquina, então não há para onde voltar. Este botão fica disponível depois que "Reinstalar o driver que já está instalado" ou "Trocar pelo driver básico do Windows" guardarem uma cópia conferida em disco.' }
     )
 
     # ESCONDER é propriedade do BOTÃO; EXPLICAR é do degrau. Os dois são decididos separadamente, e
@@ -1083,38 +1096,79 @@ function Get-WinForgeDriverStoreEntry {
     return @($entradas)
 }
 
-function Select-WinForgeWifiInboxDriver {
+function Get-WinForgeWifiDriverInfName {
     <#
     .SYNOPSIS
-        Separa, entre os pacotes lidos, o driver embutido do Windows e os pacotes de terceiro, só na
-        classe de rede.
+        O nome publicado do pacote de driver que o rádio REALMENTE usa ('oem22.inf').
     .DESCRIPTION
-        A classe é filtrada porque a lista traz a máquina inteira: impressora, vídeo e áudio não
-        têm nada a ver com o rádio, e um pacote de terceiro de outra classe na lista de exportação
-        significaria copiar 120 MB do driver errado.
+        Sai da propriedade DEVPKEY_Device_DriverInfPath do próprio dispositivo, que é o Windows
+        dizendo qual pacote assumiu aquele hardware. É o único jeito de amarrar a lista do
+        repositório a ESTE rádio - a lista, sozinha, é da máquina inteira.
+    .PARAMETER PnpDeviceId
+        Identificador do dispositivo do rádio.
+    .OUTPUTS
+        O nome publicado, ou '' quando não deu para saber.
+    #>
+    param([Parameter(Mandatory)][string]$PnpDeviceId)
 
-        'Found' é a informação, e não a decisão: quem decide se o botão do driver básico aparece é
-        Test-WinForgeNetworkGuard, pelo fato 'Inbox'.
+    try {
+        return [string](Get-PnpDeviceProperty -InstanceId $PnpDeviceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction Stop).Data
+    } catch {
+        return ''
+    }
+}
 
-        LIMITE, e está medido no comentário da região: alimentada com a saída de uma máquina de
-        verdade, esta função responde 'Found = $false' SEMPRE, porque o pnputil não lista pacote
-        embutido nenhum. Ela responde de verdade quando a lista vem de outra fonte - e a metade que
-        importa hoje é 'Oem', que é o que o botão exporta antes de mexer.
+function Select-WinForgeWifiDriverPackage {
+    <#
+    .SYNOPSIS
+        Entre os pacotes lidos do repositório, devolve SÓ os da família do rádio indicado.
+    .DESCRIPTION
+        ESTA FUNÇÃO EXISTE POR CAUSA DE UM DEFEITO GRAVE, e o defeito era pegar "todo pacote de
+        terceiro da classe de rede". Medido nesta máquina, a classe de rede tem DEZ pacotes:
+
+            oem22.inf <- netwbw02.inf      o rádio Intel        <- a família
+            oem18.inf <- netwbw02.inf      o mesmo rádio, outra versão
+            oem49/37  <- ftsvnic.inf       cliente de VPN
+            oem48/36  <- ft_vnic.inf       cliente de VPN
+            oem10.inf <- oemvista.inf      placa de rede
+            oem2.inf  <- ovpn-dco.inf      cliente de VPN
+            oem6.inf  <- rt25cx21x64.inf   placa de rede
+            oem66.inf <- wchusbnic.inf     placa de rede USB
+
+        O botão que troca pelo driver básico EXPORTA e depois REMOVE essa lista. Com os dez, ele
+        apagaria o driver da placa de cabo junto com o do rádio - e a pessoa que clicou para
+        consertar o Wi-Fi ficaria sem Wi-Fi E sem Ethernet, ou seja, sem a via de socorro que a
+        escada inteira pressupõe e que o próprio guarda exige existir. O bloqueio de "não há outra
+        via de rede" e o dado que alimenta a ação estavam se contradizendo.
+
+        A família é definida pelo ARQUIVO DE ORIGEM: o pacote que o rádio usa hoje
+        (DEVPKEY_Device_DriverInfPath) aponta para um 'Nome Original', e a família são todos os
+        pacotes com esse mesmo original. Aqui isso dá oem22 e oem18 - o rádio e a versão antiga
+        dele, que é exatamente quem disputa o dispositivo quando o instalado sai.
+
+        Sem conseguir identificar o pacote do rádio, a resposta é LISTA VAZIA. Lista vazia faz o
+        botão não ter o que exportar e portanto não ter o que remover, que é o lado seguro.
     .PARAMETER Entries
         As entradas devolvidas por Get-WinForgeDriverStoreEntry.
+    .PARAMETER InfName
+        O nome publicado do pacote que o rádio usa hoje.
     .OUTPUTS
-        @{ Found = <bool>; Published = <string>; Oem = @(<string>) }
+        @{ Oem = @(<string>); Original = <string> }
     #>
-    param([Parameter(Mandatory)][object[]]$Entries)
+    param(
+        [Parameter(Mandatory)][object[]]$Entries,
+        [Parameter(Mandatory)][string]$InfName
+    )
 
-    $rede = @(@($Entries) | Where-Object { $null -ne $_ -and ([string]$_.Class -eq 'Net') })
-    $embutidos = @($rede | Where-Object { -not [bool]$_.IsOem })
-    $terceiros = @($rede | Where-Object { [bool]$_.IsOem } | ForEach-Object { [string]$_.Published })
-    return @{
-        Found     = [bool]$embutidos.Count
-        Published = $(if ($embutidos.Count) { [string]$embutidos[0].Published } else { '' })
-        Oem       = @($terceiros)
-    }
+    $rede = @(@($Entries) | Where-Object { $null -ne $_ -and ([string]$_.Class -eq 'Net') -and [bool]$_.IsOem })
+    $instalado = @($rede | Where-Object { [string]$_.Published -eq $InfName })
+    if (-not $instalado.Count) { return @{ Oem = @(); Original = '' } }
+
+    $origem = [string]$instalado[0].Original
+    if ([string]::IsNullOrWhiteSpace($origem)) { return @{ Oem = @([string]$instalado[0].Published); Original = '' } }
+
+    $familia = @($rede | Where-Object { [string]$_.Original -eq $origem } | ForEach-Object { [string]$_.Published })
+    return @{ Oem = @($familia); Original = $origem }
 }
 
 function Test-WinForgePnputilExit {
@@ -1285,19 +1339,61 @@ function Export-WinForgeWifiDriverBackup {
         $saida = Invoke-WinForgeNativeCommand -FilePath $passo.FilePath -Arguments $passo.Arguments -Encoding $passo.Encoding
         $codigo = [int]$saida.ExitCode
         if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) {
+            # A pasta sai do disco TAMBÉM aqui. Este é o caminho de erro mais provável de todos (o
+            # pacote não existe mais, o repositório mudou) e era justamente o que deixava para trás
+            # uma pasta com nome de conjunto e conteúdo pela metade - que a leitura seguinte
+            # ofereceria ao botão que volta como se fosse cópia boa.
+            Remove-Item -LiteralPath $destino -Recurse -Force -ErrorAction SilentlyContinue
             return @{ Ok = $false; Reason = "A cópia de '$nome' falhou com o código $codigo. $([string]$saida.Text)"; Path = $destino; Files = 0; Bytes = [long]0 }
         }
     }
 
-    $infs = @(Get-ChildItem -LiteralPath $destino -Filter '*.inf' -File -Recurse -ErrorAction SilentlyContinue)
-    $cats = @(Get-ChildItem -LiteralPath $destino -Filter '*.cat' -File -Recurse -ErrorAction SilentlyContinue)
-    $todos = @(Get-ChildItem -LiteralPath $destino -File -Recurse -ErrorAction SilentlyContinue)
-    $soma = [long](@($todos | Measure-Object -Property Length -Sum).Sum)
-    if (-not $infs.Count) { return @{ Ok = $false; Reason = "A cópia terminou sem nenhum arquivo .inf em '$destino': não haveria o que reinstalar."; Path = $destino; Files = @($todos).Count; Bytes = $soma } }
-    if (-not $cats.Count) { return @{ Ok = $false; Reason = "A cópia terminou sem nenhum catálogo .cat em '$destino': o Windows recusaria o pacote na volta."; Path = $destino; Files = @($todos).Count; Bytes = $soma } }
-    if ($soma -le 0) { return @{ Ok = $false; Reason = "A cópia terminou com 0 byte em '$destino'."; Path = $destino; Files = @($todos).Count; Bytes = $soma } }
+    $conferida = Test-WinForgeWifiDriverBackupFolder -Path $destino
+    if (-not $conferida.Ok) {
+        # A pasta PARCIAL sai do disco. Deixá-la para trás é pior do que não ter cópia nenhuma: a
+        # leitura seguinte a encontraria, o botão que volta ficaria habilitado, e o que ele
+        # proporia ao Windows seria meia cópia - descoberto no pior momento possível.
+        Remove-Item -LiteralPath $destino -Recurse -Force -ErrorAction SilentlyContinue
+        return @{ Ok = $false; Reason = [string]$conferida.Reason; Path = $destino; Files = [int]$conferida.Files; Bytes = [long]$conferida.Bytes }
+    }
+    return @{ Ok = $true; Reason = ''; Path = $destino; Files = [int]$conferida.Files; Bytes = [long]$conferida.Bytes }
+}
 
-    return @{ Ok = $true; Reason = ''; Path = $destino; Files = @($todos).Count; Bytes = [long]$soma }
+function Test-WinForgeWifiDriverBackupFolder {
+    <#
+    .SYNOPSIS
+        Diz se uma pasta contém uma cópia de driver COMPLETA. Só lê.
+    .DESCRIPTION
+        A mesma conferência serve às duas pontas, e é de propósito: quem EXPORTA usa para decidir se
+        a cópia vale, e quem LÊ usa para decidir se há para onde voltar. Com duas conferências
+        diferentes, a leitura aceitaria como boa uma pasta que a exportação teria recusado - e foi
+        isso que aconteceu: a pasta parcial de uma exportação falhada ficava no disco e era contada
+        como cópia conferida.
+
+        Três perguntas, e cada uma tem um jeito próprio de dar errado no pior momento:
+
+        1. Um '.inf'. Sem ele não há o que propor ao Windows.
+        2. Um '.cat'. É o catálogo de assinatura; sem ele o Windows recusa o pacote na volta, e a
+           recusa só apareceria na hora do desespero.
+        3. Bytes. Uma pasta com os dois nomes certos e zero byte é o pior caso, porque parece boa.
+    .PARAMETER Path
+        A pasta a conferir.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Files = <int>; Bytes = <long> }
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return @{ Ok = $false; Reason = "A pasta '$Path' não existe."; Files = 0; Bytes = [long]0 } }
+
+    $todos = @(Get-ChildItem -LiteralPath $Path -File -Recurse -ErrorAction SilentlyContinue)
+    $soma = [long](@($todos | Measure-Object -Property Length -Sum).Sum)
+    $infs = @(Get-ChildItem -LiteralPath $Path -Filter '*.inf' -File -Recurse -ErrorAction SilentlyContinue)
+    $cats = @(Get-ChildItem -LiteralPath $Path -Filter '*.cat' -File -Recurse -ErrorAction SilentlyContinue)
+
+    if (-not $infs.Count) { return @{ Ok = $false; Reason = "A cópia em '$Path' não tem nenhum arquivo .inf: não haveria o que reinstalar."; Files = @($todos).Count; Bytes = $soma } }
+    if (-not $cats.Count) { return @{ Ok = $false; Reason = "A cópia em '$Path' não tem nenhum catálogo .cat: o Windows recusaria o pacote na volta."; Files = @($todos).Count; Bytes = $soma } }
+    if ($soma -le 0) { return @{ Ok = $false; Reason = "A cópia em '$Path' tem 0 byte."; Files = @($todos).Count; Bytes = $soma } }
+    return @{ Ok = $true; Reason = ''; Files = @($todos).Count; Bytes = $soma }
 }
 
 function Get-WinForgeWifiDriverBackupSet {
@@ -1323,16 +1419,303 @@ function Get-WinForgeWifiDriverBackupSet {
     try { $conjuntos = @(Get-ChildItem -LiteralPath $raiz -Directory -ErrorAction Stop | Where-Object { [string]$_.Name -match '-(\d{8}-\d{6})$' }) } catch { return $nada }
     if (-not $conjuntos.Count) { return $nada }
 
-    $novo = @($conjuntos | Sort-Object -Property Name -Descending)[0]
-    $carimbo = ''
-    if ([string]$novo.Name -match '-(\d{8}-\d{6})$') { $carimbo = [string]$Matches[1] }
-    $arquivos = @(Get-ChildItem -LiteralPath $novo.FullName -File -Recurse -ErrorAction SilentlyContinue)
-    return @{
-        Found = $true
-        Path  = [string]$novo.FullName
-        Stamp = $carimbo
-        Files = @($arquivos).Count
-        Bytes = [long](@($arquivos | Measure-Object -Property Length -Sum).Sum)
+    # Ordena pelo CARIMBO, e não pelo nome da pasta. Ordenar por nome inverte a resposta em dois
+    # casos medidos, e os dois acontecem em uso normal: 'oem22-20260912' vence 'oem2-20260913'
+    # porque o prefixo é maior, e 'oem9-...' vence 'oem10-...' pelo mesmo motivo. O cenário real é
+    # o botão que reinstala ter exportado ontem e o do driver básico ter exportado hoje e falhado -
+    # a restauração automática ofereceria a cópia de ONTEM, do pacote errado.
+    $ordenados = @($conjuntos |
+        Select-Object -Property @{ Name = 'Pasta'; Expression = { $_ } }, @{ Name = 'Carimbo'; Expression = { if ([string]$_.Name -match '-(\d{8}-\d{6})$') { [string]$Matches[1] } else { '' } } } |
+        Sort-Object -Property Carimbo -Descending)
+
+    # Conjunto INCOMPLETO não conta: a pasta parcial que uma exportação interrompida deixou para
+    # trás tem nome de conjunto e não tem o que propor ao Windows. A conferência é a MESMA de quem
+    # exporta, e é por isso que ela mora numa função só.
+    foreach ($candidato in $ordenados) {
+        $conferida = Test-WinForgeWifiDriverBackupFolder -Path ([string]$candidato.Pasta.FullName)
+        if (-not $conferida.Ok) { continue }
+        return @{
+            Found = $true
+            Path  = [string]$candidato.Pasta.FullName
+            Stamp = [string]$candidato.Carimbo
+            Files = [int]$conferida.Files
+            Bytes = [long]$conferida.Bytes
+        }
+    }
+    return $nada
+}
+
+# =============================================================== os botões que mexem no driver
+# Daqui saem as duas ações que podem deixar alguém sem conexão, e a ordem entre elas é regra: o
+# botão que VOLTA é a condição para o que vai existir. Sem volta, não se oferece a ida.
+#
+# A cópia de segurança do driver atual é a ÚNICA coisa entre o usuário e um notebook sem Wi-Fi.
+# Falha dela BLOQUEIA a ação - não é aviso, não é "continuar mesmo assim", e o valor que a asserção
+# recebe é o MEDIDO pela exportação, passado no próprio passo que exporta.
+
+function Test-WinForgeWifiOutcome {
+    <#
+    .SYNOPSIS
+        Julga como o rádio ficou depois de mexer no driver dele: bom, ruim ou sumido.
+    .DESCRIPTION
+        Três desfechos, e os dois ruins disparam restauração IMEDIATA, sem perguntar. O motivo é o
+        estado da máquina nesse instante: 'CM_PROB_FAILED_INSTALL' não é uma decisão que o dono do
+        computador tenha como tomar, e a máquina em que esse código apareceria é justamente a que
+        está sem rede para pesquisar o que ele significa. Perguntar ali é perguntar no escuro.
+
+        Vale inclusive para o botão que só reinstala o mesmo driver: num notebook sem porta de rede,
+        mandar a pessoa clicar noutro botão para voltar é mandar clicar sem rede.
+    .PARAMETER Adapter
+        O que Get-WinForgeWifiAdapter devolveu depois da operação.
+    .PARAMETER Generic
+        Exige também que quem assumiu o adaptador seja o driver básico do Windows. É o que separa os
+        dois usos da mesma verificação: no botão que reinstala, o driver que volta é o MESMO de
+        antes (Intel, Realtek, o que for) e exigir a Microsoft reprovaria todo sucesso legítimo; no
+        botão que troca pelo básico, sem o fornecedor não se distingue "o básico entrou" de "outro
+        pacote de terceiro venceu a disputa".
+    .OUTPUTS
+        @{ Outcome = 'ok'|'restaurar'|'sumiu'; Text = <string> }
+    #>
+    param(
+        [Parameter(Mandatory)]$Adapter,
+        [switch]$Generic
+    )
+
+    if (-not $Adapter.Ok) {
+        return @{ Outcome = 'sumiu'; Text = 'O adaptador sem fio sumiu da lista. Devolvendo o driver anterior agora, sem perguntar.' }
+    }
+    # O código de problema chega em DUAS formas, e as duas são "sem problema": o NÚMERO 0, que é o
+    # que Get-WinForgeWifiAdapter devolve (ele lê 'ConfigManagerErrorCode', que é inteiro), e o nome
+    # simbólico 'CM_PROB_NONE', que é como o Windows o escreve por extenso e como os gabaritos o
+    # citam. Comparar só com o nome julgava QUEBRADO um rádio impecável - medido contra o adaptador
+    # Intel desta máquina - e disparava restauração automática do driver, sem perguntar, numa
+    # máquina onde nada estava errado. Ausência de valor também é ausência de problema.
+    $semProblema = ($null -eq $Adapter.Problem) -or ([string]$Adapter.Problem -in @('0', 'CM_PROB_NONE', ''))
+    if (-not $semProblema) {
+        return @{ Outcome = 'restaurar'; Text = "O adaptador voltou com problema ($([string]$Adapter.Problem)). Devolvendo o driver anterior agora, sem perguntar." }
+    }
+    if ([string]$Adapter.Status -notin @('Up', 'Disconnected')) {
+        return @{ Outcome = 'restaurar'; Text = "O adaptador voltou em '$([string]$Adapter.Status)'. Devolvendo o driver anterior agora, sem perguntar." }
+    }
+    if ($Generic -and [string]$Adapter.DriverProvider -ne 'Microsoft') {
+        return @{ Outcome = 'restaurar'; Text = "Quem assumiu o adaptador foi '$([string]$Adapter.DriverProvider)', e não o driver básico do Windows. Devolvendo o driver anterior agora, sem perguntar." }
+    }
+    return @{ Outcome = 'ok'; Text = "$($null)" + " (fornecedor do driver: $([string]$Adapter.DriverProvider))." }
+}
+
+function Invoke-WinForgeWifiDriverRestore {
+    <#
+    .SYNOPSIS
+        Devolve ao rádio o driver guardado na última cópia de segurança.
+    .DESCRIPTION
+        É a volta, e por isso ela nasce junto com a ida: sem volta não se oferece a ida.
+
+        O que ele faz é PROPOR o pacote guardado ao Windows ('/add-driver <inf> /install'). Propor,
+        e não impor - quem decide qual pacote assume o dispositivo é o mecanismo de classificação do
+        próprio Windows, e ele pode escolher outro. Por isso o texto do fim relata o que o adaptador
+        virou, conferido com Get-WinForgeWifiAdapter, em vez de afirmar que a volta aconteceu.
+
+        Sem cópia em disco ele não tenta nada e diz isso. O botão fica DESABILITADO nesse caso, e
+        não escondido: a regra do projeto é "botão desabilitado, não removido", e a exceção de
+        esconder vale só para o botão do driver básico.
+
+        Quando nem assim o rádio volta, o texto manda a pessoa trazer o driver do fabricante por
+        cabo de rede ou por pen drive, que é o único caminho que sobra numa máquina sem Wi-Fi.
+    .PARAMETER DryRun
+        Diz o que faria e para por aí.
+    .PARAMETER Facts
+        Fatos prontos para o guarda, e opcionalmente 'BackupRoot' para a pasta das cópias. É a porta
+        do -SelfTest.
+    .OUTPUTS
+        As linhas do relato.
+    #>
+    param(
+        [switch]$DryRun,
+        [hashtable]$Facts
+    )
+
+    $L = New-Object System.Collections.Generic.List[string]
+    $raizCopias = ''
+    if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts -and $Facts.ContainsKey('BackupRoot')) { $raizCopias = [string]$Facts.BackupRoot }
+
+    $conjunto = $(if ([string]::IsNullOrWhiteSpace($raizCopias)) { Get-WinForgeWifiDriverBackupSet } else { Get-WinForgeWifiDriverBackupSet -Root $raizCopias })
+    if (-not $conjunto.Found) {
+        $L.Add('Não há nenhuma cópia de segurança de driver guardada nesta máquina, então não há para onde voltar.')
+        $L.Add('Ela é criada pelos botões que mexem no driver, antes de mexerem.')
+        return @($L.ToArray())
+    }
+    $L.Add("Cópia encontrada em '$([string]$conjunto.Path)': $([int]$conjunto.Files) arquivo(s), $([math]::Round([long]$conjunto.Bytes / 1MB)) MB, de $([string]$conjunto.Stamp).")
+
+    $infs = @(Get-ChildItem -LiteralPath ([string]$conjunto.Path) -Filter '*.inf' -File -Recurse -ErrorAction SilentlyContinue)
+    if (-not $infs.Count) {
+        $L.Add('A cópia guardada não tem nenhum arquivo .inf: não há o que propor ao Windows.')
+        return @($L.ToArray())
+    }
+
+    if ($DryRun) {
+        foreach ($inf in $infs) { $L.Add("[simulação] proporia ao Windows o pacote '$([string]$inf.Name)' (/add-driver ... /install)") }
+        return @($L.ToArray())
+    }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    foreach ($inf in $infs) {
+        $passo = @{
+            FilePath  = (Get-WinForgeSystemExe -Name 'pnputil.exe')
+            Arguments = @('/add-driver', [string]$inf.FullName, '/install')
+            Encoding  = 'ansi'
+        }
+        $saida = Invoke-WinForgeNativeCommand -FilePath $passo.FilePath -Arguments $passo.Arguments -Encoding $passo.Encoding
+        $codigo = [int]$saida.ExitCode
+        $L.Add("Proposto '$([string]$inf.Name)' ao Windows: código $codigo.")
+        if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) { $L.Add("   O Windows recusou este pacote. $([string]$saida.Text)") }
+    }
+
+    $radio = Get-WinForgeWifiAdapter
+    if ($radio.Ok) {
+        $L.Add("O adaptador '$([string]$radio.Name)' está de volta na lista, com driver de $([string]$radio.DriverProvider) e situação $([string]$radio.Status).")
+    } else {
+        $L.Add('O rádio sem fio continua fora da lista mesmo depois da proposta.')
+        $L.Add('Traga o driver do fabricante por cabo de rede ou por pen drive, de outro computador, e instale-o por ali: sem Wi-Fi esta máquina não consegue baixá-lo sozinha.')
+    }
+    return @($L.ToArray())
+}
+
+function Invoke-WinForgeWifiDriverReinstall {
+    <#
+    .SYNOPSIS
+        Remove o rádio da lista de dispositivos e manda o Windows achá-lo de novo, reinstalando o
+        MESMO driver que já estava.
+    .DESCRIPTION
+        É o degrau mais conservador dos que mexem em driver: nenhum pacote é apagado do repositório,
+        então o que o Windows repõe é exatamente o que estava lá. Serve para o caso em que o driver
+        está certo e a instalação dele é que azedou.
+
+        A ordem é a rede de segurança, e ela não tem atalho:
+
+        1. O guarda pesa a máquina. Recusou, acabou - e a explicação é a dele.
+        2. A cópia de segurança do driver atual é feita e CONFERIDA. Falhou, acabou: sem ela não há
+           caminho de volta, e este botão não roda sem caminho de volta.
+        3. A asserção recebe o resultado MEDIDO da cópia, no argumento obrigatório. O valor não é
+           herdado de lugar nenhum, e é aqui que ele é medido.
+        4. Só então o dispositivo sai da lista e o Windows é mandado procurar de novo.
+        5. O desfecho é julgado, e se for ruim a volta acontece AGORA, sem perguntar.
+    .PARAMETER DryRun
+        Diz o que faria e para por aí.
+    .PARAMETER Facts
+        Fatos prontos para o guarda. É a porta do -SelfTest.
+    .OUTPUTS
+        As linhas do relato.
+    #>
+    param(
+        [switch]$DryRun,
+        [hashtable]$Facts
+    )
+
+    $L = New-Object System.Collections.Generic.List[string]
+    $fatos = $(if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) { $Facts } else { Get-WinForgeNetworkFacts -Action 'WifiDriverReinstall' })
+    $guarda = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts $fatos
+    if (-not $guarda.Ok) {
+        $L.Add('Este botão não pode rodar nesta máquina agora.')
+        $L.Add([string]$guarda.Reason)
+        return @($L.ToArray())
+    }
+
+    $radio = Get-WinForgeWifiAdapter
+    if (-not $radio.Ok) {
+        $L.Add("Não há rádio sem fio para reinstalar: $([string]$radio.Reason)")
+        return @($L.ToArray())
+    }
+    $L.Add("Rádio: $([string]$radio.Name), driver de $([string]$radio.DriverProvider).")
+
+    # SÓ a família do rádio. A lista da classe de rede inteira traz a placa de cabo e os clientes de
+    # VPN, e exportar-e-remover aquilo deixaria a máquina sem a via de socorro que este botão exige
+    # existir - ver Select-WinForgeWifiDriverPackage.
+    $idPnp = ''
+    try {
+        $obj0 = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
+        if ($obj0.Count) { $idPnp = [string]$obj0[0].PnPDeviceID }
+    } catch { $idPnp = '' }
+    $infDoRadio = $(if ([string]::IsNullOrWhiteSpace($idPnp)) { '' } else { Get-WinForgeWifiDriverInfName -PnpDeviceId $idPnp })
+    $pacotes = @()
+    if (-not [string]::IsNullOrWhiteSpace($infDoRadio)) {
+        $lidos = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
+        $pacotes = @((Select-WinForgeWifiDriverPackage -Entries $lidos -InfName $infDoRadio).Oem)
+    }
+    if ($DryRun) {
+        $L.Add("[simulação] copiaria $(@($pacotes).Count) pacote(s) de rede e depois tiraria o rádio da lista (/remove-device) para o Windows achá-lo de novo (/scan-devices)")
+        return @($L.ToArray())
+    }
+    Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    $copia = Export-WinForgeWifiDriverBackup -Published $pacotes
+    if (-not $copia.Ok) {
+        $L.Add("A cópia de segurança do driver atual falhou, e sem ela não há caminho de volta. Nada foi alterado.")
+        $L.Add([string]$copia.Reason)
+        return @($L.ToArray())
+    }
+    $L.Add("Cópia de segurança guardada em '$([string]$copia.Path)': $([int]$copia.Files) arquivo(s), $([math]::Round([long]$copia.Bytes / 1MB)) MB.")
+    $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -ExportOk ([bool]$copia.Ok)
+
+    $idDispositivo = ''
+    try {
+        $obj = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
+        if ($obj.Count) { $idDispositivo = [string]$obj[0].PnPDeviceID }
+    } catch { $idDispositivo = '' }
+    if ([string]::IsNullOrWhiteSpace($idDispositivo)) {
+        $L.Add('Não deu para descobrir o identificador do dispositivo. Nada foi alterado.')
+        return @($L.ToArray())
+    }
+
+    foreach ($par in @(
+        @{ Rotulo = 'tirando o rádio da lista'; Args = @('/remove-device', $idDispositivo) },
+        @{ Rotulo = 'mandando o Windows procurar de novo'; Args = @('/scan-devices') })) {
+        $saida = Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments ([string[]]$par.Args) -Encoding 'ansi'
+        $codigo = [int]$saida.ExitCode
+        $L.Add("$([string]$par.Rotulo): código $codigo.")
+        if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) { $L.Add("   $([string]$saida.Text)") }
+    }
+
+    $desfecho = Test-WinForgeWifiOutcome -Adapter (Get-WinForgeWifiAdapter)
+    $L.Add([string]$desfecho.Text)
+    if ([string]$desfecho.Outcome -ne 'ok') {
+        foreach ($linha in @(Invoke-WinForgeWifiDriverRestore)) { $L.Add([string]$linha) }
+    }
+    return @($L.ToArray())
+}
+
+function Update-WinForgeNetworkButtons {
+    <#
+    .SYNOPSIS
+        Pinta os botões de rede que dependem do estado da máquina: habilita, desabilita e explica.
+    .DESCRIPTION
+        Roda na thread da janela, porque mexe em controle WPF, e LÊ as decisões que o job do
+        diagnóstico já tomou ($sync.WinForgeNetworkGuards). A separação não é estilo: levantar os
+        fatos custa perto de meio segundo por botão (uma consulta de adaptadores, uma de
+        identificadores de hardware e a varredura de INF), e meio segundo na thread da janela é
+        travamento visível. Sem as decisões prontas ele levanta na hora, que é o caminho de quem
+        chamar fora do job.
+
+        O botão que volta fica DESABILITADO quando não há cópia guardada, com o motivo na dica.
+        Desabilitado, e não escondido: a regra do projeto é "botão desabilitado, não removido".
+    .OUTPUTS
+        Nada. Mexe nos controles.
+    #>
+    param()
+
+    $decisoes = $null
+    try { $decisoes = $sync.WinForgeNetworkGuards } catch { $decisoes = $null }
+
+    foreach ($par in @(
+        @{ Chave = 'WPFWFRepWifiDriverReinstall'; Acao = 'WifiDriverReinstall' },
+        @{ Chave = 'WPFWFRepWifiDriverRestore';   Acao = 'WifiDriverRestore' })) {
+        $controle = $null
+        try { $controle = $sync[[string]$par.Chave] } catch { $controle = $null }
+        if ($null -eq $controle) { continue }
+        $g = $null
+        if ($null -ne $decisoes) { $g = $decisoes[[string]$par.Acao] }
+        if ($null -eq $g) { $g = Test-WinForgeNetworkGuard -Action ([string]$par.Acao) }
+        $controle.IsEnabled = [bool]$g.Ok
+        if (-not $g.Ok) { $controle.ToolTip = [string]$g.Reason }
     }
 }
 #endregion
