@@ -4083,6 +4083,11 @@ function Invoke-WinForgeAclRestore {
     # com fluxo ao vivo) os passos voltam ao caminho de captura - ver Invoke-WinForgeAclStreamStep.
     $fluxo = ''
     try { $fluxo = [string]$sync.WinForgeStreamPath } catch { $fluxo = '' }
+    # Onde o Parar pegou, e o que já estava pronto quando ele pegou. Os dois são anotados pelos
+    # laços, à medida que as coisas acontecem: adivinhar isso no fim daria um relato que descreve o
+    # que o programa acha, e não o que ele fez.
+    $faseParada = 0
+    $pastasFeitas = @()
 
     # A elevação vem antes de QUALQUER efeito colateral, inclusive o de criar a pasta de backup:
     # sem elevação ela nasceria com a identidade atual como dona e ficaria plantada, fazendo a
@@ -4342,6 +4347,11 @@ function Invoke-WinForgeAclRestore {
     Write-Host "Verificação antes de alterar: $($relatorio.Differences) diferença(s) em relação ao padrão do Windows."
 
     # ---- Fase 3 (e, só em acesso negado, a 6 seguida de uma segunda tentativa da 3).
+    # AQUI a escrita começa de verdade, e é a única linha que liga esta chave. Ela é o que faz a
+    # confirmação do Parar dizer a verdade: até esta linha nada foi alterado e parar é de graça; da
+    # próxima em diante o disco muda, e o backup da fase 2 é o que cobre a mudança. Quem apaga é o
+    # 'finally' do corpo da runspace, junto com o nome do comando.
+    $sync.WinForgeStreamWriting = $true
     $fase3 = @($plano | Where-Object { [int]$_.Phase -eq 3 -and [string]$_.Kind -eq 'grant' })[0]
     Invoke-WinForgeAclDenyRemoval -Plan $plano -Phase 3 -Path $raiz
     Write-Host ''
@@ -4381,10 +4391,16 @@ function Invoke-WinForgeAclRestore {
             Write-Host ''
             Write-Host "Fase 4 de 6 - $($passo.Title)"
             $codigo4 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $passo)
+            # Parado: o laço SAI. Seguir para o passo seguinte só produziria mais uma recusa e mais
+            # um "Esta etapa terminou com código 1223" por pasta restante - uma lista de erros para
+            # quem apenas clicou em Parar. A fase é anotada aqui, no laço, e não adivinhada no fim,
+            # e a pasta deste passo não entra na lista do que ficou pronto: ele não chegou a rodar.
+            if ($codigo4 -eq 1223) { if ($faseParada -eq 0) { $faseParada = 4 }; break }
             if (($codigo4 -eq 5) -and ([string]$passo.Kind -ne 'setowner')) {
                 $codigo4 = [int](Invoke-WinForgeAclOwnerFallback -Plan $plano -Step $passo -StreamPath $fluxo)
             }
             if ($codigo4 -ne 0) { Write-Error "Esta etapa terminou com código $codigo4." }
+            else { $pastasFeitas += [string]$passo.Folder }
         }
     }
 
@@ -4434,13 +4450,17 @@ function Invoke-WinForgeAclRestore {
             $falhas5 = 0
             $sumidas5 = 0
             $canceladas5 = 0
+            $vistas5 = 0
             foreach ($p5 in $passos5) {
+                $vistas5++
                 $codigo5 = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $p5)
                 $veredito5 = [string](Get-WinForgeAclInheritOutcome -Path ([string]$p5.Path) -ExitCode $codigo5)
                 if ($veredito5 -eq 'ok') { continue }
-                # Pasta que não chegou a ser tocada depois do Parar. Ela NÃO entra na conta das
-                # falhas: quem pediu para parar não errou nada.
-                if ($veredito5 -eq 'cancelada') { $canceladas5++; continue }
+                # Pasta que não chegou a ser tocada depois do Parar. O laço SAI na primeira: da
+                # primeira recusa em diante todas as outras seriam recusa também, e contá-las uma a
+                # uma é trabalho para dizer o que já se sabe. As que sobraram entram no resumo pela
+                # subtração, e não entram na conta das falhas - quem pediu para parar não errou nada.
+                if ($veredito5 -eq 'cancelada') { $canceladas5 = $passos5.Count - $vistas5 + 1; break }
                 if ($veredito5 -eq 'sumida') { $sumidas5++; continue }
                 $falhas5++
                 # Sem o texto do icacls: ele acabou de sair no arquivo, logo acima desta linha, e
@@ -4449,7 +4469,7 @@ function Invoke-WinForgeAclRestore {
             }
             $resumo5 = "Herança ligada em $($passos5.Count - $falhas5 - $sumidas5 - $canceladas5) de $($passos5.Count) pasta(s) que o backup cobre."
             if ($sumidas5) { $resumo5 += " $sumidas5 já não existia(m) desde a cópia das permissões - não havia o que ligar nelas." }
-            if ($canceladas5) { $resumo5 += " $canceladas5 não foram tocadas porque você pediu para parar; elas continuam como estavam, e o backup delas segue no conjunto do Desfazer." }
+            if ($canceladas5) { $resumo5 += " $canceladas5 não foram tocadas porque você pediu para parar; elas continuam como estavam, e o backup delas segue no conjunto do Desfazer."; if ($faseParada -eq 0) { $faseParada = 5 } }
             Write-Host $resumo5
             if ($falhas5) { Write-Error "A herança não pôde ser ligada em $falhas5 pasta(s) do perfil; elas continuam como estavam, e o backup delas segue no conjunto do Desfazer." }
             continue
@@ -4459,6 +4479,16 @@ function Invoke-WinForgeAclRestore {
         }
         $codigoPasso = [int](Invoke-WinForgeAclStreamStep -Path $fluxo -Step $passo)
         if ($codigoPasso -ne 0) { Write-Error "Esta etapa terminou com código $codigoPasso." }
+    }
+
+    # ---- PARADO A PEDIDO: o relato da parada sai NO LUGAR do veredito. 'Concluído' depois de uma
+    # interrupção seria o programa dizendo que terminou o que foi interrompido - e o que a pessoa
+    # precisa saber é outra coisa: o disco ficou num estado MISTO, e qual.
+    if ($faseParada -gt 0 -or (Test-WinForgeStreamCancelled -Path $fluxo)) {
+        if ($faseParada -eq 0) { $faseParada = 5 }
+        Write-Host ''
+        Write-Host (Get-WinForgeAclStopReport -Phase $faseParada -Folders @($pastasFeitas | Sort-Object -Unique) -Profile $perfil)
+        return
     }
 
     # ---- O veredito. O cabeçalho MUDA quando alguma pasta não pôde ser lida: a fase 5 percorre só
@@ -4667,6 +4697,28 @@ function Get-WinForgeAclOwnerPending {
         Arquivo ausente, ilegível ou sem os campos responde 'Present = $false'. Um marcador que não
         pode ser lido não é um alarme: é um arquivo estranho na pasta, e alarmar com base nele seria
         assustar sem ter o que dizer.
+
+        ATENÇÃO, ANTES DE USAR 'OwnerSid' PARA QUALQUER OUTRA COISA. Hoje o conteúdo deste arquivo
+        só vira TEXTO - uma linha de log e um rótulo -, e é por isso que ele não passa pelas mesmas
+        conferências dos outros arquivos do WinForge. Ele mora em '%ProgramData%\WinForge', pasta
+        criada com New-Item -Force simples, que HERDA permissão de escrita de usuário comum, e o
+        arquivo NÃO é endurecido (ao contrário do índice de backup, que passa por
+        Protect-WinForgeSnapshotFile). Em outras palavras: um processo de integridade média pode
+        reescrever o que está aqui dentro.
+
+        Enquanto isso for texto, tudo bem. No instante em que alguém usar 'OwnerSid' (ou 'Folder')
+        para montar um comando ELEVADO - um '/setowner', por exemplo -, este arquivo passa a ser
+        entrada de comando privilegiado vinda de fonte que um processo comum controla, e as quatro
+        condições abaixo passam a ser OBRIGATÓRIAS, nesta ordem:
+
+        1. a pasta tem de ser criada e conferida como raiz confiável (Test-WinForgeSnapshotRootTrusted);
+        2. o arquivo tem de ser endurecido (Protect-WinForgeSnapshotFile) e conferido na leitura;
+        3. o SID tem de ser revalidado convertendo-o para [System.Security.Principal.SecurityIdentifier];
+        4. a pasta citada tem de ser casada contra a lista de pastas do plano, e não aceita como veio.
+
+        Sem as quatro, o caminho é o de escalonamento clássico: conteúdo que um processo comum
+        escreve virando argumento de comando com privilégio. A mesma ameaça já está nomeada em
+        wf-server.ps1 para os arquivos daquela aba.
     .OUTPUTS
         @{ Present = <bool>; Folder = <string>; OwnerSid = <string>; Stamp = <string>; Text = <string> }.
     #>
@@ -4690,7 +4742,11 @@ function Get-WinForgeAclOwnerPending {
         Folder   = $pasta
         OwnerSid = $dono
         Stamp    = $carimbo
-        Text     = "A restauração de permissões de $carimbo parou no meio da troca de posse: '$pasta' pode ter ficado com os Administradores como dona, em vez de '$dono'. Enquanto estiver assim, qualquer processo elevado altera essa pasta. Use o botão 'Permissões do disco C: - Devolver ao padrão do Windows', na aba Config, para devolver a posse."
+        # O botão citado EXISTE. A frase oferecia 'Devolver ao padrão do Windows', que não é botão
+        # nenhum desta base - mandar a pessoa procurar o que não está lá é pior do que não oferecer
+        # saída. Quem devolve a posse é a própria restauração: ela refaz a fase 4 e o socorro de
+        # posse na pasta que ficou torta.
+        Text     = "A restauração de permissões de $carimbo parou no meio da troca de posse: '$pasta' pode ter ficado com os Administradores como dona, em vez de '$dono'. Enquanto estiver assim, qualquer processo elevado altera essa pasta. Rode 'Permissões do disco C: - Restaurar padrões' de novo, na aba Config: ela refaz essa pasta e devolve a posse."
     }
 }
 

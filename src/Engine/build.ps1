@@ -4123,8 +4123,80 @@ if ($SelfTest) {
         }
         # As pastas citadas são as que ENTRARAM, e o relato não pode inventar nenhuma.
         if ($wfBtnF4 -match 'C:\\Program Files') { Write-Host "  [ERRO] Parar (texto fase 4): o relato cita uma pasta que não estava na lista" -ForegroundColor Red; $wbErrors++ }
+        # A FASE sai do NOME do comando, e não do tipo dele. Pelo tipo, os SEIS outros comandos de
+        # reparo - sfc, DISM, netsh, Windows Update, WinGet e o servidor de horário - mostravam
+        # "algumas pastas já foram alteradas; use o Desfazer". Quem acreditasse clicaria no Desfazer
+        # e, havendo conjunto pendente (o estado NORMAL logo depois de uma restauração
+        # bem-sucedida), reverteria justamente a restauração que queria manter. A frase falsa
+        # levava o usuário a destruir o resultado que tinha acabado de obter.
+        foreach ($wfBtnCaso in @(
+            @{ Nome = 'AclRestore antes da fase 3'; Comando = 'AclRestore';         Escrevendo = $false; Espera = 'leitura' },
+            @{ Nome = 'AclRestore na fase 3';       Comando = 'AclRestore';         Escrevendo = $true;  Espera = 'escrita' },
+            @{ Nome = 'SystemRepair';               Comando = 'SystemRepair';       Escrevendo = $true;  Espera = 'indefinida' },
+            @{ Nome = 'NetworkReset';               Comando = 'NetworkReset';       Escrevendo = $false; Espera = 'indefinida' },
+            @{ Nome = 'WindowsUpdateReset';         Comando = 'WindowsUpdateReset'; Escrevendo = $true;  Espera = 'indefinida' },
+            @{ Nome = 'AclUndo';                    Comando = 'AclUndo';            Escrevendo = $true;  Espera = 'indefinida' },
+            @{ Nome = 'sem nome';                   Comando = '';                   Escrevendo = $true;  Espera = 'indefinida' }
+        )) {
+            $wfBtnFaseVeio = [string](Get-WinForgeStreamStopPhase -Command ([string]$wfBtnCaso.Comando) -Writing:([bool]$wfBtnCaso.Escrevendo))
+            if ($wfBtnFaseVeio -ne [string]$wfBtnCaso.Espera) { Write-Host "  [ERRO] Parar (fase): '$($wfBtnCaso.Nome)' deu '$wfBtnFaseVeio', esperado '$($wfBtnCaso.Espera)'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A chave da escrita é ligada em UM lugar - o começo da fase 3, que é onde a escrita começa -
+        # e apagada em UM lugar. Era esse o argumento contra criá-la, e é por isso que ela vale
+        # agora: a alternativa medida custa o backup do usuário.
+        $wfBtnFonteRest = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if (@([regex]::Matches($wfBtnFonteRest, '\$sync\.WinForgeStreamWriting = \$true')).Count -ne 1) { Write-Host "  [ERRO] Parar (fase): a chave da escrita não é ligada exatamente uma vez na restauração" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnPosChave = $wfBtnFonteRest.IndexOf('$sync.WinForgeStreamWriting = $true', [StringComparison]::Ordinal)
+        $wfBtnPosFase3 = $wfBtnFonteRest.IndexOf('-Step $fase3', [StringComparison]::Ordinal)
+        $wfBtnPosFase2 = $wfBtnFonteRest.IndexOf('Get-WinForgeAclContentScope -Path', [StringComparison]::Ordinal)
+        if ($wfBtnPosChave -lt 0 -or $wfBtnPosFase3 -lt 0) { Write-Host "  [ERRO] Parar (fase): não achei a chave da escrita ou a fase 3" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfBtnPosChave -gt $wfBtnPosFase3) { Write-Host "  [ERRO] Parar (fase): a chave é ligada DEPOIS da primeira escrita da fase 3" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfBtnPosFase2 -ge 0 -and $wfBtnPosChave -lt $wfBtnPosFase2) { Write-Host "  [ERRO] Parar (fase): a chave é ligada ANTES da fase 2 - parar durante o backup ofereceria um Desfazer que ainda não existe" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnFonteStart2 = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        if ($wfBtnFonteStart2.IndexOf('$sync.WinForgeStreamCommand = [string]$Name', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase): o nome do comando não é anotado ao despachar" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnFonteCorpo2 = [string]$sync.WinForgeStreamBody
+        foreach ($wfBtnLimpa in @('$sync.WinForgeStreamCommand = ''''', '$sync.WinForgeStreamWriting = $false')) {
+            if ($wfBtnFonteCorpo2.IndexOf($wfBtnLimpa, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase): o corpo não limpa '$wfBtnLimpa' - o comando seguinte herdaria a chave deste" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o TEXTO da fase indefinida não afirma nem nega escrita, e não promete Desfazer: os seis
+        # outros comandos de reparo alteram o sistema e NÃO têm backup nenhum - dizer
+        # 'o Desfazer cobre todas elas' ali seria a mesma mentira, do outro lado.
+        $wfBtnIndef = Get-WinForgeStreamStopText -Phase 'indefinida'
+        if ($wfBtnIndef -match 'Nada foi alterado até agora') { Write-Host "  [ERRO] Parar (texto): a fase indefinida afirma que nada foi alterado" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnIndef -match 'Desfazer cobre') { Write-Host "  [ERRO] Parar (texto): a fase indefinida promete um Desfazer que pode não existir" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnIndef -notmatch 'A etapa que estiver rodando termina antes') { Write-Host "  [ERRO] Parar (texto): a fase indefinida não diz o que vai acontecer ao clicar" -ForegroundColor Red; $wbErrors++ }
         # A confirmação tem 'Não' como padrão, e o clique é um scriptblock de escopo de arquivo.
         $wfBtnFonteJ = [string](Get-Command Show-WinForgeOutputWindow).ScriptBlock
+        # E o clique USA o nome do comando, em vez de decidir pelo TIPO dele.
+        if ($wfBtnFonteJ.IndexOf('Get-WinForgeStreamStopPhase -Command', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase): o clique não pergunta pelo NOME do comando - ele volta a afirmar escrita pelo tipo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteJ -match "WinForgeStreamKind -eq 'repair'\) \{ 'escrita'") { Write-Host "  [ERRO] Parar (fase): o clique voltou a decidir a fase pelo tipo do comando" -ForegroundColor Red; $wbErrors++ }
+        # O FIM de um comando interrompido diz 'Cancelado', nunca 'Concluído'. A marca do desfecho é
+        # gravada ANTES de a conclusão ser ligada - na ordem contrária, o cabeçalho saía
+        # 'Concluído (código 1223)' e, parando na fase do backup, 'Concluído (código 0)' com convite
+        # a reiniciar o computador.
+        $wfBtnFimArq = Join-Path $wfBtnDir 'fim.txt'
+        Set-Content -LiteralPath $wfBtnFimArq -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamDone[$wfBtnFimArq] = $false
+        $wfBtnFimJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfBtnFimArq -Component 'Repair' -NoShow
+        $sync.WinForgeStreamStopped[$wfBtnFimArq] = $true
+        $sync.WinForgeStreamExit[$wfBtnFimArq] = 1223
+        $sync.WinForgeStreamDone[$wfBtnFimArq] = $true
+        Invoke-WinForgeFollowTick -Window $wfBtnFimJan
+        $wfBtnFimCab = [string]$wfBtnFimJan.FindName('WFOutputHeader').Text
+        if ($wfBtnFimCab -notmatch '^Cancelado em \d+:\d\d$') { Write-Host "  [ERRO] Parar (fim): um comando interrompido fechou com '$wfBtnFimCab'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFimCab -match 'Conclu') { Write-Host "  [ERRO] Parar (fim): o cabeçalho final diz 'Concluído' depois de uma interrupção" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfBtnFimChave in @('WinForgeStreamDone', 'WinForgeStreamExit', 'WinForgeStreamStopped')) { [void]$sync.$wfBtnFimChave.Remove($wfBtnFimArq) }
+        # E a marca do desfecho é gravada ANTES da conclusão, no corpo da runspace: é a ordem que o
+        # tique lê, e trocá-la faz o cabeçalho voltar a dizer 'Concluído'.
+        $wfBtnPosParou = $wfBtnFonteCorpo2.IndexOf('$sync.WinForgeStreamStopped[$wfCaminho] = $wfParou', [StringComparison]::Ordinal)
+        $wfBtnPosFeito = $wfBtnFonteCorpo2.IndexOf('$sync.WinForgeStreamDone[$wfCaminho] = $true', [StringComparison]::Ordinal)
+        if ($wfBtnPosParou -lt 0 -or $wfBtnPosFeito -lt 0) { Write-Host "  [ERRO] Parar (fim): o corpo não grava o desfecho interrompido" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfBtnPosParou -gt $wfBtnPosFeito) { Write-Host "  [ERRO] Parar (fim): o desfecho é gravado DEPOIS da conclusão - o tique já leu 'Concluído'" -ForegroundColor Red; $wbErrors++ }
+        # E os laços das fases 3 a 5 SAEM quando o processo não chega a nascer, em vez de seguirem
+        # produzindo um erro por pasta restante.
+        foreach ($wfBtnSai in @('if ($codigo4 -eq 1223) { if ($faseParada -eq 0) { $faseParada = 4 }; break }', "if (`$veredito5 -eq 'cancelada') { `$canceladas5 = `$passos5.Count - `$vistas5 + 1; break }")) {
+            if ($wfBtnFonteRest.IndexOf($wfBtnSai, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (laço): o laço não SAI na primeira recusa - ele produziria um erro por pasta restante" -ForegroundColor Red; $wbErrors++ }
+        }
         if ($wfBtnFonteJ -notmatch 'MessageBoxResult\]::No') { Write-Host "  [ERRO] Parar (confirmação): 'Não' não é o padrão" -ForegroundColor Red; $wbErrors++ }
         if ($wfBtnFonteJ.IndexOf('Request-WinForgeStreamCancel -Path $caminhoSeguido', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (botão): o clique não pede o cancelamento do arquivo que a janela acompanha" -ForegroundColor Red; $wbErrors++ }
         $wfBtnFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
@@ -4135,6 +4207,25 @@ if ($SelfTest) {
         $wfBtnPosCancel = $wfBtnFonteR.IndexOf('Test-WinForgeStreamCancelled -Path $fluxo', [StringComparison]::Ordinal)
         $wfBtnPosIndice = $wfBtnFonteR.IndexOf('acl-index-', [StringComparison]::Ordinal)
         if ($wfBtnPosCancel -lt 0 -or $wfBtnPosIndice -lt 0 -or $wfBtnPosCancel -gt $wfBtnPosIndice) { Write-Host "  [ERRO] Parar (fase 2): o cancelamento é conferido DEPOIS de o índice ser escrito - o Desfazer passaria a apontar para um conjunto pela metade" -ForegroundColor Red; $wbErrors++ }
+        # E o RESUMO da parada sai na tela: a função existia, era cobrada literalmente aqui e não
+        # tinha chamador nenhum - quem clicou em Parar ficava sem o resumo que a tarefa prometia.
+        # A busca é pela forma da CHAMADA, com a fase e as pastas juntas.
+        if ($wfBtnFonteR.IndexOf('Get-WinForgeAclStopReport -Phase $faseParada', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (resumo): a restauração não imprime o relato da parada - a função fica provada e invisível" -ForegroundColor Red; $wbErrors++ }
+        # E ele sai NO LUGAR do veredito normal: 'Concluído' depois de uma parada seria o programa
+        # dizendo que terminou o que foi interrompido.
+        $wfBtnPosResumo = $wfBtnFonteR.IndexOf('Get-WinForgeAclStopReport -Phase $faseParada', [StringComparison]::Ordinal)
+        $wfBtnPosVeredito = $wfBtnFonteR.IndexOf('Get-WinForgeAclScopeVerdict -Scope', [StringComparison]::Ordinal)
+        if ($wfBtnPosResumo -ge 0 -and $wfBtnPosVeredito -ge 0 -and $wfBtnPosResumo -gt $wfBtnPosVeredito) { Write-Host "  [ERRO] Parar (resumo): o relato da parada vem DEPOIS do veredito - a tela diria 'Concluído' antes de dizer que parou" -ForegroundColor Red; $wbErrors++ }
+        # A fase em que parou é ANOTADA nos laços, e não adivinhada no fim.
+        foreach ($wfBtnAnota in @('$faseParada = 4', '$faseParada = 5')) {
+            if ($wfBtnFonteR.IndexOf($wfBtnAnota, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (resumo): o laço não anota '$wfBtnAnota' - o relato sairia com a fase errada" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O gatilho de segurança do marcador mora no BLOCO DE AJUDA de quem lê o marcador, e não só
+        # no relatório da tarefa - relatório ninguém abre depois que a leva termina.
+        $wfBtnFonteMarca = [string](Get-Command Get-WinForgeAclOwnerPending).ScriptBlock
+        foreach ($wfBtnGatilho in @('raiz confiável', 'endurecid', 'SecurityIdentifier', 'plano')) {
+            if ($wfBtnFonteMarca -notmatch $wfBtnGatilho) { Write-Host "  [ERRO] Parar (marcador): o bloco de ajuda não avisa sobre '$wfBtnGatilho' antes de alguém usar o SID em comando elevado" -ForegroundColor Red; $wbErrors++ }
+        }
         # O Add_Closing passa a CANCELAR e ESPERAR, e não só a perguntar.
         $wfBtnFonteF = ''
         try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfBtnFonteF = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfBtnFonteF = '' }
@@ -4182,7 +4273,20 @@ if ($SelfTest) {
         $wfF4Lido = Get-WinForgeAclOwnerPending -Root $wfF4Raiz
         if (-not $wfF4Lido.Present) { Write-Host "  [ERRO] Posse (marcador): o marcador plantado não foi lido" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfF4Lido.Folder -ne 'C:\Windows') { Write-Host "  [ERRO] Posse (marcador): a pasta lida é '$($wfF4Lido.Folder)'" -ForegroundColor Red; $wbErrors++ }
-        if ([string]$wfF4Lido.Text -notmatch 'Devolver ao padrão do Windows') { Write-Host "  [ERRO] Posse (marcador): o relato não oferece o botão ('$($wfF4Lido.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # O botão oferecido tem de EXISTIR, e a prova sai da tabela de comandos, não de um literal
+        # escrito aqui: a frase oferecia 'Devolver ao padrão do Windows', que não é botão nenhum
+        # desta base - mandar a pessoa procurar o que não está lá é pior do que não oferecer saída.
+        $wfF4Botao = [string](Get-WinForgeRepairCommand -Name 'AclRestore').Title
+        if ([string]::IsNullOrWhiteSpace($wfF4Botao)) { Write-Host "  [ERRO] Posse (marcador): a linha 'AclRestore' não tem título para o relato oferecer" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfF4Lido.Text -notmatch [regex]::Escape($wfF4Botao)) { Write-Host "  [ERRO] Posse (marcador): o relato não oferece um botão que existe ('$($wfF4Lido.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # E nenhum dos textos desta área pode citar um botão inventado. A varredura é sobre os nomes
+        # que APARECEM entre aspas depois de 'Permissões do disco C: - '.
+        foreach ($wfF4Texto in @([string]$wfF4Lido.Text, [string](Get-WinForgeAclStopReport -Phase 4 -Folders @('C:\Windows') -Profile 'C:\Users\fulano'), [string](Get-WinForgeAclStopReport -Phase 5 -Folders @() -Profile 'C:\Users\fulano'), [string](Get-WinForgeStreamStopText -Phase 'escrita'))) {
+            foreach ($wfF4Citado in @([regex]::Matches($wfF4Texto, "Permissões do disco C: - ([^'`",.]+)"))) {
+                $wfF4Nome = ('Permissões do disco C: - ' + [string]$wfF4Citado.Groups[1].Value).Trim()
+                if ($wfF4Nome -notin @(@($wfRepNomes) + @($wfStrNomes) + @('AclVerify', 'AclRestore', 'AclUndo', 'AclCleanup') | ForEach-Object { [string](Get-WinForgeRepairCommand -Name $_).Title })) { Write-Host "  [ERRO] Posse (botão): o texto cita '$wfF4Nome', que não é nenhum botão desta base" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
         # O relato traz o DONO ORIGINAL: sem ele a frase diz "alguma pasta está com o dono errado" e
         # não diz para quem ela tem de voltar, que é a única coisa acionável ali.
         if ([string]$wfF4Lido.Text -notmatch [regex]::Escape('S-1-5-80-956008885')) { Write-Host "  [ERRO] Posse (marcador): o relato não diz o dono original ('$($wfF4Lido.Text)')" -ForegroundColor Red; $wbErrors++ }

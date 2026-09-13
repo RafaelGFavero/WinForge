@@ -442,6 +442,51 @@ function Test-WinForgeStreamCancelled {
     } catch { return $false }
 }
 
+function Get-WinForgeStreamStopPhase {
+    <#
+    .SYNOPSIS
+        Qual dos três textos do Parar vale para o comando que está rodando. Função pura.
+    .DESCRIPTION
+        A confirmação do Parar fala sobre o que o usuário perde ao parar, e só UM comando desta base
+        tem backup e Desfazer: a restauração de permissões. Decidir isso pelo TIPO da linha
+        ('repair') era o defeito, e ele terminava em dano real - o reparo do sistema, o reparo de
+        imagem, a redefinição de rede, o Windows Update, o WinGet e o servidor de horário são todos
+        do mesmo tipo. Parar qualquer um deles mostrava "algumas pastas já foram alteradas; use o
+        Desfazer", e quem acreditasse clicaria no Desfazer - que, havendo conjunto pendente (o
+        estado NORMAL logo depois de uma restauração bem-sucedida), reverteria justamente a
+        restauração que a pessoa queria manter. A frase falsa levava o usuário a destruir o
+        resultado que ele tinha acabado de obter.
+
+        Agora a escolha é pelo NOME do comando, e só a restauração de permissões tem os dois
+        primeiros textos:
+
+        - 'leitura': a restauração ainda está no chkdsk ou no backup (fases 1 e 2). Nada foi
+          alterado, e parar é de graça.
+        - 'escrita': a restauração passou para a fase 3, que é onde a escrita começa de verdade.
+          O disco mudou, e o backup da fase 2 cobre o que mudou.
+        - 'indefinida': qualquer outro comando. Eles ALTERAM o sistema e não têm backup nenhum -
+          afirmar "nada foi alterado" seria mentira, e prometer Desfazer seria a mesma mentira do
+          outro lado. O texto neutro diz o que é verdade: o que já foi feito continua feito.
+
+        A chave '-Writing' vem de '$sync.WinForgeStreamWriting', ligada em UM lugar (o começo da
+        fase 3) e apagada em UM lugar (o 'finally' do corpo da runspace). Foi por isso que ela
+        passou a valer a pena: a alternativa medida - decidir pelo tipo - custa o backup do usuário.
+    .PARAMETER Command
+        O nome da linha ($sync.WinForgeStreamCommand), como 'AclRestore'.
+    .PARAMETER Writing
+        Se a restauração já passou da fase 2. Ignorado nos outros comandos.
+    .OUTPUTS
+        'leitura', 'escrita' ou 'indefinida'.
+    #>
+    param(
+        [string]$Command = '',
+        [switch]$Writing
+    )
+
+    if ([string]$Command -eq 'AclRestore') { return $(if ($Writing) { 'escrita' } else { 'leitura' }) }
+    return 'indefinida'
+}
+
 function Get-WinForgeStreamStopText {
     <#
     .SYNOPSIS
@@ -462,10 +507,16 @@ function Get-WinForgeStreamStopText {
     .OUTPUTS
         O texto da caixa de confirmação.
     #>
-    param([Parameter(Mandatory)][ValidateSet('leitura', 'escrita')][string]$Phase)
+    param([Parameter(Mandatory)][ValidateSet('leitura', 'escrita', 'indefinida')][string]$Phase)
 
     if ($Phase -eq 'escrita') {
         return "Parar agora?`r`n`r`nAlgumas pastas já foram alteradas; o Desfazer cobre todas elas - o backup foi gravado antes de a primeira mudança acontecer.`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam. Depois, use 'Permissões do disco C: - Desfazer (restaurar backup)' se quiser voltar tudo ao que era."
+    }
+    if ($Phase -eq 'indefinida') {
+        # Não afirma nem nega escrita, e não promete Desfazer. É o texto dos cinco botões de
+        # correção, que alteram o sistema e não têm backup: entre afirmar errado dos dois lados e
+        # não afirmar, não afirmar é o único honesto.
+        return "Parar agora?`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam. O que já foi feito continua feito.`r`n`r`nO arquivo de saída registra tudo o que rodou até aqui - abra-o pelo botão 'Abrir arquivo' se quiser conferir o que foi alterado antes de decidir o que fazer em seguida."
     }
     return "Parar agora?`r`n`r`nNada foi alterado até agora: esta etapa só lê o disco. Parar aqui não deixa nada pela metade e não precisa de Desfazer.`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam."
 }
@@ -533,7 +584,17 @@ function Request-WinForgeStreamCancel {
     if ($trabalho -eq [IntPtr]::Zero -or -not ('WfJob' -as [type])) {
         return @{ Ok = $true; Reason = 'nenhum processo em andamento; o comando para no próximo passo' }
     }
-    try { [void][WfJob]::TerminateJobObject($trabalho, 1) } catch { return @{ Ok = $true; Reason = "a marca foi levantada, mas a árvore de processos não pôde ser encerrada ($($_.Exception.Message))" } }
+    # O retorno NÃO é descartado: com um handle inválido (fechado entre a leitura do dicionário e
+    # esta linha, por exemplo) a chamada responde falso, e devolver 'Ok' com motivo vazio ali seria
+    # o Parar prometendo uma morte que não aconteceu. A marca continua levantada de qualquer jeito -
+    # o comando para no próximo passo -, e é isso que o motivo diz.
+    $encerrou = $false
+    try { $encerrou = [bool][WfJob]::TerminateJobObject($trabalho, 1) } catch { return @{ Ok = $true; Reason = "a marca foi levantada, mas a árvore de processos não pôde ser encerrada ($($_.Exception.Message))" } }
+    if (-not $encerrou) {
+        $erroJob = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "TerminateJobObject respondeu falso (erro $erroJob): o processo em andamento continua até terminar sozinho."
+        return @{ Ok = $true; Reason = "a marca foi levantada, mas o processo em andamento não pôde ser encerrado (erro $erroJob); ele termina sozinho e o comando para no passo seguinte" }
+    }
     return @{ Ok = $true; Reason = '' }
 }
 
@@ -1162,8 +1223,10 @@ function Show-WinForgeOutputWindow {
         # de ponto único antes de cada processo.
         $btnParar.Add_Click({
             # A fase decide o TEXTO, e o texto é a única coisa que a pessoa tem para decidir se
-            # perde algo parando agora. 'escrita' é o reparo que já mexeu no disco.
-            $faseParada = if ([string]$sync.WinForgeStreamKind -eq 'repair') { 'escrita' } else { 'leitura' }
+            # perde algo parando agora. Ela sai do ARQUIVO - do 'Fase N de 6' que o motor já
+            # escreveu -, e não do tipo do comando: pelo tipo, um Parar durante o chkdsk da fase 1
+            # ofereceria um Desfazer que ainda não existe.
+            $faseParada = [string](Get-WinForgeStreamStopPhase -Command ([string]$sync.WinForgeStreamCommand) -Writing:([bool]$sync.WinForgeStreamWriting))
             $respostaParada = [System.Windows.MessageBox]::Show($janela, (Get-WinForgeStreamStopText -Phase $faseParada), 'WinForge',
                 [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)
             if ($respostaParada -ne [System.Windows.MessageBoxResult]::Yes) { return }
@@ -1591,7 +1654,12 @@ function Invoke-WinForgeFollowTick {
     # nada - a etapa atual ainda termina, e são esses segundos que a frase explica.
     $parando = $false
     if (-not $concluido) { try { $parando = [bool]$sync.WinForgeStreamCancel[[string]$estado.Path] } catch { $parando = $false } }
-    $cabecalho = Get-WinForgeFollowHeader -Title ([string]$estado.Title) -Elapsed ((Get-Date) - [datetime]$estado.Start) -ExpectMinutes ([int]$estado.ExpectMinutes) -Done:$concluido -ExitCode $codigo -Stopping:$parando
+    # E o desfecho: terminou porque acabou, ou terminou porque pararam? 'Concluído' depois de uma
+    # interrupção é o programa dizendo que fez o que foi mandado parar - e, na fase do backup, ele
+    # dizia isso com código 0 e ainda mandava reiniciar o computador.
+    $parou = $false
+    if ($concluido) { try { $parou = [bool]$sync.WinForgeStreamStopped[[string]$estado.Path] } catch { $parou = $false } }
+    $cabecalho = Get-WinForgeFollowHeader -Title ([string]$estado.Title) -Elapsed ((Get-Date) - [datetime]$estado.Start) -ExpectMinutes ([int]$estado.ExpectMinutes) -Done:$concluido -ExitCode $codigo -Stopping:$parando -Cancelled:$parou
     $estado.Header.Text = [string]$cabecalho.Text
     $pincel = $estado.Pinceis[[string]$cabecalho.Level]
     if ($null -ne $pincel) { $estado.Header.Foreground = $pincel }
@@ -1655,6 +1723,11 @@ $sync.WinForgeStreamCapped = [System.Collections.Hashtable]::Synchronized(@{})
 # de cima, e existe pelo mesmo motivo do teto: depois do Parar, todo passo seguinte passa pela
 # recusa, e uma linha por recusa seriam centenas delas numa fase 5 de perfil. A frase sai UMA vez.
 $sync.WinForgeStreamCancelNoted = [System.Collections.Hashtable]::Synchronized(@{})
+
+# Quais comandos terminaram INTERROMPIDOS. Vive ao lado de WinForgeStreamDone/Exit, e com o mesmo
+# tempo de vida: a janela precisa dele DEPOIS do fim, para o cabeçalho dizer 'Cancelado' em vez de
+# 'Concluído'. Gravado antes da conclusão, no 'finally' do corpo da runspace.
+$sync.WinForgeStreamStopped = [System.Collections.Hashtable]::Synchronized(@{})
 
 # O arquivo que o comando com fluxo ao vivo está escrevendo AGORA. É como um passo do tipo
 # 'Function' - que roda com todos os fluxos redirecionados para o arquivo, sem receber argumento
@@ -1981,12 +2054,16 @@ $sync.WinForgeStreamBody = {
     # 'Espaco.WfJob', a guarda nunca o encontraria e o segundo Add-Type é que estouraria.
     try {
         if (-not ('WfJob' -as [type])) {
+            # 'SetLastError = true' em TODAS: sem ele o GetLastWin32Error que os avisos imprimem é
+            # LIXO - o .NET só guarda o código do Windows quando a importação pede. Três mensagens
+            # desta base citam esse número, e sem a chave elas citariam o erro de outra chamada
+            # qualquer, feita antes, por outro código.
             Add-Type -Namespace '' -Name 'WfJob' -MemberDefinition @'
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);
-[DllImport("kernel32.dll")] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-[DllImport("kernel32.dll")] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);
-[DllImport("kernel32.dll")] public static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
-[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr h);
 '@
         }
     } catch {
@@ -2005,6 +2082,14 @@ $sync.WinForgeStreamBody = {
         # de meio em meio segundo e o último tique tem de encontrar tudo o que foi escrito. É também
         # a única saída - um passo que estoure passa por este 'finally', e sem ele o identificador
         # do arquivo ficaria aberto até o programa fechar.
+        # INTERROMPIDO é um desfecho, e não um "concluído com código estranho". Ele é lido ANTES das
+        # remoções abaixo e gravado ANTES de a conclusão ser ligada: o tique lê os dois no mesmo
+        # instante, e na ordem contrária o cabeçalho final saía como 'Concluído (código 1223)' - ou,
+        # pior, como 'Concluído (código 0)' com um convite a reiniciar o computador, quando o
+        # comando tinha sido interrompido na fase do backup.
+        $wfParou = $false
+        try { $wfParou = [bool]$sync.WinForgeStreamCancel[$wfCaminho] } catch { $wfParou = $false }
+        $sync.WinForgeStreamStopped[$wfCaminho] = $wfParou
         Close-WinForgeStreamWriter -Path $wfCaminho
         [void]$sync.WinForgeStreamCapped.Remove($wfCaminho)
         [void]$sync.WinForgeStreamCancelNoted.Remove($wfCaminho)
@@ -2024,6 +2109,10 @@ $sync.WinForgeStreamBody = {
         # aparecer num fechamento em que não há mais nada em andamento.
         $sync.WinForgeStreamName = ''
         $sync.WinForgeStreamKind = ''
+        # O nome e a chave da escrita saem no mesmo lugar: são deste comando e de mais nenhum, e uma
+        # chave de escrita esquecida ligada faria o comando SEGUINTE oferecer um Desfazer que não é dele.
+        $sync.WinForgeStreamCommand = ''
+        $sync.WinForgeStreamWriting = $false
         # Os dois botões da aba Diagnóstico ("Aplicar marcados", "Desfazer marcados") são
         # habilitados por $sync.ProcessRunning, e quem os repinta é Update-WinForgeDiagActionButtons
         # - que até aqui só rodava no contador de marcações. Sem esta chamada eles ficavam
@@ -2121,6 +2210,11 @@ function Start-WinForgeStreamedCommand {
     # direto, como já fazia para o diagnóstico e a busca de drivers.
     $sync.WinForgeStreamName = [string]$Spec.Title
     $sync.WinForgeStreamKind = [string]$Spec.Kind
+    # O NOME da linha, que é o que separa a restauração de permissões dos outros seis comandos do
+    # mesmo tipo - e a chave da escrita, que só a restauração liga, no começo da fase 3. Ver
+    # Get-WinForgeStreamStopPhase para o dano que decidir isso pelo TIPO causava.
+    $sync.WinForgeStreamCommand = [string]$Name
+    $sync.WinForgeStreamWriting = $false
     # Os botões da aba Diagnóstico desabilitam na hora, e não no próximo clique numa caixa de
     # marcação (esta função já roda na thread da janela: é o handler do botão).
     try { Update-WinForgeDiagActionButtons } catch { }
