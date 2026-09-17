@@ -7152,9 +7152,10 @@ if ($SelfTest) {
         foreach ($wfLgId in @($wfLgMembros | Select-Object -First 40)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
         $wfLgSeco = Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI
         if ($wfLgSeco -notmatch '7') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diria '$wfLgSeco', esperado só os 7 que faltam" -ForegroundColor Red; $wbErrors++ }
-        # ...e o texto INTEIRO, porque '47' também casa com '7': com a conta errada ('instalaria 47
-        # de 47') a trava de cima fica verde reinstalando os 40 que já entraram.
-        if ([string]$wfLgSeco -ne 'instalaria 7 de 47') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diz '$wfLgSeco', esperado 'instalaria 7 de 47'" -ForegroundColor Red; $wbErrors++ }
+        # ...e a CONTA inteira, porque '47' também casa com '7': com a conta errada ('instalaria 47
+        # de 47') a trava de cima fica verde reinstalando os 40 que já entraram. O que vem depois do
+        # ponto é o aviso da rede de segurança, que é de todo lote e tem trava própria no bloco §4.
+        if ([string]$wfLgSeco -notlike 'instalaria 7 de 47.*') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diz '$wfLgSeco', esperado começar por 'instalaria 7 de 47'" -ForegroundColor Red; $wbErrors++ }
         # Lote inteiro instalado: recusa, e a recusa não é a mesma palavra do 'em andamento'.
         foreach ($wfLgId in $wfLgMembros) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
         if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI) -ne 'já instalado') { Write-Host "  [ERRO] Grupo (instalação): o lote todo instalado não foi recusado ('$(Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI)')" -ForegroundColor Red; $wbErrors++ }
@@ -7311,8 +7312,18 @@ if ($SelfTest) {
         $wfChLinha = Format-WinForgeWindowsUpdateGroupRow -Group $wfChGrupo
         $wfChRelato = [string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfChLinha -NoUI)
         if ($wfChRelato -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: o lote de um grupo de chipset não anuncia o ponto de restauração ('$wfChRelato')" -ForegroundColor Red; $wbErrors++ }
+        # O ponto é de TODO lote, e o filtro decide só o TEXTO. Esta trava prendia o contrário até a
+        # decisão mudar: enquanto a rede dependia do reconhecimento, bastava o serviço publicar o
+        # fabricante como 'Intel Corporation' para os 47 arquivos entrarem sem ponto e sem Desfazer.
         $wfChNaoCh = Format-WinForgeWindowsUpdateGroupRow -Group (& $wfChCom $wfChGrupo @{ HardwareIds = @(1..47 | ForEach-Object { 'PCI\VEN_1022&DEV_1450' }) })
-        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfChNaoCh -NoUI) -match 'ponto de restauração') { Write-Host "  [ERRO] Chipset: um grupo que NÃO é chipset ficou preso ao ponto de restauração" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfChNaoCh -NoUI) -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: um grupo que o filtro NÃO reconhece ficou sem ponto de restauração - o filtro decide o texto, nunca se existe rede de segurança" -ForegroundColor Red; $wbErrors++ }
+        # E o fornecedor por extenso, que é a forma que ninguém mediu ainda, também tem rede.
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row (Format-WinForgeWindowsUpdateGroupRow -Group (& $wfChCom $wfChGrupo @{ Provider = 'Intel Corporation' })) -NoUI) -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: lote com o fabricante por extenso ficou sem ponto de restauração" -ForegroundColor Red; $wbErrors++ }
+        # A criação também é incondicional na fonte: o 'if' do reconhecimento não pode voltar a
+        # cercá-la. A âncora é a chamada seguida da conferência, sem nada entre as duas.
+        if ($wfChFonteA -notmatch '(?m)^\s*\$ponto = New-WinForgeChipsetRestorePoint\r?\n\s*if \(-not \$ponto\.Ok\)') { Write-Host "  [ERRO] Chipset: a criação do ponto voltou a ser condicionada ao reconhecimento" -ForegroundColor Red; $wbErrors++ }
+        # ...e o reconhecimento continua sendo usado para ESCOLHER O TEXTO, que é o que sobrou dele.
+        if ($wfChFonteA -notmatch '\$\(if \(\$chipset\.Ok\) \{ \(Get-WinForgeChipsetConfirmText') { Write-Host "  [ERRO] Chipset: o reconhecimento deixou de escolher a pergunta da confirmação" -ForegroundColor Red; $wbErrors++ }
         # ...e o relato do que seria instalado continua inteiro nos dois casos: o anúncio do ponto é
         # acréscimo, não troca.
         if ($wfChRelato -notmatch 'instalaria 47 de 47') { Write-Host "  [ERRO] Chipset: o anúncio do ponto comeu o relato do lote ('$wfChRelato')" -ForegroundColor Red; $wbErrors++ }
