@@ -7223,6 +7223,127 @@ if ($SelfTest) {
             if ([string]::IsNullOrWhiteSpace([string]$sync.configs.themes.$wfLgTema.RowGroupBackgroundColor)) { Write-Host "  [ERRO] Grupo (tema): RowGroupBackgroundColor ausente em $wfLgTema" -ForegroundColor Red; $wbErrors++ }
         }
         Write-Host "  Grupo: cinco estados derivados, rótulos sem a palavra 'chipset', um runspace com foreach, uma caixa de reinício e lista na janela de saída"
+        # ---- §4: chipset INF pela via do Windows Update
+        # Classe 'System' = {4d36e97d-e325-11ce-bfc1-08002be10318}, invariante de idioma. Vídeo é
+        # 'Display', rede 'Net', áudio 'MEDIA'. E NÃO se filtra por "chipset" no título:
+        # 'INTEL - System - 10.1.1.44' não contém a palavra e é o pacote do X99.
+        # O grupo vem de Group-WinForgeWindowsUpdateNullDrivers, e não escrito à mão: é a única forma
+        # de o reforço 'PCI\VEN_8086&DEV_' ser cheque coberto. Se a Tarefa 20 parar de emitir
+        # HardwareIds, é aqui que fica vermelho, e não em produção.
+        # A cópia com troca é CLONE, e não '@{} + $a + $b': duas tabelas com a mesma chave estouram
+        # ("o item já foi adicionado"), e Class/Provider já existem nos dois lados - ver relatório.
+        $wfChCom = {
+            param($Base, [hashtable]$Troca)
+            $wfChNovo = ([hashtable]$Base).Clone()
+            foreach ($wfChK in $Troca.Keys) { $wfChNovo[$wfChK] = $Troca[$wfChK] }
+            return $wfChNovo
+        }
+        $wfChLinhas = @(1..47 | ForEach-Object {
+            [pscustomobject]@{ Title = "INTEL - System - $_"; Driver = ''; Provider = 'INTEL'; Class = [string]@($script:WinForgeNullDriverClasses | Where-Object { $_ -ne '' })[0]; Version = $null; Date = '2026-03-01'; UpdateId = "c-$_"; SizeBytes = [int]($script:WinForgeNullDriverMaxBytes / 8); HardwareId = 'PCI\VEN_8086&DEV_8D44'; ProblemCode = 28 }
+        })
+        $wfChGrupo = @(@(Group-WinForgeWindowsUpdateNullDrivers -Rows $wfChLinhas).Groups)[0]
+        if ($null -eq $wfChGrupo) { Write-Host "  [ERRO] Chipset: o agrupamento da Tarefa 20 não devolveu grupo para o caso do X99" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfChGrupo.HardwareIds).Count -ne 47) { Write-Host "  [ERRO] Chipset: o grupo veio com $(@($wfChGrupo.HardwareIds).Count) HardwareIds - o reforço PCI\VEN_8086 leria vazio em produção" -ForegroundColor Red; $wbErrors++ }
+        # A classe do grupo sai da lista de permissão, que é PROVISÓRIA e pode mudar com os dados da
+        # X99; o filtro de §4 exige 'System' e é outro teste, mais apertado. Fixar a classe aqui
+        # mantém este bloco medindo o FILTRO, e não a constante.
+        $wfChGrupo = & $wfChCom $wfChGrupo @{ Class = 'System'; Provider = 'INTEL' }
+        if (-not (Test-WinForgeChipsetGroup -Group $wfChGrupo).Ok) { Write-Host "  [ERRO] Chipset: o grupo Intel/System/PCI\VEN_8086 foi recusado ('$((Test-WinForgeChipsetGroup -Group $wfChGrupo).Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeChipsetGroup -Group (& $wfChCom $wfChGrupo @{ Provider = 'Intel' })).Ok) { Write-Host "  [ERRO] Chipset: '^intel$' tem de casar sem ligar para a caixa" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfChNao in @(
+            @{ Nome = 'classe vazia';        Muda = @{ Class = '' } },
+            @{ Nome = 'classe Net';          Muda = @{ Class = 'Net' } },
+            @{ Nome = 'fornecedor AMD';      Muda = @{ Provider = 'AMD' } },
+            @{ Nome = 'fornecedor parecido'; Muda = @{ Provider = 'Intel Corporation' } },
+            @{ Nome = 'outro VEN';           Muda = @{ HardwareIds = @('PCI\VEN_1022&DEV_1450') } })) {
+            if ((Test-WinForgeChipsetGroup -Group (& $wfChCom $wfChGrupo $wfChNao.Muda)).Ok) { Write-Host "  [ERRO] Chipset: '$($wfChNao.Nome)' passou no filtro - classe vazia cai em NÃO CLASSIFICADO, jamais em 'é chipset'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem nenhum membro com problema 28, o texto muda (e o ProblemCode continua fora do critério).
+        $wfChSemProb = Test-WinForgeChipsetGroup -Group (& $wfChCom $wfChGrupo @{ ProblemCodes = @(1..47 | ForEach-Object { 0 }) })
+        if (-not $wfChSemProb.Ok) { Write-Host "  [ERRO] Chipset: ProblemCode virou critério - ele é lido só para o texto" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfChSemProb.ProblemCount -ne 0) { Write-Host "  [ERRO] Chipset: ProblemCount=$($wfChSemProb.ProblemCount), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Test-WinForgeChipsetGroup -Group $wfChGrupo).ProblemCount -ne 47) { Write-Host "  [ERRO] Chipset: ProblemCount com 47 membros de problema 28 veio $((Test-WinForgeChipsetGroup -Group $wfChGrupo).ProblemCount)" -ForegroundColor Red; $wbErrors++ }
+        $wfChTexto0 = Get-WinForgeChipsetConfirmText -Group (& $wfChCom $wfChGrupo @{ ProblemCodes = @(1..47 | ForEach-Object { 0 }) })
+        if ($wfChTexto0 -notmatch 'Nenhum dispositivo deste PC está sem nome\. Instalar não traria efeito visível\.') { Write-Host "  [ERRO] Chipset (texto): falta a frase de 'nenhum dispositivo sem nome'" -ForegroundColor Red; $wbErrors++ }
+        $wfChTexto = Get-WinForgeChipsetConfirmText -Group $wfChGrupo
+        foreach ($wfChF in @('passa a mostrar o nome real no Gerenciador de Dispositivos', 'O que não muda: desempenho', 'só informam ao Windows o nome do componente', 'não há como desfazer', 'Reverter Driver')) {
+            if ($wfChTexto -notmatch [regex]::Escape($wfChF)) { Write-Host "  [ERRO] Chipset (texto): falta '$wfChF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfChProibida in @('otimiza', 'melhora o desempenho', 'atualiza o chipset', 'driver de chipset')) {
+            if ($wfChTexto -match [regex]::Escape($wfChProibida)) { Write-Host "  [ERRO] Chipset (texto): palavra proibida '$wfChProibida'" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfChFalta in @('cobertura offline', 'versão de pacote', 'Aplicativos e recursos')) {
+            if ($wfChTexto -notmatch [regex]::Escape($wfChFalta)) { Write-Host "  [ERRO] Chipset (texto): a confirmação não diz o que fica de fora ante o pacote da Intel ('$wfChFalta')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O texto com problema 28 DIZ QUANTOS: sem isso as duas versões seriam a mesma frase menos uma
+        # linha, e a que informa o tamanho do estrago some sem ninguém notar.
+        if ($wfChTexto -notmatch '47') { Write-Host "  [ERRO] Chipset (texto): a confirmação não diz quantos dispositivos estão sem nome" -ForegroundColor Red; $wbErrors++ }
+        # Checkpoint-Computer é SILENCIOSAMENTE IGNORADO com a Proteção do Sistema desligada ou
+        # dentro da janela de 24 h: a função confere a SEQUÊNCIA antes e depois.
+        $wfChPonto = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 })
+        if ($wfChPonto.Ok) { Write-Host "  [ERRO] Chipset (ponto): sem sequência nova ele respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        # A recusa tem de dizer a CAUSA e o CAMINHO, e as duas metades são cobradas separadamente:
+        # 'Proteção do Sistema' sozinho é satisfeito pelo 'Ligue em Painel de Controle > ... > Proteção
+        # do Sistema' do fim, e o mutante que apagou a explicação da causa passou verde - medido.
+        if ([string]$wfChPonto.Reason -notmatch 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz que a Proteção do Sistema pode estar DESLIGADA ('$($wfChPonto.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto.Reason -notmatch 'Painel de Controle') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz ONDE ligar a Proteção do Sistema ('$($wfChPonto.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto.Reason -notmatch '24 h|24 horas') { Write-Host "  [ERRO] Chipset (ponto): a recusa não menciona a janela de 24 h" -ForegroundColor Red; $wbErrors++ }
+        $wfChPontoOk = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 }, @{ SequenceNumber = 11 })
+        if (-not $wfChPontoOk.Ok -or [int]$wfChPontoOk.SequenceNumber -ne 11) { Write-Host "  [ERRO] Chipset (ponto): sequência nova não foi reconhecida ($($wfChPontoOk.SequenceNumber))" -ForegroundColor Red; $wbErrors++ }
+        # Com DOIS números novos vale o MAIOR - é o ponto que acabou de ser criado. Com um só, pegar
+        # o primeiro ou o último dá no mesmo, e a trava de cima não observaria a diferença.
+        $wfChPontoDois = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 }, @{ SequenceNumber = 11 }, @{ SequenceNumber = 12 })
+        if ([int]$wfChPontoDois.SequenceNumber -ne 12) { Write-Host "  [ERRO] Chipset (ponto): com dois pontos novos ele devolveu $($wfChPontoDois.SequenceNumber), esperado o maior (12)" -ForegroundColor Red; $wbErrors++ }
+        # Lista vazia dos dois lados é máquina sem ponto nenhum, e não sucesso silencioso.
+        if ((New-WinForgeChipsetRestorePoint -Before @() -After @()).Ok) { Write-Host "  [ERRO] Chipset (ponto): sem ponto nenhum antes e depois ele respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        if (-not (New-WinForgeChipsetRestorePoint -Before @() -After @(@{ SequenceNumber = 1 })).Ok) { Write-Host "  [ERRO] Chipset (ponto): o primeiro ponto de uma máquina sem nenhum não foi reconhecido" -ForegroundColor Red; $wbErrors++ }
+        # O ponto roda UMA VEZ, antes do primeiro membro, e sem ele o LOTE NÃO RODA.
+        $wfChFonteA = [string](Get-Command Invoke-WinForgeWindowsUpdateGroupAction).ScriptBlock
+        if (@([regex]::Matches($wfChFonteA, 'New-WinForgeChipsetRestorePoint')).Count -ne 1) { Write-Host "  [ERRO] Chipset: o ponto de restauração não roda exatamente uma vez" -ForegroundColor Red; $wbErrors++ }
+        $wfChPosPonto = $wfChFonteA.IndexOf('New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
+        $wfChPosLaco = $wfChFonteA.IndexOf('foreach', [StringComparison]::Ordinal)
+        if ($wfChPosPonto -lt 0 -or $wfChPosLaco -lt 0 -or $wfChPosPonto -gt $wfChPosLaco) { Write-Host "  [ERRO] Chipset: o ponto de restauração roda DEPOIS do primeiro membro" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch 'Install-WinForgeWindowsUpdateDriver') { Write-Host "  [ERRO] Chipset: o lote não instala pelo caminho existente" -ForegroundColor Red; $wbErrors++ }
+        # O PORTÃO, por comportamento, nas duas pontas - e sem tocar em Checkpoint-Computer, que é
+        # escrita: com -NoUI a função RELATA o que faria. Grupo que passa no filtro anuncia o ponto
+        # de restauração; grupo que não passa (é a linha do teste da Tarefa 21) segue sem ele, senão
+        # todo lote do Windows Update passaria a depender da Proteção do Sistema.
+        $wfChLinha = Format-WinForgeWindowsUpdateGroupRow -Group $wfChGrupo
+        $wfChRelato = [string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfChLinha -NoUI)
+        if ($wfChRelato -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: o lote de um grupo de chipset não anuncia o ponto de restauração ('$wfChRelato')" -ForegroundColor Red; $wbErrors++ }
+        $wfChNaoCh = Format-WinForgeWindowsUpdateGroupRow -Group (& $wfChCom $wfChGrupo @{ HardwareIds = @(1..47 | ForEach-Object { 'PCI\VEN_1022&DEV_1450' }) })
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfChNaoCh -NoUI) -match 'ponto de restauração') { Write-Host "  [ERRO] Chipset: um grupo que NÃO é chipset ficou preso ao ponto de restauração" -ForegroundColor Red; $wbErrors++ }
+        # ...e o relato do que seria instalado continua inteiro nos dois casos: o anúncio do ponto é
+        # acréscimo, não troca.
+        if ($wfChRelato -notmatch 'instalaria 47 de 47') { Write-Host "  [ERRO] Chipset: o anúncio do ponto comeu o relato do lote ('$wfChRelato')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch 'Test-WinForgeChipsetGroup') { Write-Host "  [ERRO] Chipset: o lote não pergunta ao filtro - o ponto de restauração viraria obrigatório para todo grupo" -ForegroundColor Red; $wbErrors++ }
+        # A confirmação do chipset entra na caixa ENTRE PARÊNTESES. Sem eles o '+ "..."' vira
+        # argumento posicional da função e o sufixo some EM SILÊNCIO - medido, sem erro nenhum. Este
+        # caminho é de caixa e o -SelfTest não passa por ele: a forma é o que sobra para prender.
+        if ($wfChFonteA -notmatch '\(Get-WinForgeChipsetConfirmText -Group \$Row\.Group\) \+') { Write-Host "  [ERRO] Chipset (texto): a confirmação não é montada com a chamada entre parênteses - o sufixo da pergunta seria engolido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch '\$Row\.Group') { Write-Host "  [ERRO] Chipset: o filtro é consultado com a LINHA, e não com o grupo cru que ela carrega - Class e HardwareIds não sobrevivem à formatação" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -match 'Checkpoint-Computer') { Write-Host "  [ERRO] Chipset: Checkpoint-Computer é chamado direto aqui - ele mora em New-WinForgeChipsetRestorePoint, que é quem confere a sequência" -ForegroundColor Red; $wbErrors++ }
+        # Ponto que não deu certo PARA o lote, e nenhum membro é tocado. É a razão de o ponto vir
+        # antes de tudo: sem rede, a ação que não tem Desfazer não acontece. O caminho é de caixa e o
+        # -SelfTest não passa por ele - a forma com o argumento é o que sobra para prender.
+        if ($wfChFonteA -notmatch '(?s)if \(-not \$ponto\.Ok\) \{.{0,400}return \[string\]\$ponto\.Reason') { Write-Host "  [ERRO] Chipset: falha do ponto de restauração não interrompe o lote" -ForegroundColor Red; $wbErrors++ }
+        $wfChPosPontoCham = $wfChFonteA.IndexOf('$ponto = New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
+        $wfChPosMarca = $wfChFonteA.IndexOf("Set-WinForgeWindowsUpdateRowState -UpdateId ([string]@(`$faltam)[0]) -State 'instalando'", [StringComparison]::Ordinal)
+        if ($wfChPosPontoCham -lt 0 -or $wfChPosMarca -lt 0 -or $wfChPosPontoCham -gt $wfChPosMarca) { Write-Host "  [ERRO] Chipset: o ponto de restauração é criado DEPOIS de o primeiro membro já ter sido marcado" -ForegroundColor Red; $wbErrors++ }
+        # Falha de LEITURA da lista de pontos é resposta própria, e não "não foi criado": medido nesta
+        # máquina, sem elevação Get-ComputerRestorePoint responde 'Acesso negado', e mandar quem tem a
+        # Proteção ligada ir ligá-la é mandar consertar o que não está quebrado.
+        $wfChFonteP = [string]${function:New-WinForgeChipsetRestorePoint}
+        if ($wfChFonteP -notmatch 'a lista de pontos não pôde ser lida') { Write-Host "  [ERRO] Chipset (ponto): falha ao LER a lista cai na mesma frase de 'não foi criado'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteP -notmatch '(?s)catch \{\s*return @\{ Ok = \$false; Reason = "O ponto de restauração pode ter sido criado') { Write-Host "  [ERRO] Chipset (ponto): a leitura de depois não tem catch próprio - o 'Acesso negado' viraria lista vazia e a recusa mentiria o motivo" -ForegroundColor Red; $wbErrors++ }
+        # E a criação do ponto é escrita: em SelfTest ela tem de ser recusada pelo guarda, não pela
+        # sorte de o teste sempre passar -Before/-After.
+        if ([string]${function:New-WinForgeChipsetRestorePoint} -notmatch 'Assert-WinForgeNotSelfTest -Name ''New-WinForgeChipsetRestorePoint''') { Write-Host "  [ERRO] Chipset (ponto): o caminho que cria o ponto não tem o guarda de SelfTest" -ForegroundColor Red; $wbErrors++ }
+        # Nada deste caminho baixa ou executa instalador de terceiro.
+        foreach ($wfChProibido in @('SetupChipset', 'chocolatey', 'choco ', 'Invoke-WebRequest', 'Start-BitsTransfer')) {
+            if ($wfChFonteA -match [regex]::Escape($wfChProibido)) { Write-Host "  [ERRO] Chipset: '$wfChProibido' aparece no caminho do lote" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Chipset: filtro por classe System + Intel + PCI\VEN_8086, cinco recusas, ponto de restauração conferido pela sequência e texto sem palavra proibida"
         Write-Host "  Windows Update (uma linha por dispositivo): $($wfWuVerCasos.Count) título(s) lidos | 5 ofertas -> $($wfWuMantidos.Count) dispositivo(s) e $($wfWuOcultos.Count) versão(ões) antiga(s) fora da tabela"
     } catch {
         Write-Host "  [ERRO] Windows Update (uma linha por dispositivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++

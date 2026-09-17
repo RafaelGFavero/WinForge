@@ -1273,19 +1273,50 @@ function Invoke-WinForgeWindowsUpdateGroupAction {
         Write-WinForgeLog -Component "Diag" -Message "Instalação do lote '$($Row.Title)' recusada: os $($membros.Count) itens já foram instalados nesta sessão."
         return 'já instalado'
     }
-    if ($NoUI) { return "instalaria $($faltam.Count) de $($membros.Count)" }
+    # O ponto de restauração é do CHIPSET, e não de todo lote: grupo que não passa no filtro instala
+    # como instalava. Fazer todo lote do Windows Update depender da Proteção do Sistema seria trocar
+    # um problema de tela por um bloqueio em máquina que nunca precisou dele.
+    # O filtro pergunta ao GRUPO CRU que a linha carrega: 'Date' e 'Version' da linha já são texto de
+    # tela, e Class e HardwareIds não sobrevivem à formatação.
+    $chipset = Test-WinForgeChipsetGroup -Group $Row.Group
+    if ($NoUI) {
+        $relato = "instalaria $($faltam.Count) de $($membros.Count)"
+        if ($chipset.Ok) { $relato += '. Antes do primeiro item o WinForge criaria um ponto de restauração.' }
+        return $relato
+    }
     Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeWindowsUpdateGroupAction'
 
     if ($sync.CommandRunning -or $sync.ProcessRunning) {
         [System.Windows.MessageBox]::Show("Já existe um trabalho em andamento. Espere ele terminar.", "WinForge", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
         return 'ocupado'
     }
-    $pergunta = "Instalar os $($faltam.Count) itens desta linha pelo Windows Update, um de cada vez?" + "`r`n`r`n" +
-                "Eles não trazem driver novo: são arquivos que só dão nome a componentes da placa-mãe no Gerenciador de Dispositivos. Pode levar vários minutos."
+    # A confirmação do lote de chipset é OUTRA, e mais longa: ela é a única coisa entre o usuário e
+    # uma ação sem Desfazer. Fora do caso do chipset, a pergunta curta basta.
+    # Os PARÊNTESES em volta da chamada são obrigatórios: sem eles o '+ "..."' vira argumento
+    # posicional da função, que o engole em silêncio - medido, o sufixo some sem erro nenhum, e a
+    # caixa sairia sem a pergunta. O -SelfTest não passa por aqui (é caminho de caixa), então quem
+    # segura a forma é a trava de fonte.
+    $pergunta = $(if ($chipset.Ok) { (Get-WinForgeChipsetConfirmText -Group $Row.Group) + "`r`n`r`nInstalar agora?" }
+                  else {
+                      "Instalar os $($faltam.Count) itens desta linha pelo Windows Update, um de cada vez?" + "`r`n`r`n" +
+                      "Eles não trazem driver novo: são arquivos que só dão nome a componentes da placa-mãe no Gerenciador de Dispositivos. Pode levar vários minutos."
+                  })
     $resposta = [System.Windows.MessageBox]::Show($sync.Form, $pergunta, "WinForge", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
     if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
         Write-WinForgeLog -Component "Diag" -Message "Instalação do lote '$($Row.Title)' cancelada pelo usuário."
         return 'cancelado'
+    }
+
+    # O ponto vem ANTES de qualquer membro ser tocado, e falha dele PARA o lote: sem a rede de
+    # segurança, a ação que não tem Desfazer não acontece.
+    if ($chipset.Ok) {
+        $ponto = New-WinForgeChipsetRestorePoint
+        if (-not $ponto.Ok) {
+            Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Lote de chipset recusado: $([string]$ponto.Reason)"
+            [System.Windows.MessageBox]::Show($sync.Form, [string]$ponto.Reason, "WinForge", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return [string]$ponto.Reason
+        }
+        Write-WinForgeLog -Component "Diag" -Message "Ponto de restauração $([int]$ponto.SequenceNumber) criado antes do lote de chipset."
     }
 
     # SÓ O PRIMEIRO entra como "instalando" no clique - é o que apaga o botão e responde ao clique no

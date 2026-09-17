@@ -581,6 +581,137 @@ function Group-WinForgeWindowsUpdateNullDrivers {
     return @{ Rows = @($linhas); Groups = @($grupos) }
 }
 
+function Test-WinForgeChipsetGroup {
+    <#
+    .SYNOPSIS
+        Este lote é o pacote de informação de chipset da Intel?
+    .DESCRIPTION
+        Instalar de uma vez as N entradas do lote pela via do Windows Update É o utilitário de INF de
+        chipset: é o mesmo pacote, assinado pela Microsoft, pelo canal que a máquina já usa. O WinForge
+        não baixa nem executa instalador de fabricante para isto - a exceção que existe para a placa de
+        vídeo se apoia numa consulta ao vivo à API pública do fabricante no clique, e não há
+        equivalente aqui.
+
+        TRÊS EXIGÊNCIAS, e as três juntas:
+        1. Classe 'System', que é {4d36e97d-e325-11ce-bfc1-08002be10318} e não muda de nome com o
+           idioma. Vídeo é 'Display', rede é 'Net', áudio é 'MEDIA'.
+        2. Fornecedor casando '^intel$' sem ligar para a caixa. 'Intel Corporation' NÃO passa: quem
+           publica o pacote de chipset assina 'INTEL', e o nome comprido é de outra família de driver.
+        3. De REFORÇO, id de hardware começando em 'PCI\VEN_8086&DEV_' - 8086 é o código PCI da Intel.
+
+        Classe vazia cai em NÃO CLASSIFICADO, jamais em "é chipset": o rótulo da linha de grupo é mais
+        frouxo que este filtro de propósito, e é por isso que a palavra "chipset" não aparece lá.
+
+        O reforço pede UM id com o prefixo, e não todos. O erro caro aqui é o da recusa: quem não passa
+        instala SEM ponto de restauração, e é justamente este pacote que a Intel documenta (000023446)
+        sobrescrevendo o driver funcional do SMBus. Um lote da Intel, classe System, com um id ACPI no
+        meio continua sendo o caso que precisa da rede de segurança.
+
+        ProblemCode NÃO é critério - ele é lido só para o texto, e é por isso que sai daqui como
+        contagem. As linhas que este agrupamento existe para dobrar são justamente as de problema 28;
+        usá-lo como critério faria o filtro sumir no dia em que o Windows resolvesse o problema.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; ProblemCount = <int> }
+    #>
+    param($Group)
+
+    # 28 é CM_PROB_FAILED_INSTALL: o dispositivo está lá, sem driver, e aparece sem nome no
+    # Gerenciador de Dispositivos. É a contagem que o texto da confirmação usa para dizer quantos.
+    $semNome = @(@($Group.ProblemCodes) | Where-Object { [int]$_ -eq 28 }).Count
+    if ([string]$Group.Class -ne 'System') { return @{ Ok = $false; Reason = "classe '$([string]$Group.Class)' não é System"; ProblemCount = $semNome } }
+    if ([string]$Group.Provider -notmatch '^(?i)intel$') { return @{ Ok = $false; Reason = "fornecedor '$([string]$Group.Provider)' não é Intel"; ProblemCount = $semNome } }
+    $daIntel = @(@($Group.HardwareIds) | Where-Object { [string]$_ -like 'PCI\VEN_8086&DEV_*' }).Count
+    if ($daIntel -lt 1) { return @{ Ok = $false; Reason = 'nenhum id de hardware do lote começa em PCI\VEN_8086&DEV_'; ProblemCount = $semNome } }
+    return @{ Ok = $true; Reason = ''; ProblemCount = $semNome }
+}
+
+function New-WinForgeChipsetRestorePoint {
+    <#
+    .SYNOPSIS
+        Ponto de restauração antes do lote de chipset, CONFERIDO pela sequência.
+    .DESCRIPTION
+        Checkpoint-Computer é SILENCIOSAMENTE IGNORADO em dois casos comuns: com a Proteção do Sistema
+        desligada no volume do Windows, e dentro da janela de 24 h desde o último ponto. Ele não
+        devolve erro em nenhum dos dois - devolve sucesso e não cria nada. Acreditar nele seria
+        prometer uma volta que não existe, e esta ação não tem Desfazer no WinForge.
+
+        A única prova é a SEQUÊNCIA: a lista de pontos antes, a lista depois, e um número que não
+        estava lá. Sem número novo, a resposta é não, com a razão dizendo os dois motivos e onde ligar
+        a Proteção.
+    .PARAMETER Before
+    .PARAMETER After
+        As duas listas prontas. É a porta do -SelfTest: com elas a função não cria ponto nenhum e não
+        toca na máquina.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; SequenceNumber = <int> }
+    #>
+    param([object[]]$Before, [object[]]$After)
+
+    $daMaquina = -not ($PSBoundParameters.ContainsKey('Before') -and $PSBoundParameters.ContainsKey('After'))
+    if ($daMaquina) {
+        Assert-WinForgeNotSelfTest -Name 'New-WinForgeChipsetRestorePoint'
+        try { $Before = @(Get-ComputerRestorePoint -ErrorAction Stop) } catch { $Before = @() }
+        try {
+            Checkpoint-Computer -Description 'WinForge - antes dos INF de chipset' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
+        } catch {
+            return @{ Ok = $false; Reason = "O ponto de restauração não pôde ser criado: $($_.Exception.Message)"; SequenceNumber = 0 }
+        }
+        # LER a lista é operação privilegiada por conta própria: medido nesta máquina, sem elevação
+        # Get-ComputerRestorePoint responde 'Acesso negado' em vez de lista vazia. Falha de LEITURA
+        # não é o mesmo que ponto não criado, e as duas respostas mandam o usuário para lugares
+        # diferentes - dizer "ligue a Proteção do Sistema" a quem tem a Proteção ligada e o ponto
+        # criado é mandar consertar o que não está quebrado. O lote não roda nos dois casos.
+        try { $After = @(Get-ComputerRestorePoint -ErrorAction Stop) } catch {
+            return @{ Ok = $false; Reason = "O ponto de restauração pode ter sido criado, mas a lista de pontos não pôde ser lida para conferir: $($_.Exception.Message). Por segurança o lote não foi instalado."; SequenceNumber = 0 }
+        }
+    }
+
+    $antigos = @(@($Before) | ForEach-Object { [int]$_.SequenceNumber })
+    $novos = @(@($After) | Where-Object { [int]$_.SequenceNumber -notin $antigos })
+    if (-not $novos.Count) {
+        return @{ Ok = $false
+                  Reason = 'Não foi criado ponto de restauração: o Windows ignora o pedido quando a Proteção do Sistema está desligada no disco do Windows, e também quando já existe um ponto criado nas últimas 24 h. Ligue em Painel de Controle > Sistema > Proteção do Sistema e tente de novo.'
+                  SequenceNumber = 0 }
+    }
+    return @{ Ok = $true; Reason = ''; SequenceNumber = [int](@($novos | ForEach-Object { [int]$_.SequenceNumber }) | Sort-Object)[-1] }
+}
+
+function Get-WinForgeChipsetConfirmText {
+    <#
+    .SYNOPSIS
+        O texto da confirmação do lote de chipset: o que muda, o que não muda e o que não volta.
+    .DESCRIPTION
+        Estas entradas só informam ao Windows o nome do componente. O ganho é de NOME, e é assim que
+        ele é dito - sem promessa de velocidade, que é o que o marketing de utilitário de fabricante
+        promete e que este pacote não entrega.
+
+        O que fica de fora ante o pacote do fabricante também é dito: ele traz cobertura offline,
+        versão de pacote e entrada em Aplicativos e recursos. Nada disso vem por esta via.
+
+        E o aviso do que não volta: o WinForge não tem Desfazer para isto. A única volta é
+        Propriedades > Driver > Reverter Driver, dispositivo por dispositivo, e é por isso que o ponto
+        de restauração vem antes.
+    #>
+    param($Group)
+
+    $quantos = @(@($Group.Members)).Count
+    $semNome = @(@($Group.ProblemCodes) | Where-Object { [int]$_ -eq 28 }).Count
+    $linhas = [System.Collections.Generic.List[string]]::new()
+    $linhas.Add("O WinForge vai instalar $quantos entradas de informação da Intel pelo Windows Update, uma de cada vez.")
+    $linhas.Add('')
+    if ($semNome -gt 0) {
+        $linhas.Add("O que muda: $semNome dispositivo(s) deste PC hoje aparecem sem nome no Gerenciador de Dispositivos, e cada um passa a mostrar o nome real no Gerenciador de Dispositivos.")
+    } else {
+        $linhas.Add('Nenhum dispositivo deste PC está sem nome. Instalar não traria efeito visível.')
+    }
+    $linhas.Add('O que não muda: desempenho, estabilidade e consumo de energia - estas entradas não trazem programa nenhum, só informam ao Windows o nome do componente.')
+    $linhas.Add('')
+    $linhas.Add('O que o pacote do fabricante tem e esta via não tem: cobertura offline (o instalador da Intel roda sem internet), versão de pacote para conferência e entrada em Aplicativos e recursos.')
+    $linhas.Add('')
+    $linhas.Add('ATENÇÃO: não há como desfazer isto pelo WinForge. A única volta é abrir o Gerenciador de Dispositivos, entrar em Propriedades > Driver e usar Reverter Driver em cada dispositivo. Por isso o WinForge cria um ponto de restauração antes de começar.')
+    return (@($linhas.ToArray()) -join [Environment]::NewLine)
+}
+
 function Get-WinForgeWindowsUpdateGroupId {
     <#
     .SYNOPSIS
