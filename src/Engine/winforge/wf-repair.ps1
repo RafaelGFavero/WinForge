@@ -4696,6 +4696,12 @@ function Get-WinForgeAclStopReport {
     .PARAMETER Phase
         4 ou 5. Qualquer outra fase cai no texto genérico - parar nas fases de leitura não altera
         nada, e o relato diz isso.
+
+        NENHUM destes textos manda rodar a restauração de novo sem passar pelo Desfazer, e isso é
+        regra e não estilo: o índice do backup é gravado no fim da Fase 2, e enquanto ele estiver na
+        fila Test-WinForgeAclRestoreAllowed RECUSA uma nova restauração. Mandar "rodar de novo" ali
+        é mandar a pessoa bater numa recusa - e a saída que a própria recusa oferece, limpar os
+        backups, destrói justamente o Desfazer de um disco que ficou pela metade.
     .PARAMETER Folders
         As pastas que a fase chegou a alterar, na ordem em que foram.
     .PARAMETER Profile
@@ -4712,14 +4718,14 @@ function Get-WinForgeAclStopReport {
     $lista = @($Folders | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
     if ($Phase -eq 4) {
         $quais = if ($lista.Count) { "Ficaram no padrão do Windows: $($lista -join ', ') - as demais ficaram como estavam." } else { 'Nenhuma pasta do sistema chegou a ser alterada - todas ficaram como estavam.' }
-        return "Parado a pedido durante as pastas do sistema. $quais`r`n`r`nO backup da Fase 2 está completo e é anterior a qualquer alteração: use 'Permissões do disco C: - Desfazer (restaurar backup)' para voltar tudo ao que era, ou rode a restauração de novo para terminar o que faltou."
+        return "Parado a pedido durante as pastas do sistema. $quais`r`n`r`nO backup da Fase 2 está completo e é anterior a qualquer alteração: use 'Permissões do disco C: - Desfazer (restaurar backup)' para voltar tudo ao que era.`r`n`r`nSe você quiser tentar de novo em vez de voltar, o Desfazer vem ANTES assim mesmo: enquanto o backup desta rodada estiver na fila, uma nova restauração é recusada - é a trava que impede duas rodadas de backup se atropelarem."
     }
     if ($Phase -eq 5) {
         $perfil = if ([string]::IsNullOrWhiteSpace($Profile)) { 'a sua pasta de usuário' } else { $Profile }
         $quantas = if ($lista.Count) { "$($lista.Count) pasta(s) de dentro já tinham recebido a herança; as demais ficaram como estavam." } else { 'A herança do conteúdo não chegou a ser ligada em pasta nenhuma de dentro.' }
-        return "Parado a pedido durante a herança do perfil. As permissões da raiz de '$perfil' já foram aplicadas. $quantas`r`n`r`nRode a restauração de novo para terminar: ela refaz só o que falta, e o backup deste conjunto continua valendo. Se preferir voltar tudo, use 'Permissões do disco C: - Desfazer (restaurar backup)'."
+        return "Parado a pedido durante a herança do perfil. As permissões da raiz de '$perfil' já foram aplicadas. $quantas`r`n`r`nPara voltar tudo, use 'Permissões do disco C: - Desfazer (restaurar backup)'.`r`n`r`nPara tentar de novo, o Desfazer vem ANTES: enquanto o backup desta rodada estiver na fila, uma nova restauração é recusada. Desfazer primeiro, restaurar depois - a restauração seguinte recomeça do começo, com backup novo."
     }
-    return "Parado a pedido antes de qualquer alteração: esta fase só lê o disco, e nada foi modificado. Pode rodar a restauração de novo quando quiser."
+    return "Parado a pedido antes de qualquer alteração: esta fase só lê o disco, e nada foi modificado.`r`n`r`nSe o backup desta rodada já tiver sido gravado, a próxima restauração vai pedir o Desfazer primeiro - é a mesma trava de sempre, e a recusa diz o que fazer."
 }
 
 function Get-WinForgeAclStepOwnerSid {
@@ -4891,7 +4897,7 @@ function Get-WinForgeAclOwnerPending {
         # nenhum desta base - mandar a pessoa procurar o que não está lá é pior do que não oferecer
         # saída. Quem devolve a posse é a própria restauração: ela refaz a fase 4 e o socorro de
         # posse na pasta que ficou torta.
-        Text     = "A restauração de permissões de $carimbo parou no meio da troca de posse: '$pasta' pode ter ficado com os Administradores como dona, em vez de '$dono'. Enquanto estiver assim, qualquer processo elevado altera essa pasta. Rode 'Permissões do disco C: - Restaurar padrões' de novo, na aba Config: ela refaz essa pasta e devolve a posse."
+        Text     = "A restauração de permissões de $carimbo parou no meio da troca de posse: '$pasta' pode ter ficado com os Administradores como dona, em vez de '$dono'. Enquanto estiver assim, qualquer processo elevado altera essa pasta. Use 'Permissões do disco C: - Desfazer (restaurar backup)' e, logo depois, 'Permissões do disco C: - Restaurar padrões' de novo, na aba Config: o Desfazer tira da fila o backup da rodada que parou, sem o que a restauração seguinte é recusada, e ela é que refaz essa pasta e devolve a posse."
     }
 }
 

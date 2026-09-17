@@ -4158,7 +4158,7 @@ if ($SelfTest) {
             if ($wfBtnF4 -notmatch [regex]::Escape($wfBtnF)) { Write-Host "  [ERRO] Parar (texto fase 4): falta '$wfBtnF'" -ForegroundColor Red; $wbErrors++ }
         }
         $wfBtnF5 = Get-WinForgeAclStopReport -Phase 5 -Folders @() -Profile 'C:\Users\fulano'
-        foreach ($wfBtnF in @('Parado a pedido durante a herança do perfil', 'C:\Users\fulano', 'Rode a restauração de novo para terminar')) {
+        foreach ($wfBtnF in @('Parado a pedido durante a herança do perfil', 'C:\Users\fulano', 'o Desfazer vem ANTES')) {
             if ($wfBtnF5 -notmatch [regex]::Escape($wfBtnF)) { Write-Host "  [ERRO] Parar (texto fase 5): falta '$wfBtnF'" -ForegroundColor Red; $wbErrors++ }
         }
         # A contagem da fase 5 é das pastas DE DENTRO do perfil, e vem da fase 5. Ela era alimentada
@@ -6226,6 +6226,36 @@ if ($SelfTest) {
         if ($wfLimpSemDesc.Count) { Write-Host "  [ERRO] Permissões (limpeza): sem o descarte pedido, a limpeza apagaria um conjunto que ninguém desfez" -ForegroundColor Red; $wbErrors++ }
         $wfLimpComDesc = @(Invoke-WinForgeAclCleanup -DryRun -DiscardPending -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*20250101*' })
         if (-not $wfLimpComDesc.Count) { Write-Host "  [ERRO] Permissões (limpeza): com o descarte pedido o conjunto pendente continua fora - o beco sem saída volta inteiro" -ForegroundColor Red; $wbErrors++ }
+        # ---- Nenhum relato de parada pode mandar rodar a restauração de novo sem o Desfazer
+        # antes. O índice do backup é gravado no fim da Fase 2: quem parou depois disso tem um
+        # conjunto na fila, e a nova restauração é RECUSADA. Três destes textos mandavam bater na
+        # recusa, e a saída que ela oferece (limpar os backups) apagaria o Desfazer de um disco
+        # alterado pela metade. A ordem das duas palavras é o que a trava mede: 'Desfazer' tem de
+        # vir ANTES de 'de novo', senão a frase manda tentar primeiro e explicar depois.
+        $wfParadaRaiz = Join-Path $wbSelfTestRaiz 'acl-parada'
+        New-Item -ItemType Directory -Path $wfParadaRaiz -Force | Out-Null
+        $wfParadaSelf = $sync.SelfTest
+        try {
+            $sync.SelfTest = $false
+            $null = Write-WinForgeAclOwnerPending -Folder 'C:\Windows\System32' -OwnerSid 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -Root $wfParadaRaiz
+        } finally { $sync.SelfTest = $wfParadaSelf }
+        foreach ($wfParada in @(
+            @{ Onde = 'fase 4';         Texto = [string](Get-WinForgeAclStopReport -Phase 4 -Folders @('C:\Windows') -Profile 'C:\Users\fulano') },
+            @{ Onde = 'fase 5';         Texto = [string](Get-WinForgeAclStopReport -Phase 5 -Folders @('C:\Users\fulano\Documents') -Profile 'C:\Users\fulano') },
+            @{ Onde = 'genérico';       Texto = [string](Get-WinForgeAclStopReport -Phase 2 -Folders @() -Profile 'C:\Users\fulano') },
+            @{ Onde = 'posse pendente'; Texto = [string](Get-WinForgeAclOwnerPending -Root $wfParadaRaiz).Text })) {
+            $wfParadaTexto = [string]$wfParada.Texto
+            if ([string]::IsNullOrWhiteSpace($wfParadaTexto)) { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): o relato saiu vazio" -ForegroundColor Red; $wbErrors++; continue }
+            $wfParadaDesf = $wfParadaTexto.IndexOf('Desfazer', [StringComparison]::Ordinal)
+            $wfParadaDeNovo = $wfParadaTexto.IndexOf('de novo', [StringComparison]::Ordinal)
+            if ($wfParadaDeNovo -ge 0 -and ($wfParadaDesf -lt 0 -or $wfParadaDesf -gt $wfParadaDeNovo)) { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): manda tentar 'de novo' antes de falar no Desfazer, e a guarda recusa essa tentativa ('$wfParadaTexto')" -ForegroundColor Red; $wbErrors++ }
+            # E a frase tem de DIZER que a guarda recusa enquanto o backup estiver na fila: citar o
+            # Desfazer em outro parágrafo e mandar tentar de novo no seguinte ainda manda bater na recusa.
+            if ($wfParadaDeNovo -ge 0 -and $wfParadaTexto -notmatch 'recusad') { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): manda tentar de novo sem dizer que a nova restauração é recusada enquanto o backup desta rodada estiver na fila" -ForegroundColor Red; $wbErrors++ }
+            if ($wfParadaTexto -match 'rode a restaura' -and $wfParadaDesf -lt 0) { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): manda rodar a restauração sem citar o Desfazer" -ForegroundColor Red; $wbErrors++ }
+        }
+        Remove-Item -LiteralPath $wfParadaRaiz -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  Permissões (parada): os quatro relatos de interrupção mandam desfazer ANTES de tentar de novo"
         # A confirmação do descarte é DIGITADA, e distinta da caixa Sim/Não do clique.
         foreach ($wfLimpFrase in @(
             @{ Texto = 'APAGAR';      Vale = $true },
