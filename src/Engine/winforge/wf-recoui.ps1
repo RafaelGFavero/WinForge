@@ -322,7 +322,9 @@ function Start-WinForgeProfileJob {
                 try { $wfNetDecisoes[$wfNetAcao] = Test-WinForgeNetworkGuard -Action $wfNetAcao } catch { }
             }
             $sync.WinForgeNetworkGuards = $wfNetDecisoes
-            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread { Update-WinForgeNetworkButtons } }
+            # O bloco vem de $sync, escrito em escopo de arquivo: criado aqui dentro, ele nasceria
+            # na runspace do pool e travaria a janela na primeira pipeline que rodasse nele.
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeNetworkButtonsCallback }
         } catch {
             # a barra fica visível com o erro: o usuário precisa saber que não há recomendação nenhuma
             $null = Set-WinForgeProfileProgress -Label "Diagnóstico falhou: $($_.Exception.Message)" -Percent 0

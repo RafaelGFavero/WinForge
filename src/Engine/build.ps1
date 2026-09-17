@@ -8758,7 +8758,15 @@ if ($SelfTest) {
         if ($wfW46FonteUI -notmatch 'WPFWFRepWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 6): nada habilita ou desabilita o botão 6 na abertura" -ForegroundColor Red; $wbErrors++ }
         if ($wfW46FonteUI -notmatch 'IsEnabled') { Write-Host "  [ERRO] Rede (botão 6): o gancho não mexe em IsEnabled" -ForegroundColor Red; $wbErrors++ }
         $wfW46FonteJob = [string](Get-Command Start-WinForgeProfileJob).ScriptBlock
-        if ($wfW46FonteJob -notmatch 'Update-WinForgeNetworkButtons') { Write-Host "  [ERRO] Rede (botões): o gancho de abertura não CHAMA a repintura dos botões de rede" -ForegroundColor Red; $wbErrors++ }
+        # O corpo do job roda NUMA RUNSPACE DO POOL, e scriptblock criado lá e executado pelo
+        # Dispatcher trava na primeira pipeline: a thread da janela pede a runspace de origem, que
+        # está parada esperando o Dispatcher terminar. Por isso a trava não cobra o NOME da função
+        # (que apareceria num comentário), e sim que o job mande o bloco guardado em $sync - e que
+        # não exista bloco literal nenhum indo daqui para a thread da janela.
+        if ($wfW46FonteJob -notmatch 'Invoke-WPFUIThread\s+\$sync\.WinForgeNetworkButtonsCallback') { Write-Host "  [ERRO] Rede (botões): o gancho de abertura não manda o retorno de chamada de escopo de arquivo para a thread da janela" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46FonteJob -match 'Invoke-WPFUIThread\s*\{') { Write-Host "  [ERRO] Rede (botões): o corpo do job cria o bloco ali mesmo - ele nasce na runspace do pool e trava a janela na primeira pipeline" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.WinForgeNetworkButtonsCallback -isnot [scriptblock]) { Write-Host "  [ERRO] Rede (botões): não há retorno de chamada em escopo de arquivo para a repintura" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$sync.WinForgeNetworkButtonsCallback -notmatch 'Update-WinForgeNetworkButtons') { Write-Host "  [ERRO] Rede (botões): o retorno de chamada não repinta os botões de rede" -ForegroundColor Red; $wbErrors++ }
         Write-Host "  Rede (botões 4 e 6): exportar antes de remover, três desfechos, restauração automática também no 4, '/install' que propõe e botão 6 desabilitado sem cópia"
     } catch {
         Write-Host "  [ERRO] Rede (botões 4/6): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++

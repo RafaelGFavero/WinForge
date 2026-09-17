@@ -2279,6 +2279,15 @@ function Invoke-WinForgeWifiDriverGeneric {
     return @($L.ToArray())
 }
 
+# A repintura dos botões de rede esperando a thread da janela. O bloco nasce AQUI, em escopo de
+# ARQUIVO, e não dentro do corpo do job: um scriptblock criado numa runspace do pool e executado
+# pelo Dispatcher trava na primeira pipeline, porque a thread da janela pede a runspace de origem
+# - que está parada, esperando o próprio Dispatcher terminar. Hoje o caminho feliz de
+# Update-WinForgeNetworkButtons não tem pipeline e por isso o defeito não aparecia; o caminho de
+# reserva usa filtro de pipeline, e ali a janela travaria na abertura. Mesmo desenho de
+# $sync.WinForgeDriverConfirmCallback e $sync.WinForgeAclCleanupConfirmCallback, e pela mesma razão.
+$sync.WinForgeNetworkButtonsCallback = { Update-WinForgeNetworkButtons }
+
 function Update-WinForgeNetworkButtons {
     <#
     .SYNOPSIS
