@@ -8049,7 +8049,7 @@ if ($SelfTest) {
         # elevação, NÃO mexe no repositório (só COPIA de lá para fora) e o menor pacote de rede
         # desta máquina saiu em 35 ms com 3 arquivos e 90 KB. Como esta é a única rede de segurança
         # de quem clica no botão que remove driver, ela é exercitada de verdade em vez de ficar só
-        # em gabarito - dentro da raiz isolada desta rodada, e com o pacote escolhido pelo TAMANHO.
+        # em gabarito - dentro da raiz isolada desta rodada.
         # O pacote é escolhido FORA da família do rádio, e isso é o que limita o custo: o pacote do
         # rádio desta máquina exporta 10 arquivos e 120 MB (medido), e o escolhido aqui saiu em
         # 35 ms com 3 arquivos e 90 KB. Sem esse descarte, numa máquina cujo único pacote de rede
@@ -8291,6 +8291,66 @@ if ($SelfTest) {
         # ...e com pacote na lista ele volta a descrever: senão, uma função que recusasse sempre passaria.
         $wfW46ComPac = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts (& $wfW46Com @{ Packages = @('oem22.inf') }))
         if (-not @($wfW46ComPac | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): com pacote na família ele deixou de descrever a remoção" -ForegroundColor Red; $wbErrors++ }
+        # O GABARITO MANDA ATÉ O FIM, e não só no bloqueio. Este bloco existe porque o autoteste
+        # ficou verde por dias e depois vermelho na MESMA máquina, sem uma linha de código mudar: o
+        # rádio dela deixou de ser um Intel (família de dois pacotes, com embutido) e passou a ser um
+        # MediaTek MT7922 (um pacote, sem embutido reconhecido). As duas ações respeitavam o gabarito
+        # no bloqueio e iam ler a máquina logo depois - ou seja, o teste media o hardware de quem
+        # compilava, não o código.
+        #
+        # A prova de que a máquina NÃO é lida é o nome que aparece no relato: 'Wi-Fi do gabarito' não
+        # existe em computador nenhum. Se alguém voltar a ler a máquina aqui, o nome muda e esta
+        # linha fica vermelha em qualquer lugar.
+        foreach ($wfW46Sim in @(
+            @{ Fn = 'Invoke-WinForgeWifiDriverReinstall'; Marca = 'remove-device' },
+            @{ Fn = 'Invoke-WinForgeWifiDriverGeneric';   Marca = 'delete-driver' })) {
+            $wfW46Rel = @(& ([string]$wfW46Sim.Fn) -DryRun -Facts $wfW46Base)
+            if (-not @($wfW46Rel | Where-Object { [string]$_ -match 'Wi-Fi do gabarito' }).Count) { Write-Host "  [ERRO] Rede (gabarito): '$($wfW46Sim.Fn)' foi ler o adaptador da MÁQUINA em vez de usar o gabarito ('$($wfW46Rel -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfW46Rel | Where-Object { [string]$_ -match [regex]::Escape([string]$wfW46Sim.Marca) }).Count) { Write-Host "  [ERRO] Rede (gabarito): a simulação de máquina saudável de '$($wfW46Sim.Fn)' não descreve o que faria ('$($wfW46Rel -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Gabarito SEM driver embutido: o botão 5 recusa pela reconfirmação, e o 4 - que não depende
+        # dela - continua descrevendo. O 'Inbox' aqui é a MESMA chave que o guarda usa, para o fato
+        # não ser lido de duas fontes diferentes.
+        $wfW46SemInbox = & $wfW46Com @{ Inbox = $false }
+        $wfW46Gen5 = @(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts $wfW46SemInbox)
+        if (-not @($wfW46Gen5 | Where-Object { [string]$_ -match 'básico' }).Count) { Write-Host "  [ERRO] Rede (gabarito): sem driver embutido o botão 5 não recusou ('$($wfW46Gen5 -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW46Gen5 | Where-Object { [string]$_ -match 'delete-driver' }).Count) { Write-Host "  [ERRO] Rede (gabarito): sem driver embutido o botão 5 ainda descreveu o apagamento" -ForegroundColor Red; $wbErrors++ }
+        if (-not @(@(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts $wfW46SemInbox) | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (gabarito): o botão 4 parou de funcionar por falta de driver embutido, que não é condição dele" -ForegroundColor Red; $wbErrors++ }
+        # Gabarito SEM rádio: as duas dizem isso e nenhuma descreve o que faria. É o caso que o
+        # gêmeo do botão 5 quebrava numa máquina sem rádio nenhum.
+        $wfW46SemRadio = & $wfW46Com @{ Adapter = @{ Ok = $false; Reason = 'nenhum adaptador sem fio (gabarito)' } }
+        foreach ($wfW46Sim2 in @(
+            @{ Fn = 'Invoke-WinForgeWifiDriverReinstall'; Marca = 'remove-device' },
+            @{ Fn = 'Invoke-WinForgeWifiDriverGeneric';   Marca = 'delete-driver' })) {
+            $wfW46Rel2 = @(& ([string]$wfW46Sim2.Fn) -DryRun -Facts $wfW46SemRadio)
+            if (-not @($wfW46Rel2 | Where-Object { [string]$_ -match 'nenhum adaptador sem fio \(gabarito\)' }).Count) { Write-Host "  [ERRO] Rede (gabarito): '$($wfW46Sim2.Fn)' não relatou a falta de rádio do gabarito ('$($wfW46Rel2 -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfW46Rel2 | Where-Object { [string]$_ -match [regex]::Escape([string]$wfW46Sim2.Marca) }).Count) { Write-Host "  [ERRO] Rede (gabarito): '$($wfW46Sim2.Fn)' descreveu o que faria sem rádio nenhum" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E a prova por TEMPO de que a máquina não é tocada: ler adaptador, identificador de
+        # hardware, varredura de INF e repositório de drivers custa perto de um segundo e meio nesta
+        # máquina; o caminho do gabarito é aritmética. Meio segundo é um teto com margem de vinte
+        # vezes, e ele pega uma leitura de máquina que volte a entrar por descuido.
+        $wfW46Crono = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-WinForgeWifiDriverGeneric -DryRun -Facts $wfW46Base
+        $null = Invoke-WinForgeWifiDriverReinstall -DryRun -Facts $wfW46Base
+        $wfW46Crono.Stop()
+        if ($wfW46Crono.ElapsedMilliseconds -gt 500) { Write-Host "  [ERRO] Rede (gabarito): as duas simulações levaram $($wfW46Crono.ElapsedMilliseconds)ms - alguma foi à máquina" -ForegroundColor Red; $wbErrors++ }
+        # O resolvedor, direto: com gabarito ele NUNCA lê a máquina, e sem gabarito lê.
+        $wfW46Ctx = Get-WinForgeWifiActionContext -Facts $wfW46Base
+        if ([string]$wfW46Ctx.Adapter.Name -ne 'Wi-Fi do gabarito') { Write-Host "  [ERRO] Rede (contexto): com gabarito o adaptador veio '$($wfW46Ctx.Adapter.Name)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not [bool]$wfW46Ctx.Inbox) { Write-Host "  [ERRO] Rede (contexto): 'Inbox' do gabarito não foi respeitado" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfW46Ctx.Packages).Count) { Write-Host "  [ERRO] Rede (contexto): o gabarito rendeu família vazia sem pedir isso" -ForegroundColor Red; $wbErrors++ }
+        if ([bool](Get-WinForgeWifiActionContext -Facts $wfW46SemInbox).Inbox) { Write-Host "  [ERRO] Rede (contexto): 'Inbox = `$false' do gabarito foi ignorado" -ForegroundColor Red; $wbErrors++ }
+        # E SEM gabarito o resolvedor vai à MÁQUINA. Esta linha existe porque a primeira versão deste
+        # conserto entregava ao resolvedor a tabela de fatos do GUARDA, que no produto nunca é nula:
+        # o caminho de gabarito passaria a valer em máquina de verdade, e os botões agiriam sobre um
+        # identificador e um pacote sintéticos. A asserção não depende do que esta máquina tem - ela
+        # só exige que o resultado NÃO seja o sintético, o que vale até quando a leitura falha.
+        $wfW46CtxReal = Get-WinForgeWifiActionContext
+        if ([string]$wfW46CtxReal.Adapter.Name -eq 'Wi-Fi do gabarito' -or [string]$wfW46CtxReal.PnpDeviceId -eq 'GABARITO\NET\0000' -or @($wfW46CtxReal.Packages) -contains 'oem00.inf') { Write-Host "  [ERRO] Rede (contexto): sem gabarito o resolvedor devolveu o SINTÉTICO ('$($wfW46CtxReal.Adapter.Name)' / '$($wfW46CtxReal.PnpDeviceId)') - o produto agiria sobre dado de teste" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW46Par in 'Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric') {
+            if ([string](Get-Command $wfW46Par).ScriptBlock -notmatch 'Get-WinForgeWifiActionContext\s+-Facts\s+\$Facts\b') { Write-Host "  [ERRO] Rede (contexto): '$wfW46Par' não entrega ao resolvedor o PARÂMETRO -Facts - com a tabela do guarda, que nunca é nula, o gabarito valeria na máquina de verdade" -ForegroundColor Red; $wbErrors++ }
+        }
         # O botão 4 tem a MESMA restauração automática do 5.
         $wfW46Fonte4 = [string](Get-Command Invoke-WinForgeWifiDriverReinstall).ScriptBlock
         if ($wfW46Fonte4 -notmatch 'Invoke-WinForgeWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 4): sem restauração automática no desfecho ruim" -ForegroundColor Red; $wbErrors++ }
@@ -8428,13 +8488,20 @@ if ($SelfTest) {
         # A FAMÍLIA do rádio, e não a classe de rede inteira. Cobrado pela chamada completa: 'Oem'
         # solto casaria com o comentário que explica a regra, e a diferença aqui é apagar 2 pacotes
         # ou 10, sendo que entre os 10 está o driver do cabo - a via de socorro deste botão.
-        if ($wfW5Fonte -notmatch 'Select-WinForgeWifiDriverPackage\s+-Entries\s+\$\w+\s+-InfName\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): ele não restringe à família do rádio - apagaria o driver do cabo junto" -ForegroundColor Red; $wbErrors++ }
-        if ($wfW5Fonte -match 'Where-Object\s*\{[^}]*Class[^}]*-eq\s*''Net''') { Write-Host "  [ERRO] Rede (botão 5): ele monta a lista pela CLASSE de rede, que é o defeito consertado na Tarefa 17" -ForegroundColor Red; $wbErrors++ }
-        # O embutido é reconfirmado ANTES de apagar, e pela MESMA varredura de INF que alimenta o
-        # guarda: a função que consulta a ferramenta de drivers responde "não há embutido" em toda
-        # máquina real, e usá-la aqui esconderia o botão em qualquer computador.
-        if ($wfW5Fonte -notmatch 'Test-WinForgeInboxWifiDriver\s+-PnpDeviceId\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): não reconfirma o driver embutido pela varredura de INF antes de apagar" -ForegroundColor Red; $wbErrors++ }
-        if ($wfW5Fonte -match 'Select-WinForgeWifiInboxDriver') { Write-Host "  [ERRO] Rede (botão 5): usa a consulta à ferramenta de drivers para saber do embutido - ela responde 'não há' em toda máquina real" -ForegroundColor Red; $wbErrors++ }
+        # A família e o embutido saem do RESOLVEDOR, que é o único lugar que decide entre gabarito e
+        # máquina. As travas seguem os dois: o botão tem de usar o resolvedor, e o resolvedor tem de
+        # restringir à família e conferir o embutido pela varredura de INF.
+        if ($wfW5Fonte -notmatch 'Get-WinForgeWifiActionContext\s+-Facts\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): não usa o resolvedor - o gabarito pararia no bloqueio e o resto viria da máquina" -ForegroundColor Red; $wbErrors++ }
+        $wfW5FonteCtx = [string](Get-Command Get-WinForgeWifiActionContext).ScriptBlock
+        if ($wfW5FonteCtx -notmatch 'Select-WinForgeWifiDriverPackage\s+-Entries\s+\$\w+\s+-InfName\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): o resolvedor não restringe à família do rádio - apagaria o driver do cabo junto" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteCtx -match 'Where-Object\s*\{[^}]*Class[^}]*-eq\s*''Net''') { Write-Host "  [ERRO] Rede (botão 5): o resolvedor monta a lista pela CLASSE de rede, que é o defeito consertado na Tarefa 17" -ForegroundColor Red; $wbErrors++ }
+        # O embutido é conferido pela MESMA varredura de INF que alimenta o guarda: a função que
+        # consulta a ferramenta de drivers responde "não há embutido" em toda máquina real, e usá-la
+        # aqui esconderia o botão em qualquer computador.
+        if ($wfW5FonteCtx -notmatch 'Test-WinForgeInboxWifiDriver\s+-PnpDeviceId\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): o resolvedor não confere o driver embutido pela varredura de INF" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteCtx -match 'Select-WinForgeWifiInboxDriver') { Write-Host "  [ERRO] Rede (botão 5): usa a consulta à ferramenta de drivers para saber do embutido - ela responde 'não há' em toda máquina real" -ForegroundColor Red; $wbErrors++ }
+        # E o botão RECUSA quando o embutido não está lá, seja qual for a fonte do fato.
+        if ($wfW5Fonte -notmatch 'if \(-not \[bool\]\$contexto\.Inbox\)') { Write-Host "  [ERRO] Rede (botão 5): não reconfirma o driver embutido antes de apagar" -ForegroundColor Red; $wbErrors++ }
         # A verificação de sucesso exige DriverProvider = Microsoft - cobrada POR COMPORTAMENTO, e
         # não por '-match "Microsoft"' na fonte, que casaria com o comentário que explica a regra.
         if ($wfW5Fonte -notmatch 'Test-WinForgeWifiOutcome[^\r\n]*-Generic') { Write-Host "  [ERRO] Rede (botão 5): a verificação não passa '-Generic' - sem ele não se distingue 'o básico entrou' de 'outro OEM venceu'" -ForegroundColor Red; $wbErrors++ }

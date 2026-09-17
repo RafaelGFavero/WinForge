@@ -1555,6 +1555,80 @@ function Wait-WinForgeWifiAdapterSettle {
     return $ultima
 }
 
+function Get-WinForgeWifiActionContext {
+    <#
+    .SYNOPSIS
+        Tudo que as ações de driver precisam saber sobre o rádio: o adaptador, o identificador do
+        dispositivo, se há driver embutido e quais pacotes são da família dele.
+    .DESCRIPTION
+        Existe por causa de um defeito de TESTE que virou bloqueador, e a lição vale mais que o
+        código: as duas ações respeitavam o gabarito de fatos no BLOQUEIO e, logo depois, iam ler a
+        máquina de verdade. O autoteste ficou verde por dias numa máquina com rádio Intel - família
+        de dois pacotes, driver embutido presente - e passou a falhar na MESMA máquina quando o
+        rádio virou um MediaTek MT7922, com um pacote só e sem embutido reconhecido. O teste não
+        testava o código: testava o hardware de quem compilava.
+
+        A REGRA AGORA É ABSOLUTA: com -Facts, nada aqui toca na máquina. Nenhum Get-NetAdapter,
+        nenhuma consulta de propriedade de dispositivo, nenhuma varredura de INF, nenhum pnputil. O
+        gabarito manda de ponta a ponta, e por isso o resultado é o mesmo em qualquer computador.
+        Sem -Facts - que é como o produto chama - tudo vem da máquina, como antes.
+
+        Isso é seguro porque -Facts não existe no caminho do produto: as linhas da tabela chamam as
+        ações sem argumento nenhum. Ele é a porta do -SelfTest, igual a '-Adapters' em
+        Get-WinForgeWifiAdapter e a '-Probe' em Wait-WinForgeWifiAdapterSettle.
+
+        As chaves que o gabarito pode trazer, todas opcionais: 'Adapter', 'PnpDeviceId', 'InfName',
+        'Packages', 'Original' e 'Inbox' - esta última já é uma das onze do guarda, e é a MESMA
+        pergunta ("o Windows tem driver básico para este rádio"), então ela não é lida duas vezes de
+        fontes diferentes. O que o gabarito não trouxer ganha um valor sintético que se identifica
+        como tal, para nenhum relato de teste passar por relato de máquina.
+    .PARAMETER Facts
+        Os fatos. Trazendo-os, a máquina não é lida.
+    .OUTPUTS
+        @{ Adapter; PnpDeviceId; InfName; Original; Packages = @(<string>); Inbox = <bool> }
+    #>
+    param([hashtable]$Facts)
+
+    if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts) {
+        $doGabarito = @{
+            Adapter     = $(if ($Facts.ContainsKey('Adapter')) { $Facts.Adapter } else { @{ Ok = $true; Reason = ''; Name = 'Wi-Fi do gabarito'; ifIndex = 1; Status = 'Disconnected'; Problem = 0; DriverProvider = 'Gabarito'; PhysicalMediaType = 'Native 802.11' } })
+            PnpDeviceId = [string]$(if ($Facts.ContainsKey('PnpDeviceId')) { $Facts.PnpDeviceId } else { 'GABARITO\NET\0000' })
+            InfName     = [string]$(if ($Facts.ContainsKey('InfName')) { $Facts.InfName } else { 'oem00.inf' })
+            Original    = [string]$(if ($Facts.ContainsKey('Original')) { $Facts.Original } else { 'gabarito.inf' })
+            Packages    = @($(if ($Facts.ContainsKey('Packages')) { @($Facts.Packages) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ } } else { @('oem00.inf') }))
+            Inbox       = [bool]$(if ($Facts.ContainsKey('Inbox')) { $Facts.Inbox } else { $true })
+        }
+        return $doGabarito
+    }
+
+    $vazio = @{ Adapter = @{ Ok = $false; Reason = 'não consultado' }; PnpDeviceId = ''; InfName = ''; Original = ''; Packages = @(); Inbox = $false }
+    $adaptadores = @()
+    try { $adaptadores = @(Get-NetAdapter -ErrorAction Stop) } catch { return $vazio }
+    $radio = Get-WinForgeWifiAdapter -Adapters $adaptadores
+    $vazio.Adapter = $radio
+    if (-not $radio.Ok) { return $vazio }
+
+    $obj = @($adaptadores | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
+    if (-not $obj.Count) { return $vazio }
+    $idPnp = [string]$obj[0].PnPDeviceID
+    $vazio.PnpDeviceId = $idPnp
+    if ([string]::IsNullOrWhiteSpace($idPnp)) { return $vazio }
+
+    $vazio.Inbox = [bool](Test-WinForgeInboxWifiDriver -PnpDeviceId $idPnp)
+    $inf = [string](Get-WinForgeWifiDriverInfName -PnpDeviceId $idPnp)
+    $vazio.InfName = $inf
+    if ([string]::IsNullOrWhiteSpace($inf)) { return $vazio }
+
+    # SÓ a família do rádio. A lista da classe de rede inteira traz a placa de cabo e os clientes de
+    # VPN, e exportar-e-remover aquilo deixaria a máquina sem a via de socorro que estes botões
+    # exigem existir - ver Select-WinForgeWifiDriverPackage.
+    $lidos = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
+    $familia = Select-WinForgeWifiDriverPackage -Entries $lidos -InfName $inf
+    $vazio.Packages = @($familia.Oem)
+    $vazio.Original = [string]$familia.Original
+    return $vazio
+}
+
 function Invoke-WinForgeWifiDriverRestore {
     <#
     .SYNOPSIS
@@ -1697,32 +1771,21 @@ function Invoke-WinForgeWifiDriverReinstall {
         return @($L.ToArray())
     }
 
-    $radio = Get-WinForgeWifiAdapter
+    # O gabarito que vale aqui é o PARÂMETRO, e não a tabela de fatos do guarda. Sem -Facts, $fatos
+    # já veio cheio de Get-WinForgeNetworkFacts, e passar aquilo jogaria o resolvedor no caminho de
+    # gabarito EM MÁQUINA DE VERDADE - com identificador e pacote sintéticos, que é o oposto do que
+    # este conserto existe para garantir.
+    $contexto = Get-WinForgeWifiActionContext -Facts $Facts
+    $radio = $contexto.Adapter
     if (-not $radio.Ok) {
         $L.Add("Não há rádio sem fio para reinstalar: $([string]$radio.Reason)")
         return @($L.ToArray())
     }
     $L.Add("Rádio: $([string]$radio.Name), driver de $([string]$radio.DriverProvider).")
 
-    # SÓ a família do rádio. A lista da classe de rede inteira traz a placa de cabo e os clientes de
-    # VPN, e exportar-e-remover aquilo deixaria a máquina sem a via de socorro que este botão exige
-    # existir - ver Select-WinForgeWifiDriverPackage.
-    $idPnp = ''
-    try {
-        $obj0 = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
-        if ($obj0.Count) { $idPnp = [string]$obj0[0].PnPDeviceID }
-    } catch { $idPnp = '' }
-    $infDoRadio = $(if ([string]::IsNullOrWhiteSpace($idPnp)) { '' } else { Get-WinForgeWifiDriverInfName -PnpDeviceId $idPnp })
-    $pacotes = @()
-    if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts -and $Facts.ContainsKey('Packages')) {
-        # A porta do -SelfTest para a lista de pacotes, no mesmo espírito de '-Adapters' e '-Probe':
-        # sem ela a recusa de família vazia é inalcançável em qualquer máquina que TENHA rádio, que
-        # são todas as que interessam.
-        $pacotes = @(@($Facts.Packages) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
-    } elseif (-not [string]::IsNullOrWhiteSpace($infDoRadio)) {
-        $lidos = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
-        $pacotes = @((Select-WinForgeWifiDriverPackage -Entries $lidos -InfName $infDoRadio).Oem)
-    }
+    $idPnp = [string]$contexto.PnpDeviceId
+    $infDoRadio = [string]$contexto.InfName
+    $pacotes = @($contexto.Packages)
     # Família vazia é o fim da linha, e ANTES da simulação: dizer que copiaria zero pacotes e depois
     # tiraria o rádio da lista descreve uma remoção sem rede de segurança nenhuma.
     if (-not @($pacotes).Count) {
@@ -1851,37 +1914,40 @@ function Invoke-WinForgeWifiDriverGeneric {
         return @($L.ToArray())
     }
 
-    $radio = Get-WinForgeWifiAdapter
+    # O gabarito que vale aqui é o PARÂMETRO, e não a tabela de fatos do guarda. Sem -Facts, $fatos
+    # já veio cheio de Get-WinForgeNetworkFacts, e passar aquilo jogaria o resolvedor no caminho de
+    # gabarito EM MÁQUINA DE VERDADE - com identificador e pacote sintéticos, que é o oposto do que
+    # este conserto existe para garantir.
+    $contexto = Get-WinForgeWifiActionContext -Facts $Facts
+    $radio = $contexto.Adapter
     if (-not $radio.Ok) {
         $L.Add("Não há rádio sem fio para mexer: $([string]$radio.Reason)")
         return @($L.ToArray())
     }
-    $idPnp = ''
-    try {
-        $obj = @(Get-NetAdapter -ErrorAction Stop | Where-Object { [int]$_.ifIndex -eq [int]$radio.ifIndex })
-        if ($obj.Count) { $idPnp = [string]$obj[0].PnPDeviceID }
-    } catch { $idPnp = '' }
+    $L.Add("Rádio: $([string]$radio.Name), driver de $([string]$radio.DriverProvider).")
+    $idPnp = [string]$contexto.PnpDeviceId
     if ([string]::IsNullOrWhiteSpace($idPnp)) {
         $L.Add('Não deu para descobrir o identificador do rádio. Nada foi alterado.')
         return @($L.ToArray())
     }
 
     # A reconfirmação do embutido, na hora de agir. O guarda decidiu com o mesmo dado, mas entre
-    # pintar o botão e clicar nele pode ter passado uma atualização de driver.
-    if (-not (Test-WinForgeInboxWifiDriver -PnpDeviceId $idPnp)) {
+    # pintar o botão e clicar nele pode ter passado uma atualização de driver. Com gabarito, ela sai
+    # do gabarito: a chave 'Inbox' dos fatos é a MESMA pergunta, e ir à máquina aqui faria o teste
+    # depender do rádio de quem compila - foi assim que este bloco passou verde numa máquina com
+    # rádio Intel e vermelho na mesma máquina com um MediaTek.
+    if (-not [bool]$contexto.Inbox) {
         $L.Add('O Windows não tem driver básico para este rádio, então não há por onde trocar. Nada foi alterado.')
         return @($L.ToArray())
     }
 
-    $infDoRadio = Get-WinForgeWifiDriverInfName -PnpDeviceId $idPnp
-    $lidos = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
-    $familia = Select-WinForgeWifiDriverPackage -Entries $lidos -InfName $infDoRadio
-    $pacotes = @($familia.Oem)
+    $infDoRadio = [string]$contexto.InfName
+    $pacotes = @($contexto.Packages)
     if (-not $pacotes.Count) {
         $L.Add("Não achei no repositório nenhum pacote da família do rádio ('$infDoRadio'). Nada foi alterado.")
         return @($L.ToArray())
     }
-    $L.Add("Família do rádio ($([string]$familia.Original)): $($pacotes -join ', ').")
+    $L.Add("Família do rádio ($([string]$contexto.Original)): $($pacotes -join ', ').")
 
     if ($DryRun) {
         $L.Add("[simulação] copiaria os $(@($pacotes).Count) pacote(s) acima e depois os apagaria do repositório (delete-driver), deixando o Windows instalar o driver básico")
