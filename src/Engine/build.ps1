@@ -6014,17 +6014,53 @@ if ($SelfTest) {
         # ---- A marca é gravada por TROCA, e não por reescrita no lugar. 'Set-Content' trunca o
         # arquivo antes de escrever: interrompido no meio - queda de energia, disco cheio - o índice
         # vira ILEGÍVEL, que é exatamente a armadilha que prende o conjunto para sempre. O que a
-        # troca precisa manter é o endurecimento do DESTINO, e isso aqui é medido, não suposto: a
-        # lista de permissões do arquivo antes e depois tem de ser a MESMA.
+        # troca precisa entregar é um índice PROTEGIDO no lugar do antigo, e é isso - só isso - que
+        # se cobra aqui: ninguém novo passa a ter acesso ao arquivo.
+        #
+        # A cobrança NÃO é mais "o SDDL do destino é idêntico antes e depois". Esse texto é o
+        # resultado da mescla de ACL que o próprio ReplaceFile faz: qual das duas listas sobrevive,
+        # em que ordem e com quais marcas de herança não é contrato de lugar nenhum. Varia por
+        # versão do Windows e muda conforme o temporário tenha sido endurecido ou não - elevado, ele
+        # nasce com DACL protegida. MEDIDO nesta máquina (Windows 11): a lista do DESTINO sobrevive
+        # mesmo quando a do temporário é protegida, e por isso a trava ficava verde aqui aconteça o
+        # que acontecer com o temporário. No executor da integração contínua o texto sai diferente e
+        # ela ficava vermelha sem nada estar quebrado. Comparar texto de SDDL é cobrar do Windows
+        # uma promessa que ele não fez, e ler a máquina em vez do gabarito.
+        #
+        # O que se compara é o CONJUNTO de SIDs com Allow, e por SID, nunca por nome: nome de grupo
+        # é traduzido ('BUILTIN\Administradores' aqui, 'BUILTIN\Administrators' no executor). A
+        # troca PODE fechar o arquivo - é o que o endurecimento faz, e ele só acrescenta SYSTEM e
+        # Administradores; o que ela não pode é ABRIR o índice para quem não alcançava o destino.
+        # A leitura é pela seção de acesso (GetAccessControl), e não por Get-Acl: Get-Acl pede
+        # também dono e grupo e tropeça em DACL protegida, que é justo o estado do arquivo
+        # endurecido - a trava acusaria "não pôde ser lida" no caso em que o código acertou.
         $wfIdxAlvoM = Join-Path $wfIdxRaiz 'acl-index-20260101-000000.json'
-        $wfIdxSddlAntes = ''
-        try { $wfIdxSddlAntes = [string](Get-Acl -LiteralPath $wfIdxAlvoM).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access) } catch { $wfIdxSddlAntes = '' }
+        $wfIdxQuemAcessa = {
+            param($Caminho)
+            $sids = @{}
+            try {
+                $regras = @((New-Object System.IO.FileInfo ([string]$Caminho)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+            } catch { return $null }
+            foreach ($regra in $regras) {
+                if ($regra.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+                $sids[[string]$regra.IdentityReference.Value] = $true
+            }
+            return $sids
+        }
+        $wfIdxAcessoAntes = & $wfIdxQuemAcessa $wfIdxAlvoM
         # Consumido some da fila; o seguinte assume.
         if (-not (Set-WinForgeAclIndexConsumed -Path $wfIdxAlvoM).Ok) { Write-Host "  [ERRO] Permissões (Consumed): a marcação falhou" -ForegroundColor Red; $wbErrors++ }
-        $wfIdxSddlDepois = ''
-        try { $wfIdxSddlDepois = [string](Get-Acl -LiteralPath $wfIdxAlvoM).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access) } catch { $wfIdxSddlDepois = '' }
-        if ([string]::IsNullOrWhiteSpace($wfIdxSddlAntes)) { Write-Host "  [ERRO] Permissões (Consumed): a lista do índice não pôde ser lida antes da marcação" -ForegroundColor Red; $wbErrors++ }
-        elseif ($wfIdxSddlAntes -cne $wfIdxSddlDepois) { Write-Host "  [ERRO] Permissões (Consumed): a troca do arquivo NÃO preservou a lista de permissões do destino`n    antes:  $wfIdxSddlAntes`n    depois: $wfIdxSddlDepois" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxAcessoDepois = & $wfIdxQuemAcessa $wfIdxAlvoM
+        # S-1-5-18 é SYSTEM e S-1-5-32-544 é o grupo Administradores: são os dois que o endurecimento
+        # acrescenta de propósito (wf-server.ps1, Protect-WinForgeSnapshotFile). Qualquer OUTRO nome
+        # novo na lista é o índice aberto para quem não o alcançava.
+        $wfIdxDuros = @('S-1-5-18', 'S-1-5-32-544')
+        if ($null -eq $wfIdxAcessoAntes -or -not $wfIdxAcessoAntes.Count) { Write-Host "  [ERRO] Permissões (Consumed): a lista do índice não pôde ser lida antes da marcação" -ForegroundColor Red; $wbErrors++ }
+        elseif ($null -eq $wfIdxAcessoDepois -or -not $wfIdxAcessoDepois.Count) { Write-Host "  [ERRO] Permissões (Consumed): a lista do índice trocado não pôde ser lida depois da marcação" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfIdxAbriu = @(@($wfIdxAcessoDepois.Keys) | Where-Object { -not $wfIdxAcessoAntes.ContainsKey([string]$_) -and [string]$_ -notin $wfIdxDuros })
+            if ($wfIdxAbriu.Count) { Write-Host "  [ERRO] Permissões (Consumed): a troca do arquivo ABRIU o índice para quem não tinha acesso ao destino ($($wfIdxAbriu -join ', '))`n    antes:  $(@($wfIdxAcessoAntes.Keys) -join ', ')`n    depois: $(@($wfIdxAcessoDepois.Keys) -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        }
         # E o temporário não fica no disco: um '.tmp' esquecido na pasta vira órfão para a limpeza e
         # entra na conta do aviso de tamanho.
         $wfIdxSobra = @(Get-ChildItem -LiteralPath $wfIdxRaiz -Filter '*.tmp' -File -ErrorAction SilentlyContinue)
@@ -6034,9 +6070,8 @@ if ($SelfTest) {
         $wfIdxFonteM = [string](Get-Command Set-WinForgeAclIndexConsumed).ScriptBlock
         if ($wfIdxFonteM.IndexOf('[System.IO.File]::Replace(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): a marca não é gravada por troca ([System.IO.File]::Replace) - truncado no meio, o índice vira ilegível" -ForegroundColor Red; $wbErrors++ }
         if ($wfIdxFonteM -match "Set-Content -LiteralPath \(\[string\]\`$Path\)") { Write-Host "  [ERRO] Permissões (Consumed): a reescrita no lugar voltou - é ela que transforma uma interrupção em índice ilegível" -ForegroundColor Red; $wbErrors++ }
-        # O TEMPORÁRIO é endurecido ANTES da troca, e esta é a metade de segurança do conserto.
-        # File.Replace preserva a LISTA do destino (a asserção de SDDL acima mede isso), mas o
-        # arquivo que fica é o TEMPORÁRIO renomeado - e arquivo criado por processo elevado nasce
+        # O TEMPORÁRIO é endurecido ANTES da troca, e esta é a metade de segurança do conserto. O
+        # arquivo que fica no lugar é o TEMPORÁRIO renomeado - e arquivo criado por processo elevado nasce
         # pertencendo à CONTA, não ao grupo Administradores (wf-server.ps1, Protect-WinForgeSnapshotFile).
         # Dono guarda WRITE_DAC implícito: um processo de integridade MÉDIA da mesma conta reabriria
         # o índice já consumido, plantaria um 'ExternalPath' e a limpeza elevada apagaria aquele

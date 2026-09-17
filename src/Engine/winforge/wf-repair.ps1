@@ -5253,8 +5253,9 @@ function Set-WinForgeAclIndexConsumed {
         exatamente o estado que prende o conjunto na fila e deixa a restauração recusada. O texto
         novo vai para um temporário ao lado e [IO.File]::Replace() troca os dois de uma vez.
 
-        Replace mantém a LISTA do destino - medido, SDDL idêntico antes e depois -, mas NÃO o DONO:
-        o arquivo que fica é o temporário renomeado, e arquivo criado por processo elevado nasce
+        Replace não leva o DONO do destino junto, e o que ele faz com a LISTA é uma mescla de ACL
+        decidida pelo Windows, que muda por versão e não é contrato: contar com ela seria apostar.
+        O arquivo que fica é o temporário renomeado, e arquivo criado por processo elevado nasce
         pertencendo à CONTA, não ao grupo Administradores (ver Protect-WinForgeSnapshotFile). Dono
         guarda WRITE_DAC implícito, e o estrago não é só funcional - índice com dono errado é
         recusado na conferência do Desfazer seguinte: um processo de integridade MÉDIA da mesma
