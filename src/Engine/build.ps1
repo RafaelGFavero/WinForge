@@ -7270,6 +7270,19 @@ if ($SelfTest) {
         foreach ($wfLgTema in @('Light', 'Dark')) {
             if ([string]::IsNullOrWhiteSpace([string]$sync.configs.themes.$wfLgTema.RowGroupBackgroundColor)) { Write-Host "  [ERRO] Grupo (tema): RowGroupBackgroundColor ausente em $wfLgTema" -ForegroundColor Red; $wbErrors++ }
         }
+        # ---- A criação do ponto de restauração roda na thread da janela e leva dezenas de
+        # segundos. O que a trava cobra é o AVISO antes dela: a linha muda de texto, a grade é
+        # repintada e o Dispatcher é empurrado - nessa ordem - antes da chamada que bloqueia.
+        $wfPontoFonte = [string](Get-Command Invoke-WinForgeWindowsUpdateGroupAction).ScriptBlock
+        $wfPontoOndeAviso = $wfPontoFonte.IndexOf("-State 'pendente' -Text 'criando ponto de restauração...'", [StringComparison]::Ordinal)
+        $wfPontoOndeCria = $wfPontoFonte.IndexOf('$ponto = New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
+        $wfPontoOndePinta = $wfPontoFonte.IndexOf('DispatcherPriority]::Render', [StringComparison]::Ordinal)
+        if ($wfPontoOndeAviso -lt 0) { Write-Host "  [ERRO] Lote (aviso): a linha não diz que o ponto de restauração está sendo criado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPontoOndeCria -lt 0 -or $wfPontoOndeAviso -gt $wfPontoOndeCria) { Write-Host "  [ERRO] Lote (aviso): o aviso aparece DEPOIS da criação do ponto - a janela trava calada" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPontoOndePinta -lt 0 -or $wfPontoOndePinta -gt $wfPontoOndeCria) { Write-Host "  [ERRO] Lote (aviso): nada força a pintura antes da chamada que bloqueia - o texto só apareceria no fim" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPontoFonte -notmatch 'Cursors\]::Wait') { Write-Host "  [ERRO] Lote (aviso): o cursor não vira ampulheta durante a espera" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPontoFonte -notmatch '(?s)finally\s*\{[^}]*\$sync\.Form\.Cursor = \$wfPontoCursor') { Write-Host "  [ERRO] Lote (aviso): o cursor não é devolvido num finally - uma falha deixaria a ampulheta para sempre" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Lote (aviso): a linha anuncia o ponto de restauração, a grade repinta e o cursor volta no finally"
         Write-Host "  Grupo: cinco estados derivados, rótulos sem a palavra 'chipset', um runspace com foreach, uma caixa de reinício e lista na janela de saída"
         # ---- §4: chipset INF pela via do Windows Update
         # Classe 'System' = {4d36e97d-e325-11ce-bfc1-08002be10318}, invariante de idioma. Vídeo é
@@ -7393,7 +7406,14 @@ if ($SelfTest) {
         if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row (Format-WinForgeWindowsUpdateGroupRow -Group (& $wfChCom $wfChGrupo @{ Provider = 'Intel Corporation' })) -NoUI) -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: lote com o fabricante por extenso ficou sem ponto de restauração" -ForegroundColor Red; $wbErrors++ }
         # A criação também é incondicional na fonte: o 'if' do reconhecimento não pode voltar a
         # cercá-la. A âncora é a chamada seguida da conferência, sem nada entre as duas.
-        if ($wfChFonteA -notmatch '(?m)^\s*\$ponto = New-WinForgeChipsetRestorePoint\r?\n\s*if \(-not \$ponto\.Ok\)') { Write-Host "  [ERRO] Chipset: a criação do ponto voltou a ser condicionada ao reconhecimento" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch '(?m)^\s*\$ponto = New-WinForgeChipsetRestorePoint\s*$') { Write-Host "  [ERRO] Chipset: a criação do ponto não está numa linha própria - ela pode ter voltado para dentro de uma condição" -ForegroundColor Red; $wbErrors++ }
+        # Entre a caixa de confirmação e a criação do ponto não pode aparecer o reconhecimento:
+        # é ali que o 'if ($chipset.Ok)' voltaria a cercar a rede de segurança. A adjacência das
+        # duas linhas não serve mais de âncora - o aviso da espera entrou no meio.
+        $wfChPosResp = $wfChFonteA.IndexOf('$resposta = [System.Windows.MessageBox]', [StringComparison]::Ordinal)
+        $wfChEntre = $(if ($wfChPosResp -ge 0 -and $wfChPosPonto -gt $wfChPosResp) { $wfChFonteA.Substring($wfChPosResp, $wfChPosPonto - $wfChPosResp) } else { '' })
+        if ($wfChEntre -match '\$chipset\.Ok') { Write-Host "  [ERRO] Chipset: a criação do ponto voltou a ser condicionada ao reconhecimento" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch '(?s)\$ponto = New-WinForgeChipsetRestorePoint.{0,300}if \(-not \$ponto\.Ok\)') { Write-Host "  [ERRO] Chipset: a conferência do ponto ficou longe da criação" -ForegroundColor Red; $wbErrors++ }
         # ...e o reconhecimento continua sendo usado para ESCOLHER O TEXTO, que é o que sobrou dele.
         if ($wfChFonteA -notmatch '\$\(if \(\$chipset\.Ok\) \{ \(Get-WinForgeChipsetConfirmText') { Write-Host "  [ERRO] Chipset: o reconhecimento deixou de escolher a pergunta da confirmação" -ForegroundColor Red; $wbErrors++ }
         # ...e o relato do que seria instalado continua inteiro nos dois casos: o anúncio do ponto é
@@ -7409,9 +7429,12 @@ if ($SelfTest) {
         # Ponto que não deu certo PARA o lote, e nenhum membro é tocado. É a razão de o ponto vir
         # antes de tudo: sem rede, a ação que não tem Desfazer não acontece. O caminho é de caixa e o
         # -SelfTest não passa por ele - a forma com o argumento é o que sobra para prender.
-        if ($wfChFonteA -notmatch '(?s)if \(-not \$ponto\.Ok\) \{.{0,400}return \[string\]\$ponto\.Reason') { Write-Host "  [ERRO] Chipset: falha do ponto de restauração não interrompe o lote" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch '(?s)if \(-not \$ponto\.Ok\) \{.{0,900}return \[string\]\$ponto\.Reason') { Write-Host "  [ERRO] Chipset: falha do ponto de restauração não interrompe o lote" -ForegroundColor Red; $wbErrors++ }
         $wfChPosPontoCham = $wfChFonteA.IndexOf('$ponto = New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
         $wfChPosMarca = $wfChFonteA.IndexOf("Set-WinForgeWindowsUpdateRowState -UpdateId ([string]@(`$faltam)[0]) -State 'instalando'", [StringComparison]::Ordinal)
+        # O aviso da espera mexe no TEXTO da linha e não no estado dela: 'instalando' antes de o
+        # ponto existir seria a tela dizendo que começou o que ainda não pode começar.
+        if ($wfChFonteA -match "-State 'instalando' -Text 'criando ponto") { Write-Host "  [ERRO] Lote (aviso): o aviso marca o membro como 'instalando' antes de o ponto de restauração existir" -ForegroundColor Red; $wbErrors++ }
         if ($wfChPosPontoCham -lt 0 -or $wfChPosMarca -lt 0 -or $wfChPosPontoCham -gt $wfChPosMarca) { Write-Host "  [ERRO] Chipset: o ponto de restauração é criado DEPOIS de o primeiro membro já ter sido marcado" -ForegroundColor Red; $wbErrors++ }
         # Falha de LEITURA da lista de pontos é resposta própria, e não "não foi criado": medido nesta
         # máquina, sem elevação Get-ComputerRestorePoint responde 'Acesso negado'. E ela é cobrada nas

@@ -1312,8 +1312,33 @@ function Invoke-WinForgeWindowsUpdateGroupAction {
     # O ponto vem ANTES de qualquer membro ser tocado, e falha dele PARA o lote: sem a rede de
     # segurança, a ação que não tem Desfazer não acontece. Vale para TODO lote, reconhecido ou não -
     # ver o comentário lá em cima.
-    $ponto = New-WinForgeChipsetRestorePoint
+    # A criação do ponto roda NA THREAD DA JANELA e leva dezenas de segundos: são três idas ao
+    # Windows (a lista de pontos antes, a criação, a lista de novo para conferir que apareceu um
+    # ponto novo). Travar em silêncio logo depois de um "Sim" faz a pessoa clicar outra vez ou
+    # matar o programa, então a linha DIZ o que está acontecendo e o cursor vira ampulheta. A
+    # pintura é forçada ANTES da chamada que bloqueia - sem o empurrão do Dispatcher, a mensagem só
+    # apareceria depois de tudo terminar, que é o mesmo que não existir.
+    $wfPontoCursor = $null
+    # O estado continua 'pendente': nenhum membro pode aparecer como 'instalando' antes de o ponto
+    # existir - é a mesma regra que faz o ponto vir antes de tudo. O que muda aqui é só o TEXTO da
+    # linha, que é o que a pessoa lê enquanto a janela não responde.
+    $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]@($faltam)[0]) -State 'pendente' -Text 'criando ponto de restauração...'
+    Update-WinForgeDiagnosticsWindowsUpdateGrid
+    try {
+        if ($null -ne $sync.Form) {
+            $wfPontoCursor = $sync.Form.Cursor
+            $sync.Form.Cursor = [System.Windows.Input.Cursors]::Wait
+            $sync.Form.Dispatcher.Invoke([action] { }, [System.Windows.Threading.DispatcherPriority]::Render) | Out-Null
+        }
+        $ponto = New-WinForgeChipsetRestorePoint
+    } finally {
+        if ($null -ne $sync.Form) { $sync.Form.Cursor = $wfPontoCursor }
+    }
     if (-not $ponto.Ok) {
+        # A linha volta para 'pendente': ela ficou dizendo "criando ponto de restauração..." e o
+        # lote não vai acontecer.
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]@($faltam)[0]) -State 'pendente' -Text ''
+        Update-WinForgeDiagnosticsWindowsUpdateGrid
         Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Lote recusado: $([string]$ponto.Reason)"
         [System.Windows.MessageBox]::Show($sync.Form, [string]$ponto.Reason, "WinForge", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
         return [string]$ponto.Reason
