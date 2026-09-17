@@ -8709,6 +8709,106 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Rede (botão 5): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # ---------------------------------------------------------------- versão e documentação
+    # Prende quatro coisas que só existem fora do motor: o número da versão, a seção desta versão no
+    # changelog, os rótulos de botão que o README documenta e o roteiro manual.
+    #
+    # Três cuidados, cada um contra uma armadilha que esta leva já viu:
+    #   1. O tema do changelog é procurado SÓ dentro da seção desta versão. Procurá-lo no arquivo
+    #      inteiro seria satisfeito pela seção da 1.7.0, que também fala de permissões e de Windows
+    #      Update - a trava passaria sem ninguém escrever uma linha nova.
+    #   2. Os rótulos NÃO são literais escritos aqui: saem de '$sync.configs.feature'. Renomear o
+    #      botão e esquecer o README reprova, e é o caso real desta leva - a spec chama o botão
+    #      principal de 'Devolver ao padrão do Windows', nome que a janela nunca mostrou, e uma
+    #      trava escrita contra o literal da spec teria cobrado do README a mentira em vez do fato.
+    #   3. O rótulo tem de estar no README COMO rótulo (linha de tabela ou em negrito), e cada item
+    #      do roteiro tem de estar dentro de um teste que diga o que fazer se der errado. Citação no
+    #      meio de um parágrafo não é documentação de botão, e item solto não é teste.
+    try {
+        # Guardado aqui para a linha de sucesso lá embaixo só sair quando este bloco inteiro passar:
+        # "no lugar" impresso logo abaixo de sete [ERRO] é ruído que treina a gente a não ler.
+        $wfDocErrosAntes = $wbErrors
+        # O autoteste pode ser chamado de qualquer pasta, e o motor gerado mora em <repo>\dist\engine.
+        $wfDocRaiz = (Get-Location).Path
+        if (-not (Test-Path -LiteralPath (Join-Path $wfDocRaiz 'version.props'))) {
+            $wfDocAlt = Split-Path -Parent (Split-Path -Parent ([string]$sync.ScriptRoot))
+            if (Test-Path -LiteralPath (Join-Path $wfDocAlt 'version.props')) { $wfDocRaiz = $wfDocAlt }
+        }
+        # A versão é literal de propósito: subir de versão tem de passar por esta linha, e não
+        # deslizar junto com o version.props.
+        if ([string]$sync.version -ne '1.8.0') { Write-Host "  [ERRO] Versão: `$sync.version = '$($sync.version)', esperado '1.8.0'" -ForegroundColor Red; $wbErrors++ }
+        # ---- changelog: a seção desta versão, no topo, com os quatro temas da leva em subtítulo.
+        $wfDocChangeArq = Join-Path $wfDocRaiz 'docs\changelog.md'
+        $wfDocChange = [string](Get-Content -LiteralPath $wfDocChangeArq -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $wfDocCab = [regex]::Match($wfDocChange, ('(?m)^## ' + [regex]::Escape([string]$sync.version) + ' \(\d{4}-\d{2}-\d{2}\)\s*$'))
+        if (-not $wfDocCab.Success) {
+            Write-Host "  [ERRO] Changelog: falta a seção '## $($sync.version) (<data>)'" -ForegroundColor Red; $wbErrors++
+        } else {
+            if (@([regex]::Matches($wfDocChange.Substring(0, $wfDocCab.Index), '(?m)^## ')).Count -ne 0) {
+                Write-Host "  [ERRO] Changelog: a seção $($sync.version) não é a do topo" -ForegroundColor Red; $wbErrors++
+            }
+            $wfDocResto = $wfDocChange.Substring($wfDocCab.Index + $wfDocCab.Length)
+            $wfDocFim = [regex]::Match($wfDocResto, '(?m)^## ')
+            $wfDocSecao = if ($wfDocFim.Success) { $wfDocResto.Substring(0, $wfDocFim.Index) } else { $wfDocResto }
+            foreach ($wfDocTema in @('Permissões', 'Parar', 'Windows Update', 'Rede sem fio')) {
+                if ($wfDocSecao -notmatch ('(?m)^### .*' + [regex]::Escape($wfDocTema))) { Write-Host "  [ERRO] Changelog: a seção $($sync.version) não tem subtítulo sobre '$wfDocTema'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Os limites conhecidos são a parte que ninguém escreve por vontade própria: uma versão
+            # que mexe em permissão, driver de rede e driver em lote sem ter rodado numa máquina com
+            # o problema precisa dizer isso onde o usuário lê.
+            $wfDocLim = [regex]::Match($wfDocSecao, '(?ms)^### [^\r\n]*[Ll]imites conhecidos.*$')
+            if (-not $wfDocLim.Success) {
+                Write-Host "  [ERRO] Changelog: a seção $($sync.version) não declara os limites conhecidos" -ForegroundColor Red; $wbErrors++
+            } elseif (@([regex]::Matches($wfDocLim.Value, '(?m)^- ')).Count -lt 4) {
+                Write-Host "  [ERRO] Changelog: os limites conhecidos têm $(@([regex]::Matches($wfDocLim.Value, '(?m)^- ')).Count) item(ns); esperado ao menos 4" -ForegroundColor Red; $wbErrors++
+            }
+        }
+        # ---- README: cada botão novo desta leva, com o rótulo LIDO DA CONFIG.
+        $wfDocReadme = [string](Get-Content -LiteralPath (Join-Path $wfDocRaiz 'README.md') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $wfDocLinhas = @($wfDocReadme -split "`r?`n")
+        foreach ($wfDocId in @('WPFWFRepAclRestore', 'WPFWFRepAclUndo', 'WPFWFRepAclCleanup', 'WPFWFRepNetDiagFull', 'WPFWFRepNetDnsRenew', 'WPFWFRepWifiDriverReinstall', 'WPFWFRepWifiDriverRestore', 'WPFWFRepWifiDriverGeneric')) {
+            $wfDocEnt = $sync.configs.feature.PSObject.Properties[$wfDocId]
+            if ($null -eq $wfDocEnt) { Write-Host "  [ERRO] README: a entrada de config '$wfDocId' não existe" -ForegroundColor Red; $wbErrors++; continue }
+            $wfDocRot = [string]$wfDocEnt.Value.Content
+            # O núcleo do rótulo: sem o prefixo do grupo e sem o parêntese de aviso do fim, que são
+            # contexto da tela e não do texto corrido. O resto tem de aparecer LETRA POR LETRA.
+            $wfDocNucleo = (($wfDocRot -replace '^Permissões do disco C: - ', '') -replace '\s*\([^)]*\)\s*$', '').Trim()
+            $wfDocEsc = [regex]::Escape($wfDocNucleo)
+            $wfDocAchou = $false
+            foreach ($wfDocLinha in $wfDocLinhas) {
+                if ($wfDocLinha -notmatch $wfDocEsc) { continue }
+                if ($wfDocLinha -match '^\s*\|' -or $wfDocLinha -match ('\*\*' + $wfDocEsc + '\*\*')) { $wfDocAchou = $true; break }
+            }
+            if (-not $wfDocAchou) { Write-Host "  [ERRO] README: o botão '$wfDocRot' não está documentado como rótulo (procurei por '$wfDocNucleo' em linha de tabela ou em negrito)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # ---- roteiro manual: o que nada desta versão mediu, escrito antes do PR.
+        $wfDocRotArq = Join-Path $wfDocRaiz ('docs\roteiro-manual-' + [string]$sync.version + '.md')
+        $wfDocRoteiro = [string](Get-Content -LiteralPath $wfDocRotArq -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+        if ([string]::IsNullOrWhiteSpace($wfDocRoteiro)) {
+            Write-Host "  [ERRO] Roteiro: '$wfDocRotArq' não existe - nada desta versão foi visto rodando numa máquina quebrada de verdade" -ForegroundColor Red; $wbErrors++
+        } else {
+            $wfDocCortes = @([regex]::Matches($wfDocRoteiro, '(?m)^## '))
+            $wfDocSecoes = @()
+            for ($wfDocI = 0; $wfDocI -lt $wfDocCortes.Count; $wfDocI++) {
+                $wfDocIni = $wfDocCortes[$wfDocI].Index
+                $wfDocAte = if ($wfDocI + 1 -lt $wfDocCortes.Count) { $wfDocCortes[$wfDocI + 1].Index } else { $wfDocRoteiro.Length }
+                $wfDocSecoes += , $wfDocRoteiro.Substring($wfDocIni, $wfDocAte - $wfDocIni)
+            }
+            # Teste = seção NUMERADA que diz o que fazer se der errado. É essa a unidade que os itens
+            # abaixo têm de habitar: item citado na abertura ou na lista do que não foi coberto não
+            # é teste, e era assim que uma trava por frase se autoaprovava.
+            $wfDocTestes = @($wfDocSecoes | Where-Object { $_ -match '(?m)^## \d+\.' -and $_ -match 'Se der errado' })
+            if ($wfDocTestes.Count -lt 8) { Write-Host "  [ERRO] Roteiro: $($wfDocTestes.Count) teste(s) numerado(s) com saída de erro escrita; esperado ao menos 8" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfDocItem in @('remove-device', 'add-driver', 'inbox', 'KILL_ON_JOB_CLOSE', 'perfil grande')) {
+                if (-not @($wfDocTestes | Where-Object { $_ -match [regex]::Escape($wfDocItem) }).Count) { Write-Host "  [ERRO] Roteiro: o item '$wfDocItem' não está dentro de um teste" -ForegroundColor Red; $wbErrors++ }
+            }
+            if (@($wfDocTestes | Where-Object { $_ -match 'ELEVAÇÃO' }).Count -lt 5) { Write-Host "  [ERRO] Roteiro: menos de 5 testes marcam a exigência de elevação" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfDocTestes | Where-Object { $_ -match 'PODE FICAR SEM REDE' -and $_ -match 'cabo de rede' }).Count) { Write-Host "  [ERRO] Roteiro: nenhum teste avisa que pode ficar sem rede com o cabo à mão" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wbErrors -eq $wfDocErrosAntes) { Write-Host "  $($sync.version): versão, changelog, README e roteiro manual no lugar" }
+    } catch {
+        Write-Host "  [ERRO] Versão e documentação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
     # qualquer processo de integridade média da mesma conta. Enquanto ele só pintava o rótulo
