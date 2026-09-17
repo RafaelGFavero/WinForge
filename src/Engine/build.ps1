@@ -8711,7 +8711,12 @@ if ($SelfTest) {
         # '/install' PROPÕE, não impõe: o texto do 6 não pode afirmar 'driver restaurado'.
         $wfW46Fonte6 = [string](Get-Command Invoke-WinForgeWifiDriverRestore).ScriptBlock
         if ($wfW46Fonte6 -match '[Dd]river restaurado') { Write-Host "  [ERRO] Rede (botão 6): o texto afirma 'driver restaurado' - o '/install' apenas propõe" -ForegroundColor Red; $wbErrors++ }
-        if ($wfW46Fonte6 -notmatch 'Get-WinForgeWifiAdapter') { Write-Host "  [ERRO] Rede (botão 6): não confere o adaptador depois" -ForegroundColor Red; $wbErrors++ }
+        # A DÉCIMA TERCEIRA âncora oca da leva: 'Get-WinForgeWifiAdapter' aparece no bloco de ajuda
+        # desta mesma função (é o padrão do -Probe da espera), então a trava antiga media o
+        # comentário. A forma cobrada agora é a CHAMADA com argumento, e ela também é a prova do
+        # conserto: julgar antes de o Plug and Play terminar faz o relato mandar buscar driver por
+        # pen drive enquanto a instalação está em curso - e este é o caminho do socorro automático.
+        if ($wfW46Fonte6 -notmatch 'Wait-WinForgeWifiAdapterSettle\s+-TimeoutSeconds\s+\d+') { Write-Host "  [ERRO] Rede (botão 6): não espera o Plug and Play assentar antes de julgar o adaptador" -ForegroundColor Red; $wbErrors++ }
         foreach ($wfW46F in @('cabo de rede', 'pen drive')) {
             if ($wfW46Fonte6 -notmatch [regex]::Escape($wfW46F)) { Write-Host "  [ERRO] Rede (botão 6): sem rádio no fim, o texto não manda '$wfW46F'" -ForegroundColor Red; $wbErrors++ }
         }

@@ -2019,7 +2019,11 @@ function Invoke-WinForgeWifiDriverRestore {
         if (-not (Test-WinForgePnputilExit -ExitCode $codigo)) { $L.Add("   O Windows recusou este pacote. $([string]$saida.Text)") }
     }
 
-    $radio = Get-WinForgeWifiAdapter
+    # A ESPERA vale aqui como nas irmãs, e aqui mais do que nelas: este é o caminho do socorro
+    # automático, que roda segundos depois de o dispositivo ter saído da lista. Julgar antes de o
+    # Plug and Play terminar faz o relato mandar buscar driver por pen drive enquanto a instalação
+    # ainda está acontecendo - o pior conselho possível, e no pior momento possível.
+    $radio = Wait-WinForgeWifiAdapterSettle -TimeoutSeconds 60
     if ($radio.Ok) {
         $L.Add("O adaptador '$([string]$radio.Name)' está de volta na lista, com driver de $([string]$radio.DriverProvider) e situação $([string]$radio.Status).")
     } else {
