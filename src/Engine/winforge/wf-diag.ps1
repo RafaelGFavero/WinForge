@@ -1061,6 +1061,291 @@ function Invoke-WinForgeWindowsUpdateAction {
     return 'windows-update'
 }
 
+function Get-WinForgeWindowsUpdateGroupState {
+    <#
+    .SYNOPSIS
+        O estado da linha de grupo, DERIVADO do estado de cada membro.
+    .DESCRIPTION
+        Derivado a cada remontagem, NUNCA armazenado. Guardar um estado próprio do grupo criaria uma
+        segunda verdade sobre a mesma coisa, e as duas discordariam no primeiro membro que falhasse
+        ou no primeiro clique numa linha solta. A única verdade é $sync.DiagWUState, por id.
+
+        O texto conta o que aconteceu com os membros, e é ele que sobrevive a uma captura de tela em
+        cinza - a cor da linha sozinha não serve a quem não a distingue. O '(reinicie)' sobe de
+        qualquer membro: um reinício pendente vale para a máquina inteira, não para a linha.
+
+        O botão fica clicável enquanto sobrar membro para instalar e nada estiver em andamento -
+        falha INCLUÍDA, porque é justamente a hora de tentar de novo.
+    .OUTPUTS
+        @{ State = 'pendente'|'instalando'|'instalado'|'falhou'; StatusText; ActionLabel; ActionEnabled }
+    #>
+    param([string[]]$Members)
+
+    $ids = @(@($Members) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $total = $ids.Count
+    if ($total -eq 0) { return @{ State = 'pendente'; StatusText = ''; ActionLabel = 'Instalar todos (0)'; ActionEnabled = $false } }
+
+    $instalados = 0; $instalando = 0; $falharam = 0; $reinicio = $false
+    foreach ($id in $ids) {
+        $estado = Get-WinForgeWindowsUpdateRowState -UpdateId ([string]$id)
+        switch ([string]$estado.State) {
+            'instalado'  { $instalados++; if ([string]$estado.Text -match '\(reinicie\)') { $reinicio = $true } }
+            'instalando' { $instalando++ }
+            'falhou'     { $falharam++ }
+        }
+    }
+    $pendentes = $total - $instalados - $instalando - $falharam
+    $faltam    = $total - $instalados
+
+    $texto = ''
+    $situacao = 'pendente'
+    if ($instalando -gt 0) {
+        $situacao = 'instalando'
+        $texto = "instalando $instalando de $total..."
+    } elseif ($instalados -eq $total) {
+        $situacao = 'instalado'
+        $texto = "$total de $total instalados" + $(if ($reinicio) { ' (reinicie)' } else { '' })
+    } elseif ($instalados -eq 0 -and $falharam -eq 0) {
+        # Nada aconteceu ainda: a coluna "Situação" fica em branco, como na linha solta recém-buscada.
+        $texto = ''
+    } else {
+        # O lote parou no meio - por falha, por cancelamento ou pelos dois. As três parcelas somam o
+        # total, e é assim que a pessoa sabe o que ainda tem para fazer.
+        $partes = @("$instalados de $total instalados")
+        if ($falharam -gt 0)  { $partes += $(if ($falharam -eq 1)  { '1 falhou' }   else { "$falharam falharam" }) }
+        if ($pendentes -gt 0) { $partes += $(if ($pendentes -eq 1) { '1 pendente' } else { "$pendentes pendentes" }) }
+        $texto = ($partes -join ', ')
+        if ($falharam -gt 0 -and $pendentes -eq 0) { $situacao = 'falhou' }
+    }
+
+    $rotulo = $(if ($instalados -eq 0 -and $falharam -eq 0) { "Instalar todos ($total)" }
+                elseif ($faltam -gt 0) { "Instalar os $faltam que faltam" }
+                else { "Instalar todos ($total)" })
+    return @{
+        State         = $situacao
+        StatusText    = $texto
+        ActionLabel   = $rotulo
+        ActionEnabled = ($instalando -eq 0 -and $faltam -gt 0)
+    }
+}
+
+function Format-WinForgeWindowsUpdateGroupRow {
+    <#
+    .SYNOPSIS
+        A linha da tabela que representa um lote de INF sem versão.
+    .DESCRIPTION
+        As colunas mostram texto já formatado, e por isso o GRUPO CRU viaja inteiro no campo Group:
+        o filtro de chipset precisa de Class, Provider, HardwareIds e ProblemCodes como vieram, e
+        'Date' aqui já pode ter virado a frase 'sem data confiável'.
+
+        O rótulo nasce de Provider e do tamanho do lote, e NÃO diz "chipset": o critério que junta
+        estas linhas (fornecedor, classe e data) é mais frouxo do que o que permitiria afirmar de
+        que peça elas são. Dizer "chipset" aqui seria afirmar o que este agrupamento não apurou.
+
+        Data anterior a 1990 vira 'sem data confiável': é carimbo de fábrica de INF, não data de
+        publicação, e mostrá-la faria a coluna ordenar o lote como se fosse o driver mais velho da
+        máquina. O mesmo vale para data ausente ou ilegível.
+    .OUTPUTS
+        A linha, com o grupo original em .Group.
+    #>
+    param($Group)
+
+    if ($null -eq $Group) { return $null }
+    $membros = @(@($Group.Members) | ForEach-Object { [string]$_ })
+    $quantos = $membros.Count
+    $estado  = Get-WinForgeWindowsUpdateGroupState -Members $membros
+
+    # 1990: antes disso não existia driver para este Windows. A data que vem nesses INF é carimbo de
+    # fábrica (1968, 1970), e o que ela informaria seria falso.
+    $anoMinimo = 1990
+    $data = [string]$Group.Date
+    # TIPADA antes do [ref]: com $null o PowerShell 5.1 não acha a sobrecarga de cinco argumentos de
+    # TryParseExact e a linha inteira estoura - medido, e o estouro derrubava a tabela.
+    [datetime]$quando = [datetime]::MinValue
+    if ([string]::IsNullOrWhiteSpace($data) -or
+        -not [datetime]::TryParseExact($data, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$quando) -or
+        $quando.Year -lt $anoMinimo) {
+        $data = 'sem data confiável'
+    }
+
+    return [pscustomobject]@{
+        Title    = "$([string]$Group.Provider) — $quantos itens que só dão nome a componentes da placa-mãe"
+        Driver   = "$quantos dispositivos"
+        Provider = [string]$Group.Provider
+        Version  = 'sem número de versão'
+        Date     = $data
+        UpdateId = (Get-WinForgeWindowsUpdateGroupId -Key ([string]$Group.Key))
+        IsGroup  = $true
+        Members  = $membros
+        MemberTitles = @(@($Group.MemberTitles) | ForEach-Object { [string]$_ })
+        State         = [string]$estado.State
+        StatusText    = [string]$estado.StatusText
+        ActionLabel   = [string]$estado.ActionLabel
+        ActionEnabled = [bool]$estado.ActionEnabled
+        ActionTip     = "Baixa e instala os $quantos itens desta linha pelo Windows Update, um de cada vez."
+        DetailsVisible = 'Visible'
+        Group         = $Group
+    }
+}
+
+function Show-WinForgeWindowsUpdateGroupList {
+    <#
+    .SYNOPSIS
+        O que o botão "Ver lista" da linha de grupo mostra: os títulos de todos os membros.
+    .DESCRIPTION
+        Na janela de saída, e não numa célula que se abre. Gabarito próprio de célula
+        (RowDetailsTemplate, Expander) quebra a rolagem da aba - medido no Plano 9, Tarefa 4: com
+        gabarito próprio a roda repassada à aba deixa de mover o ScrollViewer. A janela de saída já
+        existe, já rola, já tem "Copiar" e já sabe fechar.
+    .PARAMETER NoShow
+        Monta a janela sem mostrar. É a porta do -SelfTest.
+    .OUTPUTS
+        A janela montada.
+    #>
+    param($Row, [switch]$NoShow)
+
+    if ($null -eq $Row) { return $null }
+    $titulos = @(@($Row.MemberTitles) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($titulos.Count -eq 0) { $titulos = @('Esta linha não trouxe a lista de títulos.') }
+    return (Show-WinForgeOutputWindow -Title ([string]$Row.Title) -Text ($titulos -join "`r`n") -Component 'Diag' -NoShow:$NoShow)
+}
+
+function Invoke-WinForgeWindowsUpdateGroupAction {
+    <#
+    .SYNOPSIS
+        O que o botão "Instalar todos" da linha de grupo faz.
+    .DESCRIPTION
+        UM despacho para a pilha de runspaces, com o laço DENTRO dele. Um trabalho por membro
+        disputaria $sync.CommandRunning consigo mesmo: o segundo veria a trava do primeiro e seria
+        recusado, e o lote pararia no item 2 de 47.
+
+        Cada membro dá um tique pelo caminho que já existe ($sync.LastWUInstall* mais
+        Invoke-WPFUIThread), e os dois blocos que a thread da janela executa nascem AQUI, na runspace
+        principal: bloco criado dentro da runspace do pool e invocado pelo Dispatcher trava a janela
+        no primeiro pipeline.
+
+        Falha de um membro não interrompe o lote - o que falhou fica vermelho na linha dele e o resto
+        continua. Entre um membro e outro, duas saídas: a janela fechando e o pedido de parada.
+
+        UMA caixa de reinício, no fim. Uma por membro seriam dezenas de caixas para dizer a mesma
+        coisa, e é justamente o incômodo que este agrupamento existe para acabar.
+
+        Os membros que não chegaram a ser instalados voltam a PENDENTE no fim. Sem isso, parar no
+        meio deixaria as linhas restantes em "instalando..." para sempre, com o botão apagado.
+    .PARAMETER NoUI
+        Diz o que faria, sem caixa, sem rede e sem instalar nada. É a porta do -SelfTest.
+    .OUTPUTS
+        Texto curto com o que foi feito.
+    #>
+    param($Row, [switch]$NoUI)
+
+    if ($null -eq $Row) { return 'none' }
+    $membros = @(@($Row.Members) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($membros.Count -eq 0) { return 'none' }
+
+    $estado = Get-WinForgeWindowsUpdateGroupState -Members $membros
+    if ([string]$estado.State -eq 'instalando') {
+        Write-WinForgeLog -Component "Diag" -Message "Instalação do lote '$($Row.Title)' recusada: já está em andamento."
+        return 'instalando'
+    }
+    # Só o que FALTA. O segundo clique não reinstala o que já entrou: são minutos de máquina ocupada
+    # para nada, e o Windows Update pede reinício de novo por cada um deles.
+    $faltam = @($membros | Where-Object { [string](Get-WinForgeWindowsUpdateRowState -UpdateId ([string]$_)).State -ne 'instalado' })
+    if ($faltam.Count -eq 0) {
+        Write-WinForgeLog -Component "Diag" -Message "Instalação do lote '$($Row.Title)' recusada: os $($membros.Count) itens já foram instalados nesta sessão."
+        return 'já instalado'
+    }
+    if ($NoUI) { return "instalaria $($faltam.Count) de $($membros.Count)" }
+    Assert-WinForgeNotSelfTest -Name 'Invoke-WinForgeWindowsUpdateGroupAction'
+
+    if ($sync.CommandRunning -or $sync.ProcessRunning) {
+        [System.Windows.MessageBox]::Show("Já existe um trabalho em andamento. Espere ele terminar.", "WinForge", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        return 'ocupado'
+    }
+    $pergunta = "Instalar os $($faltam.Count) itens desta linha pelo Windows Update, um de cada vez?" + "`r`n`r`n" +
+                "Eles não trazem driver novo: são arquivos que só dão nome a componentes da placa-mãe no Gerenciador de Dispositivos. Pode levar vários minutos."
+    $resposta = [System.Windows.MessageBox]::Show($sync.Form, $pergunta, "WinForge", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    if ($resposta -ne [System.Windows.MessageBoxResult]::Yes) {
+        Write-WinForgeLog -Component "Diag" -Message "Instalação do lote '$($Row.Title)' cancelada pelo usuário."
+        return 'cancelado'
+    }
+
+    # O estado entra ANTES do despacho, na thread da janela: é o que apaga o botão e escreve
+    # "instalando..." nas linhas no mesmo instante do clique.
+    foreach ($wfMembro in $faltam) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfMembro) -State 'instalando' -Text 'instalando...' }
+    $sync.WUGroupMembers = @($faltam | ForEach-Object { [string]$_ })
+    $sync.WUGroupCancel = $false
+    $sync.WUGroupReboot = $false
+    Update-WinForgeDiagnosticsWindowsUpdateGrid
+
+    $sync.WinForgeWUGroupTickCallback = {
+        try {
+            $null = Set-WinForgeWindowsUpdateInstallResult -UpdateId ([string]$sync.LastWUInstallId) -ResultCode ([int]$sync.LastWUInstallCode) -RebootRequired ([bool]$sync.LastWUInstallReboot)
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+        } catch { }
+    }
+
+    $sync.CommandRunning = $true
+    $corpo = {
+        param($wfArgs)
+        $wfIds = @($wfArgs.Ids)
+        $wfTotal = $wfIds.Count
+        $wfFeitos = 0
+        try {
+            foreach ($wfId in $wfIds) {
+                if ($sync.WinForgeClosing -or $sync.WUGroupCancel) { break }
+                $wfFeitos++
+                $sync.LastWUInstallId = [string]$wfId
+                $sync.LastWUInstallCode = -1
+                $sync.LastWUInstallReboot = $false
+                try {
+                    $null = Set-WinForgeDiagProgress -Label "Instalando $wfFeitos de $wfTotal pelo Windows Update..." -Percent ([int](100 * $wfFeitos / $wfTotal))
+                    $wfRes = Install-WinForgeWindowsUpdateDriver -UpdateId ([string]$wfId)
+                    $sync.LastWUInstallCode = [int]$wfRes.ResultCode
+                    $sync.LastWUInstallReboot = [bool]$wfRes.RebootRequired
+                    $sync.LastWUInstallText = [string]$wfRes.Text
+                } catch {
+                    $sync.LastWUInstallText = "Instalação pelo Windows Update falhou: $($_.Exception.Message)"
+                    Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message $sync.LastWUInstallText
+                }
+                if ([bool]$sync.LastWUInstallReboot) { $sync.WUGroupReboot = $true }
+                if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUGroupTickCallback }
+            }
+        } finally {
+            $sync.CommandRunning = $false
+            $null = Set-WinForgeDiagProgress -Label "Windows Update: $wfFeitos de $wfTotal item(ns) do lote processado(s)." -Percent 100
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUGroupDoneCallback }
+        }
+    }
+
+    $sync.WinForgeWUGroupDoneCallback = {
+        try {
+            foreach ($wfPendente in @($sync.WUGroupMembers)) {
+                if ([string](Get-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfPendente)).State -eq 'instalando') {
+                    $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfPendente) -State 'pendente' -Text ''
+                }
+            }
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            if ($sync.WUGroupReboot) {
+                [System.Windows.MessageBox]::Show($sync.Form, "Alguns itens só terminam de se instalar depois de reiniciar o computador.", "WinForge", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            }
+        } catch { }
+    }
+
+    try {
+        Invoke-WPFRunspace -ScriptBlock $corpo -ArgumentList @{ Ids = @($faltam | ForEach-Object { [string]$_ }) } | Out-Null
+    } catch {
+        # Despacho que falha nunca roda o corpo nem os blocos da janela: as linhas ficariam
+        # "instalando..." para sempre, com o botão apagado e nada acontecendo.
+        $sync.CommandRunning = $false
+        foreach ($wfMembro in $faltam) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfMembro) -State 'pendente' -Text '' }
+        Update-WinForgeDiagnosticsWindowsUpdateGrid
+        Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação do lote pelo Windows Update não pôde começar: $($_.Exception.Message)"
+        $null = Set-WinForgeDiagProgress -Label "Instalação do lote pelo Windows Update não pôde começar: $($_.Exception.Message)" -Percent 0
+    }
+    return 'windows-update-grupo'
+}
+
 function New-WinForgeDiagLineBlock {
     <#
     .SYNOPSIS
@@ -1208,9 +1493,25 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
     # continuam inteiros, e é por isso que ela mora aqui e não na busca.
     $selecao = Select-WinForgeWindowsUpdateLatest -Rows @($sync.DiagWUResults)
     $ocultos = @($selecao.Superseded)
+    # Os lotes de INF sem versão viram UMA linha. Também é filtragem de VISTA, pelo mesmo motivo da
+    # linha acima, e por isso vem depois dela: o agrupamento trabalha sobre o que a tabela mostraria.
+    $agrupado = Group-WinForgeWindowsUpdateNullDrivers -Rows @($selecao.Kept)
+    # Publicado a CADA remontagem, inclusive quando é zero. Publicando só quando há lote, o relatório
+    # HTML - que só repete este número - passaria a citar a contagem da busca anterior, que é o pior
+    # tipo de erro numa tela de diagnóstico: um número certo para uma máquina que não é mais esta.
+    $sync.DiagWUGrouped = [int](@(@($agrupado.Groups) | ForEach-Object { @($_.Members).Count }) | Measure-Object -Sum).Sum
     $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
-    foreach ($u in @($selecao.Kept)) {
+    foreach ($u in @($agrupado.Rows)) {
         if ($null -eq $u) { continue }
+        if ([bool]$u.IsGroup) {
+            $linhaGrupo = Format-WinForgeWindowsUpdateGroupRow -Group $u.Group
+            # A elevação manda no botão do lote pela mesma regra da linha solta - o estado derivado
+            # não sabe nada de elevação, e é a tabela que sabe.
+            $linhaGrupo.ActionEnabled = ([bool]$linhaGrupo.ActionEnabled -and $elevado)
+            if (-not $elevado) { $linhaGrupo.ActionTip = $WinForgeElevationTip }
+            $rows.Add($linhaGrupo)
+            continue
+        }
         # O estado da sessão é reaplicado a CADA remontagem: a tabela é refeita inteira depois de
         # cada instalação (é assim que a linha muda de cor), e sem isto ela voltaria a dizer
         # "pendente" justamente na linha que acabou de ser instalada.
@@ -1236,6 +1537,13 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
                               elseif ([string]$estado.State -eq 'instalado') { 'Este driver já foi instalado nesta sessão.' }
                               elseif ([string]$estado.State -eq 'instalando') { 'Instalação em andamento.' }
                               else { 'Baixa e instala este driver pelo Windows Update.' })
+            # Os quatro campos que a linha de grupo usa, escritos também aqui: uma coluna ligada a um
+            # campo que só metade das linhas tem produz erro de ligação em silêncio a cada remontagem,
+            # e o botão "Ver lista" apareceria na linha solta se DetailsVisible viesse vazio.
+            IsGroup        = $false
+            ActionLabel    = 'Instalar'
+            DetailsVisible = 'Collapsed'
+            Group          = $null
         })
     }
 
@@ -1251,6 +1559,9 @@ function Update-WinForgeDiagnosticsWindowsUpdateGrid {
             $texto += " · $($ocultos.Count) versão(ões) mais antiga(s) oculta(s)"
             $sync.WPFDiagWULabel.ToolTip = ((@($ocultos | ForEach-Object { "• $($_.Title)" })) -join [Environment]::NewLine)
         }
+        # O que foi reunido é dito no rótulo pelo mesmo motivo das versões ocultas: linha que some da
+        # tabela sem explicação é um mistério, e aqui somem dezenas de uma vez.
+        if ([int]$sync.DiagWUGrouped -gt 0) { $texto += " · $([int]$sync.DiagWUGrouped) item(ns) reunido(s) em linha(s) de grupo" }
         $texto
     } elseif ($sync.LastWUError) {
         "Windows Update: a consulta falhou -> $($sync.LastWUError)"
@@ -1390,7 +1701,21 @@ function Initialize-WinForgeDiagnosticsTab {
                 $wfBotao = $eventArgs.OriginalSource
                 if ($wfBotao -isnot [System.Windows.Controls.Button] -or $null -eq $wfBotao.Tag) { return }
                 $eventArgs.Handled = $true
-                try { $sync.LastDriverAction = Invoke-WinForgeWindowsUpdateAction -Row $wfBotao.Tag } catch {
+                # Três botões chegam por aqui, e o que os separa é o Uid do gabarito - não o texto do
+                # Content, que na coluna "Instalar" muda com o estado da linha. Uid é propriedade do
+                # elemento e sobrevive ao gabarito; Name, dentro de um DataTemplate, não chega ao
+                # dicionário da janela.
+                $wfLinha = $wfBotao.Tag
+                try {
+                    if ([string]$wfBotao.Uid -eq 'WFWUGroupDetails') {
+                        $null = Show-WinForgeWindowsUpdateGroupList -Row $wfLinha
+                        $sync.LastDriverAction = 'windows-update-lista'
+                    } elseif ([bool]$wfLinha.IsGroup) {
+                        $sync.LastDriverAction = Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLinha
+                    } else {
+                        $sync.LastDriverAction = Invoke-WinForgeWindowsUpdateAction -Row $wfLinha
+                    }
+                } catch {
                     $sync.LastDriverAction = "erro: $($_.Exception.Message)"
                     Write-WinForgeLog -Component "Diag" -Level "ERROR" -Message "Instalação pelo Windows Update falhou: $($_.Exception.Message)"
                 }

@@ -94,9 +94,18 @@
                                     <DataGridTemplateColumn Header="Instalar" Width="Auto">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <Button Content="Instalar" Tag="{Binding}" ToolTip="{Binding ActionTip}"
+                                                <Button Content="{Binding ActionLabel}" Tag="{Binding}" ToolTip="{Binding ActionTip}"
                                                         IsEnabled="{Binding ActionEnabled}" ToolTipService.ShowOnDisabled="True"
                                                         Margin="8,4" Padding="10,0" MinWidth="100" Height="22" MinHeight="0" HorizontalAlignment="Left"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn Header="Detalhes" Width="Auto">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Button Uid="WFWUGroupDetails" Content="Ver lista" Tag="{Binding}" Visibility="{Binding DetailsVisible}"
+                                                        ToolTip="Mostra, numa janela, o título de cada item reunido nesta linha - são os que o botão Instalar desta mesma linha aplica de uma vez."
+                                                        Margin="8,4" Padding="10,0" MinWidth="90" Height="22" MinHeight="0" HorizontalAlignment="Left"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>

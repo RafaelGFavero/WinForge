@@ -572,13 +572,34 @@ function Group-WinForgeWindowsUpdateNullDrivers {
             Class     = [string]$grupo.Class
             Version   = $null
             Date      = [string]$grupo.Date
-            UpdateId  = 'grupo:' + ('{0:x8}' -f $chave.GetHashCode())
+            UpdateId  = (Get-WinForgeWindowsUpdateGroupId -Key $chave)
             SizeBytes = [long]0
             IsGroup   = $true
             Group     = $grupo
         })
     }
     return @{ Rows = @($linhas); Groups = @($grupos) }
+}
+
+function Get-WinForgeWindowsUpdateGroupId {
+    <#
+    .SYNOPSIS
+        O id sintético de um lote: 'grupo:<hash da chave>'.
+    .DESCRIPTION
+        Existe como função porque DOIS lugares precisam do mesmo id a partir da mesma chave - o
+        agrupamento, que monta a linha, e a formatação da linha de grupo da tabela, que recebe só o
+        grupo. Duas cópias da fórmula seriam dois lugares para mudar, e o dia em que uma mudasse a
+        linha deixaria de casar com o estado guardado por id.
+
+        O prefixo faz Get-/Set-WinForgeWindowsUpdateRowState funcionarem sem mudança nenhuma: para
+        eles um id é um id. O hash é o da própria string e só precisa ser estável DENTRO da sessão -
+        o mapa de estado morre junto com a janela. Não é criptográfico de propósito:
+        [SHA256]::Create() estoura em máquina com FIPS ligado, e esta conta acontece na thread da
+        janela, montando a tabela - uma exceção ali apaga a tabela inteira.
+    #>
+    param([string]$Key)
+
+    return ('grupo:' + ('{0:x8}' -f ([string]$Key).GetHashCode()))
 }
 
 function New-WinForgeWindowsUpdateNullDriverGroup {

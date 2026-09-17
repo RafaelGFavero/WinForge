@@ -164,6 +164,13 @@ $WinForgeTheme = [ordered]@{
 # o hexadecimal já conferido evita um par novo que ninguém mediu. Nomes próprios porque o significado
 # é outro - um ajuste desaconselhado não é um comando demorado -, e porque o dia em que o âmbar do
 # cabeçalho precisar ficar mais claro que o de "evitar" não pode arrastar a aba Ajustes junto.
+#
+# RowGroupBackgroundColor é o fundo da LINHA DE GRUPO da tabela do Windows Update - a que reúne
+# dezenas de arquivos de informação sem versão numa só. Neutro de propósito, e não verde nem
+# vermelho: a linha de grupo não é um desfecho, é uma linha que representa outras. Quando o lote
+# termina, os gatilhos de State (instalado/falhou) vêm DEPOIS deste no estilo e vencem - o desfecho
+# vale mais que a origem da linha. O texto continua sendo o MainForegroundColor, e é esse par que o
+# -SelfTest confere.
 $WinForgeThemeNovos = [ordered]@{
     Light = [ordered]@{
         ButtonForegroundSelectedColor = '#FFFFFF'
@@ -174,6 +181,7 @@ $WinForgeThemeNovos = [ordered]@{
         DangerColor                   = '#B91C1C'
         RowSuccessBackgroundColor     = '#DCFCE7'
         RowFailureBackgroundColor     = '#FEE2E2'
+        RowGroupBackgroundColor       = '#E2E8F0'
         HeaderWarningColor            = '#B45309'
         HeaderUrgentColor             = '#B91C1C'
     }
@@ -186,6 +194,7 @@ $WinForgeThemeNovos = [ordered]@{
         DangerColor                   = '#EF4444'
         RowSuccessBackgroundColor     = '#14532D'
         RowFailureBackgroundColor     = '#7F1D1D'
+        RowGroupBackgroundColor       = '#1E293B'
         HeaderWarningColor            = '#F59E0B'
         HeaderUrgentColor             = '#EF4444'
     }

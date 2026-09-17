@@ -1245,6 +1245,9 @@ if ($SelfTest) {
     # MainForegroundColor do estilo da linha, e é ele que tem de sobreviver ao fundo colorido.
     $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowSuccessBackgroundColor';      Nome = 'linha instalada' }
     $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowFailureBackgroundColor';      Nome = 'linha que falhou' }
+    # A linha de grupo do Windows Update: mesmo texto, terceiro fundo. Ela é a que fica mais tempo na
+    # tela dos três - as outras duas só aparecem depois de instalar.
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowGroupBackgroundColor';        Nome = 'linha de grupo' }
     foreach ($wfTemaNome in @('Dark', 'Light')) {
         $wfTemaSec = $sync.configs.themes.$wfTemaNome
         if ($null -eq $wfTemaSec) { Write-Host "  [ERRO] tema: seção '$wfTemaNome' não existe no bloco de temas" -ForegroundColor Red; $wbErrors++; continue }
@@ -7063,6 +7066,130 @@ if ($SelfTest) {
             Remove-Item -LiteralPath $wfGrpRelArq -Force -ErrorAction SilentlyContinue
         }
         Write-Host "  Agrupamento: 47 -> 1 grupo lendo as constantes provisórias ($wfGrpMax B / $wfGrpMin / $($wfGrpClasses.Count) classes), oito recusas, ordem preservada, relatório cru com a coluna Classe e a nota da aba"
+        # ---- a linha de grupo. O estado é DERIVADO a cada remontagem, nunca armazenado.
+        $wfLgMembros = @(1..47 | ForEach-Object { "g-$_" })
+        $sync.DiagWUState = @{}
+        $wfLgPend = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgPend.ActionLabel -ne 'Instalar todos (47)') { Write-Host "  [ERRO] Grupo (estado): pendente deu '$($wfLgPend.ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfLgPend.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): pendente nasceu desabilitado" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 13)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalando' -Text 'instalando...' }
+        $wfLgAnd = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgAnd.StatusText -ne 'instalando 13 de 47...') { Write-Host "  [ERRO] Grupo (estado): em andamento deu '$($wfLgAnd.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgAnd.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): em andamento continua habilitado" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in $wfLgMembros) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $wfLgTudo = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgTudo.StatusText -ne '47 de 47 instalados') { Write-Host "  [ERRO] Grupo (estado): tudo instalado deu '$($wfLgTudo.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgTudo.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): tudo instalado continua habilitado" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-1' -State 'instalado' -Text 'instalado (reinicie)'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne '47 de 47 instalados (reinicie)') { Write-Host "  [ERRO] Grupo (estado): o '(reinicie)' não aparece no grupo" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 45)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -Last 2)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'falhou' -Text 'falhou (código 5)' }
+        $wfLgFalha = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgFalha.StatusText -ne '45 de 47 instalados, 2 falharam') { Write-Host "  [ERRO] Grupo (estado): falha deu '$($wfLgFalha.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfLgFalha.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): com falha o botão tem de continuar clicável" -ForegroundColor Red; $wbErrors++ }
+        # O State é o que PINTA a linha, e ele não é o texto: lote terminado com falha fica vermelho,
+        # lote parado no meio fica neutro (ainda há o que fazer, e vermelho diria que acabou mal).
+        if ([string]$wfLgFalha.State -ne 'falhou') { Write-Host "  [ERRO] Grupo (estado): lote terminado com 2 falhas veio State '$($wfLgFalha.State)', esperado 'falhou'" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 12)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-13' -State 'falhou' -Text 'falhou'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne '12 de 47 instalados, 1 falhou, 34 pendentes') { Write-Host "  [ERRO] Grupo (estado): parcial deu '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).State -ne 'pendente') { Write-Host "  [ERRO] Grupo (estado): lote parado no meio veio State '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).State)', esperado 'pendente' - vermelho ali diria que o lote acabou mal" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        # Rótulos da linha. A palavra "chipset" NÃO entra: o rótulo nasce de Provider e classe, mais
+        # frouxos que o filtro de §4, e dizer "chipset" ali afirmaria o que §4 proíbe afirmar.
+        # HardwareIds de propósito FORA do 'PCI\VEN_8086&DEV_': este grupo não passa no filtro de
+        # chipset da Tarefa 22, e é assim que o lote deste teste continua rodando sem ponto de
+        # restauração depois que aquela tarefa entrar. O rótulo da linha não depende daquele filtro -
+        # ele nasce de Provider e classe, que são mais frouxos de propósito (§3.2).
+        $wfLgGrupo = @{ Key = 'intel|system|2026-03-01'; Provider = 'Intel'; Class = 'System'; Date = '2026-03-01'; Members = $wfLgMembros; MemberTitles = @($wfLgMembros | ForEach-Object { "INTEL - System - $_" }); HardwareIds = @(1..47 | ForEach-Object { 'PCI\VEN_1022&DEV_1450' }); ProblemCodes = @(1..47 | ForEach-Object { 28 }) }
+        $wfLgLinha = Format-WinForgeWindowsUpdateGroupRow -Group $wfLgGrupo
+        if ([string]$wfLgLinha.Title -ne 'Intel — 47 itens que só dão nome a componentes da placa-mãe') { Write-Host "  [ERRO] Grupo (rótulo): Atualização = '$($wfLgLinha.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLgLinha.Driver -ne '47 dispositivos') { Write-Host "  [ERRO] Grupo (rótulo): Driver = '$($wfLgLinha.Driver)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLgLinha.Version -ne 'sem número de versão') { Write-Host "  [ERRO] Grupo (rótulo): Versão = '$($wfLgLinha.Version)'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLgProp in @('Title', 'Driver', 'Provider', 'Version', 'Date', 'ActionLabel', 'StatusText')) {
+            if ([string]$wfLgLinha.$wfLgProp -match '(?i)chipset') { Write-Host "  [ERRO] Grupo (rótulo): a palavra 'chipset' apareceu em '$wfLgProp'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A data duvidosa vem de uma CÓPIA do grupo. '@{} + $g + @{ Date = ... }' estoura no PS 5.1
+        # ("o item já foi adicionado") porque a chave Date já existe nos dois lados - ver relatório.
+        $wfLgGrupoData = $wfLgGrupo.Clone()
+        $wfLgGrupoData.Date = '1980-01-01'
+        if ([string](Format-WinForgeWindowsUpdateGroupRow -Group $wfLgGrupoData).Date -ne 'sem data confiável') { Write-Host "  [ERRO] Grupo (rótulo): data anterior a 1990 não virou 'sem data confiável'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfLgLinha.IsGroup) { Write-Host "  [ERRO] Grupo (linha): IsGroup não está marcado" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfLgLinha.MemberTitles).Count -ne 47) { Write-Host "  [ERRO] Grupo (linha): MemberTitles tem $(@($wfLgLinha.MemberTitles).Count) item(ns)" -ForegroundColor Red; $wbErrors++ }
+        # O grupo cru viaja na linha: 'Date' já virou texto de tela, e a Tarefa 22 precisa de Class,
+        # Provider, HardwareIds e ProblemCodes como vieram.
+        foreach ($wfLgCru in @('Class', 'Provider', 'HardwareIds', 'ProblemCodes')) {
+            if ($null -eq $wfLgLinha.Group.$wfLgCru) { Write-Host "  [ERRO] Grupo (linha): a linha não carrega '$wfLgCru' do grupo cru - o filtro de chipset ficaria sem o que ler" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Instalação: UM runspace com foreach, e não um job por membro (dois jobs disputariam a trava
+        # CommandRunning consigo mesmos). O segundo clique instala só os que faltam.
+        $wfLgFonteI = [string](Get-Command Invoke-WinForgeWindowsUpdateGroupAction).ScriptBlock
+        if (@([regex]::Matches($wfLgFonteI, 'Invoke-WPFRunspace')).Count -ne 1) { Write-Host "  [ERRO] Grupo (instalação): $(@([regex]::Matches($wfLgFonteI, 'Invoke-WPFRunspace')).Count) despachos, esperado 1" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgFonteI -notmatch 'foreach') { Write-Host "  [ERRO] Grupo (instalação): falta o foreach sobre os membros" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgFonteI -notmatch 'WUGroupCancel') { Write-Host "  [ERRO] Grupo (instalação): não confere `$sync.WUGroupCancel entre membros" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgFonteI -notmatch 'WinForgeClosing') { Write-Host "  [ERRO] Grupo (instalação): não confere `$sync.WinForgeClosing entre membros" -ForegroundColor Red; $wbErrors++ }
+        # UMA caixa de REINÍCIO, e ela vem depois do laço. O teste conta a caixa de reinício
+        # (MessageBoxImage::Information), e não 'MessageBox' cru: a Tarefa 22 acrescenta a
+        # confirmação do chipset (MessageBoxImage::Warning) a esta mesma função, e contar todas
+        # deixaria este teste vermelho no dia em que aquela tarefa entrasse.
+        if (@([regex]::Matches($wfLgFonteI, 'MessageBoxImage\]::Information')).Count -ne 1) { Write-Host "  [ERRO] Grupo (instalação): $(@([regex]::Matches($wfLgFonteI, 'MessageBoxImage\]::Information')).Count) caixas de reinício, esperado UMA no fim" -ForegroundColor Red; $wbErrors++ }
+        $wfLgPosLaco = $wfLgFonteI.IndexOf('foreach', [StringComparison]::Ordinal)
+        $wfLgPosCaixa = $wfLgFonteI.IndexOf('MessageBoxImage]::Information', [StringComparison]::Ordinal)
+        if ($wfLgPosCaixa -lt 0 -or $wfLgPosLaco -lt 0 -or $wfLgPosCaixa -lt $wfLgPosLaco) { Write-Host "  [ERRO] Grupo (instalação): a caixa de reinício aparece antes do laço - uma por membro é justamente o que ela existe para evitar" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 40)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $wfLgSeco = Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI
+        if ($wfLgSeco -notmatch '7') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diria '$wfLgSeco', esperado só os 7 que faltam" -ForegroundColor Red; $wbErrors++ }
+        # ...e o texto INTEIRO, porque '47' também casa com '7': com a conta errada ('instalaria 47
+        # de 47') a trava de cima fica verde reinstalando os 40 que já entraram.
+        if ([string]$wfLgSeco -ne 'instalaria 7 de 47') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diz '$wfLgSeco', esperado 'instalaria 7 de 47'" -ForegroundColor Red; $wbErrors++ }
+        # Lote inteiro instalado: recusa, e a recusa não é a mesma palavra do 'em andamento'.
+        foreach ($wfLgId in $wfLgMembros) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI) -ne 'já instalado') { Write-Host "  [ERRO] Grupo (instalação): o lote todo instalado não foi recusado ('$(Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI)')" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-1' -State 'instalando' -Text 'instalando...'
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI) -ne 'instalando') { Write-Host "  [ERRO] Grupo (instalação): com um membro em andamento o lote não foi recusado" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $null -NoUI) -ne 'none') { Write-Host "  [ERRO] Grupo (instalação): linha nula deveria dar 'none'" -ForegroundColor Red; $wbErrors++ }
+        # As três formas que o laço do lote precisa ter, ancoradas na CHAMADA com o argumento - o nome
+        # solto que o brief cobra é satisfeito pelo comentário que explica a regra.
+        foreach ($wfLgForma in @(
+            'if \(\$sync\.WinForgeClosing -or \$sync\.WUGroupCancel\) \{ break \}',
+            'Set-WinForgeWindowsUpdateRowState -UpdateId \(\[string\]\$wfPendente\) -State ''pendente''',
+            'Invoke-WPFUIThread \$sync\.WinForgeWUGroupTickCallback'
+        )) {
+            if ($wfLgFonteI -notmatch $wfLgForma) { Write-Host "  [ERRO] Grupo (instalação): falta a forma '$wfLgForma' no lote" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o -SelfTest não instala: a trava vem DEPOIS do -NoUI, e antes de qualquer caixa.
+        $wfLgPosNoUI = $wfLgFonteI.IndexOf('if ($NoUI)', [StringComparison]::Ordinal)
+        $wfLgPosTrava = $wfLgFonteI.IndexOf('Assert-WinForgeNotSelfTest', [StringComparison]::Ordinal)
+        if ($wfLgPosNoUI -lt 0 -or $wfLgPosTrava -lt 0 -or $wfLgPosTrava -lt $wfLgPosNoUI) { Write-Host "  [ERRO] Grupo (instalação): a trava de SelfTest não está depois do -NoUI" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        # A lista expandida sai na JANELA DE SAÍDA por um botão "Ver lista": gabarito próprio de
+        # célula (RowDetailsTemplate, expander) quebra a rolagem da aba - wf-xaml-styles.xml:334-344.
+        $wfLgXaml = [string](Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Engine\xaml\wf-xaml-diag-tab.xml') -Raw -ErrorAction SilentlyContinue)
+        if ([string]::IsNullOrWhiteSpace($wfLgXaml)) { $wfLgXaml = [string]$inputXML }
+        if ($wfLgXaml -match 'RowDetailsTemplate|<Expander') { Write-Host "  [ERRO] Grupo (XAML): RowDetailsTemplate/Expander quebram a rolagem da aba" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgXaml -notmatch 'Ver lista') { Write-Host "  [ERRO] Grupo (XAML): falta a coluna 'Detalhes' com o botão 'Ver lista'" -ForegroundColor Red; $wbErrors++ }
+        # A ligação do rótulo é cobrada DENTRO da tabela do Windows Update, recortando a região dela
+        # no XAML. A âncora por distância do brief - 'Instalar' a menos de 600 caracteres depois da
+        # ligação - não passa com a sétima coluna no lugar: medido no motor gerado, a palavra fica a
+        # 1072 caracteres, porque são oito linhas de fechamento com 56 espaços de recuo cada. Ela só
+        # passaria contorcendo o markup, e o recorte prova mais: a ligação está na tabela CERTA, e
+        # não só em algum lugar do arquivo (a tabela de drivers instalados já tinha uma igual).
+        $wfLgIniGrade = $wfLgXaml.IndexOf('Name="WPFDiagWU"', [StringComparison]::Ordinal)
+        $wfLgFimGrade = $(if ($wfLgIniGrade -ge 0) { $wfLgXaml.IndexOf('</DataGrid>', $wfLgIniGrade, [StringComparison]::Ordinal) } else { -1 })
+        if ($wfLgIniGrade -lt 0 -or $wfLgFimGrade -lt 0) { Write-Host "  [ERRO] Grupo (XAML): não achei a região da tabela do Windows Update no XAML" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfLgRegiao = $wfLgXaml.Substring($wfLgIniGrade, $wfLgFimGrade - $wfLgIniGrade)
+            if ($wfLgRegiao -notmatch 'Content="\{Binding ActionLabel\}"') { Write-Host "  [ERRO] Grupo (XAML): o botão da coluna Instalar não liga o Content a ActionLabel" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLgRegiao -notmatch 'Uid="WFWUGroupDetails"[\s\S]{0,300}Visibility="\{Binding DetailsVisible\}"') { Write-Host "  [ERRO] Grupo (XAML): o botão 'Ver lista' não tem o Uid que o clique usa, ou não esconde pelo DetailsVisible" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLgRegiao -notmatch 'Header="Detalhes"') { Write-Host "  [ERRO] Grupo (XAML): a coluna 'Detalhes' não está na tabela do Windows Update" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfLgTema in @('Light', 'Dark')) {
+            if ([string]::IsNullOrWhiteSpace([string]$sync.configs.themes.$wfLgTema.RowGroupBackgroundColor)) { Write-Host "  [ERRO] Grupo (tema): RowGroupBackgroundColor ausente em $wfLgTema" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Grupo: cinco estados derivados, rótulos sem a palavra 'chipset', um runspace com foreach, uma caixa de reinício e lista na janela de saída"
         Write-Host "  Windows Update (uma linha por dispositivo): $($wfWuVerCasos.Count) título(s) lidos | 5 ofertas -> $($wfWuMantidos.Count) dispositivo(s) e $($wfWuOcultos.Count) versão(ões) antiga(s) fora da tabela"
     } catch {
         Write-Host "  [ERRO] Windows Update (uma linha por dispositivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -9274,6 +9401,124 @@ if ($SelfTest) {
             ${function:Test-WinForgeRepairElevated} = $wfWuEstElevSalvo
             $sync.DiagWUState = $(if ($null -eq $wfWuEstMapa) { @{} } else { $wfWuEstMapa })
             $sync.DiagWUResults = $wfWuEstAntes
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+        }
+        # A linha de grupo NA TABELA: o caminho inteiro, da oferta crua até a linha montada. O bloco
+        # de cima prova as funções; este prova que a tabela as usa - é a diferença entre a função
+        # certa e a função chamada.
+        $wfLgGrAntes = $sync.DiagWUResults
+        $wfLgGrMapa  = $sync.DiagWUState
+        $wfLgGrElev  = ${function:Test-WinForgeRepairElevated}
+        try {
+            ${function:Test-WinForgeRepairElevated} = { return $true }
+            $sync.DiagWUState = @{}
+            # O fixture lê as CONSTANTES da Tarefa 20: nenhum valor de critério é escrito à mão aqui.
+            $wfLgGrMaxB = [int]$script:WinForgeNullDriverMaxBytes
+            $wfLgGrMinG = [int]$script:WinForgeNullDriverMinGroup
+            $wfLgGrCls  = [string]@(@($script:WinForgeNullDriverClasses) | Where-Object { $_ -ne '' })[0]
+            $wfLgGrLote = @(1..$wfLgGrMinG | ForEach-Object { [pscustomobject]@{ Title = "INTEL - $wfLgGrCls - $_"; Driver = ''; Provider = 'INTEL'; Class = $wfLgGrCls; Version = $null; Date = '2016-07-05'; UpdateId = "lote-$_"; SizeBytes = [int]($wfLgGrMaxB / 8); HardwareId = 'PCI\VEN_8086&DEV_8D44'; ProblemCode = 28 } })
+            $wfLgGrSolta = [pscustomobject]@{ Title = 'Realtek - Display - 1.2.3'; Driver = 'Realtek'; Provider = 'Realtek'; Class = 'Display'; Version = '1.2.3'; Date = '2026-09-10'; UpdateId = 'solta-1'; SizeBytes = 5000; HardwareId = 'PCI\VEN_10EC&DEV_8168'; ProblemCode = 0 }
+            $sync.DiagWUResults = @($wfLgGrLote) + @($wfLgGrSolta)
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrLinhas = @($sync.WPFDiagWU.ItemsSource)
+            if ($wfLgGrLinhas.Count -ne 2) { Write-Host "  [ERRO] Grupo (tabela): $($wfLgGrLinhas.Count) linha(s) na tela, esperado 2 (o lote dobrado + a solta)" -ForegroundColor Red; $wbErrors++ }
+            $wfLgGrLinha = @($wfLgGrLinhas | Where-Object { [bool]$_.IsGroup })[0]
+            $wfLgGrOutra = @($wfLgGrLinhas | Where-Object { -not [bool]$_.IsGroup })[0]
+            if ($null -eq $wfLgGrLinha) { Write-Host "  [ERRO] Grupo (tabela): a tabela não montou linha de grupo nenhuma" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ([string]$wfLgGrLinha.UpdateId -notlike 'grupo:*') { Write-Host "  [ERRO] Grupo (tabela): o id da linha de grupo é '$($wfLgGrLinha.UpdateId)'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrLinha.ActionLabel -ne "Instalar todos ($wfLgGrMinG)") { Write-Host "  [ERRO] Grupo (tabela): o botão do lote diz '$($wfLgGrLinha.ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrLinha.DetailsVisible -ne 'Visible') { Write-Host "  [ERRO] Grupo (tabela): o botão 'Ver lista' não aparece na linha de grupo" -ForegroundColor Red; $wbErrors++ }
+                # A data de 2016 é REAL e tem de passar; é a de 1980 que vira frase. Sem este caso, o
+                # teste da frase sozinho ficaria verde com a coluna sempre em 'sem data confiável'.
+                if ([string]$wfLgGrLinha.Date -ne '2016-07-05') { Write-Host "  [ERRO] Grupo (tabela): a data de 2016 virou '$($wfLgGrLinha.Date)' - só a anterior a 1990 é que não é confiável" -ForegroundColor Red; $wbErrors++ }
+                if (-not [bool]$wfLgGrLinha.ActionEnabled) { Write-Host "  [ERRO] Grupo (tabela): com elevação o botão do lote nasceu desabilitado" -ForegroundColor Red; $wbErrors++ }
+            }
+            if ($null -eq $wfLgGrOutra) { Write-Host "  [ERRO] Grupo (tabela): a linha solta sumiu da tabela" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ([string]$wfLgGrOutra.ActionLabel -ne 'Instalar') { Write-Host "  [ERRO] Grupo (tabela): a linha solta veio com o rótulo '$($wfLgGrOutra.ActionLabel)' - a coluna liga no ActionLabel de TODAS as linhas" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrOutra.DetailsVisible -ne 'Collapsed') { Write-Host "  [ERRO] Grupo (tabela): o botão 'Ver lista' apareceu numa linha solta" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A dívida que a Tarefa 20 deixou: o número é publicado a CADA remontagem.
+            if ([int]$sync.DiagWUGrouped -ne $wfLgGrMinG) { Write-Host "  [ERRO] Grupo (contagem): `$sync.DiagWUGrouped = $($sync.DiagWUGrouped), esperado $wfLgGrMinG" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.WPFDiagWULabel.Text -notmatch "$wfLgGrMinG item\(ns\) reunido\(s\)") { Write-Host "  [ERRO] Grupo (rótulo da aba): não diz quantos itens foram reunidos ('$($sync.WPFDiagWULabel.Text)')" -ForegroundColor Red; $wbErrors++ }
+            # ...e ZERADO quando a busca seguinte não tem lote. Sem isto o relatório HTML, que só
+            # repete este número, passaria a citar a contagem da busca anterior.
+            $sync.DiagWUResults = @($wfLgGrSolta)
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            if ([int]$sync.DiagWUGrouped -ne 0) { Write-Host "  [ERRO] Grupo (contagem): sem lote nenhum, `$sync.DiagWUGrouped ficou em $($sync.DiagWUGrouped) - o número da busca anterior sobreviveu" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.WPFDiagWULabel.Text -match 'reunido') { Write-Host "  [ERRO] Grupo (rótulo da aba): sem lote nenhum ele ainda fala em itens reunidos ('$($sync.WPFDiagWULabel.Text)')" -ForegroundColor Red; $wbErrors++ }
+            # O estado guardado pelo id sintético sobrevive à remontagem: é o que faz o lote continuar
+            # de onde parou, e é a razão de o id ter a forma que tem.
+            $sync.DiagWUResults = @($wfLgGrLote) + @($wfLgGrSolta)
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'lote-1' -State 'instalado' -Text 'instalado'
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrDepois = @(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]
+            if ([string]$wfLgGrDepois.StatusText -ne "1 de $wfLgGrMinG instalados, $($wfLgGrMinG - 1) pendentes") { Write-Host "  [ERRO] Grupo (tabela): depois de instalar um membro a linha diz '$($wfLgGrDepois.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfLgGrDepois.ActionLabel -ne "Instalar os $($wfLgGrMinG - 1) que faltam") { Write-Host "  [ERRO] Grupo (tabela): o botão não passou a oferecer só o que falta ('$($wfLgGrDepois.ActionLabel)')" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfLgGrDepois.UpdateId -ne [string]$wfLgGrLinha.UpdateId) { Write-Host "  [ERRO] Grupo (tabela): o id do lote mudou entre duas remontagens ('$($wfLgGrLinha.UpdateId)' -> '$($wfLgGrDepois.UpdateId)') - o estado por id não sobreviveria" -ForegroundColor Red; $wbErrors++ }
+            $sync.DiagWUState = @{}
+            # Sem elevação o botão do lote fica apagado com a dica da elevação, como a linha solta.
+            ${function:Test-WinForgeRepairElevated} = { return $false }
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrSemElev = @(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]
+            if ([bool]$wfLgGrSemElev.ActionEnabled) { Write-Host "  [ERRO] Grupo (elevação): sem elevação o botão do lote continua clicável" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfLgGrSemElev.ActionTip -ne [string]$WinForgeElevationTip) { Write-Host "  [ERRO] Grupo (elevação): a dica do botão do lote não é a da elevação ('$($wfLgGrSemElev.ActionTip)')" -ForegroundColor Red; $wbErrors++ }
+            ${function:Test-WinForgeRepairElevated} = { return $true }
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            # O botão "Ver lista" abre a janela de saída com um título por linha - e ela é MONTADA,
+            # não só descrita: é a única forma de saber que os 5 títulos chegaram lá.
+            $wfLgGrJanela = Show-WinForgeWindowsUpdateGroupList -Row (@(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]) -NoShow
+            $wfLgGrTexto = [string]$wfLgGrJanela.FindName('WFOutputText').Text
+            foreach ($wfLgGrTit in @("INTEL - $wfLgGrCls - 1", "INTEL - $wfLgGrCls - $wfLgGrMinG")) {
+                if ($wfLgGrTexto.IndexOf($wfLgGrTit, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Grupo (Ver lista): a janela não traz o título '$wfLgGrTit'" -ForegroundColor Red; $wbErrors++ }
+            }
+            if (@($wfLgGrTexto -split "`r`n").Count -ne $wfLgGrMinG) { Write-Host "  [ERRO] Grupo (Ver lista): a janela tem $(@($wfLgGrTexto -split "`r`n").Count) linha(s), esperado $wfLgGrMinG" -ForegroundColor Red; $wbErrors++ }
+            # O fundo da linha de grupo: gatilho próprio, ANTES dos dois de desfecho - em WPF vence o
+            # último que casa, e a linha que terminou instalada tem de ficar verde, não neutra.
+            $wfLgGrEstilo = $sync.WPFDiagWU.RowStyle
+            $wfLgGrGat = @(@($wfLgGrEstilo.Triggers) | Where-Object { $_ -is [System.Windows.DataTrigger] -and [string]$_.Binding.Path.Path -eq 'IsGroup' })[0]
+            if ($null -eq $wfLgGrGat) { Write-Host "  [ERRO] Grupo (fundo): o estilo da linha não tem gatilho para IsGroup" -ForegroundColor Red; $wbErrors++ }
+            else {
+                $wfLgGrSet = @(@($wfLgGrGat.Setters) | Where-Object { $_.Property -eq [System.Windows.Controls.Control]::BackgroundProperty })[0]
+                if ([string]$wfLgGrSet.Value.ResourceKey -ne 'RowGroupBackgroundColor') { Write-Host "  [ERRO] Grupo (fundo): o gatilho de IsGroup usa '$($wfLgGrSet.Value.ResourceKey)'" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.Form -and $sync.Form.TryFindResource('RowGroupBackgroundColor') -isnot [System.Windows.Media.SolidColorBrush]) { Write-Host "  [ERRO] Grupo (fundo): 'RowGroupBackgroundColor' não chegou ao dicionário da janela como pincel" -ForegroundColor Red; $wbErrors++ }
+                $wfLgGrPosG = @($wfLgGrEstilo.Triggers).IndexOf($wfLgGrGat)
+                $wfLgGrPosE = @($wfLgGrEstilo.Triggers).IndexOf(@(@($wfLgGrEstilo.Triggers) | Where-Object { $_ -is [System.Windows.DataTrigger] -and [string]$_.Binding.Path.Path -eq 'State' -and [string]$_.Value -eq 'instalado' })[0])
+                if ($wfLgGrPosE -lt 0 -or $wfLgGrPosG -lt 0 -or $wfLgGrPosG -gt $wfLgGrPosE) { Write-Host "  [ERRO] Grupo (fundo): o gatilho de IsGroup vem DEPOIS do de 'instalado' e venceria o verde do desfecho" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A coluna "Instalar" liga o Content ao ActionLabel - cobrado no objeto carregado, e não
+            # pela distância entre duas palavras no texto do XAML.
+            $wfLgGrColI = @($sync.WPFDiagWU.Columns | Where-Object { [string]$_.Header -eq 'Instalar' })[0]
+            $wfLgGrColD = @($sync.WPFDiagWU.Columns | Where-Object { [string]$_.Header -eq 'Detalhes' })[0]
+            if ($null -eq $wfLgGrColI -or $null -eq $wfLgGrColD) { Write-Host "  [ERRO] Grupo (colunas): falta a coluna 'Instalar' ou a 'Detalhes' na tabela" -ForegroundColor Red; $wbErrors++ }
+            else {
+                $wfLgGrBtnI = $wfLgGrColI.CellTemplate.LoadContent()
+                $wfLgGrLigI = [System.Windows.Data.BindingOperations]::GetBinding($wfLgGrBtnI, [System.Windows.Controls.ContentControl]::ContentProperty)
+                if ([string]$wfLgGrLigI.Path.Path -ne 'ActionLabel') { Write-Host "  [ERRO] Grupo (colunas): o botão de 'Instalar' liga o Content a '$($wfLgGrLigI.Path.Path)', esperado 'ActionLabel'" -ForegroundColor Red; $wbErrors++ }
+                $wfLgGrBtnD = $wfLgGrColD.CellTemplate.LoadContent()
+                if ([string]$wfLgGrBtnD.Uid -ne 'WFWUGroupDetails') { Write-Host "  [ERRO] Grupo (colunas): o botão de 'Detalhes' veio com Uid '$($wfLgGrBtnD.Uid)' - é por ele que o clique separa os dois botões" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrBtnD.Content -ne 'Ver lista') { Write-Host "  [ERRO] Grupo (colunas): o botão de 'Detalhes' diz '$($wfLgGrBtnD.Content)'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E o clique separa os TRÊS caminhos. Âncora na forma da chamada com o argumento: o nome
+            # solto apareceria no comentário que explica a regra.
+            $wfLgGrFonteH = [string](Get-Command Initialize-WinForgeDiagnosticsTab).ScriptBlock
+            foreach ($wfLgGrCaminho in @(
+                'if \(\[string\]\$wfBotao\.Uid -eq ''WFWUGroupDetails''\)',
+                'Show-WinForgeWindowsUpdateGroupList -Row \$wfLinha',
+                'Invoke-WinForgeWindowsUpdateGroupAction -Row \$wfLinha',
+                'Invoke-WinForgeWindowsUpdateAction -Row \$wfLinha'
+            )) {
+                if ($wfLgGrFonteH -notmatch $wfLgGrCaminho) { Write-Host "  [ERRO] Grupo (clique): o handler da tabela não tem '$wfLgGrCaminho'" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Grupo na tabela: $wfLgGrMinG ofertas viram 1 linha + 1 solta, contagem publicada e ZERADA, id estável entre remontagens, elevação, fundo próprio e 'Ver lista' com $wfLgGrMinG títulos"
+        } catch {
+            Write-Host "  [ERRO] Grupo (tabela): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            ${function:Test-WinForgeRepairElevated} = $wfLgGrElev
+            $sync.DiagWUState = $(if ($null -eq $wfLgGrMapa) { @{} } else { $wfLgGrMapa })
+            $sync.DiagWUResults = $wfLgGrAntes
             Update-WinForgeDiagnosticsWindowsUpdateGrid
         }
         # Checklist das recomendações + contador na tela. Uma linha por recomendação, e caixa de
