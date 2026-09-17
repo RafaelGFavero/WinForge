@@ -7288,7 +7288,27 @@ if ($SelfTest) {
         # do Sistema' do fim, e o mutante que apagou a explicação da causa passou verde - medido.
         if ([string]$wfChPonto.Reason -notmatch 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz que a Proteção do Sistema pode estar DESLIGADA ('$($wfChPonto.Reason)')" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfChPonto.Reason -notmatch 'Painel de Controle') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz ONDE ligar a Proteção do Sistema ('$($wfChPonto.Reason)')" -ForegroundColor Red; $wbErrors++ }
-        if ([string]$wfChPonto.Reason -notmatch '24 h|24 horas') { Write-Host "  [ERRO] Chipset (ponto): a recusa não menciona a janela de 24 h" -ForegroundColor Red; $wbErrors++ }
+        # As DUAS causas são separadas, porque mandam o usuário para lugares diferentes: com um ponto
+        # criado agora, a causa é a janela de 24 h e a Proteção está LIGADA - dizer para ligá-la seria
+        # mandar consertar o que não está quebrado. A data que separa as duas já vem na lista lida.
+        $wfChPonto24 = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddHours(-2) }) -After @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddHours(-2) })
+        if ($wfChPonto24.Ok) { Write-Host "  [ERRO] Chipset (ponto): com ponto recente e nenhum novo ele respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto24.Reason -notmatch '24 h|24 horas') { Write-Host "  [ERRO] Chipset (ponto): com ponto de 2 h atrás a recusa não menciona a janela de 24 h ('$($wfChPonto24.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto24.Reason -match 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): com a Proteção LIGADA e um ponto recente a recusa manda ligá-la mesmo assim" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto24.Reason -notmatch ([regex]::Escape((Get-Date).AddHours(-2).ToString('dd/MM/yyyy')))) { Write-Host "  [ERRO] Chipset (ponto): a recusa das 24 h não diz de QUANDO é o ponto que já existe" -ForegroundColor Red; $wbErrors++ }
+        # ...e ponto ANTIGO não vira "espere 24 h": aí a causa é mesmo a Proteção desligada.
+        $wfChPontoVelho = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddDays(-9) }) -After @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddDays(-9) })
+        if ([string]$wfChPontoVelho.Reason -notmatch 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): com o ponto mais novo de 9 dias atrás a recusa não acusa a Proteção desligada" -ForegroundColor Red; $wbErrors++ }
+        # As duas recusas dizem que dá para criar o ponto à mão: é a saída de quem não quer esperar
+        # 24 h e de quem não pode mexer na Proteção.
+        foreach ($wfChRec in @($wfChPonto, $wfChPonto24, $wfChPontoVelho)) {
+            if ([string]$wfChRec.Reason -notmatch 'à mão') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz que o usuário pode criar o ponto à mão ('$($wfChRec.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A data chega em três formas, e a do WMI é a que a máquina usa de verdade.
+        if ([string](Get-WinForgeRestorePointTime -Point @{ CreationTime = [datetime]'2026-09-10 08:30' }).ToString('yyyy-MM-dd HH:mm') -ne '2026-09-10 08:30') { Write-Host "  [ERRO] Chipset (data): [datetime] direto não foi lido" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Get-WinForgeRestorePointTime -Point @{ CreationTime = '20260910083000.000000-180' }).ToString('yyyy-MM-dd HH:mm') -ne '2026-09-10 08:30') { Write-Host "  [ERRO] Chipset (data): o formato do WMI não foi lido - é o que Get-ComputerRestorePoint devolve" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne (Get-WinForgeRestorePointTime -Point @{ CreationTime = 'nao e data' })) { Write-Host "  [ERRO] Chipset (data): texto ilegível devia dar `$null, e não uma data inventada" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne (Get-WinForgeRestorePointTime -Point $null)) { Write-Host "  [ERRO] Chipset (data): ponto nulo devia dar `$null" -ForegroundColor Red; $wbErrors++ }
         $wfChPontoOk = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 }, @{ SequenceNumber = 11 })
         if (-not $wfChPontoOk.Ok -or [int]$wfChPontoOk.SequenceNumber -ne 11) { Write-Host "  [ERRO] Chipset (ponto): sequência nova não foi reconhecida ($($wfChPontoOk.SequenceNumber))" -ForegroundColor Red; $wbErrors++ }
         # Com DOIS números novos vale o MAIOR - é o ponto que acabou de ser criado. Com um só, pegar
@@ -7342,11 +7362,15 @@ if ($SelfTest) {
         $wfChPosMarca = $wfChFonteA.IndexOf("Set-WinForgeWindowsUpdateRowState -UpdateId ([string]@(`$faltam)[0]) -State 'instalando'", [StringComparison]::Ordinal)
         if ($wfChPosPontoCham -lt 0 -or $wfChPosMarca -lt 0 -or $wfChPosPontoCham -gt $wfChPosMarca) { Write-Host "  [ERRO] Chipset: o ponto de restauração é criado DEPOIS de o primeiro membro já ter sido marcado" -ForegroundColor Red; $wbErrors++ }
         # Falha de LEITURA da lista de pontos é resposta própria, e não "não foi criado": medido nesta
-        # máquina, sem elevação Get-ComputerRestorePoint responde 'Acesso negado', e mandar quem tem a
-        # Proteção ligada ir ligá-la é mandar consertar o que não está quebrado.
+        # máquina, sem elevação Get-ComputerRestorePoint responde 'Acesso negado'. E ela é cobrada nas
+        # DUAS pontas: com a lista de ANTES vazia por erro, um ponto ANTIGO conta como novo e a função
+        # responde sucesso sem nada ter sido criado - o caso mais provável de todos, porque o Windows
+        # não cria um segundo ponto dentro de 24 h. As duas âncoras são a forma da chamada com o
+        # tratamento, e não o nome solto.
         $wfChFonteP = [string]${function:New-WinForgeChipsetRestorePoint}
-        if ($wfChFonteP -notmatch 'a lista de pontos não pôde ser lida') { Write-Host "  [ERRO] Chipset (ponto): falha ao LER a lista cai na mesma frase de 'não foi criado'" -ForegroundColor Red; $wbErrors++ }
-        if ($wfChFonteP -notmatch '(?s)catch \{\s*return @\{ Ok = \$false; Reason = "O ponto de restauração pode ter sido criado') { Write-Host "  [ERRO] Chipset (ponto): a leitura de depois não tem catch próprio - o 'Acesso negado' viraria lista vazia e a recusa mentiria o motivo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteP -notmatch 'A lista de pontos de restauração não pôde ser lida') { Write-Host "  [ERRO] Chipset (ponto): falha ao LER a lista cai na mesma frase de 'não foi criado'" -ForegroundColor Red; $wbErrors++ }
+        if (@([regex]::Matches($wfChFonteP, 'try \{ \$(Before|After) = @\(Get-ComputerRestorePoint -ErrorAction Stop\) \} catch \{\r?\n\s*return @\{ Ok = \$false; Reason = \$wfRecusaLeitura')).Count -ne 2) { Write-Host "  [ERRO] Chipset (ponto): uma das duas leituras da lista não recusa no catch - erro de leitura viraria lista vazia e um ponto velho contaria como novo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteP -match 'catch \{ \$Before = @\(\) \}') { Write-Host "  [ERRO] Chipset (ponto): a leitura de ANTES voltou a virar lista vazia no erro" -ForegroundColor Red; $wbErrors++ }
         # E a criação do ponto é escrita: em SelfTest ela tem de ser recusada pelo guarda, não pela
         # sorte de o teste sempre passar -Before/-After.
         if ([string]${function:New-WinForgeChipsetRestorePoint} -notmatch 'Assert-WinForgeNotSelfTest -Name ''New-WinForgeChipsetRestorePoint''') { Write-Host "  [ERRO] Chipset (ponto): o caminho que cria o ponto não tem o guarda de SelfTest" -ForegroundColor Red; $wbErrors++ }

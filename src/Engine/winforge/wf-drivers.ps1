@@ -625,6 +625,29 @@ function Test-WinForgeChipsetGroup {
     return @{ Ok = $true; Reason = ''; ProblemCount = $semNome }
 }
 
+function Get-WinForgeRestorePointTime {
+    <#
+    .SYNOPSIS
+        A data de criação de um ponto de restauração, nas três formas em que ela chega.
+    .DESCRIPTION
+        Get-ComputerRestorePoint devolve CreationTime no formato do WMI ('yyyyMMddHHmmss.ffffff±UUU'),
+        e o próprio objeto sabe convertê-lo. Fixture de teste traz [datetime] direto. Data que não dá
+        para ler devolve $null, e quem chama trata isso como "não sei quando" - nunca como "faz tempo".
+    #>
+    param($Point)
+
+    if ($null -eq $Point) { return $null }
+    $bruto = $Point.CreationTime
+    if ($bruto -is [datetime]) { return $bruto }
+    if ($null -eq $bruto) { return $null }
+    try { if ($Point.PSObject.Methods['ConvertToDateTime']) { return [datetime]$Point.ConvertToDateTime($bruto) } } catch { }
+    try { return [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$bruto) } catch { }
+    # TIPADA antes do [ref]: com $null o PS 5.1 não acha a sobrecarga e a linha estoura.
+    [datetime]$lida = [datetime]::MinValue
+    if ([datetime]::TryParse([string]$bruto, [ref]$lida)) { return $lida }
+    return $null
+}
+
 function New-WinForgeChipsetRestorePoint {
     <#
     .SYNOPSIS
@@ -647,30 +670,46 @@ function New-WinForgeChipsetRestorePoint {
     #>
     param([object[]]$Before, [object[]]$After)
 
+    # LER a lista é operação privilegiada por conta própria: medido nesta máquina, sem elevação
+    # Get-ComputerRestorePoint responde 'Acesso negado' em vez de lista vazia. E falha de leitura NÃO
+    # pode virar lista vazia em nenhuma das duas pontas: com a lista de ANTES vazia por erro, um ponto
+    # ANTIGO conta como novo e a função responde sucesso sem nada ter sido criado - que é o caso mais
+    # provável de todos, porque o Windows não cria um segundo ponto dentro de 24 h. O lote não roda
+    # em nenhum dos dois casos, e o motivo diz qual foi.
+    $wfRecusaLeitura = 'A lista de pontos de restauração não pôde ser lida, então não há como confirmar que o ponto foi criado. Por segurança o lote não foi instalado.'
     $daMaquina = -not ($PSBoundParameters.ContainsKey('Before') -and $PSBoundParameters.ContainsKey('After'))
     if ($daMaquina) {
         Assert-WinForgeNotSelfTest -Name 'New-WinForgeChipsetRestorePoint'
-        try { $Before = @(Get-ComputerRestorePoint -ErrorAction Stop) } catch { $Before = @() }
+        try { $Before = @(Get-ComputerRestorePoint -ErrorAction Stop) } catch {
+            return @{ Ok = $false; Reason = $wfRecusaLeitura; SequenceNumber = 0 }
+        }
         try {
-            Checkpoint-Computer -Description 'WinForge - antes dos INF de chipset' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
+            Checkpoint-Computer -Description 'WinForge - antes do lote do Windows Update' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
         } catch {
             return @{ Ok = $false; Reason = "O ponto de restauração não pôde ser criado: $($_.Exception.Message)"; SequenceNumber = 0 }
         }
-        # LER a lista é operação privilegiada por conta própria: medido nesta máquina, sem elevação
-        # Get-ComputerRestorePoint responde 'Acesso negado' em vez de lista vazia. Falha de LEITURA
-        # não é o mesmo que ponto não criado, e as duas respostas mandam o usuário para lugares
-        # diferentes - dizer "ligue a Proteção do Sistema" a quem tem a Proteção ligada e o ponto
-        # criado é mandar consertar o que não está quebrado. O lote não roda nos dois casos.
         try { $After = @(Get-ComputerRestorePoint -ErrorAction Stop) } catch {
-            return @{ Ok = $false; Reason = "O ponto de restauração pode ter sido criado, mas a lista de pontos não pôde ser lida para conferir: $($_.Exception.Message). Por segurança o lote não foi instalado."; SequenceNumber = 0 }
+            return @{ Ok = $false; Reason = $wfRecusaLeitura; SequenceNumber = 0 }
         }
     }
 
     $antigos = @(@($Before) | ForEach-Object { [int]$_.SequenceNumber })
     $novos = @(@($After) | Where-Object { [int]$_.SequenceNumber -notin $antigos })
     if (-not $novos.Count) {
+        # As duas causas mandam o usuário para lugares DIFERENTES, e a data que separa as duas já está
+        # na lista que acabou de ser lida. Dizer "ligue a Proteção do Sistema" a quem a tem ligada -
+        # e só esbarrou na janela de 24 h - é mandar consertar o que não está quebrado.
+        $ultimo = @(@($After) | Sort-Object { [int]$_.SequenceNumber })[-1]
+        $quando = Get-WinForgeRestorePointTime -Point $ultimo
+        $recente = ($null -ne $quando -and ((Get-Date) - $quando).TotalHours -lt 24)
+        $aMao = 'Você também pode criar o ponto à mão em Painel de Controle > Sistema > Proteção do Sistema > Criar.'
+        if ($recente) {
+            return @{ Ok = $false
+                      Reason = "Não foi criado ponto de restauração: já existe um de $($quando.ToString('dd/MM/yyyy HH:mm')), e o Windows não cria outro nas 24 h seguintes. $aMao"
+                      SequenceNumber = 0 }
+        }
         return @{ Ok = $false
-                  Reason = 'Não foi criado ponto de restauração: o Windows ignora o pedido quando a Proteção do Sistema está desligada no disco do Windows, e também quando já existe um ponto criado nas últimas 24 h. Ligue em Painel de Controle > Sistema > Proteção do Sistema e tente de novo.'
+                  Reason = "Não foi criado ponto de restauração: a Proteção do Sistema está desligada no disco do Windows, e o Windows ignora o pedido em silêncio quando ela está. Ligue em Painel de Controle > Sistema > Proteção do Sistema e tente de novo. $aMao"
                   SequenceNumber = 0 }
     }
     return @{ Ok = $true; Reason = ''; SequenceNumber = [int](@($novos | ForEach-Object { [int]$_.SequenceNumber }) | Sort-Object)[-1] }
