@@ -116,11 +116,13 @@
   lista de permissão, tamanho conhecido e abaixo do corte, e pelo menos cinco membros. Qualquer
   dúvida deixa a linha sozinha — mostrar uma linha a mais é barato, esconder o driver que o usuário
   veio buscar é caro.
-- **Ponto de restauração antes do lote**, quando o grupo é de chipset Intel: a própria Intel
+- **Ponto de restauração antes de TODO lote**, reconhecido como chipset Intel ou não: a própria Intel
   documenta INF de chipset vindo do Windows Update por cima de um driver de SMBus que funcionava. O
   Windows ignora o pedido em silêncio com a Proteção do Sistema desligada, e também quando já há um
   ponto das últimas 24 horas, então o WinForge confere que apareceu ponto novo. Não apareceu, o
-  lote não roda, e o texto diz qual dos dois casos é.
+  lote não roda, e o texto diz qual dos dois casos é. O ponto era só do grupo reconhecido até a
+  revisão final desta leva: o lote que o filtro NÃO reconhece é justamente aquele sobre o qual
+  nada se apurou, e era o que estava indo sem rede de segurança.
 - O que o lote instala são arquivos de informação: eles dão nome ao componente no Gerenciador de
   Dispositivos e não trazem driver novo. O aviso diz isso, diz que **não há como desfazer pelo
   WinForge** e aponta a única volta, que é o Reverter Driver do Windows, dispositivo por

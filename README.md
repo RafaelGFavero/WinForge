@@ -186,8 +186,9 @@ uma linha a mais é barato, esconder o driver que você veio buscar é caro. Fir
 software e INF de extensão nunca são agrupados. O relatório HTML continua cru, uma linha por
 atualização, com a coluna **Classe** e a nota de quantos itens a aba agrupou.
 
-**Quando o grupo é de chipset Intel, o WinForge cria um ponto de restauração antes do lote**, e não
-instala nada se não conseguir criá-lo. O Windows ignora esse pedido em silêncio com a Proteção
+**O WinForge cria um ponto de restauração antes de QUALQUER lote** — o grupo reconhecido como
+chipset Intel e o que não foi reconhecido, sem distinção —, e não instala nada se não conseguir
+criá-lo. O Windows ignora esse pedido em silêncio com a Proteção
 do Sistema desligada, e também quando já existe um ponto das últimas 24 horas; o WinForge confere
 que apareceu um ponto novo e diz qual dos dois casos impediu. Três limites, escritos na
 confirmação:
@@ -385,8 +386,11 @@ o que você perde: numa fase de leitura, nada foi alterado até ali; numa de esc
 vira "Parando…" e, no fim, o cabeçalho diz **Cancelado em mm:ss**, e não "Concluído". Fechar a
 janela no meio de um comando que altera o sistema faz a mesma pergunta.
 
-Fechar o WinForge no meio de um comando encerra também os programas que ele lançou. Até a versão
-anterior, matar o WinForge pelo Gerenciador de Tarefas deixava um `icacls` elevado rodando sozinho.
+Fechar o WinForge no meio de um comando encerra também os programas que ele lançou: eles nascem
+dentro de um Job Object, e o job leva os filhos junto quando morre. Até a versão anterior, um
+`icacls` elevado ficava rodando sozinho. O que está PROVADO por teste é o job sendo terminado pelo
+próprio teste; matar o WinForge pelo Gerenciador de Tarefas não foi exercitado, e é a lacuna que o
+registro de mudanças também declara.
 A exceção é a troca de posse da fase 4 das permissões, que fica fora dessa amarração de propósito:
 morrer entre tomar a posse e devolvê-la deixa uma pasta do sistema aberta a qualquer processo
 elevado. Se o WinForge for encerrado justo ali, a abertura seguinte **relata** a pasta e o dono
