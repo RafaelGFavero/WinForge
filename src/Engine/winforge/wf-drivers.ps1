@@ -514,9 +514,9 @@ function Group-WinForgeWindowsUpdateNullDrivers {
         campos para 'ab'+'c' não colidir com 'a'+'bc'. Os três limites são $script:WinForgeNullDriver*,
         constantes PROVISÓRIAS declaradas no topo deste arquivo.
 
-        UpdateId = 'grupo:<hash da chave>' faz Get-/Set-WinForgeWindowsUpdateRowState funcionarem sem
-        mudança nenhuma - para eles um id é um id. O hash é o da própria string e só precisa ser
-        estável DENTRO da sessão: o mapa de estado morre junto com a janela.
+        UpdateId = 'grupo:<hash da chave>' identifica a LINHA na tabela - é o que o clique carrega na
+        Tag. Não é chave de estado: o estado de instalação é guardado por MEMBRO, e o da linha de
+        grupo é derivado deles a cada remontagem. O que ele tem de ser é estável entre remontagens.
     .OUTPUTS
         @{ Rows; Groups }. Rows é a lista na ordem original, com a linha de grupo na posição da
         PRIMEIRA oferta que a originou; Groups traz um registro por lote dobrado.
@@ -591,9 +591,12 @@ function Get-WinForgeWindowsUpdateGroupId {
         grupo. Duas cópias da fórmula seriam dois lugares para mudar, e o dia em que uma mudasse a
         linha deixaria de casar com o estado guardado por id.
 
-        O prefixo faz Get-/Set-WinForgeWindowsUpdateRowState funcionarem sem mudança nenhuma: para
-        eles um id é um id. O hash é o da própria string e só precisa ser estável DENTRO da sessão -
-        o mapa de estado morre junto com a janela. Não é criptográfico de propósito:
+        Ele identifica a LINHA, e não um estado: o estado de instalação é guardado por MEMBRO, e o da
+        linha de grupo é derivado dos membros a cada remontagem - este id nunca é chave em
+        $sync.DiagWUState. O que ele precisa ser é ESTÁVEL entre duas remontagens da mesma tabela,
+        senão a linha trocaria de identidade a cada repintura, com a seleção e o clique junto.
+
+        O hash é o da própria string e não é criptográfico de propósito:
         [SHA256]::Create() estoura em máquina com FIPS ligado, e esta conta acontece na thread da
         janela, montando a tabela - uma exceção ali apaga a tabela inteira.
     #>

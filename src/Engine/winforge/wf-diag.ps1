@@ -1101,7 +1101,11 @@ function Get-WinForgeWindowsUpdateGroupState {
     $situacao = 'pendente'
     if ($instalando -gt 0) {
         $situacao = 'instalando'
-        $texto = "instalando $instalando de $total..."
+        # O numerador é o ANDAMENTO - o que já saiu da fila mais o que está na mão -, e não a
+        # quantidade de membros marcados. Contando só os marcados, o número ANDAVA PARA TRÁS: o
+        # clique marcava os 47, cada resultado tirava um, e a linha dizia "instalando 47 de 47",
+        # depois 46, depois 45, enquanto a barra de status dizia "Instalando 1 de 47".
+        $texto = "instalando $($instalados + $falharam + $instalando) de $total..."
     } elseif ($instalados -eq $total) {
         $situacao = 'instalado'
         $texto = "$total de $total instalados" + $(if ($reinicio) { ' (reinicie)' } else { '' })
@@ -1205,9 +1209,23 @@ function Show-WinForgeWindowsUpdateGroupList {
     param($Row, [switch]$NoShow)
 
     if ($null -eq $Row) { return $null }
-    $titulos = @(@($Row.MemberTitles) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($titulos.Count -eq 0) { $titulos = @('Esta linha não trouxe a lista de títulos.') }
-    return (Show-WinForgeOutputWindow -Title ([string]$Row.Title) -Text ($titulos -join "`r`n") -Component 'Diag' -NoShow:$NoShow)
+    # Cada título leva o ESTADO do membro junto. Sem isso a lista responde "quais são" e não "o que
+    # aconteceu com cada um": depois de um lote com falhas, a linha diz que 2 de 47 falharam e esta
+    # janela era o único lugar que poderia dizer QUAIS - e não dizia. O código do erro ficava só no
+    # log, que é onde o usuário não está olhando.
+    $ids = @(@($Row.Members) | ForEach-Object { [string]$_ })
+    $linhas = [System.Collections.Generic.List[string]]::new()
+    $i = 0
+    foreach ($titulo in @(@($Row.MemberTitles) | ForEach-Object { [string]$_ })) {
+        if (-not [string]::IsNullOrWhiteSpace($titulo)) {
+            $situacao = ''
+            if ($i -lt $ids.Count) { $situacao = [string](Get-WinForgeWindowsUpdateRowState -UpdateId ([string]$ids[$i])).Text }
+            $linhas.Add($(if ([string]::IsNullOrWhiteSpace($situacao)) { $titulo } else { "$titulo  ->  $situacao" }))
+        }
+        $i++
+    }
+    if ($linhas.Count -eq 0) { $linhas.Add('Esta linha não trouxe a lista de títulos.') }
+    return (Show-WinForgeOutputWindow -Title ([string]$Row.Title) -Text (@($linhas.ToArray()) -join "`r`n") -Component 'Diag' -NoShow:$NoShow)
 }
 
 function Invoke-WinForgeWindowsUpdateGroupAction {
@@ -1270,18 +1288,42 @@ function Invoke-WinForgeWindowsUpdateGroupAction {
         return 'cancelado'
     }
 
-    # O estado entra ANTES do despacho, na thread da janela: é o que apaga o botão e escreve
-    # "instalando..." nas linhas no mesmo instante do clique.
-    foreach ($wfMembro in $faltam) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfMembro) -State 'instalando' -Text 'instalando...' }
+    # SÓ O PRIMEIRO entra como "instalando" no clique - é o que apaga o botão e responde ao clique no
+    # mesmo instante. Marcar os 47 de uma vez fazia o contador da linha andar para trás, porque cada
+    # resultado tirava um da conta dos marcados.
+    $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]@($faltam)[0]) -State 'instalando' -Text 'instalando...'
     $sync.WUGroupMembers = @($faltam | ForEach-Object { [string]$_ })
     $sync.WUGroupCancel = $false
     $sync.WUGroupReboot = $false
     Update-WinForgeDiagnosticsWindowsUpdateGrid
 
+    # Os TRÊS blocos que a thread da janela executa nascem aqui, antes do corpo: um para marcar o
+    # membro que começa, um para o resultado de cada um e um para o fim.
+    $sync.WinForgeWUGroupStartCallback = {
+        try {
+            $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]$sync.WUGroupStartId) -State 'instalando' -Text 'instalando...'
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+        } catch { }
+    }
+
     $sync.WinForgeWUGroupTickCallback = {
         try {
             $null = Set-WinForgeWindowsUpdateInstallResult -UpdateId ([string]$sync.LastWUInstallId) -ResultCode ([int]$sync.LastWUInstallCode) -RebootRequired ([bool]$sync.LastWUInstallReboot)
             Update-WinForgeDiagnosticsWindowsUpdateGrid
+        } catch { }
+    }
+
+    $sync.WinForgeWUGroupDoneCallback = {
+        try {
+            foreach ($wfPendente in @($sync.WUGroupMembers)) {
+                if ([string](Get-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfPendente)).State -eq 'instalando') {
+                    $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfPendente) -State 'pendente' -Text ''
+                }
+            }
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            if ($sync.WUGroupReboot) {
+                [System.Windows.MessageBox]::Show($sync.Form, "Alguns itens só terminam de se instalar depois de reiniciar o computador.", "WinForge", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            }
         } catch { }
     }
 
@@ -1295,6 +1337,10 @@ function Invoke-WinForgeWindowsUpdateGroupAction {
             foreach ($wfId in $wfIds) {
                 if ($sync.WinForgeClosing -or $sync.WUGroupCancel) { break }
                 $wfFeitos++
+                # O membro que COMEÇA é marcado agora, um de cada vez, pela thread da janela: é o que
+                # faz o contador da linha subir junto com o da barra em vez de descer.
+                $sync.WUGroupStartId = [string]$wfId
+                if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUGroupStartCallback }
                 $sync.LastWUInstallId = [string]$wfId
                 $sync.LastWUInstallCode = -1
                 $sync.LastWUInstallReboot = $false
@@ -1316,20 +1362,6 @@ function Invoke-WinForgeWindowsUpdateGroupAction {
             $null = Set-WinForgeDiagProgress -Label "Windows Update: $wfFeitos de $wfTotal item(ns) do lote processado(s)." -Percent 100
             if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeWUGroupDoneCallback }
         }
-    }
-
-    $sync.WinForgeWUGroupDoneCallback = {
-        try {
-            foreach ($wfPendente in @($sync.WUGroupMembers)) {
-                if ([string](Get-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfPendente)).State -eq 'instalando') {
-                    $null = Set-WinForgeWindowsUpdateRowState -UpdateId ([string]$wfPendente) -State 'pendente' -Text ''
-                }
-            }
-            Update-WinForgeDiagnosticsWindowsUpdateGrid
-            if ($sync.WUGroupReboot) {
-                [System.Windows.MessageBox]::Show($sync.Form, "Alguns itens só terminam de se instalar depois de reiniciar o computador.", "WinForge", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-            }
-        } catch { }
     }
 
     try {

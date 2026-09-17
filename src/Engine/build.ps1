@@ -7076,6 +7076,16 @@ if ($SelfTest) {
         $wfLgAnd = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
         if ([string]$wfLgAnd.StatusText -ne 'instalando 13 de 47...') { Write-Host "  [ERRO] Grupo (estado): em andamento deu '$($wfLgAnd.StatusText)'" -ForegroundColor Red; $wbErrors++ }
         if ($wfLgAnd.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): em andamento continua habilitado" -ForegroundColor Red; $wbErrors++ }
+        # O contador ANDA PARA FRENTE, e é esta a forma que a produção produz: um membro marcado por
+        # vez, os anteriores já com resultado. Contando só os marcados, este caso daria "instalando 1
+        # de 47" enquanto a barra de status diz 13 - e, com todos marcados no clique, a linha contava
+        # ao contrário (47, 46, 45...). O numerador é o andamento: instalados + falhados + o da vez.
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 12)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-13' -State 'instalando' -Text 'instalando...'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne 'instalando 13 de 47...') { Write-Host "  [ERRO] Grupo (contador): com 12 prontos e o 13º na mão a linha diz '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText)', esperado 'instalando 13 de 47...'" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-3' -State 'falhou' -Text 'falhou (código 5)'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne 'instalando 13 de 47...') { Write-Host "  [ERRO] Grupo (contador): o membro que falhou saiu da conta do andamento ('$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText)')" -ForegroundColor Red; $wbErrors++ }
         $sync.DiagWUState = @{}
         foreach ($wfLgId in $wfLgMembros) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
         $wfLgTudo = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
@@ -7155,11 +7165,34 @@ if ($SelfTest) {
         # solto que o brief cobra é satisfeito pelo comentário que explica a regra.
         foreach ($wfLgForma in @(
             'if \(\$sync\.WinForgeClosing -or \$sync\.WUGroupCancel\) \{ break \}',
+            'Set-WinForgeWindowsUpdateRowState -UpdateId \(\[string\]@\(\$faltam\)\[0\]\) -State ''instalando''',
+            'Invoke-WPFUIThread \$sync\.WinForgeWUGroupStartCallback',
             'Set-WinForgeWindowsUpdateRowState -UpdateId \(\[string\]\$wfPendente\) -State ''pendente''',
             'Invoke-WPFUIThread \$sync\.WinForgeWUGroupTickCallback'
         )) {
             if ($wfLgFonteI -notmatch $wfLgForma) { Write-Host "  [ERRO] Grupo (instalação): falta a forma '$wfLgForma' no lote" -ForegroundColor Red; $wbErrors++ }
         }
+        # Os blocos que a THREAD DA JANELA executa nascem na runspace principal, e isso é preso por
+        # POSIÇÃO: cada declaração tem de vir antes da abertura do corpo que vai para o pool. Sem esta
+        # trava, mover uma delas para dentro do corpo deixa a suíte verde - foi medido, com o bloco de
+        # tique logo depois do param() - e é exatamente a forma que já travou a janela deste projeto:
+        # bloco criado na runspace do pool e invocado pelo Dispatcher para no primeiro pipeline.
+        $wfLgPosCorpo = $wfLgFonteI.IndexOf('$corpo = {', [StringComparison]::Ordinal)
+        if ($wfLgPosCorpo -lt 0) { Write-Host "  [ERRO] Grupo (runspace): não achei a abertura do corpo do lote" -ForegroundColor Red; $wbErrors++ }
+        # LastIndexOf, e não IndexOf: mover o bloco para dentro do corpo é um caso, DUPLICÁ-LO lá
+        # dentro é o outro - e o duplicado é pior, porque sobrescreve o bom em $sync quando o corpo
+        # roda, sem sumir com a declaração de fora que a trava procuraria.
+        foreach ($wfLgBloco in @('WinForgeWUGroupStartCallback', 'WinForgeWUGroupTickCallback', 'WinForgeWUGroupDoneCallback')) {
+            $wfLgPosBloco = $wfLgFonteI.LastIndexOf('$sync.' + $wfLgBloco + ' = {', [StringComparison]::Ordinal)
+            if ($wfLgPosBloco -lt 0) { Write-Host "  [ERRO] Grupo (runspace): '$wfLgBloco' não é declarado no corpo da função, onde a runspace é a principal" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfLgPosCorpo -ge 0 -and $wfLgPosBloco -gt $wfLgPosCorpo) { Write-Host "  [ERRO] Grupo (runspace): '$wfLgBloco' é declarado DEPOIS da abertura do corpo - bloco nascido na runspace do pool trava a janela no Dispatcher" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E a trava do comando em andamento é a última coisa antes do corpo: os três blocos já têm de
+        # existir quando ela sobe, senão um despacho que falhe entre uma coisa e outra deixaria a
+        # trava presa com bloco nenhum para soltá-la.
+        $wfLgPosTrava = $wfLgFonteI.IndexOf('$sync.CommandRunning = $true', [StringComparison]::Ordinal)
+        $wfLgPosDone  = $wfLgFonteI.LastIndexOf('$sync.WinForgeWUGroupDoneCallback = {', [StringComparison]::Ordinal)
+        if ($wfLgPosTrava -lt 0 -or $wfLgPosDone -lt 0 -or $wfLgPosDone -gt $wfLgPosTrava) { Write-Host "  [ERRO] Grupo (runspace): o bloco do fim é declarado depois de a trava do comando subir" -ForegroundColor Red; $wbErrors++ }
         # E o -SelfTest não instala: a trava vem DEPOIS do -NoUI, e antes de qualquer caixa.
         $wfLgPosNoUI = $wfLgFonteI.IndexOf('if ($NoUI)', [StringComparison]::Ordinal)
         $wfLgPosTrava = $wfLgFonteI.IndexOf('Assert-WinForgeNotSelfTest', [StringComparison]::Ordinal)
@@ -9515,8 +9548,9 @@ if ($SelfTest) {
             Update-WinForgeDiagnosticsWindowsUpdateGrid
             if ([int]$sync.DiagWUGrouped -ne 0) { Write-Host "  [ERRO] Grupo (contagem): sem lote nenhum, `$sync.DiagWUGrouped ficou em $($sync.DiagWUGrouped) - o número da busca anterior sobreviveu" -ForegroundColor Red; $wbErrors++ }
             if ([string]$sync.WPFDiagWULabel.Text -match 'reunido') { Write-Host "  [ERRO] Grupo (rótulo da aba): sem lote nenhum ele ainda fala em itens reunidos ('$($sync.WPFDiagWULabel.Text)')" -ForegroundColor Red; $wbErrors++ }
-            # O estado guardado pelo id sintético sobrevive à remontagem: é o que faz o lote continuar
-            # de onde parou, e é a razão de o id ter a forma que tem.
+            # O id sintético NÃO é chave de estado - o estado é guardado por membro, e o da linha sai
+            # derivado deles. O que se cobra aqui é que ele seja ESTÁVEL entre duas remontagens: id
+            # que muda a cada repintura troca a identidade da linha, e com ela a seleção e o clique.
             $sync.DiagWUResults = @($wfLgGrLote) + @($wfLgGrSolta)
             Update-WinForgeDiagnosticsWindowsUpdateGrid
             $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'lote-1' -State 'instalado' -Text 'instalado'
@@ -9542,6 +9576,19 @@ if ($SelfTest) {
                 if ($wfLgGrTexto.IndexOf($wfLgGrTit, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Grupo (Ver lista): a janela não traz o título '$wfLgGrTit'" -ForegroundColor Red; $wbErrors++ }
             }
             if (@($wfLgGrTexto -split "`r`n").Count -ne $wfLgGrMinG) { Write-Host "  [ERRO] Grupo (Ver lista): a janela tem $(@($wfLgGrTexto -split "`r`n").Count) linha(s), esperado $wfLgGrMinG" -ForegroundColor Red; $wbErrors++ }
+            # ...e cada linha leva o ESTADO do membro. Sem isso, depois de um lote com falhas a linha
+            # diz que 2 falharam e esta janela - o único lugar que poderia dizer QUAIS - não dizia.
+            $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'lote-2' -State 'falhou' -Text 'falhou (código 5)'
+            $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'lote-3' -State 'instalado' -Text 'instalado (reinicie)'
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrTexto2 = [string](Show-WinForgeWindowsUpdateGroupList -Row (@(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]) -NoShow).FindName('WFOutputText').Text
+            foreach ($wfLgGrPar in @(@("INTEL - $wfLgGrCls - 2", 'falhou (código 5)'), @("INTEL - $wfLgGrCls - 3", 'instalado (reinicie)'))) {
+                if ($wfLgGrTexto2 -notmatch ([regex]::Escape($wfLgGrPar[0]) + '[^\r\n]*' + [regex]::Escape($wfLgGrPar[1]))) { Write-Host "  [ERRO] Grupo (Ver lista): '$($wfLgGrPar[0])' saiu sem '$($wfLgGrPar[1])' na mesma linha" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E o membro sem estado continua saindo só com o título, sem sujeira de separador.
+            if ($wfLgGrTexto2 -match ([regex]::Escape("INTEL - $wfLgGrCls - 1") + '[^\r\n]*->')) { Write-Host "  [ERRO] Grupo (Ver lista): membro sem estado ganhou separador à toa" -ForegroundColor Red; $wbErrors++ }
+            $sync.DiagWUState = @{}
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
             # O fundo da linha de grupo: gatilho próprio, ANTES dos dois de desfecho - em WPF vence o
             # último que casa, e a linha que terminou instalada tem de ficar verde, não neutra.
             $wfLgGrEstilo = $sync.WPFDiagWU.RowStyle
