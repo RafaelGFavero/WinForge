@@ -290,8 +290,10 @@ function Get-WinForgeNetworkFacts {
         }
         $f.Inbox = (-not [string]::IsNullOrWhiteSpace($idRadio)) -and (Test-WinForgeInboxWifiDriver -PnpDeviceId $idRadio)
     }
-    # Só o botão que volta precisa saber se há cópia guardada, e a pergunta é uma leitura de pasta.
-    if ($Action -eq 'WifiDriverRestore') { $f.BackupFound = [bool](Get-WinForgeWifiDriverBackupSet).Found }
+    # Só o botão que volta precisa saber se há cópia guardada, e a pergunta é a MESMA que a ação
+    # faz na hora de agir - '-Trusted' inclusive. Sem ele, o degrau acenderia o botão contando uma
+    # cópia que a ação vai recusar, e o usuário clicaria num botão que só sabe dizer não.
+    if ($Action -eq 'WifiDriverRestore') { $f.BackupFound = [bool](Get-WinForgeWifiDriverBackupSet -Trusted).Found }
     return $f
 }
 
@@ -1262,6 +1264,238 @@ function Get-WinForgeWifiDriverBackupRoot {
     return (Join-Path (Join-Path $base 'WinForge') 'driver-backup')
 }
 
+function Confirm-WinForgeWifiDriverBackupRoot {
+    <#
+    .SYNOPSIS
+        Garante que a pasta das cópias de driver existe e é CONFIÁVEL, antes de a primeira cópia ser
+        gravada.
+    .DESCRIPTION
+        Mesmas primitivas e mesmas regras da pasta de backup de permissões e da pasta de downloads:
+        DACL própria sem herança (New-WinForgeSnapshotRoot), nenhum ponto de reanálise na cadeia,
+        dono dentro de SYSTEM/Administradores, ninguém de fora deles com escrita
+        (Test-WinForgeSnapshotRootTrusted) e a ACE herdável de OWNER RIGHTS
+        (Repair-WinForgeSnapshotRootOwnerRight).
+
+        O motivo é o mesmo das outras duas, e aqui ele é literal: o que sai desta pasta vira
+        argumento de uma INSTALAÇÃO DE DRIVER com privilégio. Se um processo de integridade média da
+        mesma conta puder escrever aqui, ele escolhe o driver que a máquina vai instalar - e o botão
+        que volta, além do socorro automático, que não pergunta nada, faria isso sozinho. É o mesmo
+        furo do instalador trocado, com a diferença de que aqui o que entra é código de kernel.
+
+        Sem elevação a pasta nasce com a identidade atual como dona e esta função RECUSA: a cópia não
+        acontece e o botão não roda, o que é melhor do que remover um driver guardando a volta numa
+        pasta que a própria conta reescreve.
+
+        O afrouxamento de -ExplicitRoot existe só para a pasta do -SelfTest, em %TEMP%, e NENHUM dos
+        botões passa por ele - há trava de fonte cobrando isso das duas ações que exportam. Quem
+        chama no produto chama sem o switch, e por isso responde pelas regras da pasta padrão.
+    .PARAMETER Root
+        A pasta raiz das cópias. Sem o parâmetro, a de Get-WinForgeWifiDriverBackupRoot.
+    .PARAMETER ExplicitRoot
+        Afrouxa as regras de dono para a pasta de teste. Porta do -SelfTest, nunca do produto.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <pasta> }
+    #>
+    param([string]$Root, [switch]$ExplicitRoot)
+
+    $dir = $(if ([string]::IsNullOrWhiteSpace($Root)) { Get-WinForgeWifiDriverBackupRoot } else { [string]$Root })
+    if (-not (Test-Path -LiteralPath $dir)) {
+        try { New-WinForgeSnapshotRoot -Root $dir | Out-Null }
+        catch { return @{ Ok = $false; Reason = "não foi possível criar a pasta de cópias '$dir': $($_.Exception.Message)"; Path = $dir } }
+        if (-not (Test-Path -LiteralPath $dir)) { return @{ Ok = $false; Reason = "a pasta de cópias '$dir' não pôde ser criada"; Path = $dir } }
+    }
+    $confiavel = Test-WinForgeSnapshotRootTrusted -Root $dir -ExplicitRoot:$ExplicitRoot
+    if (-not $confiavel.Trusted) { return @{ Ok = $false; Reason = "a pasta de cópias de driver não é confiável: $([string]$confiavel.Reason)"; Path = $dir } }
+    $dono = Repair-WinForgeSnapshotRootOwnerRight -Root $dir
+    if (-not $dono.Ok) { return @{ Ok = $false; Reason = "pasta de cópias de driver sem proteção de dono ('$dir'): $([string]$dono.Reason)"; Path = $dir } }
+    return @{ Ok = $true; Reason = ''; Path = $dir }
+}
+
+function Get-WinForgeWifiDriverManifestPath {
+    <#
+    .SYNOPSIS
+        O caminho do manifesto de um conjunto de cópia, SEMPRE direto na raiz protegida.
+    .DESCRIPTION
+        O manifesto mora na RAIZ e não dentro do conjunto, pela mesma razão que o índice do backup
+        de permissões: a raiz é a pasta cuja DACL foi conferida, e uma subpasta pode ter outra. O
+        nome sai do nome do conjunto, então um conjunto não descreve o outro.
+    .PARAMETER Root
+        A raiz das cópias.
+    .PARAMETER SetName
+        O nome da pasta do conjunto ('oem22-20260912-101010').
+    .OUTPUTS
+        O caminho do arquivo de manifesto.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$SetName
+    )
+
+    return (Join-Path $Root ("manifesto-{0}.json" -f ([string]$SetName)))
+}
+
+function New-WinForgeWifiDriverManifest {
+    <#
+    .SYNOPSIS
+        Escreve na raiz protegida o manifesto com o SHA-256 de cada arquivo do conjunto, e endurece
+        o que gravou.
+    .DESCRIPTION
+        O manifesto é o que amarra a cópia ao momento em que ela foi feita: sem ele, "a pasta existe
+        e tem um .inf e um .cat" é tudo o que a leitura sabe, e isso um terceiro também sabe
+        fabricar. Com ele, trocar um arquivo do conjunto depois - ou plantar um conjunto inteiro -
+        precisa também reescrever um arquivo que só SYSTEM e Administradores escrevem.
+
+        Cada arquivo do conjunto entra com caminho RELATIVO, tamanho e hash. A conferência exige a
+        correspondência nos dois sentidos (nada a mais, nada a menos), porque um arquivo EXTRA no
+        conjunto é um pacote que o /add-driver também proporia.
+
+        O arquivo é endurecido logo depois de gravado (Protect-WinForgeSnapshotFile). Não deu para
+        endurecer, o manifesto é apagado e a função falha: é a mesma regra de New-WinForgeSnapshot,
+        e pela mesma razão - manifesto que a própria conta reescreve não prova nada.
+    .PARAMETER Path
+        A pasta do conjunto.
+    .PARAMETER Root
+        A raiz protegida das cópias.
+    .PARAMETER ExplicitRoot
+        Pasta de teste: a falha em endurecer vira aviso e o manifesto fica. Porta do -SelfTest.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string>; Path = <manifesto>; Files = <int> }
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$ExplicitRoot
+    )
+
+    $nome = [string][System.IO.Path]::GetFileName(([string]$Path).TrimEnd('\'))
+    $manifesto = Get-WinForgeWifiDriverManifestPath -Root $Root -SetName $nome
+    $itens = @()
+    try {
+        foreach ($arquivo in @(Get-ChildItem -LiteralPath $Path -File -Recurse -ErrorAction Stop | Sort-Object FullName)) {
+            $relativo = ([string]$arquivo.FullName).Substring(([string]$Path).TrimEnd('\').Length).TrimStart('\')
+            $itens += @{
+                Name   = $relativo
+                Bytes  = [long]$arquivo.Length
+                Sha256 = [string](Get-FileHash -LiteralPath ([string]$arquivo.FullName) -Algorithm SHA256 -ErrorAction Stop).Hash
+            }
+        }
+    } catch { return @{ Ok = $false; Reason = "não foi possível calcular o hash da cópia: $($_.Exception.Message)"; Path = $manifesto; Files = 0 } }
+    if (-not @($itens).Count) { return @{ Ok = $false; Reason = "a cópia em '$Path' não tem arquivo nenhum para o manifesto."; Path = $manifesto; Files = 0 } }
+
+    try {
+        @{ Set = $nome; Created = (Get-Date).ToString('s'); Files = @($itens) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifesto -Encoding UTF8 -ErrorAction Stop
+    } catch { return @{ Ok = $false; Reason = "não foi possível gravar o manifesto '$manifesto': $($_.Exception.Message)"; Path = $manifesto; Files = 0 } }
+
+    $protegido = Protect-WinForgeSnapshotFile -Path $manifesto
+    if (-not $protegido.Hardened) {
+        if (-not $ExplicitRoot) {
+            Remove-Item -LiteralPath $manifesto -Force -ErrorAction SilentlyContinue
+            return @{ Ok = $false; Reason = "o manifesto da cópia não pôde ser protegido ($([string]$protegido.Reason))"; Path = $manifesto; Files = 0 }
+        }
+        try { Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "Manifesto de cópia de driver gravado sem endurecer dono e DACL (pasta própria): $([string]$protegido.Reason)" } catch { }
+    }
+    return @{ Ok = $true; Reason = ''; Path = $manifesto; Files = @($itens).Count }
+}
+
+function Test-WinForgeWifiDriverBackupTrusted {
+    <#
+    .SYNOPSIS
+        Diz se um conjunto de cópia pode virar argumento de instalação de driver: manifesto conferido,
+        carimbo sem viagem no tempo e, com -Trusted, dono e DACL de pasta protegida.
+    .DESCRIPTION
+        A ordem das perguntas é deliberada, e é a que faz o -SelfTest conseguir distinguir as causas:
+        primeiro as que valem em qualquer pasta (estar DIRETO na raiz, manifesto presente, hashes
+        batendo, carimbo não estar no futuro) e só depois as que exigem elevação (dono e DACL).
+
+        1. DIRETO na raiz. Subpasta de subpasta não vale, porque a DACL conferida é a da raiz.
+        2. Carimbo no FUTURO recusa. É o passo que fecha o cenário do revisor: quem planta um
+           conjunto escolhe o nome dele, e um carimbo adiante do relógio vence a ordenação por
+           carimbo e passa na frente da cópia de verdade. Cinco minutos de folga cobrem relógio
+           torto sem abrir a porta.
+        3. Manifesto direto na raiz protegida, legível, e correspondência nos DOIS sentidos entre o
+           que ele lista e o que está na pasta - nada a mais, nada a menos, hash e tamanho iguais.
+        4. Com -Trusted: a raiz passa por Test-WinForgeSnapshotRootTrusted e CADA arquivo do
+           conjunto, mais o manifesto, por Test-WinForgeSnapshotFileTrusted. Sem o afrouxamento de
+           -ExplicitRoot, que existe para pasta de teste e não para esta.
+    .PARAMETER Path
+        A pasta do conjunto.
+    .PARAMETER Root
+        A raiz das cópias.
+    .PARAMETER Trusted
+        Acrescenta as perguntas de dono, DACL e ponto de reanálise. É o que o caminho de verdade usa;
+        sem ele, o -SelfTest consegue montar um conjunto em %TEMP%, cujos arquivos pertencem à
+        identidade atual e por isso nunca passariam na regra de dono.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string> }
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$Trusted
+    )
+
+    $completo = ''
+    try { $completo = ([System.IO.Path]::GetFullPath($Path)).TrimEnd('\') } catch { return @{ Ok = $false; Reason = "caminho de conjunto inválido: '$Path'" } }
+    $raiz = ''
+    try { $raiz = ([System.IO.Path]::GetFullPath($Root)).TrimEnd('\') } catch { return @{ Ok = $false; Reason = "pasta de cópias inválida: '$Root'" } }
+    $pai = ''
+    try { $pai = ([string][System.IO.Path]::GetDirectoryName($completo)).TrimEnd('\') } catch { $pai = '' }
+    if ($pai -ne $raiz) { return @{ Ok = $false; Reason = "'$completo' não está diretamente na pasta de cópias '$raiz'" } }
+
+    $nome = [string][System.IO.Path]::GetFileName($completo)
+    $carimbo = ''
+    if ($nome -match '-(\d{8}-\d{6})$') { $carimbo = [string]$Matches[1] }
+    if ([string]::IsNullOrWhiteSpace($carimbo)) { return @{ Ok = $false; Reason = "'$nome' não tem carimbo de data e hora no nome" } }
+    $quando = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($carimbo, 'yyyyMMdd-HHmmss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$quando)) {
+        return @{ Ok = $false; Reason = "o carimbo '$carimbo' de '$nome' não é uma data válida" }
+    }
+    if ($quando -gt (Get-Date).AddMinutes(5)) {
+        return @{ Ok = $false; Reason = "a cópia '$nome' está carimbada no FUTURO ($carimbo): nenhuma cópia feita por este programa pode estar, e um carimbo adiante do relógio passaria na frente da cópia de verdade" }
+    }
+
+    $manifesto = Get-WinForgeWifiDriverManifestPath -Root $raiz -SetName $nome
+    if (-not (Test-Path -LiteralPath $manifesto -PathType Leaf)) {
+        return @{ Ok = $false; Reason = "a cópia '$nome' não tem manifesto em '$manifesto': não dá para saber se o que está lá é o que foi copiado" }
+    }
+    $dados = $null
+    try { $dados = Get-Content -LiteralPath $manifesto -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return @{ Ok = $false; Reason = "o manifesto de '$nome' não pôde ser lido: $($_.Exception.Message)" } }
+    $listados = @{}
+    foreach ($item in @($dados.Files)) {
+        $chave = ([string]$item.Name).Trim()
+        if ([string]::IsNullOrWhiteSpace($chave)) { continue }
+        $listados[$chave.ToLowerInvariant()] = @{ Sha256 = ([string]$item.Sha256).Trim(); Bytes = [long]$item.Bytes }
+    }
+    if (-not $listados.Count) { return @{ Ok = $false; Reason = "o manifesto de '$nome' não lista arquivo nenhum" } }
+
+    $vistos = @{}
+    foreach ($arquivo in @(Get-ChildItem -LiteralPath $completo -File -Recurse -ErrorAction SilentlyContinue)) {
+        $relativo = ([string]$arquivo.FullName).Substring($completo.Length).TrimStart('\')
+        $chave = $relativo.ToLowerInvariant()
+        $vistos[$chave] = $true
+        if (-not $listados.ContainsKey($chave)) { return @{ Ok = $false; Reason = "'$relativo' está na cópia '$nome' e não no manifesto: arquivo que ninguém copiou também seria proposto ao Windows" } }
+        if ([long]$arquivo.Length -ne [long]$listados[$chave].Bytes) { return @{ Ok = $false; Reason = "'$relativo' tem $([long]$arquivo.Length) byte(s) e o manifesto de '$nome' diz $([long]$listados[$chave].Bytes)" } }
+        $hash = ''
+        try { $hash = [string](Get-FileHash -LiteralPath ([string]$arquivo.FullName) -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return @{ Ok = $false; Reason = "não foi possível conferir o hash de '$relativo': $($_.Exception.Message)" } }
+        if ($hash -ne [string]$listados[$chave].Sha256) { return @{ Ok = $false; Reason = "'$relativo' não bate com o hash do manifesto de '$nome': o conteúdo mudou depois da cópia" } }
+    }
+    foreach ($chave in @($listados.Keys)) {
+        if (-not $vistos.ContainsKey([string]$chave)) { return @{ Ok = $false; Reason = "o manifesto de '$nome' lista '$chave', que não está mais na cópia" } }
+    }
+
+    if ($Trusted) {
+        $raizOk = Test-WinForgeSnapshotRootTrusted -Root $raiz
+        if (-not $raizOk.Trusted) { return @{ Ok = $false; Reason = "a pasta de cópias não é confiável: $([string]$raizOk.Reason)" } }
+        $manifestoOk = Test-WinForgeSnapshotFileTrusted -Path $manifesto
+        if (-not $manifestoOk.Trusted) { return @{ Ok = $false; Reason = "o manifesto de '$nome' não é confiável: $([string]$manifestoOk.Reason)" } }
+        foreach ($arquivo in @(Get-ChildItem -LiteralPath $completo -File -Recurse -ErrorAction SilentlyContinue)) {
+            $arqOk = Test-WinForgeSnapshotFileTrusted -Path ([string]$arquivo.FullName)
+            if (-not $arqOk.Trusted) { return @{ Ok = $false; Reason = "'$([string]$arquivo.Name)' da cópia '$nome' não é confiável: $([string]$arqOk.Reason)" } }
+        }
+    }
+    return @{ Ok = $true; Reason = '' }
+}
+
 function Export-WinForgeWifiDriverBackup {
     <#
     .SYNOPSIS
@@ -1309,7 +1543,12 @@ function Export-WinForgeWifiDriverBackup {
         # erro bruto de ligação de parâmetro em vez da frase.
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Published,
         [string]$Root,
-        [switch]$DryRun
+        [switch]$DryRun,
+        # A porta do -SelfTest para a pasta em %TEMP%, e SÓ dele: com ela, a raiz é conferida pelas
+        # regras de pasta própria e a falha em endurecer vira aviso em vez de apagar a cópia. Os dois
+        # botões chamam sem o switch, e há trava de fonte cobrando isso - sem ela, o afrouxamento
+        # migraria para o produto num copiar e colar.
+        [switch]$ExplicitRoot
     )
 
     $raiz = $(if ([string]::IsNullOrWhiteSpace($Root)) { Get-WinForgeWifiDriverBackupRoot } else { [string]$Root })
@@ -1332,6 +1571,11 @@ function Export-WinForgeWifiDriverBackup {
         return @{ Ok = $true; Reason = "[simulação] copiaria $($nomes.Count) pacote(s) para '$destino'"; Path = $destino; Files = 0; Bytes = [long]0 }
     }
     Assert-WinForgeNotSelfTest -Name $MyInvocation.MyCommand.Name
+
+    # A RAIZ PRIMEIRO, e falha dela aborta antes de existir pasta nenhuma: o que vai ser gravado
+    # aqui volta depois como argumento de instalação de driver com privilégio.
+    $raizOk = Confirm-WinForgeWifiDriverBackupRoot -Root $raiz -ExplicitRoot:$ExplicitRoot
+    if (-not $raizOk.Ok) { return @{ Ok = $false; Reason = [string]$raizOk.Reason; Path = $raiz; Files = 0; Bytes = [long]0 } }
 
     New-Item -ItemType Directory -Path $destino -Force -ErrorAction Stop | Out-Null
     foreach ($nome in $nomes) {
@@ -1361,6 +1605,23 @@ function Export-WinForgeWifiDriverBackup {
         # proporia ao Windows seria meia cópia - descoberto no pior momento possível.
         Remove-Item -LiteralPath $destino -Recurse -Force -ErrorAction SilentlyContinue
         return @{ Ok = $false; Reason = [string]$conferida.Reason; Path = $destino; Files = [int]$conferida.Files; Bytes = [long]$conferida.Bytes }
+    }
+
+    # Endurecer CADA arquivo e só então escrever o manifesto: entre o pnputil gravar e o Protect
+    # passar, o dono do arquivo recém-criado ainda guarda WRITE_DAC. Falhou qualquer um dos dois, a
+    # cópia inteira sai do disco - meia proteção aqui é pior que nenhuma, porque a leitura seguinte
+    # trataria a pasta como cópia boa.
+    foreach ($arquivo in @(Get-ChildItem -LiteralPath $destino -File -Recurse -ErrorAction SilentlyContinue)) {
+        $protegido = Protect-WinForgeSnapshotFile -Path ([string]$arquivo.FullName)
+        if (-not $protegido.Hardened -and -not $ExplicitRoot) {
+            Remove-Item -LiteralPath $destino -Recurse -Force -ErrorAction SilentlyContinue
+            return @{ Ok = $false; Reason = "A cópia não pôde ser protegida ('$([string]$arquivo.Name)': $([string]$protegido.Reason)) e foi apagada: um driver que a própria conta reescreve não é caminho de volta."; Path = $destino; Files = 0; Bytes = [long]0 }
+        }
+    }
+    $manifesto = New-WinForgeWifiDriverManifest -Path $destino -Root $raiz -ExplicitRoot:$ExplicitRoot
+    if (-not $manifesto.Ok) {
+        Remove-Item -LiteralPath $destino -Recurse -Force -ErrorAction SilentlyContinue
+        return @{ Ok = $false; Reason = "A cópia foi apagada porque o manifesto falhou: $([string]$manifesto.Reason)"; Path = $destino; Files = 0; Bytes = [long]0 }
     }
     return @{ Ok = $true; Reason = ''; Path = $destino; Files = [int]$conferida.Files; Bytes = [long]$conferida.Bytes }
 }
@@ -1412,13 +1673,21 @@ function Get-WinForgeWifiDriverBackupSet {
         usa isso para dizer que não há nada guardado, em vez de tentar e falhar no meio.
     .PARAMETER Root
         A pasta raiz das cópias. Sem o parâmetro, a de Get-WinForgeWifiDriverBackupRoot.
+    .PARAMETER Trusted
+        Exige que o conjunto passe por Test-WinForgeWifiDriverBackupTrusted COM as perguntas de dono
+        e DACL. É o que o caminho de verdade usa, porque o que sai daqui vira argumento de instalação
+        de driver com privilégio; sem o switch ficam só as perguntas que não exigem elevação, que é
+        o que deixa o -SelfTest montar um conjunto em %TEMP%.
     .OUTPUTS
-        @{ Found = <bool>; Path = <string>; Stamp = <string>; Files = <int>; Bytes = <long> }
+        @{ Found = <bool>; Path = <string>; Stamp = <string>; Files = <int>; Bytes = <long>;
+        Rejected = @(@{ Path; Reason }) }. 'Rejected' existe para o relato DIZER por que uma cópia
+        que está na pasta não foi usada: recusa silenciosa vira "não há nada guardado" na tela de
+        quem acabou de ficar sem rádio.
     #>
-    param([string]$Root)
+    param([string]$Root, [switch]$Trusted)
 
     $raiz = $(if ([string]::IsNullOrWhiteSpace($Root)) { Get-WinForgeWifiDriverBackupRoot } else { [string]$Root })
-    $nada = @{ Found = $false; Path = ''; Stamp = ''; Files = 0; Bytes = [long]0 }
+    $nada = @{ Found = $false; Path = ''; Stamp = ''; Files = 0; Bytes = [long]0; Rejected = @() }
     if (-not (Test-Path -LiteralPath $raiz)) { return $nada }
 
     $conjuntos = @()
@@ -1437,17 +1706,31 @@ function Get-WinForgeWifiDriverBackupSet {
     # Conjunto INCOMPLETO não conta: a pasta parcial que uma exportação interrompida deixou para
     # trás tem nome de conjunto e não tem o que propor ao Windows. A conferência é a MESMA de quem
     # exporta, e é por isso que ela mora numa função só.
+    $recusados = @()
     foreach ($candidato in $ordenados) {
         $conferida = Test-WinForgeWifiDriverBackupFolder -Path ([string]$candidato.Pasta.FullName)
-        if (-not $conferida.Ok) { continue }
+        if (-not $conferida.Ok) {
+            $recusados += @{ Path = [string]$candidato.Pasta.FullName; Reason = [string]$conferida.Reason }
+            continue
+        }
+        # A SEGUNDA tranca, e é ela que impede o cenário do conjunto plantado: manifesto conferido,
+        # carimbo sem viagem no tempo e, no caminho de verdade, dono e DACL de pasta protegida.
+        # Conjunto que reprova NÃO vira argumento de instalação, e o motivo sobe junto.
+        $confiavel = Test-WinForgeWifiDriverBackupTrusted -Path ([string]$candidato.Pasta.FullName) -Root $raiz -Trusted:$Trusted
+        if (-not $confiavel.Ok) {
+            $recusados += @{ Path = [string]$candidato.Pasta.FullName; Reason = [string]$confiavel.Reason }
+            continue
+        }
         return @{
-            Found = $true
-            Path  = [string]$candidato.Pasta.FullName
-            Stamp = [string]$candidato.Carimbo
-            Files = [int]$conferida.Files
-            Bytes = [long]$conferida.Bytes
+            Found    = $true
+            Path     = [string]$candidato.Pasta.FullName
+            Stamp    = [string]$candidato.Carimbo
+            Files    = [int]$conferida.Files
+            Bytes    = [long]$conferida.Bytes
+            Rejected = @($recusados)
         }
     }
+    $nada.Rejected = @($recusados)
     return $nada
 }
 
@@ -1689,8 +1972,23 @@ function Invoke-WinForgeWifiDriverRestore {
     $raizCopias = ''
     if ($PSBoundParameters.ContainsKey('Facts') -and $null -ne $Facts -and $Facts.ContainsKey('BackupRoot')) { $raizCopias = [string]$Facts.BackupRoot }
 
-    $conjunto = $(if ([string]::IsNullOrWhiteSpace($raizCopias)) { Get-WinForgeWifiDriverBackupSet } else { Get-WinForgeWifiDriverBackupSet -Root $raizCopias })
+    # '-Trusted' é o que separa "existe uma pasta com um .inf dentro" de "existe uma cópia que este
+    # programa fez e ninguém tocou". Sem ele, um conjunto plantado por um processo de integridade
+    # média da mesma conta, com carimbo no futuro para vencer a ordenação, viraria o pacote que a
+    # máquina instala com privilégio - inclusive pelo socorro automático, que não pergunta nada.
+    $conjunto = $(if ([string]::IsNullOrWhiteSpace($raizCopias)) { Get-WinForgeWifiDriverBackupSet -Trusted } else { Get-WinForgeWifiDriverBackupSet -Root $raizCopias -Trusted })
+    # A recusa é DITA, uma linha por conjunto descartado. Quem está sem rádio precisa saber que havia
+    # uma cópia na pasta e por que ela não serviu - senão a tela diz "não há nada guardado" e a
+    # pessoa apaga a pasta inteira procurando resolver.
+    foreach ($recusado in @($conjunto.Rejected)) {
+        $L.Add("Cópia descartada ('$([string]$recusado.Path)'): $([string]$recusado.Reason)")
+    }
     if (-not $conjunto.Found) {
+        if (@($conjunto.Rejected).Count) {
+            $L.Add('Nenhuma das cópias guardadas passou na conferência, então nenhuma delas vai ser instalada.')
+            $L.Add('Traga o driver do fabricante por cabo de rede ou por pen drive, de outro computador, e instale-o por ali.')
+            return @($L.ToArray())
+        }
         $L.Add('Não há nenhuma cópia de segurança de driver guardada nesta máquina, então não há para onde voltar.')
         $L.Add('Ela é criada pelos botões que mexem no driver, antes de mexerem.')
         return @($L.ToArray())

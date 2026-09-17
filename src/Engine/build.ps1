@@ -8288,7 +8288,7 @@ if ($SelfTest) {
                 # A função recusa em SelfTest de propósito (é a trava provada acima); para exercitar
                 # o caminho de verdade, a trava é solta por esta chamada e devolvida no finally.
                 $sync.SelfTest = $false
-                $wfPnpReal = Export-WinForgeWifiDriverBackup -Published @($wfPnpAlvoReal) -Root $wfPnpRaizReal
+                $wfPnpReal = Export-WinForgeWifiDriverBackup -Published @($wfPnpAlvoReal) -Root $wfPnpRaizReal -ExplicitRoot
                 if (-not $wfPnpReal.Ok) { Write-Host "  [ERRO] Rede (exportação real): '$wfPnpAlvoReal' falhou ('$($wfPnpReal.Reason)')" -ForegroundColor Red; $wbErrors++ }
                 elseif ([int]$wfPnpReal.Files -lt 2) { Write-Host "  [ERRO] Rede (exportação real): $($wfPnpReal.Files) arquivo(s) copiado(s)" -ForegroundColor Red; $wbErrors++ }
                 elseif ([long]$wfPnpReal.Bytes -le 0) { Write-Host "  [ERRO] Rede (exportação real): 0 byte copiado" -ForegroundColor Red; $wbErrors++ }
@@ -8302,7 +8302,7 @@ if ($SelfTest) {
                     else { Write-Host "  Exportação de driver (de verdade): '$wfPnpAlvoReal' -> $($wfPnpReal.Files) arquivo(s), $($wfPnpReal.Bytes) byte(s), conferida e relida" }
                 }
                 # Nome que não existe no repositório: o pnputil recusa, e a pasta parcial NÃO fica.
-                $wfPnpRuimReal = Export-WinForgeWifiDriverBackup -Published @('oem99999.inf') -Root $wfPnpRaizReal
+                $wfPnpRuimReal = Export-WinForgeWifiDriverBackup -Published @('oem99999.inf') -Root $wfPnpRaizReal -ExplicitRoot
                 if ($wfPnpRuimReal.Ok) { Write-Host "  [ERRO] Rede (exportação real): um pacote inexistente foi dado como copiado" -ForegroundColor Red; $wbErrors++ }
                 elseif (Test-Path -LiteralPath ([string]$wfPnpRuimReal.Path)) { Write-Host "  [ERRO] Rede (exportação real): a pasta parcial de uma exportação falhada ficou no disco" -ForegroundColor Red; $wbErrors++ }
             } catch {
@@ -8318,6 +8318,18 @@ if ($SelfTest) {
         # seria trava vazia: uma função que devolvesse 'Found = $false' sempre passaria nela, e o
         # botão que restaura nunca enxergaria backup nenhum. O fixture nasce e morre dentro da raiz
         # isolada desta rodada.
+        # O manifesto do conjunto é escrito AQUI, pelo teste, e não pela função que exporta: quem
+        # julga a cópia tem de julgar um manifesto escrito por outro, que é a situação de verdade -
+        # a leitura acontece numa máquina, o manifesto foi escrito noutro momento, e o que amarra os
+        # dois é o hash e mais nada.
+        $wfPnpEscreveMan = {
+            param([string]$Raiz, [string]$Conj)
+            $wfPnpItens = @()
+            foreach ($wfPnpA in @(Get-ChildItem -LiteralPath $Conj -File -Recurse)) {
+                $wfPnpItens += @{ Name = ([string]$wfPnpA.FullName).Substring(([string]$Conj).TrimEnd('\').Length).TrimStart('\'); Bytes = [long]$wfPnpA.Length; Sha256 = [string](Get-FileHash -LiteralPath ([string]$wfPnpA.FullName) -Algorithm SHA256).Hash }
+            }
+            @{ Set = [System.IO.Path]::GetFileName($Conj); Created = (Get-Date).ToString('s'); Files = @($wfPnpItens) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Get-WinForgeWifiDriverManifestPath -Root $Raiz -SetName ([System.IO.Path]::GetFileName($Conj))) -Encoding UTF8
+        }
         $wfPnpCheio = Join-Path $wbSelfTestRaiz 'driver-backup-cheio'
         try {
             # DOIS conjuntos, com PREFIXOS DIFERENTES de propósito: ordenar por NOME inverte a
@@ -8330,10 +8342,12 @@ if ($SelfTest) {
             New-Item -ItemType Directory -Path $wfPnpVelho -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $wfPnpVelho 'antigo.inf') -Value 'abcdefghij' -Encoding Ascii
             Set-Content -LiteralPath (Join-Path $wfPnpVelho 'antigo.cat') -Value 'abcdefghij' -Encoding Ascii
+            & $wfPnpEscreveMan $wfPnpCheio $wfPnpVelho
             $wfPnpConj = Join-Path $wfPnpCheio 'oem2-20260913-010203'
             New-Item -ItemType Directory -Path $wfPnpConj -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $wfPnpConj 'netwbw02.inf') -Value 'abc' -Encoding Ascii
             Set-Content -LiteralPath (Join-Path $wfPnpConj 'netwbw02.cat') -Value 'abc' -Encoding Ascii
+            & $wfPnpEscreveMan $wfPnpCheio $wfPnpConj
             $wfPnpSet = Get-WinForgeWifiDriverBackupSet -Root $wfPnpCheio
             if (-not $wfPnpSet.Found) { Write-Host "  [ERRO] Rede (backup): não achou a cópia guardada" -ForegroundColor Red; $wbErrors++ }
             elseif ([string]$wfPnpSet.Stamp -ne '20260913-010203') { Write-Host "  [ERRO] Rede (backup): carimbo '$($wfPnpSet.Stamp)', esperado '20260913-010203' - a escolha foi por NOME e não por data" -ForegroundColor Red; $wbErrors++ }
@@ -8367,6 +8381,94 @@ if ($SelfTest) {
         } finally {
             Remove-Item -LiteralPath $wfPnpCheio -Recurse -Force -ErrorAction SilentlyContinue
         }
+        # ---- A pasta das cópias de driver é PASTA PROTEGIDA, e cada conjunto é conferido por
+        # manifesto. O cenário que a revisão final montou: um processo de integridade média da mesma
+        # conta planta um conjunto com um .inf e um .cat dentro e carimbo no FUTURO. Ele vence a
+        # ordenação por carimbo, e o socorro automático - que não pergunta nada - instalaria aquilo
+        # com privilégio. Cada trava daqui fecha um pedaço desse caminho.
+        $wfPnpRaizAberta = Join-Path $wbSelfTestRaiz 'driver-backup-aberto'
+        New-Item -ItemType Directory -Path $wfPnpRaizAberta -Force | Out-Null
+        $wfPnpAclAberta = Get-Acl -LiteralPath $wfPnpRaizAberta
+        $wfPnpAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $wfPnpRaizAberta -AclObject $wfPnpAclAberta
+        $wfPnpConfAberta = Confirm-WinForgeWifiDriverBackupRoot -Root $wfPnpRaizAberta
+        if ($wfPnpConfAberta.Ok) { Write-Host "  [ERRO] Rede (pasta de cópias): uma pasta com escrita para 'Todos' foi aceita como raiz das cópias de driver" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfPnpConfAberta.Reason)) { Write-Host "  [ERRO] Rede (pasta de cópias): a raiz foi recusada sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        # E a exportação PARA nessa recusa, sem criar conjunto nenhum. A trava roda com a simulação
+        # solta, porque o -DryRun devolve antes de chegar à pasta - e é justamente o caminho que grava
+        # que precisa ser provado aqui.
+        $wfPnpSelfAberta = $sync.SelfTest
+        $wfPnpExpAberta = @{ Ok = $true; Reason = '' }
+        try {
+            $sync.SelfTest = $false
+            $wfPnpExpAberta = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -Root $wfPnpRaizAberta
+        } catch { $wfPnpExpAberta = @{ Ok = $false; Reason = [string]$_.Exception.Message } } finally { $sync.SelfTest = $wfPnpSelfAberta }
+        if ($wfPnpExpAberta.Ok) { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação gravou numa pasta que qualquer processo da conta reescreve" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfPnpExpAberta.Reason -notmatch 'confiável|dono') { Write-Host "  [ERRO] Rede (pasta de cópias): a recusa da exportação não é a da pasta ('$($wfPnpExpAberta.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wfPnpRaizAberta -Directory -ErrorAction SilentlyContinue).Count) { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação recusou a raiz e mesmo assim criou conjunto" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath $wfPnpRaizAberta -Recurse -Force -ErrorAction SilentlyContinue
+        # ---- O manifesto, nas quatro formas de a cópia não valer mais, e na boa.
+        $wfPnpRaizMan = Join-Path $wbSelfTestRaiz 'driver-backup-manifesto'
+        try {
+            $wfPnpNovoConj = {
+                param([string]$Raiz, [string]$Nome, [switch]$SemManifesto)
+                $wfPnpP = Join-Path $Raiz $Nome
+                New-Item -ItemType Directory -Path $wfPnpP -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $wfPnpP 'radio.inf') -Value 'conteudo do inf' -Encoding Ascii
+                Set-Content -LiteralPath (Join-Path $wfPnpP 'radio.cat') -Value 'conteudo do cat' -Encoding Ascii
+                if (-not $SemManifesto) { & $wfPnpEscreveMan $Raiz $wfPnpP }
+                return $wfPnpP
+            }
+            $null = & $wfPnpNovoConj $wfPnpRaizMan 'oem5-20260101-000000'
+            $wfPnpLeitura = Get-WinForgeWifiDriverBackupSet -Root $wfPnpRaizMan
+            if (-not $wfPnpLeitura.Found) { Write-Host "  [ERRO] Rede (manifesto): um conjunto com manifesto correto foi recusado ('$(@($wfPnpLeitura.Rejected | ForEach-Object { [string]$_.Reason }) -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            # Cada caso entra com carimbo MAIOR que o do conjunto bom, para ser o escolhido se passar.
+            # A asserção é dupla: a recusa tem de dizer a causa, e o bom tem de continuar sendo achado
+            # por baixo dela - recusar tudo também esconderia o defeito.
+            $wfPnpFuturo = 'oem9-' + (Get-Date).AddDays(2).ToString('yyyyMMdd-HHmmss')
+            foreach ($wfPnpCaso in @(
+                @{ Nome = 'oem6-20260102-000000'; Como = 'sem-manifesto'; Diz = 'manifesto' },
+                @{ Nome = 'oem7-20260103-000000'; Como = 'adulterado';    Diz = 'hash' },
+                @{ Nome = 'oem8-20260104-000000'; Como = 'arquivo-extra'; Diz = 'não no manifesto' },
+                @{ Nome = $wfPnpFuturo;           Como = 'futuro';        Diz = 'FUTURO' })) {
+                $wfPnpAlvo = $(if ([string]$wfPnpCaso.Como -eq 'sem-manifesto') { & $wfPnpNovoConj $wfPnpRaizMan ([string]$wfPnpCaso.Nome) -SemManifesto } else { & $wfPnpNovoConj $wfPnpRaizMan ([string]$wfPnpCaso.Nome) })
+                # O adulterado troca o conteúdo MANTENDO o tamanho: com um byte a mais, quem reprovaria
+                # seria a conferência de tamanho, e o hash ficaria sem prova nenhuma.
+        if ([string]$wfPnpCaso.Como -eq 'adulterado') { Set-Content -LiteralPath (Join-Path $wfPnpAlvo 'radio.inf') -Value 'CONTEUDO DO INF' -Encoding Ascii }
+                if ([string]$wfPnpCaso.Como -eq 'arquivo-extra') { Set-Content -LiteralPath (Join-Path $wfPnpAlvo 'plantado.inf') -Value 'pacote que ninguem copiou' -Encoding Ascii }
+                $wfPnpDepoisCaso = Get-WinForgeWifiDriverBackupSet -Root $wfPnpRaizMan
+                if ([string]$wfPnpDepoisCaso.Stamp -ne '20260101-000000') { Write-Host "  [ERRO] Rede (manifesto): o conjunto '$($wfPnpCaso.Como)' virou a cópia escolhida (carimbo '$($wfPnpDepoisCaso.Stamp)')" -ForegroundColor Red; $wbErrors++ }
+                if (-not @($wfPnpDepoisCaso.Rejected | Where-Object { [string]$_.Reason -match [regex]::Escape([string]$wfPnpCaso.Diz) }).Count) { Write-Host "  [ERRO] Rede (manifesto): a recusa de '$($wfPnpCaso.Como)' não diz '$($wfPnpCaso.Diz)' ('$(@($wfPnpDepoisCaso.Rejected | ForEach-Object { [string]$_.Reason }) -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+                Remove-Item -LiteralPath $wfPnpAlvo -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (Get-WinForgeWifiDriverManifestPath -Root $wfPnpRaizMan -SetName ([string]$wfPnpCaso.Nome)) -Force -ErrorAction SilentlyContinue
+            }
+            # E o caminho de VERDADE, com -Trusted: a pasta de %TEMP% pertence à identidade atual, então
+            # nem o conjunto bom passa. É a prova de que o switch não é enfeite.
+            if ((Get-WinForgeWifiDriverBackupSet -Root $wfPnpRaizMan -Trusted).Found) { Write-Host "  [ERRO] Rede (manifesto): com -Trusted uma cópia em %TEMP%, de dono comum, foi aceita para virar argumento de instalação" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            Remove-Item -LiteralPath $wfPnpRaizMan -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # ---- E as travas de fonte das duas pontas.
+        $wfPnpFonteExp = [string](Get-Command Export-WinForgeWifiDriverBackup).ScriptBlock
+        $wfPnpOndeConf = $wfPnpFonteExp.IndexOf('Confirm-WinForgeWifiDriverBackupRoot -Root', [StringComparison]::Ordinal)
+        $wfPnpOndeDir = $wfPnpFonteExp.IndexOf('New-Item -ItemType Directory -Path $destino', [StringComparison]::Ordinal)
+        if ($wfPnpOndeConf -lt 0) { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação não confere a raiz" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPnpOndeDir -lt 0 -or $wfPnpOndeConf -gt $wfPnpOndeDir) { Write-Host "  [ERRO] Rede (pasta de cópias): a raiz é conferida DEPOIS de a pasta do conjunto ser criada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPnpFonteExp -notmatch 'Protect-WinForgeSnapshotFile\s+-Path\s+\(') { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação não endurece os arquivos que copiou" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPnpFonteExp -notmatch 'New-WinForgeWifiDriverManifest\s+-Path\s+\$\w+\s+-Root\s+\$\w+') { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação não escreve o manifesto com hash" -ForegroundColor Red; $wbErrors++ }
+        # O fato que ACENDE o botão 6 e a conferência que a ação faz são a MESMA pergunta: sem
+        # '-Trusted' no levantamento, o degrau contaria uma cópia que a ação vai recusar, e o botão
+        # aceso só saberia dizer não.
+        if ([string](Get-Command Get-WinForgeNetworkFacts).ScriptBlock -notmatch 'Get-WinForgeWifiDriverBackupSet\s+-Trusted') { Write-Host "  [ERRO] Rede (botão 6): o levantamento conta cópia sem conferir dono, DACL e manifesto - o botão acende para uma cópia que a ação recusa" -ForegroundColor Red; $wbErrors++ }
+        $wfPnpFonteVolta = [string](Get-Command Invoke-WinForgeWifiDriverRestore).ScriptBlock
+        foreach ($wfPnpForma in @('Get-WinForgeWifiDriverBackupSet -Trusted', 'Get-WinForgeWifiDriverBackupSet -Root $raizCopias -Trusted')) {
+            if ($wfPnpFonteVolta.IndexOf($wfPnpForma, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Rede (botão 6): a leitura do conjunto sem '$wfPnpForma' - a cópia seria instalada sem ser conferida" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O afrouxamento da pasta de teste não pode migrar para o produto num copiar e colar.
+        foreach ($wfPnpBotao in @('Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric', 'Invoke-WinForgeWifiDriverRestore')) {
+            if ([string](Get-Command $wfPnpBotao).ScriptBlock -match 'ExplicitRoot') { Write-Host "  [ERRO] Rede (pasta de cópias): '$wfPnpBotao' passa o afrouxamento da pasta de teste" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Rede (cópias de driver): raiz protegida conferida antes de gravar, manifesto com hash, carimbo no futuro recusado e a recusa DITA no relato"
         Write-Host "  Rede (pnputil): amostra pt-BR com oem22.inf e exatamente 1 inbox, só código 0 é sucesso, saída interpretada, decodificação ansi, sem /force e sem /reboot"
     } catch {
         Write-Host "  [ERRO] Rede (pnputil): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
