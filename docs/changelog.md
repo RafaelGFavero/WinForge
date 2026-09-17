@@ -1,5 +1,150 @@
 # Changelog
 
+## 1.8.0 (2026-09-12)
+
+### Permissões do disco C:
+
+- **O botão que devolve as permissões ao padrão enchia o disco e travava a máquina.** Num notebook
+  de verdade ele chegou a 404 minutos ainda na segunda fase, com o disco crescendo e a memória
+  subindo. A causa era a segunda fase chamar `icacls /save /T /L` sobre a pasta de usuário: o `/L`
+  fala do link, não da caminhada, e o perfil é cheio de junções de compatibilidade que apontam para
+  o próprio pai (`AppData\Local\Dados de aplicativos` → `AppData\Local`). O laço só parava no
+  limite de 63 saltos de reparse do Windows. Medido: cerca de **205 GB** gravados contra 73 MB de
+  backup legítimo, um fator acima de **2.800×**.
+- **A segunda fase não usa mais `icacls /T`.** A caminhada passou a ser do próprio motor: pilha em
+  vez de recursão, atributo lido antes de empilhar, ponto de reanálise nunca percorrido e nunca
+  guardado como entrada. Ela guarda só pasta com **herança bloqueada**, que é a única em que a fase
+  5 mexe na volta: o que se guarda passa a ser o que se aplica. No mesmo perfil que gerava os 205
+  GB: **338 entradas, 103,4 KB, 39 segundos**.
+- Quatro tetos param a fase antes de ela crescer: 20.000 itens, 4 MB, 32 níveis e 90 segundos.
+  Estourar qualquer um cancela a restauração e não altera nada — não há "continuar mesmo assim",
+  porque seguir sem backup leva ao desfazer que não desfaz. O espaço livre é conferido antes, e o
+  arquivo pela metade é apagado num `finally`, não dentro do laço.
+- **Rodar a restauração duas vezes destruía o backup bom.** O Desfazer lia o índice mais novo; na
+  segunda execução a herança já estava religada, o escopo caía para perto de zero e o índice novo
+  virava o único visível, com as entradas originais perdidas. Agora cada índice carrega a marca
+  `Consumed`, o Desfazer lê o **mais antigo ainda não usado**, e uma restauração nova é recusada
+  enquanto existir backup não usado — a recusa manda usar o Desfazer ou limpar os backups antigos.
+- O índice guarda o identificador da máquina e o SID do perfil, e é recusado quando vem de outra
+  máquina: aplicar SDDL com SIDs alheios tranca o perfil em vez de destrancá-lo. O arquivo de
+  conteúdo leva SHA-256, recalculado na hora de desfazer.
+- **O backup do conteúdo do perfil ficou obrigatório; o opcional é o destino.** A 103,4 KB não há o
+  que economizar. A caixa "Guardar o backup das permissões em outro disco" nasce desmarcada;
+  marcada, só o arquivo de conteúdo sai, e o índice fica sempre em
+  `%ProgramData%\WinForge\acl-backup`. O destino passa por sete exigências — absoluto e não-UNC,
+  fora da raiz do volume, NTFS, disco fixo ou removível, nem dentro nem contendo o perfil, sem
+  ponto de reanálise na cadeia, espaço com folga — e o arquivo é endurecido lá como já era na pasta
+  do WinForge. O aviso diz o que muda: fora da pasta do WinForge, qualquer administrador lê, altera
+  ou apaga esse arquivo, e disco desligado na hora de desfazer é o mesmo que não ter backup.
+- **Botão novo: `Permissões do disco C: - Limpar backups antigos`.** Lista o que está guardado com
+  tamanho e data, marca o arquivo que nenhum índice referencia e apaga só os marcados, sob
+  confirmação. Na abertura, uma varredura relata a pasta acima de 1 GB e não apaga nada. É a saída
+  de quem matou a 1.7.0 no meio da segunda fase e ficou com centenas de GB numa pasta que só o
+  SYSTEM e os Administradores apagam.
+- **A quinta fase ligava herança fora do perfil.** O `icacls /inheritance:e /T /L` descia seguindo
+  os pontos de reanálise e derramava em `AppData\Roaming`, `AppData\Local` e no armazenamento em
+  nuvem redirecionado a negação de travessia que as junções de compatibilidade carregam. Agora é um
+  `icacls <pasta> /inheritance:e` por entrada da lista guardada, em ordem ordinal, que entrega pai
+  antes de filho e não sai do perfil.
+- Pasta que não deixa ler a lista de permissões não some mais no silêncio: ela é contada, o
+  cabeçalho vira **Concluído com ressalvas** e o relatório nomeia as primeiras, dizendo que elas
+  não foram copiadas nem alteradas.
+
+### Janela de saída: memória, tempo e o botão Parar
+
+- **A saída dos comandos longos passou a ser transmitida, e não acumulada.** As fases 2 a 5
+  chamavam o executor sem fluxo, e a saída inteira virava uma linha só, de centenas de MB. Medido
+  no mesmo comando: pico de processo de **457 MB para 156 MB** e memória gerenciada de **375 MB
+  para 16 MB**. Junto saíram três gargalos que apareceriam logo em seguida — o escritor que abria e
+  fechava o arquivo por linha, o acumulador que o único chamador descartava e o erro-padrão lido de
+  uma vez só, que neste caso é justamente o volume.
+- A janela ganhou teto: anel de 4 MB com corte em 2 MB na tela, 256 MB por arquivo de saída (ao
+  passar, uma linha diz que os detalhes dali em diante foram descartados) e retenção de 30 dias ou
+  20 arquivos por prefixo.
+- O cabeçalho avisa quando a operação passa de **uma vez e meia** o tempo esperado, e de novo ao
+  passar do **triplo**, dizendo quanto aquilo costuma levar e que continua rodando.
+- **Botão Parar**, à esquerda do Fechar e só em comando com saída ao vivo. Ele impede o próximo
+  passo de começar; a etapa em curso termina antes. A confirmação diz o que se perde: em fase de
+  leitura nada foi alterado, e em fase de escrita o Desfazer cobre tudo o que já mudou, porque o
+  backup é anterior à primeira alteração. No fim o cabeçalho diz **Cancelado em mm:ss**, nunca
+  Concluído.
+- **Fechar o WinForge durante um comando deixava processo elevado rodando órfão.** O
+  `powershell.exe` morto à força deixa vivo o filho que ele lançou, e esse filho pode ser um
+  `icacls` reescrevendo a lista de uma pasta do sistema. Os processos passaram a nascer dentro de
+  um Job Object que os encerra junto. A quarta fase é a exceção e fica **fora** do job: matá-la
+  entre tomar a posse e devolvê-la deixa uma pasta do sistema aberta a qualquer processo elevado
+  que apareça depois. Antes da troca o motor
+  grava um marcador com a pasta e o dono original; na abertura seguinte o marcador vira aviso, que
+  aponta o botão e nunca conserta sozinho.
+
+### Rede sem fio
+
+- **"Mesmo conectado certinho, a rede e a navegação na internet não funcionam."** Conectado prova
+  que o rádio associou e autenticou, então o driver raramente é o culpado. A resposta é uma escada
+  de seis degraus, na ordem do atendimento, com o que mexe em driver no fim: `Rede — Diagnóstico
+  completo`, `Rede - Redefinir` (que já existia e ganhou o texto do que **não** faz), `Rede —
+  Limpar cache de DNS e pegar endereço novo`, `Rede sem fio — Reinstalar o driver que já está
+  instalado`, `Rede sem fio — Voltar para o driver que estava antes` e `Rede sem fio — Trocar pelo
+  driver básico do Windows`.
+- O diagnóstico só lê e termina em cerca de três segundos: rádio, perfil da rede, endereço e o
+  169.254 de quando o roteador não responde, rota, servidor de nomes comparado com o 1.1.1.1, três
+  sondas de saída, proxy do usuário e do WinHTTP, filtros presos aos adaptadores, catálogo Winsock,
+  tamanho máximo de pacote, IPv6 e código de problema do dispositivo. Fecha com uma frase de
+  veredito, escolhida de uma lista de cinco, dizendo por onde começar.
+- Filtro de antivírus, de firewall ou de rede privada preso a todos os adaptadores físicos é
+  nomeado, com o caminho de menu do Windows para desligá-lo à mão. O WinForge não desliga nem
+  desinstala produto de segurança de terceiro, e o texto avisa que, se o filtro é a causa, trocar o
+  driver do Wi-Fi não conserta nada e ainda arrisca deixar a máquina sem rádio.
+- Nove bloqueios de leitura cercam os degraus que mexem em driver: sessão remota, Windows anterior
+  ao 10 1903, nenhuma outra via de rede, ausência de driver básico, falha ao exportar o pacote,
+  notebook na bateria, máquina virtual ou Windows Server, reinício pendente e espaço em disco. Não
+  existe "continuar mesmo assim".
+- O botão que troca pelo driver básico pede uma **palavra digitada** em vez de um Sim, e não
+  aparece em computador para o qual o Windows não tem driver básico — o caso comum em MediaTek,
+  Realtek recentes e Intel novos. Antes de qualquer remoção o pacote em uso é exportado e conferido
+  arquivo por arquivo; falhou a exportação, nada é alterado. Depois da troca o adaptador é
+  conferido, e desfecho ruim devolve o driver guardado na hora, sem perguntar.
+
+### Drivers do Windows Update
+
+- Num desktop com chipset X99 a tabela vinha com dezenas de linhas de arquivos de informação de
+  chipset, uma por componente da placa-mãe. Elas passaram a ocupar **uma linha de grupo**, cujo
+  título é `Intel — 47 itens que só dão nome a componentes da placa-mãe`, com um botão "Ver lista"
+  para os títulos e um **Instalar todos (47)** que roda o lote inteiro num runspace só. O segundo
+  clique instala apenas o que ficou faltando.
+- O agrupamento exige quatro condições ao mesmo tempo: título sem número de versão, classe numa
+  lista de permissão, tamanho conhecido e abaixo do corte, e pelo menos cinco membros. Qualquer
+  dúvida deixa a linha sozinha — mostrar uma linha a mais é barato, esconder o driver que o usuário
+  veio buscar é caro.
+- **Ponto de restauração antes do lote**, quando o grupo é de chipset Intel: a própria Intel
+  documenta INF de chipset vindo do Windows Update por cima de um driver de SMBus que funcionava. O
+  Windows ignora o pedido em silêncio com a Proteção do Sistema desligada, e também quando já há um
+  ponto das últimas 24 horas, então o WinForge confere que apareceu ponto novo. Não apareceu, o
+  lote não roda, e o texto diz qual dos dois casos é.
+- O que o lote instala são arquivos de informação: eles dão nome ao componente no Gerenciador de
+  Dispositivos e não trazem driver novo. O aviso diz isso, diz que **não há como desfazer pelo
+  WinForge** e aponta a única volta, que é o Reverter Driver do Windows, dispositivo por
+  dispositivo.
+- O relatório HTML continua cru, uma linha por atualização, e ganhou a coluna Classe e a nota de
+  quantos itens a aba agrupou.
+- O WinForge continua sem baixar e sem executar instalador de fabricante: o lote vai pela via do
+  Windows Update, com as mesmas entradas que a tabela mostra.
+
+### Limites conhecidos desta versão
+
+- Nada desta versão foi visto rodando numa máquina com as permissões realmente quebradas. O
+  autoteste roda sem administrador e sobre um perfil íntegro.
+- A instalação de driver pelo Windows Update e a remoção de driver de rede nunca rodaram de
+  verdade. O que está provado é a decisão, as recusas e a forma dos comandos.
+- O critério que reconhece os arquivos de chipset nunca viu uma oferta real. Os três valores dele
+  estão marcados como provisórios no código, à espera de um levantamento na máquina do usuário.
+- A criação do ponto de restauração não é exercitada por teste: ela escreve, e o autoteste recusa
+  escrita.
+- O encerramento dos processos filhos foi provado com o job sendo terminado pelo teste, e não com o
+  WinForge morto pelo Gerenciador de Tarefas.
+- O botão para parar o lote de drivers ainda não existe, embora o laço já leia a bandeira de
+  cancelamento entre um membro e o seguinte.
+
 ## 1.7.0 (2026-09-11)
 
 ### Ajustes que já estão em vigor
