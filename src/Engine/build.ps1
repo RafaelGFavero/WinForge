@@ -7405,7 +7405,26 @@ if ($SelfTest) {
         }
         # A data chega em três formas, e a do WMI é a que a máquina usa de verdade.
         if ([string](Get-WinForgeRestorePointTime -Point @{ CreationTime = [datetime]'2026-09-10 08:30' }).ToString('yyyy-MM-dd HH:mm') -ne '2026-09-10 08:30') { Write-Host "  [ERRO] Chipset (data): [datetime] direto não foi lido" -ForegroundColor Red; $wbErrors++ }
-        if ([string](Get-WinForgeRestorePointTime -Point @{ CreationTime = '20260910083000.000000-180' }).ToString('yyyy-MM-dd HH:mm') -ne '2026-09-10 08:30') { Write-Host "  [ERRO] Chipset (data): o formato do WMI não foi lido - é o que Get-ComputerRestorePoint devolve" -ForegroundColor Red; $wbErrors++ }
+        # O formato do WMI carrega o PRÓPRIO fuso ('-180' são os minutos de diferença para o UTC), e
+        # o conversor do .NET devolve a data já no fuso de QUEM LÊ. Cobrar '08:30' era cobrar que a
+        # máquina do teste estivesse em UTC-3 - o fuso desta aqui, não o do executor da integração
+        # contínua, onde a mesma conversão dá 11:30 e a trava ficava vermelha com o código certo.
+        # O que não depende de máquina nenhuma é o INSTANTE: 08:30 em UTC-3 são 11:30 em UTC, em
+        # qualquer fuso. O formato de saída também sai sem os separadores ':' e '/', que são
+        # caracteres de CULTURA e mudariam num Windows em outro idioma.
+        #
+        # São DOIS fixtures, com fusos diferentes, e é isso que dá dente à trava em qualquer
+        # máquina: quem ignorasse o fuso e lesse só os 14 primeiros dígitos devolveria o MESMO
+        # instante para os dois, então um dos dois sempre acusa. Com um fixture só, numa máquina
+        # cujo fuso por acaso seja o do fixture, o erro passa despercebido - foi o que aconteceu.
+        foreach ($wfChWmi in @(
+            @('20260910083000.000000-180', '202609101130'),
+            @('20260910083000.000000+060', '202609100730')
+        )) {
+            $wfChLida = Get-WinForgeRestorePointTime -Point @{ CreationTime = [string]$wfChWmi[0] }
+            if ($null -eq $wfChLida) { Write-Host "  [ERRO] Chipset (data): o formato do WMI '$($wfChWmi[0])' não foi lido - é o que Get-ComputerRestorePoint devolve" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfChLida.ToUniversalTime().ToString('yyyyMMddHHmm') -ne [string]$wfChWmi[1]) { Write-Host "  [ERRO] Chipset (data): '$($wfChWmi[0])' virou o instante $($wfChLida.ToUniversalTime().ToString('yyyyMMddHHmm')) em UTC, esperado $($wfChWmi[1]) - o fuso que vem no próprio texto não foi respeitado" -ForegroundColor Red; $wbErrors++ }
+        }
         if ($null -ne (Get-WinForgeRestorePointTime -Point @{ CreationTime = 'nao e data' })) { Write-Host "  [ERRO] Chipset (data): texto ilegível devia dar `$null, e não uma data inventada" -ForegroundColor Red; $wbErrors++ }
         if ($null -ne (Get-WinForgeRestorePointTime -Point $null)) { Write-Host "  [ERRO] Chipset (data): ponto nulo devia dar `$null" -ForegroundColor Red; $wbErrors++ }
         $wfChPontoOk = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 }, @{ SequenceNumber = 11 })
