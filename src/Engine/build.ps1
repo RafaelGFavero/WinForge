@@ -7390,11 +7390,18 @@ if ($SelfTest) {
         # As DUAS causas são separadas, porque mandam o usuário para lugares diferentes: com um ponto
         # criado agora, a causa é a janela de 24 h e a Proteção está LIGADA - dizer para ligá-la seria
         # mandar consertar o que não está quebrado. A data que separa as duas já vem na lista lida.
-        $wfChPonto24 = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddHours(-2) }) -After @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddHours(-2) })
+        # UM Get-Date, guardado: eram três chamadas, e a de baixo formatava um instante DIFERENTE do
+        # que foi para o fixture. Rodando à meia-noite menos duas horas, as duas caem em dias
+        # distintos e a trava fica vermelha sem nada estar quebrado - relógio da máquina é máquina.
+        $wfChRecente = (Get-Date).AddHours(-2)
+        $wfChPonto24 = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10; CreationTime = $wfChRecente }) -After @(@{ SequenceNumber = 10; CreationTime = $wfChRecente })
         if ($wfChPonto24.Ok) { Write-Host "  [ERRO] Chipset (ponto): com ponto recente e nenhum novo ele respondeu Ok" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfChPonto24.Reason -notmatch '24 h|24 horas') { Write-Host "  [ERRO] Chipset (ponto): com ponto de 2 h atrás a recusa não menciona a janela de 24 h ('$($wfChPonto24.Reason)')" -ForegroundColor Red; $wbErrors++ }
         if ([string]$wfChPonto24.Reason -match 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): com a Proteção LIGADA e um ponto recente a recusa manda ligá-la mesmo assim" -ForegroundColor Red; $wbErrors++ }
-        if ([string]$wfChPonto24.Reason -notmatch ([regex]::Escape((Get-Date).AddHours(-2).ToString('dd/MM/yyyy')))) { Write-Host "  [ERRO] Chipset (ponto): a recusa das 24 h não diz de QUANDO é o ponto que já existe" -ForegroundColor Red; $wbErrors++ }
+        # O '/' deste formato é o separador de data da CULTURA, e aqui isso não é armadilha: a recusa
+        # é montada com o MESMO 'dd/MM/yyyy' (wf-drivers.ps1, New-WinForgeChipsetRestorePoint), então
+        # os dois lados andam juntos em qualquer idioma. Quem fixasse a barra à mão é que quebraria.
+        if ([string]$wfChPonto24.Reason -notmatch ([regex]::Escape($wfChRecente.ToString('dd/MM/yyyy')))) { Write-Host "  [ERRO] Chipset (ponto): a recusa das 24 h não diz de QUANDO é o ponto que já existe" -ForegroundColor Red; $wbErrors++ }
         # ...e ponto ANTIGO não vira "espere 24 h": aí a causa é mesmo a Proteção desligada.
         $wfChPontoVelho = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddDays(-9) }) -After @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddDays(-9) })
         if ([string]$wfChPontoVelho.Reason -notmatch 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): com o ponto mais novo de 9 dias atrás a recusa não acusa a Proteção desligada" -ForegroundColor Red; $wbErrors++ }
@@ -7404,7 +7411,19 @@ if ($SelfTest) {
             if ([string]$wfChRec.Reason -notmatch 'à mão') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz que o usuário pode criar o ponto à mão ('$($wfChRec.Reason)')" -ForegroundColor Red; $wbErrors++ }
         }
         # A data chega em três formas, e a do WMI é a que a máquina usa de verdade.
-        if ([string](Get-WinForgeRestorePointTime -Point @{ CreationTime = [datetime]'2026-09-10 08:30' }).ToString('yyyy-MM-dd HH:mm') -ne '2026-09-10 08:30') { Write-Host "  [ERRO] Chipset (data): [datetime] direto não foi lido" -ForegroundColor Red; $wbErrors++ }
+        #
+        # A [datetime] direta tem de voltar INTEIRA, e a conferência é pelo instante (ticks), nunca
+        # por texto formatado: ':' num formato personalizado é o separador de hora da CULTURA
+        # corrente, e num Windows em outro idioma ele não é ':'. Cobrar '2026-09-10 08:30' passava
+        # aqui e no executor em inglês por sorte - as duas culturas usam ':'.
+        #
+        # O fixture é construído por NÚMEROS, sem passar por texto, e leva milissegundos de
+        # propósito: uma implementação que perdesse o atalho da [datetime] e devolvesse o valor
+        # depois de uma ida e volta por texto acertaria o minuto e perderia os 123 ms.
+        $wfChDireta = [datetime]::new(2026, 9, 10, 8, 30, 45, 123)
+        $wfChLidaD = Get-WinForgeRestorePointTime -Point @{ CreationTime = $wfChDireta }
+        if ($null -eq $wfChLidaD) { Write-Host "  [ERRO] Chipset (data): [datetime] direto não foi lido" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfChLidaD.Ticks -ne $wfChDireta.Ticks) { Write-Host "  [ERRO] Chipset (data): [datetime] direto voltou com $($wfChLidaD.Ticks) ticks, esperado $($wfChDireta.Ticks) - a data não volta inteira" -ForegroundColor Red; $wbErrors++ }
         # O formato do WMI carrega o PRÓPRIO fuso ('-180' são os minutos de diferença para o UTC), e
         # o conversor do .NET devolve a data já no fuso de QUEM LÊ. Cobrar '08:30' era cobrar que a
         # máquina do teste estivesse em UTC-3 - o fuso desta aqui, não o do executor da integração
