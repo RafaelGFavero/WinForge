@@ -170,6 +170,41 @@ conta como "mesmo driver" é modelo, fornecedor **e** classe juntos: o driver ba
 extensão de uma mesma placa chegam com modelo e fornecedor iguais, são pacotes que se completam e
 por isso ficam os dois. A coluna **Versão** sai do próprio título da atualização.
 
+**Dezenas de arquivos de informação viram uma linha só.** Em placa-mãe cheia de componentes — um
+desktop com chipset X99, por exemplo — o Windows Update oferece dezenas de entradas que não trazem
+driver nenhum: são arquivos que apenas dão nome ao componente no Gerenciador de Dispositivos. Elas
+passam a ocupar uma **linha de grupo**, com o fornecedor e a contagem no título (`Intel — 47 itens
+que só dão nome a componentes da placa-mãe`), a coluna Versão dizendo "sem número de versão", um
+botão **Ver lista** que abre os títulos de todos os membros e um **Instalar todos (47)** que roda o
+lote inteiro de uma vez. O estado é recontado a cada remontagem da tabela ("12 de 47 instalados, 1
+falhou, 34 pendentes"), e o segundo clique instala só o que faltou.
+
+Para virar grupo são quatro condições ao mesmo tempo: título sem número de versão, classe dentro de
+uma lista de permissão fechada, tamanho conhecido e abaixo do corte, e pelo menos cinco membros com
+o mesmo fornecedor, a mesma classe e a mesma data. Qualquer dúvida deixa a linha sozinha — mostrar
+uma linha a mais é barato, esconder o driver que você veio buscar é caro. Firmware, componente de
+software e INF de extensão nunca são agrupados. O relatório HTML continua cru, uma linha por
+atualização, com a coluna **Classe** e a nota de quantos itens a aba agrupou.
+
+**O WinForge cria um ponto de restauração antes de QUALQUER lote** — o grupo reconhecido como
+chipset Intel e o que não foi reconhecido, sem distinção —, e não instala nada se não conseguir
+criá-lo. O Windows ignora esse pedido em silêncio com a Proteção
+do Sistema desligada, e também quando já existe um ponto das últimas 24 horas; o WinForge confere
+que apareceu um ponto novo e diz qual dos dois casos impediu. Três limites, escritos na
+confirmação:
+
+- **Não há como desfazer isso pelo WinForge.** A única volta é o Gerenciador de Dispositivos, em
+  Propriedades → Driver → Reverter Driver, dispositivo por dispositivo.
+- Esses arquivos **não são o driver que faz o dispositivo funcionar**. Eles não instalam SMBus
+  funcional, Intel ME/HECI, Serial IO, DPTF nem Rapid Storage: depois do lote, um "Dispositivo PCI"
+  que precisava de driver de verdade continua sem ele e muda só de nome.
+- Desempenho não muda. A própria Intel diz que, fora de uma instalação do Windows, não é preciso
+  instalar esses arquivos. Se nenhum dispositivo da máquina estiver sem nome, o texto avisa que
+  instalar não traria efeito visível.
+
+O WinForge não baixa nem executa instalador de fabricante para isso. O lote vai pela via do Windows
+Update, com as mesmas entradas que a tabela mostra.
+
 Depois do clique em Instalar, a linha conta o que aconteceu: "instalando…", depois "instalado" (ou
 "instalado (reinicie)") em verde, ou "falhou (código N)" em vermelho. A coluna **Situação** repete
 em palavras o que a cor diz. O botão continua na linha, desabilitado enquanto ela estiver
@@ -283,11 +318,11 @@ quem trabalhar só nesta aba não os verá.
 
 ## Reparo de componentes
 
-Na aba **Configurações**, o grupo **WinForge - Reparo de componentes** reúne quinze botões para os
-problemas que não se resolvem com tweak: componente que sumiu, repositório corrompido, disco com
-suspeita de defeito, permissão de pasta perdida. Na mesma coluna fica o grupo **Correções**, que
-veio do utilitário de origem e ganhou nesta versão a mesma janela de saída ao vivo (ver
-[Correções](#correções-os-cinco-botões-que-demoram) mais abaixo).
+Na aba **Configurações**, o grupo **WinForge - Reparo de componentes** reúne vinte e um botões para
+os problemas que não se resolvem com tweak: componente que sumiu, repositório corrompido, disco com
+suspeita de defeito, permissão de pasta perdida, rede que conecta e não navega. Na mesma coluna
+fica o grupo **Correções**, que veio do utilitário de origem e usa a mesma janela de saída ao vivo
+(ver [Correções](#correções-os-cinco-botões-que-demoram) mais abaixo).
 
 **Só leem, não mudam nada (e o do DirectX só abre uma página):**
 
@@ -298,6 +333,7 @@ veio do utilitário de origem e ganhou nesta versão a mesma janela de saída ao
 | Estado do .NET Framework 3.5 e 4.8 | Se o recurso NetFx3 está habilitado e qual versão da linha 4.x está instalada, lida do valor Release do registro. |
 | Verificar disco do sistema agora (chkdsk /scan) | Verificação online, com o sistema em uso: relata problemas, não repara nada e não reinicia. Pode demorar minutos num disco grande. |
 | DirectX: abrir a página oficial da Microsoft | Abre no navegador a página oficial de download do DirectX End-User Runtime Web Installer. Quem baixa e roda o `dxwebsetup.exe` é você, no navegador: o WinForge não baixa nem executa arquivo da internet. O instalador é interativo e traz as bibliotecas antigas (d3dx9, XInput) que jogos mais velhos pedem. |
+| Rede — Diagnóstico completo | Doze pontos da rede deste computador, do rádio sem fio ao catálogo Winsock, com uma frase de veredito no fim dizendo por onde começar. Nenhum driver é tocado. Ver [Rede](#rede-a-escada-de-seis-degraus) mais abaixo. |
 
 **Alteram o sistema:**
 
@@ -316,8 +352,14 @@ veio do utilitário de origem e ganhou nesta versão a mesma janela de saída ao
 | Visual C++ 2005–2022 (x86/x64) via winget | Os 12 redistribuíveis (2005, 2008, 2010, 2012, 2013 e 2015-2022), nas duas arquiteturas. O que já está instalado é pulado. É o que resolve erro de VCRUNTIME140.dll e MSVCP140.dll. |
 | PowerShell 7 via winget | Instala o `Microsoft.PowerShell` lado a lado: o Windows PowerShell 5.1 continua instalado e é ele que roda o WinForge. |
 
-**Permissões do disco C: (três botões):** a seção [Permissões do disco C:](#permissões-do-disco-c)
-explica os três em detalhe, porque o que eles mexem não cabe numa linha de tabela.
+**Permissões do disco C: (quatro botões):** a seção
+[Permissões do disco C:](#permissões-do-disco-c) explica os quatro em detalhe, porque o que eles
+mexem não cabe numa linha de tabela.
+
+**Rede (cinco botões, mais um que já existia):** a seção
+[Rede: a escada de seis degraus](#rede-a-escada-de-seis-degraus) explica a ordem em que eles são
+para ser usados e o que cada um não faz. Os três que mexem em driver ficam no fim da escada, e é lá
+que estão os bloqueios que podem impedir o clique.
 
 **Nada roda sem clique e confirmação.** Os botões que só leem rodam direto. Os que alteram o
 sistema ou instalam componente abrem antes uma caixa de Sim/Não com a descrição inteira do botão —
@@ -329,6 +371,30 @@ arquivo**. O arquivo é `repair-<nome>-<data-hora>.txt`, na mesma pasta de logs 
 (`%LocalAppData%\WinForge\logs`). Nos comandos longos a janela mostra a saída **ao vivo**, linha a
 linha, e o cabeçalho conta o tempo: "Em andamento: `<título>` (mm:ss)" vira "Concluído em mm:ss
 (código N)" quando o trabalho termina.
+
+A saída é transmitida linha a linha, e não guardada até o fim: o que a janela mostra tem teto de
+2 MB, e o arquivo, 256 MB por execução — passando disso, uma linha avisa que os detalhes dali em
+diante foram descartados. O WinForge guarda 30 dias ou 20 arquivos de cada tipo de comando, o que
+vier primeiro. Quando a operação passa de uma vez e meia o tempo que ela costuma levar, o cabeçalho
+muda de cor e diz quanto é o comum; ao passar do triplo, repete o aviso com mais destaque. Nos dois
+casos ele diz a mesma coisa: continua rodando, isso não é travamento.
+
+**Parar.** Os comandos com saída ao vivo têm um botão **Parar** à esquerda do Fechar. Ele não mata
+a etapa que está rodando; essa termina. O que ele impede é a seguinte de começar. A confirmação diz
+o que você perde: numa fase de leitura, nada foi alterado até ali; numa de escrita, o que já mudou
+é coberto pelo Desfazer, porque o backup é anterior à primeira alteração. Depois do sim o botão
+vira "Parando…" e, no fim, o cabeçalho diz **Cancelado em mm:ss**, e não "Concluído". Fechar a
+janela no meio de um comando que altera o sistema faz a mesma pergunta.
+
+Fechar o WinForge no meio de um comando encerra também os programas que ele lançou: eles nascem
+dentro de um Job Object, e o job leva os filhos junto quando morre. Até a versão anterior, um
+`icacls` elevado ficava rodando sozinho. O que está PROVADO por teste é o job sendo terminado pelo
+próprio teste; matar o WinForge pelo Gerenciador de Tarefas não foi exercitado, e é a lacuna que o
+registro de mudanças também declara.
+A exceção é a troca de posse da fase 4 das permissões, que fica fora dessa amarração de propósito:
+morrer entre tomar a posse e devolvê-la deixa uma pasta do sistema aberta a qualquer processo
+elevado. Se o WinForge for encerrado justo ali, a abertura seguinte **relata** a pasta e o dono
+original e aponta o botão que resolve; ele nunca conserta isso sozinho.
 
 O que cada botão exige está escrito na descrição dele. Em resumo: WMI, chkdsk agendado, diagnóstico
 de memória, .NET 3.5 e Visual C++ precisam do WinForge aberto como administrador; sem elevação, as
@@ -385,14 +451,20 @@ que agora diz tudo que essas funções fazem.
 
 O caso real: depois de uma atualização de fabricante, o disco do Windows perde a cadeia de
 permissões — o dono da máquina fica sem acesso às próprias pastas, programas não abrem, "acesso
-negado" em toda parte. São três botões, e a ordem entre eles é a do atendimento.
+negado" em toda parte. São quatro botões, e a ordem entre eles é a do atendimento.
 
-Três regras atravessam os três: todo direito é concedido **por SID**, nunca por nome (uma linha de
-`icacls` com `Administradores` falha calada num Windows em inglês, e a máquina quebrada fica pior);
-nenhum comando é montado como texto, e todo executável vem pelo caminho completo em System32; e nas
-pastas do sistema o `icacls` só faz duas coisas, **na própria pasta**: `/setowner` quando o dono
-está fora do padrão e `/inheritance:r /grant:r` com as ACEs medidas. `/reset`, `/T` e `/R` não
-existem ali, porque os três descem a árvore inteira apagando o que o Windows sabe e o WinForge não.
+Se você rodou a restauração na versão 1.7.0 e a máquina travou com o disco enchendo, é o defeito
+que a 1.8.0 conserta — a explicação está na fase 2, logo abaixo. A pasta de backup pode ter ficado
+com dezenas ou centenas de GB de arquivo pela metade: o botão **Limpar backups antigos** é a saída,
+e ele não apaga o backup que o Desfazer usa.
+
+Três regras atravessam os que mexem em permissão: todo direito é concedido **por SID**, nunca por
+nome (uma linha de `icacls` com `Administradores` falha calada num Windows em inglês, e a máquina
+quebrada fica pior); nenhum comando é montado como texto, e todo executável vem pelo caminho
+completo em System32; e nas pastas do sistema o `icacls` só faz duas coisas, **na própria pasta**:
+`/setowner` quando o dono está fora do padrão e `/inheritance:r /grant:r` com as ACEs medidas.
+`/reset`, `/T` e `/R` não existem ali, porque os três descem a árvore inteira apagando o que o
+Windows sabe e o WinForge não.
 
 **Verificar** — só lê, e pode ser clicado sempre (a leitura não pede elevação). Confere dono e
 permissões da raiz do disco, de `Windows`, `Program Files`, `Program Files (x86)`, `ProgramData`,
@@ -417,11 +489,24 @@ nesta ordem:
    pasta de primeiro nível, cada pasta aninhada que a fase 4 pode reescrever (`Users\Public`) e a
    sua pasta de usuário. A regra é essa, e não uma lista: pasta que a restauração toca tem backup.
    De cada uma vão para o **índice** (um JSON na mesma pasta protegida) a lista de permissões em
-   **SDDL** e o dono. Só a sua pasta de usuário ganha, além disso, um arquivo de
-   `icacls /save /T /L /C /Q` com o **conteúdo** dela — é a única pasta em que a restauração desce
-   a árvore; o `/L` mantém a caminhada dentro do perfil em vez de sair por um OneDrive ou por uma
-   junção de compatibilidade, e o `/Q` evita uma linha de saída por arquivo. É o que o botão
-   Desfazer consome.
+   **SDDL** e o dono. Só a sua pasta de usuário ganha, além disso, um arquivo com o **conteúdo**
+   dela — é a única pasta em que a restauração desce a árvore. É o que o botão Desfazer consome.
+
+   Esse arquivo passou a ser escrito pelo próprio WinForge, e não mais por `icacls /save /T`. Sobre
+   uma pasta de perfil o `/T` não é utilizável: o `/L` fala do link, não da caminhada, e as junções
+   de compatibilidade do perfil apontam para o próprio pai (`AppData\Local\Dados de aplicativos`
+   leva de volta a `AppData\Local`). O `icacls` entrava em laço e só parava no limite de 63 saltos
+   de reparse do Windows — numa máquina real, cerca de 205 GB gravados e o computador travado
+   depois de 404 minutos, ainda nesta fase. A caminhada de hoje lê o atributo de cada item antes de
+   entrar nele, nunca entra em ponto de reanálise e guarda só as pastas com **herança bloqueada**,
+   que são exatamente aquelas em que a fase 5 mexe. O mesmo perfil que gerava os 205 GB dá 338
+   pastas, 103,4 KB e 39 segundos.
+
+   A fase para sozinha em quatro tetos — 20.000 itens, 4 MB, 32 níveis de profundidade, 90
+   segundos — e, quando para, **nada é alterado**. Não há "continuar mesmo assim": continuar sem
+   backup é ficar sem Desfazer. Pasta cuja lista de permissões não pode ser lida é contada e
+   nomeada no relatório, e o cabeçalho termina em "Concluído com ressalvas" — essas pastas não
+   foram copiadas e também não foram alteradas.
 
    O SDDL não é preciosismo: foi medido, com elevação, numa pasta descartável. O
    `icacls <pasta>\ /save` grava a entrada da própria pasta com o **nome vazio**, e o
@@ -439,8 +524,12 @@ nesta ordem:
    direito de reescrever a lista: quando a concessão responde "acesso negado", a posse vai para os
    Administradores, a concessão é repetida uma vez e a posse **volta** ao dono padrão.
 5. A **sua pasta de usuário**: dono, negações, as três ACEs padrão na raiz do perfil e, depois
-   delas, `/inheritance:e /T /L` no conteúdo. A ordem é dependência — a herança só propaga o que já
-   está concedido na raiz. `/reset /T` não é usado: ele apagaria as ACEs explícitas que os próprios
+   delas, a herança religada **pasta a pasta** — um `icacls <pasta> /inheritance:e` por entrada da
+   lista que a fase 2 guardou, em ordem que entrega pai antes de filho. A ordem é dependência: a
+   herança só propaga o que já está concedido na raiz. O `/T` saiu daqui pelo mesmo motivo que saiu
+   da fase 2, e com ele saiu um defeito da 1.7.0 — descendo a árvore, o `icacls` ligava a herança
+   **fora** do perfil, no destino de cada junção de compatibilidade e no armazenamento em nuvem
+   redirecionado. `/reset /T` continua de fora: ele apagaria as ACEs explícitas que os próprios
    aplicativos põem dentro do perfil (`AppData\Local\Packages`, OneDrive), e `/inheritance:e` as
    preserva.
 6. `takeown` na raiz, **sem recursão**, e só quando a fase 3 responder "acesso negado", seguido de
@@ -448,23 +537,46 @@ nesta ordem:
 
 O `secedit` com o `defltbase.inf` **saiu** desta lista. No Windows 10 e no 11 as seções
 `[Registry Keys]` e `[File Security]` desse arquivo vêm vazias, então `/areas FILESTORE REGKEYS` não
-repõe DACL nenhuma: ele levava minutos e não consertava nada. A fase 4 faz esse trabalho de forma
-explícita, com a mesma tabela que a verificação usa.
+repõe DACL nenhuma: ele levava minutos e não consertava nada. Quem faz esse trabalho é a fase 4,
+pasta por pasta, com a mesma tabela que a verificação usa.
 
-**Desfazer (restaurar backup)** — reaplica o conjunto de backup mais recente, de duas formas
-conforme o item. A lista de cada **pasta** volta do SDDL guardado no índice, e logo depois dela vem
-uma tentativa **separada** de devolver o dono. O **conteúdo** da sua pasta de usuário volta por
-`icacls <pasta acima> /restore <arquivo> /C /L`, rodado a partir da pasta anotada no índice (o
-`icacls` grava nomes relativos à pasta em que foi invocado, e restaurar da pasta errada aplicaria a
-DACL de uma coisa em outra). Sem backup gravado, ele apenas diz isso e não toca em nada. Também
-exige elevação, conferida antes de qualquer pasta ser criada.
+**O backup é obrigatório; o destino é que é opcional.** A 103,4 KB não há o que economizar, então
+não existe caixa para desligá-lo. Existe uma para mandá-lo a outro lugar — **Guardar o backup das
+permissões em outro disco**, desmarcada por padrão. Marcada, só o arquivo de conteúdo sai: o índice
+fica sempre em `%ProgramData%\WinForge\acl-backup`, porque é ele que o Desfazer lê. O destino é
+recusado por padrão e só passa cumprindo sete exigências — caminho absoluto e local (nada de
+rede), fora da raiz do volume, NTFS (exFAT e FAT32 não guardam permissão e não reclamam disso),
+disco fixo ou removível, nem dentro nem contendo o seu perfil, sem ponto de reanálise no caminho, e
+espaço livre com folga. O arquivo é endurecido lá como já era aqui, e o índice guarda o SHA-256
+dele, recalculado na hora de desfazer.
 
-O `/L` do `/restore` é obrigatório e é o par do `/T` do backup. Sem ele o `icacls` abre cada item
-**seguindo** o ponto de reanálise, e o perfil está cheio deles: as junções de compatibilidade
-(`Dados de aplicativos`, `Configurações locais`, `Cookies`) carregam uma negação de travessia para
-Todos, que é como o Windows impede que sejam percorridas. Restaurar sem `/L` derramaria essa
-negação em `AppData\Roaming`, `AppData\Local` e `InetCookies` — trancando você fora do próprio
-AppData com o botão que existe para destrancá-lo.
+O aviso ao lado da caixa diz o que muda ao sair da pasta do WinForge: ali, qualquer conta de
+administrador — desta máquina ou de outra onde o disco for ligado — pode ler, alterar ou apagar o
+arquivo. O WinForge percebe a alteração e recusa restaurar, mas não recupera arquivo apagado. Em
+pen drive ou HD externo, disco desligado na hora de desfazer é o mesmo que não ter backup, e a
+recusa diz qual disco ligar.
+
+**Uma restauração de cada vez.** Enquanto existir backup que o Desfazer ainda não usou, uma
+restauração nova é recusada, e a recusa manda escolher: desfazer o que está pendente ou apagá-lo
+pelo botão de limpar. Na 1.7.0 não era assim, e rodar a restauração duas vezes destruía o backup
+bom — o Desfazer lia o conjunto mais novo, que na segunda rodada já era um retrato do disco depois
+da primeira. O índice também guarda de qual máquina e de qual perfil ele é, e índice de outra
+máquina é recusado: aplicar permissões com SIDs alheios tranca o perfil em vez de destrancá-lo.
+
+**Desfazer (restaurar backup)** — reaplica o conjunto de backup **mais antigo que ainda não foi
+usado**, de duas formas conforme o item. A lista de cada **pasta** volta do SDDL guardado no
+índice, e logo depois dela vem uma tentativa **separada** de devolver o dono. O **conteúdo** da sua
+pasta de usuário volta por `icacls <pasta acima> /restore <arquivo> /C /L`, rodado a partir da
+pasta anotada no índice (o `icacls` grava nomes relativos à pasta em que foi invocado, e restaurar
+da pasta errada aplicaria a DACL de uma coisa em outra). Sem backup gravado, ele apenas diz isso e
+não toca em nada. Também exige elevação, conferida antes de qualquer pasta ser criada.
+
+O `/L` do `/restore` é obrigatório, e pelo mesmo motivo que tirou o `/T` do backup. Sem ele o
+`icacls` abre cada item **seguindo** o ponto de reanálise, e o perfil está cheio deles: as junções
+de compatibilidade (`Dados de aplicativos`, `Configurações locais`, `Cookies`) carregam uma negação
+de travessia para Todos, que é como o Windows impede que sejam percorridas. Restaurar sem `/L`
+derramaria essa negação em `AppData\Roaming`, `AppData\Local` e `InetCookies` —
+trancando você fora do próprio AppData com o botão que existe para destrancá-lo.
 
 Os limites do desfazer, que estão escritos na descrição dos botões:
 
@@ -472,7 +584,20 @@ Os limites do desfazer, que estão escritos na descrição dos botões:
   todo administrador tem. Quando a lista volta e o dono não, o Desfazer diz em qual pasta — em vez
   de ficar calado ou de deixar a lista de fora por causa disso.
 - O backup das pastas **fora do seu perfil** é sem recursão: volta a lista da pasta em si, não a de
-  tudo que está dentro dela. Só a pasta de usuário é salva com `/T`.
+  tudo que está dentro dela. Só a pasta de usuário é salva com o conteúdo.
+- Dentro do perfil, o que volta são as pastas que tinham a herança bloqueada. Arquivo solto fica de
+  fora, e ligar a herança de volta não apaga ACE que um aplicativo tenha posto ali. Pasta de nuvem
+  sob demanda fica fora do backup e também fora da fase 5 — as duas pontas combinam.
+- Um Desfazer bem-sucedido **marca o conjunto como usado**. Ele continua no disco, e continua
+  aparecendo na lista do botão de limpar, mas deixa de ser o que o próximo Desfazer vai ler.
+
+**Limpar backups antigos** — só lê até você confirmar. Lista o que está guardado em
+`%ProgramData%\WinForge\acl-backup` com tamanho e data, marca o arquivo que nenhum índice
+referencia e apaga apenas os marcados, sob confirmação. Backup que ainda serve para desfazer não é
+marcado. Backup que foi para outro disco também entra na lista; se esse disco não estiver ligado na
+hora, o botão diz onde o arquivo está e manda apagá-lo à mão, em vez de dizer que apagou. Ao abrir
+o WinForge, uma varredura em segundo plano avisa se essa pasta passou de 1 GB — ela só relata, e
+não apaga nada.
 
 A pasta de backup passa pela mesma conferência da pasta de downloads de driver — DACL própria sem
 herança, nenhum ponto de reanálise na cadeia, dono dentro de SYSTEM/Administradores e ninguém de
@@ -481,8 +606,71 @@ arquivo que não esteja diretamente nessa pasta ou cujo dono não seja o SYSTEM 
 Administradores. Sem elevação a pasta nasce com a sua identidade como dona e a restauração inteira
 para: sem backup confiável não há desfazer, e restaurar sem desfazer transforma um problema em dois.
 
-Reinicie o computador depois de qualquer um dos dois botões que escrevem: serviços e programas já
-abertos continuam com as permissões antigas em cache.
+Reinicie o computador depois da restauração e depois do Desfazer: serviços e programas já abertos
+continuam com as permissões antigas em cache.
+
+### Rede: a escada de seis degraus
+
+O caso real: "mesmo conectado certinho, a rede e a navegação na internet não funcionam". Estar
+conectado prova que o rádio associou e autenticou, e driver quebrado não chega até aí. O que sobra,
+na ordem em que costuma ser a causa, é endereço, servidor de nomes, rota, proxy ou um filtro de
+software preso na pilha de rede. É essa a ordem dos botões, e por isso os que mexem em driver ficam
+no fim.
+
+| # | Botão | O que faz |
+|---|---|---|
+| 1 | Rede — Diagnóstico completo | Só lê, e é por onde se começa. Levanta doze pontos e fecha com uma frase dizendo por onde seguir. |
+| 2 | Rede - Redefinir | Devolve a pilha TCP/IP e o Winsock ao padrão (`netsh winsock reset`, `netsh int ip reset`). Fica no grupo **Correções**, ao lado. Reinicie no fim. |
+| 3 | Rede — Limpar cache de DNS e pegar endereço novo | Esvazia o cache de nomes, devolve o endereço atual ao roteador, pede outro e limpa o cache NetBIOS. É reversível por natureza: o roteador entrega outro endereço em segundos. |
+| 4 | Rede sem fio — Reinstalar o driver que já está instalado | Guarda uma cópia conferida do driver atual, tira o rádio da lista de dispositivos e manda o Windows procurar de novo. Nenhum pacote é apagado, então volta exatamente o mesmo driver. |
+| 5 | Rede sem fio — Voltar para o driver que estava antes | Propõe ao Windows o pacote guardado na última cópia de segurança. É a rede de segurança dos outros dois, e foi construído antes deles: sem volta, não se oferece a ida. Fica habilitado só quando existe cópia conferida em disco. |
+| 6 | Rede sem fio — Trocar pelo driver básico do Windows | O único que **apaga** pacote de driver. Último recurso, e pode deixar o computador sem Wi-Fi. |
+
+O diagnóstico do botão 1 termina em poucos segundos e não altera nada: rádio sem fio, perfil da
+rede ativa, endereço IP (inclusive o `169.254.x.x` que aparece quando o roteador não responde),
+rota padrão, servidor de nomes comparado com o `1.1.1.1`, três sondas de saída para a internet,
+proxy do usuário e do WinHTTP, filtros de terceiros presos aos adaptadores, catálogo de protocolos
+do Winsock, tamanho máximo de pacote, IPv6 e o código de problema do dispositivo. A frase final sai
+de uma lista fechada de cinco e diz por onde começar — endereço, servidor de nomes, filtro,
+roteador, ou "não encontrei nada errado na rede deste computador".
+
+**Filtro de antivírus, de firewall ou de rede privada é o primeiro suspeito**, não o driver. Quando
+o diagnóstico acha um preso a todos os adaptadores físicos, ele nomeia o produto e escreve o
+caminho de menu do próprio Windows para você desligá-lo à mão. O WinForge não desliga, não
+reconfigura e não desinstala produto de segurança de terceiro. E o texto avisa que, se o filtro é a
+causa, trocar o driver do Wi-Fi não conserta nada e ainda arrisca deixar a máquina sem rádio.
+
+Os botões 4, 5 e 6 são cercados. Antes de qualquer remoção, o pacote em uso é exportado para
+`%ProgramData%\WinForge\driver-backup` e conferido arquivo por arquivo — código de saída, o `.inf`,
+o `.cat` e o total em bytes. Falhou a conferência, a ação para ali e nada é alterado, porque sem
+cópia não há caminho de volta. Depois da troca o adaptador é conferido, e desfecho ruim (sumiu da
+lista, voltou com código de problema, ou quem assumiu não foi quem devia) devolve o driver guardado
+**na hora, sem perguntar**: num notebook sem porta de rede, mandar você clicar noutro botão para
+voltar seria mandar clicar sem rede.
+
+O botão 5 **propõe** o pacote guardado, não o impõe: quem decide qual driver assume o dispositivo é
+o mecanismo de classificação do Windows, e ele pode escolher outro. Por isso o relatório conta o
+que o adaptador virou, em vez de afirmar que a volta aconteceu. Se nem assim o rádio voltar, o
+texto final põe na tela o nome do adaptador e o fabricante e manda trazer o driver por cabo ou pen
+drive, de outro computador.
+
+Nove bloqueios podem impedir o clique, todos de leitura e todos explicados em português na tela:
+sessão remota (o botão derrubaria a sua própria conexão), Windows anterior ao 10 versão 1903 (os
+comandos não existem lá), nenhuma outra via de rede na máquina, ausência de driver básico, falha ao
+exportar o pacote, notebook na bateria, máquina virtual ou Windows Server, reinício pendente e
+espaço em disco. Disparado um bloqueio, não existe "continuar mesmo assim".
+
+Três ressalvas sobre o botão 6:
+
+- Ele **pede uma palavra digitada**, e não um Sim — Sim se clica por reflexo. A confirmação avisa
+  para ter um cabo de rede à mão.
+- Ele **não aparece** quando o Windows não tem driver básico para aquele rádio, que é o caso comum
+  em MediaTek, Realtek recentes e Intel novos. Botão desabilitado convidaria a procurar como
+  habilitá-lo, e o que se acha na internet é a opção que força a remoção do pacote em uso —
+  justamente o caminho para ficar sem rádio.
+- A detecção de acesso remoto enxerga a Área de Trabalho Remota do Windows, e **não** enxerga
+  AnyDesk, TeamViewer ou RustDesk, que rodam na sessão de console. Se você está acessando o
+  computador de longe por um desses, pare antes dos botões de driver.
 
 ## Classificação de risco
 
@@ -594,8 +782,10 @@ docs/               changelog e documentação
 Concluído: auditoria de risco de todos os tweaks (ver [`docs/auditoria.md`](docs/auditoria.md)), a
 detecção de hardware, drivers e papéis de servidor com as recomendações da aba Diagnóstico, a aba
 Servidor com os ajustes de Windows Server, IIS e Active Directory, o reparo de componentes do
-Windows na aba Configurações, a restauração das permissões padrão do disco do sistema e a
-detecção do que já está aplicado na máquina antes de aplicar qualquer coisa.
+Windows na aba Configurações, a restauração das permissões padrão do disco do sistema, a detecção
+do que já está aplicado na máquina antes de aplicar qualquer coisa, a escada de rede sem fio
+(diagnóstico, DNS e a troca de driver), o agrupamento dos arquivos de informação oferecidos pelo
+Windows Update e o botão Parar nos comandos que demoram.
 
 ## Licença
 

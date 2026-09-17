@@ -146,6 +146,7 @@ $repairConfig   = Read-Lf (Join-Path $PSScriptRoot "config\wf-repair-config.ps1"
 $auditBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-audit.ps1")
 $profileBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-profile.ps1")
 $driversBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-drivers.ps1")
+$netBlock       = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-net.ps1")
 $rulesBlock     = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-rules.ps1")
 $recoUiBlock    = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-recoui.ps1")
 $appliedBlock   = Read-Lf (Join-Path $PSScriptRoot "winforge\wf-applied.ps1")
@@ -376,6 +377,9 @@ $src = Insert-Before $src "#region ===== WinForge - logo =====" ($profileBlock.T
 
 # ---------------------------------------------------------------- consulta de drivers (rede)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($driversBlock.TrimEnd() + "`n`n") "insert drivers"
+
+# ---------------------------------------------------------------- rede sem fio (rádio, sondas, bloqueios)
+$src = Insert-Before $src "#region ===== WinForge - logo =====" ($netBlock.TrimEnd() + "`n`n") "insert net"
 
 # ---------------------------------------------------------------- regras de recomendação (motor)
 $src = Insert-Before $src "#region ===== WinForge - logo =====" ($rulesBlock.TrimEnd() + "`n`n") "insert rules"
@@ -824,6 +828,12 @@ $src = Insert-After $src '        "WPFAdvanced" {Invoke-WPFPresets "Advanced" -c
         "WPFWFRepAclVerify" {Invoke-WinForgeRepairCommand -Name AclVerify}
         "WPFWFRepAclRestore" {Invoke-WinForgeRepairCommand -Name AclRestore}
         "WPFWFRepAclUndo" {Invoke-WinForgeRepairCommand -Name AclUndo}
+        "WPFWFRepAclCleanup" {Invoke-WinForgeRepairCommand -Name AclCleanup}
+        "WPFWFRepNetDiagFull" {Invoke-WinForgeRepairCommand -Name NetDiagFull}
+        "WPFWFRepNetDnsRenew" {Invoke-WinForgeRepairCommand -Name NetDnsRenew}
+        "WPFWFRepWifiDriverReinstall" {Invoke-WinForgeRepairCommand -Name WifiDriverReinstall}
+        "WPFWFRepWifiDriverRestore" {Invoke-WinForgeRepairCommand -Name WifiDriverRestore}
+        "WPFWFRepWifiDriverGeneric" {Invoke-WinForgeRepairCommand -Name WifiDriverGeneric}
         # Correções (aba Config, vindas da base): mesma tabela e mesma máquina do reparo, com a
         # janela que se enche ao vivo. Antes cada uma destas chaves chamava a função da base pelo
         # campo "function" da config, na thread da janela.
@@ -1114,7 +1124,39 @@ if ($SelfTest) {
     # (C:\Users\RUNNER~1\...), e as funções devolvem caminhos longos (GetFullPath/Get-Item).
     # Comparar os dois como texto falhava só lá. Get-Item resolve o nome curto para o longo.
     $wbSelfTestTemp = try { (Get-Item -LiteralPath ([System.IO.Path]::GetTempPath().TrimEnd('\'))).FullName } catch { $env:TEMP }
+    # A raiz dos fixtures é POR PROCESSO, e não uma pasta fixa. Duas causas de falso vermelho moram
+    # aqui, e as duas foram vistas no mesmo dia: um -SelfTest interrompido no meio deixava a pasta
+    # para trás e o seguinte achava fixture de outra rodada (seis erros em código que a mudança nem
+    # tocava); e dois -SelfTest ao mesmo tempo - o normal quando há revisão em paralelo - escreviam
+    # na MESMA pasta, um apagando o fixture que o outro estava lendo.
+    #
+    # O $PID separa as rodadas concorrentes; a varredura abaixo limpa o que uma rodada morta deixou.
+    # Ela só apaga raiz de PID que NÃO está mais vivo (ou que nem parece um PID, como a pasta fixa
+    # das versões anteriores): sem essa pergunta, a varredura de uma rodada apagaria a pasta da
+    # outra, que é o problema que ela existe para resolver.
+    function Clear-WinForgeSelfTestRoots {
+        param(
+            [Parameter(Mandatory)][string]$Temp,
+            [Parameter(Mandatory)][string]$Keep
+        )
+        $apagadas = @()
+        foreach ($velha in @(Get-ChildItem -LiteralPath $Temp -Directory -Filter 'WinForge-SelfTest*' -ErrorAction SilentlyContinue)) {
+            if ([string]$velha.FullName -eq $Keep) { continue }
+            $pidVelho = 0
+            if ([string]$velha.Name -match '^WinForge-SelfTest-(\d+)$') { $pidVelho = [int]$Matches[1] }
+            if ($pidVelho -gt 0 -and (Get-Process -Id $pidVelho -ErrorAction SilentlyContinue)) { continue }
+            Remove-Item -LiteralPath $velha.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $velha.FullName)) { $apagadas += [string]$velha.Name }
+        }
+        return @{ Removed = @($apagadas) }
+    }
+    $wbSelfTestRaiz = Join-Path $wbSelfTestTemp ("WinForge-SelfTest-{0}" -f $PID)
+    [void](Clear-WinForgeSelfTestRoots -Temp $wbSelfTestTemp -Keep $wbSelfTestRaiz)
+    New-Item -ItemType Directory -Path $wbSelfTestRaiz -Force -ErrorAction SilentlyContinue | Out-Null
     $wbErrors = 0
+    # O 'finally' lá embaixo é a única saída: sem ele, um erro terminante no meio de um bloco - fora
+    # de todos os try/catch daqui - deixaria a raiz desta rodada no disco para a próxima encontrar.
+    try {
     foreach ($p in $sync.configs.preset.PSObject.Properties) {
         foreach ($k in @($p.Value)) {
             $known = ($null -ne $sync.configs.tweaks.PSObject.Properties[$k]) -or $sync.configs.appxHashtable.ContainsKey($k) -or ($null -ne $sync.configs.feature.PSObject.Properties[$k]) -or $sync.configs.applicationsHashtable.ContainsKey($k)
@@ -1154,7 +1196,7 @@ if ($SelfTest) {
     Write-Host "  Sistema: $($sync.OSName) $($sync.OSDisplayVersion) build $($sync.OSBuild) | GPU: $(if ($sync.GPUVendors.Count) { $sync.GPUVendors -join ',' } else { 'nenhuma' })"
     Write-Host "  Entradas -> aba Tweaks: $(@($wbTweaksTab.PSObject.Properties).Count) | aba Jogos: $(@($wbGamesTab.PSObject.Properties).Count) | aba Servidor: $(@($wbServerTab.PSObject.Properties).Count) | Config: $(@($sync.configs.feature.PSObject.Properties).Count) | AppX: $(@($sync.configs.appx.PSObject.Properties).Count) | Presets: $(@($sync.configs.preset.PSObject.Properties).Count)"
     # trava de contagem: pega regex da limpeza de marca que coma entradas demais quando o arquivo base mudar
-    if (@($sync.configs.feature.PSObject.Properties).Count -ne 57) { Write-Host "  [ERRO] Config: esperado 57 entradas" -ForegroundColor Red; $wbErrors++ }
+    if (@($sync.configs.feature.PSObject.Properties).Count -ne 63) { Write-Host "  [ERRO] Config: esperado 63 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbTweaksTab.PSObject.Properties).Count -ne 83) { Write-Host "  [ERRO] aba Tweaks: esperado 83 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbGamesTab.PSObject.Properties).Count -ne 84) { Write-Host "  [ERRO] aba Jogos: esperado 84 entradas" -ForegroundColor Red; $wbErrors++ }
     if (@($wbServerTab.PSObject.Properties).Count -ne 22) { Write-Host "  [ERRO] aba Servidor: esperado 22 entradas" -ForegroundColor Red; $wbErrors++ }
@@ -1183,8 +1225,12 @@ if ($SelfTest) {
     # e dica. É produto cartesiano de propósito - a lista escrita à mão sempre esquece a
     # combinação que aparece numa aba só, e foi assim que o verde de "recomendado" ficou em 3,6:1
     # sobre o fundo escuro sem ninguém notar.
+    # HeaderWarningColor/HeaderUrgentColor entram na MESMA lista de textos, e não num par avulso
+    # contra o fundo da janela: o cabeçalho da janela de saída cai sobre MainBackgroundColor hoje,
+    # mas quem repetir o hexadecimal num cartão ou numa dica amanhã não vai lembrar de acrescentar o
+    # par. O produto cartesiano é o que garante que a conta já foi feita.
     $wfTemaFundos = @('MainBackgroundColor', 'CardBackgroundColor', 'ToolTipBackgroundColor')
-    $wfTemaTextos = @('MainForegroundColor', 'LabelboxForegroundColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor')
+    $wfTemaTextos = @('MainForegroundColor', 'LabelboxForegroundColor', 'RecommendedColor', 'DiscouragedColor', 'DangerColor', 'HeaderWarningColor', 'HeaderUrgentColor')
     $wfTemaPares = @()
     foreach ($wfBgNome in $wfTemaFundos) {
         foreach ($wfFgNome in $wfTemaTextos) { $wfTemaPares += @{ Fg = $wfFgNome; Bg = $wfBgNome; Nome = "$wfFgNome sobre $wfBgNome" } }
@@ -1199,6 +1245,9 @@ if ($SelfTest) {
     # MainForegroundColor do estilo da linha, e é ele que tem de sobreviver ao fundo colorido.
     $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowSuccessBackgroundColor';      Nome = 'linha instalada' }
     $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowFailureBackgroundColor';      Nome = 'linha que falhou' }
+    # A linha de grupo do Windows Update: mesmo texto, terceiro fundo. Ela é a que fica mais tempo na
+    # tela dos três - as outras duas só aparecem depois de instalar.
+    $wfTemaPares += @{ Fg = 'MainForegroundColor';           Bg = 'RowGroupBackgroundColor';        Nome = 'linha de grupo' }
     foreach ($wfTemaNome in @('Dark', 'Light')) {
         $wfTemaSec = $sync.configs.themes.$wfTemaNome
         if ($null -eq $wfTemaSec) { Write-Host "  [ERRO] tema: seção '$wfTemaNome' não existe no bloco de temas" -ForegroundColor Red; $wbErrors++; continue }
@@ -1716,7 +1765,7 @@ if ($SelfTest) {
     # voltar. Numa máquina sem IIS dá para provar duas coisas, e são as duas cobradas aqui: o
     # round-trip do arquivo (numa raiz temporária, nunca em %ProgramData%) e a recusa limpa de
     # Invoke-WinForgeIisTweak quando o módulo WebAdministration não existe.
-    $wbIisRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup'
+    $wbIisRoot = Join-Path $wbSelfTestRaiz 'iis-backup'
     try {
         if (Test-Path $wbIisRoot) { Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbIisFile = New-WinForgeSnapshot -Name 'AlwaysRunning' -Values @{ 'pool:A:startMode' = 'OnDemand'; 'pool:A:autoStart' = 'False' } -Root $wbIisRoot
@@ -1732,7 +1781,7 @@ if ($SelfTest) {
         $wbIisTrust = Test-WinForgeSnapshotRootTrusted -Root $wbIisRoot -ExplicitRoot
         if (-not $wbIisTrust.Trusted) { Write-Host "  [ERRO] IIS: a pasta recém-criada não passou na checagem de confiança ('$($wbIisTrust.Reason)')" -ForegroundColor Red; $wbErrors++ }
         # Pasta com escrita para 'Todos' (Everyone, S-1-1-0) é o cenário do ataque: tem de ser recusada.
-        $wbIisRootMau = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\iis-backup-aberto'
+        $wbIisRootMau = Join-Path $wbSelfTestRaiz 'iis-backup-aberto'
         New-Item -ItemType Directory -Path $wbIisRootMau -Force | Out-Null
         $wbIisAclMau = Get-Acl -LiteralPath $wbIisRootMau
         $wbIisAclMau.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -1777,7 +1826,10 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] IIS (backup): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Split-Path -Parent $wbIisRoot) -Recurse -Force -ErrorAction SilentlyContinue
+        # A PRÓPRIA pasta deste bloco, e não a de cima: subir um nível daqui é apagar a raiz de
+        # fixtures da rodada inteira - inclusive o que os blocos seguintes ainda vão usar. Quem
+        # apaga a raiz é o 'finally' que fecha o -SelfTest.
+        Remove-Item -Path $wbIisRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- backup: forma do valor, dono da pasta, crivo inteiro
     # Segunda rodada de revisão de segurança. Os três buracos fechados aqui tinham o mesmo fim -
@@ -1828,7 +1880,7 @@ if ($SelfTest) {
     $wbSecOc = Get-WinForgeIisAllowedKey -Name OutputCache
     if (Test-WinForgeSnapshotKey -Key 'server:system.webServer/directoryBrowse:enabled' -AllowedKey $wbSecOc) { Write-Host "  [ERRO] Backup (crivo): OutputCache aceitou 'server:system.webServer/directoryBrowse:enabled' (forma curta)" -ForegroundColor Red; $wbErrors++ }
     if (-not (Test-WinForgeSnapshotKey -Key 'server:system.webServer/caching:enabled' -AllowedKey $wbSecOc)) { Write-Host "  [ERRO] Backup (crivo): OutputCache recusou a própria chave 'server:system.webServer/caching:enabled'" -ForegroundColor Red; $wbErrors++ }
-    $wbSecRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seguranca'
+    $wbSecRoot = Join-Path $wbSelfTestRaiz 'seguranca'
     try {
         if (Test-Path $wbSecRoot) { Remove-Item -Path $wbSecRoot -Recurse -Force -ErrorAction SilentlyContinue }
         # Backup plantado com um GUID que não é GUID: a chave sai da leitura (vai para Ignored) e o
@@ -1949,7 +2001,7 @@ if ($SelfTest) {
     #   2. o ponto de reanálise era conferido só na ÚLTIMA pasta. Uma junção em %ProgramData%\WinForge
     #      fazia a pasta de backup nascer fora de %ProgramData%, com a DACL de onde a junção aponta.
     #      Agora o caminho é normalizado uma vez e TODA a cadeia de ancestrais é conferida.
-    $wb3Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada3'
+    $wb3Base = Join-Path $wbSelfTestRaiz 'rodada3'
     $wb3Root = Join-Path $wb3Base 'backup'
     try {
         if (Test-Path $wb3Base) { Remove-Item -Path $wb3Base -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1999,7 +2051,7 @@ if ($SelfTest) {
     #      implícito entre a gravação e o Protect - a janela que a ACE existe para fechar.
     #   2. a checagem do ARQUIVO olhava só o dono: um backup com ACE de escrita para 'Todos' passava
     #      mesmo com o dono certo.
-    $wb4Base = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\rodada4'
+    $wb4Base = Join-Path $wbSelfTestRaiz 'rodada4'
     try {
         if (Test-Path $wb4Base) { Remove-Item -Path $wb4Base -Recurse -Force -ErrorAction SilentlyContinue }
         $wb4Root = Join-Path $wb4Base 'backup'
@@ -2087,7 +2139,7 @@ if ($SelfTest) {
     # build - é um cliente, e mexer no SMB ou no plano de energia de quem compila seria estrago. As
     # duas coisas cobradas são exatamente essas: numa máquina que não é servidor, aplicar recusa
     # limpo; e a captura (-CaptureOnly, que nunca escreve) traz valor de verdade onde o cmdlet existe.
-    $wbSrvRoot = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\server-backup'
+    $wbSrvRoot = Join-Path $wbSelfTestRaiz 'server-backup'
     try {
         if (Test-Path $wbSrvRoot) { Remove-Item -Path $wbSrvRoot -Recurse -Force -ErrorAction SilentlyContinue }
         $wbSrvItens = @(
@@ -2134,7 +2186,8 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Servidor (ajustes com captura): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Split-Path -Parent $wbSrvRoot) -Recurse -Force -ErrorAction SilentlyContinue
+        # A própria pasta, e não a de cima - ver o mesmo 'finally' do bloco do IIS.
+        Remove-Item -Path $wbSrvRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- comandos de leitura da aba Servidor
     # Nada aqui exige servidor: a tabela de comandos é dado puro, o núcleo é síncrono e o netsh
@@ -2648,10 +2701,11 @@ if ($SelfTest) {
         # Passos do botão "Servidor NTP - Ativar": mexem num serviço do Windows, então caem na mesma
         # regra - param() com -DryRun e recusa em modo SelfTest.
         'Start-WinForgeTimeService', 'Restart-WinForgeTimeService',
-        # As duas ações de permissões do disco. Elas reescrevem DACL com elevação: se o -DryRun
-        # delas se perder em $args por falta de param(), a "simulação" reescreve o disco de quem
-        # compila - que é exatamente o estrago que criou esta lista.
-        'Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo'
+        # As ações de permissões do disco. Duas delas reescrevem DACL com elevação e a terceira
+        # APAGA arquivo: se o -DryRun se perder em $args por falta de param(), a "simulação"
+        # reescreve o disco de quem compila, ou esvazia a pasta de backup dele - que é exatamente o
+        # estrago que criou esta lista.
+        'Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo', 'Invoke-WinForgeAclCleanup'
     )
     try {
         if (-not $sync.SelfTest) { Write-Host "  [ERRO] Reparo (trava): `$sync.SelfTest deveria estar ligado dentro do SelfTest" -ForegroundColor Red; $wbErrors++ }
@@ -2789,6 +2843,10 @@ if ($SelfTest) {
         foreach ($wfStrLinha in @('a', 'b')) {
             if ([string]$wfStrRes.Text -notmatch "(?m)^$wfStrLinha\s*$") { Write-Host "  [ERRO] Correções (fluxo): a linha '$wfStrLinha' não voltou no texto" -ForegroundColor Red; $wbErrors++ }
         }
+        # O escritor é persistente e fica aberto até alguém fechá-lo (no programa, o 'finally' do
+        # corpo da runspace). '[System.IO.File]::ReadAllText' pede FileShare.Read e RECUSA um
+        # arquivo com escritor aberto - medido -, então o fecho vem antes da leitura.
+        Close-WinForgeStreamWriter -Path $wfStrArq
         if (-not (Test-Path -LiteralPath $wfStrArq)) {
             Write-Host "  [ERRO] Correções (fluxo): -StreamTo não gravou '$wfStrArq'" -ForegroundColor Red; $wbErrors++
         } else {
@@ -2802,7 +2860,7 @@ if ($SelfTest) {
         # E o escritor nasce ANTES do Start(): arquivo que não abre tem de estourar com o processo
         # ainda parado, e não deixar um sfc de meia hora rodando sem ninguém para ler a saída dele.
         $wfStrProc = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
-        $wfStrProcEsc = $wfStrProc.IndexOf('$escritor = New-Object System.IO.StreamWriter', [StringComparison]::Ordinal)
+        $wfStrProcEsc = $wfStrProc.IndexOf('$escritor = Open-WinForgeStreamWriter', [StringComparison]::Ordinal)
         $wfStrProcIni = $wfStrProc.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
         if ($wfStrProcEsc -lt 0 -or $wfStrProcIni -lt 0) { Write-Host "  [ERRO] Correções (fluxo): não achei o escritor ou o Start() em Invoke-WinForgeStreamedProcess" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfStrProcEsc -gt $wfStrProcIni) { Write-Host "  [ERRO] Correções (fluxo): o arquivo de saída é aberto DEPOIS de o processo começar" -ForegroundColor Red; $wbErrors++ }
@@ -2816,10 +2874,14 @@ if ($SelfTest) {
         $wfStrFn = Join-Path $wfStrDir ("selftest-passo-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
         Write-WinForgeStreamLine -Path $wfStrFn -Text '> primeiro'
         # O arquivo tem de ser legível JÁ, antes da segunda escrita: é isso que separa "ao vivo" de
-        # "no fim". Com buffer, a leitura aqui traria vazio.
-        $wfStrParcial = [System.IO.File]::ReadAllText($wfStrFn, [System.Text.Encoding]::UTF8)
+        # "no fim". Com buffer, a leitura aqui traria vazio. E a leitura é por 'Get-Content' de
+        # propósito - o escritor persistente ainda está ABERTO neste ponto, que é exatamente a
+        # situação da janela lendo o arquivo enquanto ele cresce. '[System.IO.File]::ReadAllText'
+        # pede FileShare.Read e recusaria; Get-Content lê.
+        $wfStrParcial = [string](Get-Content -LiteralPath $wfStrFn -Raw)
         Write-WinForgeStreamLine -Path $wfStrFn -Text 'segundo, com acento: configuração'
-        $wfStrFnTexto = [System.IO.File]::ReadAllText($wfStrFn, [System.Text.Encoding]::UTF8)
+        $wfStrFnTexto = [string](Get-Content -LiteralPath $wfStrFn -Raw)
+        Close-WinForgeStreamWriter -Path $wfStrFn
         if ($wfStrParcial -notmatch '> primeiro') { Write-Host "  [ERRO] Correções (passo): a primeira linha não estava no arquivo antes da segunda" -ForegroundColor Red; $wbErrors++ }
         if ($wfStrFnTexto -notmatch 'configuração') { Write-Host "  [ERRO] Correções (passo): o acréscimo perdeu o acento ou não aconteceu" -ForegroundColor Red; $wbErrors++ }
         if (([regex]::Matches($wfStrFnTexto, '> primeiro')).Count -ne 1) { Write-Host "  [ERRO] Correções (passo): o acréscimo reescreveu o arquivo em vez de acrescentar" -ForegroundColor Red; $wbErrors++ }
@@ -2931,6 +2993,8 @@ if ($SelfTest) {
             'dism.exe'   = 'oem'
             'netsh.exe'  = 'utf8'
             'w32tm.exe'  = 'oem'
+            'icacls.exe' = 'oem'
+            'takeown.exe' = 'oem'
         }
         $wfEncPares = @{
             'oem'     = [int][System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
@@ -2959,6 +3023,25 @@ if ($SelfTest) {
                 else { $wfEncVistos++ }
             }
         }
+        # O PLANO DAS PERMISSÕES passa pela mesma régua, e não passava: a varredura acima só olhava a
+        # tabela de comandos, e o plano não transmitia nada. Depois que as fases 1 e 3 a 5 entraram no
+        # fluxo ao vivo, todo passo dele também manda a saída para a janela - e um passo sem dica cai
+        # calado em OEM. Era o caso do chkdsk da fase 1: 'concluídos' chegava como 'conclu?dos'.
+        foreach ($wfEncAclPasso in @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestRaiz 'acl-plano-encoding') -Stamp '20260912-101010')) {
+            if ([string]::IsNullOrWhiteSpace([string]$wfEncAclPasso.FilePath)) { continue }
+            $wfEncAclFolha = [string](Split-Path -Leaf ([string]$wfEncAclPasso.FilePath))
+            if (-not $wfEncEsperado.ContainsKey($wfEncAclFolha.ToLowerInvariant())) { Write-Host "  [ERRO] Correções (codificação): '$wfEncAclFolha' (fase $($wfEncAclPasso.Phase) das permissões) não está na tabela medida" -ForegroundColor Red; $wbErrors++; continue }
+            $wfEncAclQuer = [string]$wfEncEsperado[$wfEncAclFolha.ToLowerInvariant()]
+            # Dica AUSENTE vale 'oem' aqui, e a régua compara o valor EFETIVO: é o que
+            # Get-WinForgeOutputEncoding faz com nome vazio, e o plano é quase todo icacls e takeown,
+            # que são oem. O buraco que isso poderia abrir não existe - um passo cuja medição NÃO é
+            # oem (o chkdsk da fase 1, um sfc que alguém acrescente) sai vermelho por omissão, que é
+            # exatamente o defeito que esta trava veio pegar.
+            $wfEncAclTem = ([string]$wfEncAclPasso.Encoding).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($wfEncAclTem)) { $wfEncAclTem = 'oem' }
+            if ($wfEncAclTem -ne $wfEncAclQuer) { Write-Host "  [ERRO] Correções (codificação): '$wfEncAclFolha' da fase $($wfEncAclPasso.Phase) das permissões está como '$wfEncAclTem', medido '$wfEncAclQuer'" -ForegroundColor Red; $wbErrors++ }
+            else { $wfEncVistos++ }
+        }
         # A prova do chkdsk, com bytes sintéticos: "concluídos" escrito em ANSI (o 'í' é 0xED) tem
         # de voltar acentuado pela codificação do PASSO do chkdsk, e tem de sair errado se lido em
         # OEM - que é o que a janela mostrou na máquina do usuário.
@@ -2982,7 +3065,8 @@ if ($SelfTest) {
         if ($wfEncPt -and $wfEncCerto.IndexOf('usuário', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM não trouxe 'usuário' acentuado" -ForegroundColor Red; $wbErrors++ }
         elseif (-not $wfEncPt -and ($wfEncCerto.IndexOf([char]0xFFFD) -ge 0 -or $wfEncCerto.Length -lt 50 -or $wfEncCerto -eq $wfEncErrado)) { Write-Host "  [ERRO] Correções (codificação): o takeown lido como OEM veio ilegível ou igual à leitura UTF-16 (idioma $([System.Globalization.CultureInfo]::CurrentUICulture.Name))" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfEncErrado.IndexOf('usuário', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Correções (codificação): a dica não chegou ao processo - lido como UTF-16 o texto saiu igual" -ForegroundColor Red; $wbErrors++ }
-        else { Write-Host "  Correções (codificação): 4 nome(s) viram code page, $wfEncVistos passo(s) com a dica medida (chkdsk ANSI, sfc UTF-16, DISM/w32tm OEM, netsh UTF-8), dica conferida no processo" }
+        else { Write-Host "  Correções (codificação): 4 nome(s) viram code page, $wfEncVistos passo(s) com a dica medida (chkdsk ANSI, sfc UTF-16, DISM/w32tm/icacls/takeown OEM, netsh UTF-8), tabela de comandos e plano das permissões, dica conferida no processo" }
+        Close-WinForgeStreamWriter -Path $wfEncArq
         Remove-Item -LiteralPath $wfEncArq -Force -ErrorAction SilentlyContinue
     } catch {
         Write-Host "  [ERRO] Correções (codificação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -3313,6 +3397,1075 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Correções (ferramenta): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
+    # ---------------------------------------------------------------- Fixtures: raiz por processo
+    # Higiene do próprio -SelfTest, e não do produto. A raiz era FIXA ('%TEMP%\WinForge-SelfTest') e
+    # não era apagada no fim: rodada interrompida no meio contaminava a seguinte, e duas rodadas ao
+    # mesmo tempo - o normal quando há revisão em paralelo - escreviam na mesma pasta. Deu falso
+    # vermelho duas vezes no mesmo dia, em código que a mudança nem tocava.
+    try {
+        if ($wbSelfTestRaiz -ne (Join-Path $wbSelfTestTemp ("WinForge-SelfTest-{0}" -f $PID))) { Write-Host "  [ERRO] Fixtures: a raiz desta rodada não é a do PID ('$wbSelfTestRaiz')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wbSelfTestRaiz -PathType Container)) { Write-Host "  [ERRO] Fixtures: a raiz '$wbSelfTestRaiz' não existe" -ForegroundColor Red; $wbErrors++ }
+        # A pasta FIXA não pode voltar a nascer: é ela que atravessa rodadas.
+        if (Test-Path -LiteralPath (Join-Path $wbSelfTestTemp 'WinForge-SelfTest')) { Write-Host "  [ERRO] Fixtures: a pasta fixa '%TEMP%\WinForge-SelfTest' voltou a ser criada" -ForegroundColor Red; $wbErrors++ }
+        # A varredura, contra um %TEMP% de mentira. Três regras, uma por pasta: PID VIVO fica (é a
+        # rodada concorrente, e apagá-la é o defeito que a varredura poderia criar), PID morto sai,
+        # nome sem PID - a pasta fixa das versões anteriores - sai.
+        $wfIsoTmp = Join-Path $wbSelfTestRaiz 'isolamento'
+        New-Item -ItemType Directory -Path $wfIsoTmp -Force | Out-Null
+        $wfIsoViva = Join-Path $wfIsoTmp ("WinForge-SelfTest-{0}" -f $PID)
+        $wfIsoMorta = Join-Path $wfIsoTmp 'WinForge-SelfTest-999999998'
+        $wfIsoFixa = Join-Path $wfIsoTmp 'WinForge-SelfTest'
+        $wfIsoMinha = Join-Path $wfIsoTmp 'WinForge-SelfTest-guardada'
+        foreach ($wfIsoPasta in @($wfIsoViva, $wfIsoMorta, $wfIsoFixa, $wfIsoMinha)) {
+            New-Item -ItemType Directory -Path $wfIsoPasta -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfIsoPasta 'fixture.txt') -Value 'x' -Encoding UTF8
+        }
+        $wfIsoRes = Clear-WinForgeSelfTestRoots -Temp $wfIsoTmp -Keep $wfIsoMinha
+        if (-not (Test-Path -LiteralPath $wfIsoViva)) { Write-Host "  [ERRO] Fixtures: a varredura apagou a raiz de um PID VIVO - é a rodada concorrente" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath $wfIsoMinha)) { Write-Host "  [ERRO] Fixtures: a varredura apagou a raiz da própria rodada" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfIsoMorta) { Write-Host "  [ERRO] Fixtures: a raiz de um PID morto ficou para trás" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfIsoFixa) { Write-Host "  [ERRO] Fixtures: a pasta fixa antiga não foi varrida" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfIsoRes.Removed).Count -ne 2) { Write-Host "  [ERRO] Fixtures: a varredura relatou $(@($wfIsoRes.Removed).Count) remoção(ões), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        # E a limpeza do fim roda DÊ NO QUE DER: ela mora no 'finally' que fecha o -SelfTest, depois
+        # da linha '== SelfTest concluído ==' - e não solta no fim do bloco, onde um erro terminante
+        # num teste qualquer passaria por cima dela. A busca é pela FORMA: o 'finally' mais próximo
+        # ANTES da chamada tem de ser um que venha DEPOIS do fim do -SelfTest.
+        $wfIsoFonte = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfIsoFonte = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfIsoFonte = '' }
+        # As duas buscas partem do FIM do -SelfTest, e não do começo do arquivo: as mesmas duas
+        # cadeias aparecem aqui em cima, dentro deste próprio teste, e uma busca do começo acharia a
+        # linha do teste em vez da linha que ele existe para prender.
+        $wfIsoPosFim = $wfIsoFonte.LastIndexOf('== SelfTest concluído:', [StringComparison]::Ordinal)
+        $wfIsoPosLimpa = if ($wfIsoPosFim -ge 0) { $wfIsoFonte.IndexOf('Remove-Item -LiteralPath $wbSelfTestRaiz -Recurse', $wfIsoPosFim, [StringComparison]::Ordinal) } else { -1 }
+        if ([string]::IsNullOrWhiteSpace($wfIsoFonte)) { Write-Host "  [ERRO] Fixtures: o próprio arquivo do WinForge não pôde ser lido para conferir a limpeza" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIsoPosLimpa -lt 0) { Write-Host "  [ERRO] Fixtures: ninguém apaga a raiz desta rodada no fim" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfIsoPosFin = $wfIsoFonte.LastIndexOf('} finally {', $wfIsoPosLimpa, [StringComparison]::Ordinal)
+            if ($wfIsoPosFin -lt 0 -or $wfIsoPosFin -lt $wfIsoPosFim) { Write-Host "  [ERRO] Fixtures: a limpeza da raiz não está no 'finally' que fecha o -SelfTest - um erro terminante no meio a pularia" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E nenhum bloco apaga a pasta de CIMA da sua, subindo um nível com Split-Path. Era assim que
+        # dois deles limpavam - o do IIS e o da aba Servidor -, e com a raiz por processo isso virou
+        # "apagar a rodada inteira no meio dela". MEDIDO ao restaurar a forma antiga: três erros em
+        # 'Permissões (SDDL)' e 'Permissões (Consumed)', blocos que a mudança nem tocava - o falso
+        # vermelho que este bloco existe para acabar. A trava pesca a FORMA da chamada, e o padrão
+        # abaixo é o único lugar do arquivo onde ela aparece escrita.
+        if ($wfIsoFonte -match 'Remove-Item -Path \(Split-Path -Parent') { Write-Host "  [ERRO] Fixtures: algum bloco apaga a pasta de cima da sua - com a raiz por processo, isso apaga os fixtures dos blocos seguintes" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath $wfIsoTmp -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  Fixtures: raiz por processo ('WinForge-SelfTest-$PID'), varredura poupa PID vivo e apaga PID morto, limpeza no 'finally' do fim"
+    } catch {
+        Write-Host "  [ERRO] Fixtures: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Janela de saída: memória
+    # Não é o TextBox. As fases 2 a 5 chamavam Invoke-WinForgeNativeCommand SEM -StreamTo, caíam no
+    # 'Out-String -Width 4096' e o Write-Host seguinte virava UMA linha de centenas de MB: medido,
+    # 135 MB de saída viraram 1.575 MB de pico (11,7x).
+    $wfMemRaiz = Join-Path $wbSelfTestRaiz 'stream'
+    try {
+        if (Test-Path -LiteralPath $wfMemRaiz) { Remove-Item -LiteralPath $wfMemRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfMemRaiz -Force | Out-Null
+        $wfMemArq = Join-Path $wfMemRaiz 'saida.txt'
+        Set-Content -LiteralPath $wfMemArq -Value 'cabecalho' -Encoding UTF8
+        # O escritor é PERSISTENTE: abrir e fechar o arquivo por linha é 99x mais lento.
+        $wfMemE1 = Open-WinForgeStreamWriter -Path $wfMemArq
+        $wfMemE2 = Open-WinForgeStreamWriter -Path $wfMemArq
+        if (-not [object]::ReferenceEquals($wfMemE1, $wfMemE2)) { Write-Host "  [ERRO] Fluxo (escritor): duas aberturas do mesmo arquivo devolveram escritores diferentes" -ForegroundColor Red; $wbErrors++ }
+        $wfMemRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+        1..2000 | ForEach-Object { Write-WinForgeStreamLine -Path $wfMemArq -Text "linha $_" }
+        $wfMemRelogio.Stop()
+        Close-WinForgeStreamWriter -Path $wfMemArq
+        if ((Measure-Object -InputObject (Get-Content -LiteralPath $wfMemArq -Raw) -Character).Characters -lt 2000) { Write-Host "  [ERRO] Fluxo (escritor): as linhas não chegaram ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-Content -LiteralPath $wfMemArq).Count -ne 2001) { Write-Host "  [ERRO] Fluxo (escritor): $(@(Get-Content -LiteralPath $wfMemArq).Count) linha(s), esperado 2001" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemRelogio.Elapsed.TotalSeconds -gt 5) { Write-Host "  [ERRO] Fluxo (escritor): 2000 linhas levaram $([int]$wfMemRelogio.Elapsed.TotalSeconds)s - o arquivo continua sendo aberto por linha" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.WinForgeStreamWriters.ContainsKey($wfMemArq)) { Write-Host "  [ERRO] Fluxo (escritor): o escritor não saiu do cache no Close" -ForegroundColor Red; $wbErrors++ }
+        # -NoCapture: o único chamador descarta o texto, e acumulá-lo num StringBuilder é guardar o
+        # volume inteiro na memória para jogar fora.
+        $wfMemSaida = Join-Path $wfMemRaiz 'cmd.txt'
+        Set-Content -LiteralPath $wfMemSaida -Value '' -Encoding UTF8
+        $wfMemRes = Invoke-WinForgeStreamedProcess -FilePath (Get-WinForgeSystemExe -Name 'cmd.exe') -Arguments @('/c', 'echo alfa& echo beta 1>&2') -StreamTo $wfMemSaida -Encoding (Get-WinForgeOutputEncoding -Name 'oem') -NoCapture
+        if ([string]$wfMemRes.Text -ne '') { Write-Host "  [ERRO] Fluxo (-NoCapture): Text veio com $(([string]$wfMemRes.Text).Length) caractere(s), esperado vazio" -ForegroundColor Red; $wbErrors++ }
+        Close-WinForgeStreamWriter -Path $wfMemSaida
+        $wfMemTexto = [string](Get-Content -LiteralPath $wfMemSaida -Raw)
+        if ($wfMemTexto -notmatch 'alfa') { Write-Host "  [ERRO] Fluxo (-NoCapture): a saída padrão não chegou ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemTexto -notmatch '\[erro\] beta') { Write-Host "  [ERRO] Fluxo (-NoCapture): o fluxo de erro não chegou ao arquivo" -ForegroundColor Red; $wbErrors++ }
+        # O fluxo de erro é lido LINHA A LINHA e JUNTO com o da saída: o ReadToEndAsync junta o erro
+        # sem teto, e aqui o erro É o volume. E o pump do erro não pode ser um scriptblock rodado
+        # por 'Task::Run' - MEDIDO nesta máquina, PowerShell 5.1: convertido em delegate e invocado
+        # numa thread do pool de threads, ele morre com "Não há Runspace disponível para executar
+        # scripts neste thread", a Task fica 'Faulted' e NINGUÉM lê o fluxo de erro. Quatro KB de
+        # erro depois, o processo para de escrever, nós paramos de ler e os dois lados esperam.
+        #
+        # As quatro travas pegam a FORMA DA CHAMADA, e não o nome: as duas proibições são citadas de
+        # propósito no bloco de ajuda da função (é lá que está o porquê de cada uma), e o bloco de
+        # ajuda entra no ScriptBlock. Uma trava por nome solto ficaria vermelha para sempre.
+        $wfMemFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        if ($wfMemFonteP -match 'ReadToEndAsync\(\)') { Write-Host "  [ERRO] Fluxo (erro): a chamada a ReadToEndAsync continua lá - ela junta o erro inteiro na memória" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -notmatch '\$processo\.StandardError\.ReadLineAsync\(\)') { Write-Host "  [ERRO] Fluxo (erro): o fluxo de erro não é lido linha a linha" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -notmatch '\$processo\.StandardOutput\.ReadLineAsync\(\)') { Write-Host "  [ERRO] Fluxo (saída): o fluxo de saída não é lido linha a linha" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -notmatch '\[System\.Threading\.Tasks\.Task\]::WaitAny\(') { Write-Host "  [ERRO] Fluxo (erro): saída e erro não são esperados JUNTOS - o que não for lido enche o cano de 4 KB e trava os dois lados" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteP -match '::Run\(\[') { Write-Host "  [ERRO] Fluxo (erro): o fluxo de erro voltou a ser lido por um scriptblock dentro de uma Task - nessa thread não há runspace e ele nunca roda" -ForegroundColor Red; $wbErrors++ }
+        # E o passo do fluxo ao vivo dos CINCO botões de correção também descarta o texto: as linhas
+        # seguintes só leem o código de saída. Num DISM ou num sfc isso é o volume inteiro guardado
+        # num StringBuilder para ser jogado fora no fim.
+        $wfMemFonteS = [string](Get-Command Invoke-WinForgeStreamStep).ScriptBlock
+        if ($wfMemFonteS.IndexOf('-StreamTo $Path -Encoding ([string]$Step.Encoding) -NoCapture', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Fluxo (passo): Invoke-WinForgeStreamStep acumula um texto que ninguém lê" -ForegroundColor Red; $wbErrors++ }
+        # As fases 1 e 3 a 5 usam o fluxo (a fase 2 não roda mais processo nenhum: depois da Tarefa 3
+        # ela é caminhada do motor). A busca é pela FORMA de CADA chamada, uma por alvo, e não por uma
+        # contagem: um piso de "pelo menos quatro" fica verde com metade dos passos fora do fluxo.
+        $wfMemFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        foreach ($wfMemAlvo in @('$fase1', '$fase3', '$fase6', '$passo', '$p5')) {
+            if ($wfMemFonteR.IndexOf("Invoke-WinForgeAclStreamStep -Path `$fluxo -Step $wfMemAlvo", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Fluxo (fases): o passo '$wfMemAlvo' não vai pelo fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E NENHUM passo escapa: sobrar uma chamada direta ao executável é sobrar o caminho de
+        # captura, que é o que enchia a memória.
+        if ($wfMemFonteR -match 'Invoke-WinForgeNativeCommand -FilePath') { Write-Host "  [ERRO] Fluxo (fases): sobrou passo chamando o executável fora do fluxo ao vivo" -ForegroundColor Red; $wbErrors++ }
+        $wfMemFonteF4 = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
+        if ($wfMemFonteF4 -notmatch 'Invoke-WinForgeAclStreamStep') { Write-Host "  [ERRO] Fluxo (fase 4): Invoke-WinForgeAclOwnerFallback continua em Invoke-WinForgeNativeCommand, fora do fluxo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteF4 -match 'Invoke-WinForgeNativeCommand') { Write-Host "  [ERRO] Fluxo (fase 4): sobrou chamada direta a Invoke-WinForgeNativeCommand na troca de posse" -ForegroundColor Red; $wbErrors++ }
+        if ($wfMemFonteR -match 'Write-Host \(\[string\]\$r\.Text\)') { Write-Host "  [ERRO] Fluxo (fases): ainda existe 'Write-Host ([string]`$r.Text)' - é a linha de centenas de MB" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Fluxo (memória): escritor persistente (2000 linhas em $([int]$wfMemRelogio.Elapsed.TotalMilliseconds)ms), -NoCapture sem texto, erro linha a linha, fases 3 a 5 no fluxo"
+    } catch {
+        Write-Host "  [ERRO] Fluxo (memória): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfMemRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Janela de saída: tetos
+    try {
+        # Anel com histerese: abaixo do teto não mexe; acima, volta para 2 MB cortando na primeira
+        # quebra de linha, com a marca.
+        $wfTetoCurto = ('linha' + "`r`n") * 100
+        if ((Limit-WinForgeStreamText -Text $wfTetoCurto) -ne $wfTetoCurto) { Write-Host "  [ERRO] Tetos (anel): texto abaixo do teto foi alterado" -ForegroundColor Red; $wbErrors++ }
+        $wfTetoGrande = ('x' * 99 + "`r`n") * 50000     # ~5 MB
+        $wfTetoCortado = Limit-WinForgeStreamText -Text $wfTetoGrande
+        if ($wfTetoCortado.Length -gt 4194304) { Write-Host "  [ERRO] Tetos (anel): o corte deixou $($wfTetoCortado.Length) caractere(s), acima do teto de 4 MB" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoCortado.Length -lt 1000000) { Write-Host "  [ERRO] Tetos (anel): o corte deixou só $($wfTetoCortado.Length) caractere(s) - a histerese devolve ~2 MB" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoCortado -notlike '*(o começo desta parte ficou só no arquivo)*') { Write-Host "  [ERRO] Tetos (anel): o texto cortado saiu sem a marca" -ForegroundColor Red; $wbErrors++ }
+        $wfTetoResto = $wfTetoCortado.Substring($wfTetoCortado.IndexOf("`n") + 1)
+        if ($wfTetoResto -notmatch '^x{99}') { Write-Host "  [ERRO] Tetos (anel): o corte não caiu numa quebra de linha" -ForegroundColor Red; $wbErrors++ }
+        # E a histerese de verdade: cortar o já cortado não corta de novo.
+        if ((Limit-WinForgeStreamText -Text $wfTetoCortado).Length -ne $wfTetoCortado.Length) { Write-Host "  [ERRO] Tetos (anel): o texto já dentro do teto foi cortado outra vez" -ForegroundColor Red; $wbErrors++ }
+        # A histerese é a FAIXA ENTRE os dois tetos, e é ela que tem de ser provada: 3 MB está acima
+        # do que o corte deixa (2 MB) e abaixo do teto (4 MB), e não pode ser tocado. A linha acima
+        # sozinha não prova isso - MEDIDO: um mutante que cortasse sempre acima de 2 MB SOBREVIVEU a
+        # ela, porque o texto recém-cortado cai alguns caracteres ABAIXO de 2 MB por acaso (o corte
+        # anda até a próxima quebra de linha e a marca é menor que a linha). É a faixa do meio que
+        # separa "corta a cada tique" - 971 MB de pico - de "corta a cada 2 MB de saída".
+        $wfTetoMeio = ('y' * 99 + "`r`n") * 30000     # ~3 MB: entre os dois tetos
+        if ((Limit-WinForgeStreamText -Text $wfTetoMeio).Length -ne $wfTetoMeio.Length) { Write-Host "  [ERRO] Tetos (anel): texto de 3 MB - entre o corte (2 MB) e o teto (4 MB) - foi cortado; sem a histerese a caixa copia 2 MB a cada tique" -ForegroundColor Red; $wbErrors++ }
+        # Leitura por tique: cresceu mais de 8 MB, lê só o último 1 MB e diz quanto pulou.
+        $wfTetoJan = Get-WinForgeFollowReadWindow -Offset 0 -Length 20971520
+        if ([long]$wfTetoJan.Start -ne (20971520 - 1048576)) { Write-Host "  [ERRO] Tetos (tique): crescimento de 20 MB deveria começar em Length-1MB, veio $($wfTetoJan.Start)" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfTetoJan.Count -gt 1048576) { Write-Host "  [ERRO] Tetos (tique): o tique leria $($wfTetoJan.Count) bytes" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfTetoJan.Skipped -le 0) { Write-Host "  [ERRO] Tetos (tique): o que foi pulado não é relatado" -ForegroundColor Red; $wbErrors++ }
+        $wfTetoPouco = Get-WinForgeFollowReadWindow -Offset 100 -Length 200000
+        if ([long]$wfTetoPouco.Start -ne 100 -or [int]$wfTetoPouco.Count -ne 199900) { Write-Host "  [ERRO] Tetos (tique): crescimento pequeno foi recortado ($($wfTetoPouco.Start)/$($wfTetoPouco.Count))" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfTetoPouco.Skipped -ne 0) { Write-Host "  [ERRO] Tetos (tique): crescimento pequeno relatou salto" -ForegroundColor Red; $wbErrors++ }
+        # Teto do ARQUIVO: 256 MB por execução, com a linha dizendo que os detalhes foram descartados.
+        $wfTetoDir = Join-Path $wbSelfTestRaiz 'tetos'
+        if (Test-Path -LiteralPath $wfTetoDir) { Remove-Item -LiteralPath $wfTetoDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfTetoDir -Force | Out-Null
+        $wfTetoArq = Join-Path $wfTetoDir 'repair-Teste-20260912-101010.txt'
+        Set-Content -LiteralPath $wfTetoArq -Value ('y' * 4096) -Encoding UTF8
+        $wfTetoCap = Test-WinForgeStreamFileCap -Path $wfTetoArq -MaxBytes 1024
+        if (-not $wfTetoCap.Over) { Write-Host "  [ERRO] Tetos (arquivo): 4 KB contra um teto de 1 KB não disparou" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfTetoCap.Text -notmatch 'descartados') { Write-Host "  [ERRO] Tetos (arquivo): a linha não diz que os detalhes dali em diante foram descartados ('$($wfTetoCap.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if ((Test-WinForgeStreamFileCap -Path $wfTetoArq).Over) { Write-Host "  [ERRO] Tetos (arquivo): 4 KB dispararam o teto padrão de 256 MB" -ForegroundColor Red; $wbErrors++ }
+        # E o teto é CONSULTADO no laço que escreve, e uma vez só por arquivo: sem isso a função é
+        # decoração, e sem a marca de "já avisei" cada chamada de processo repetiria a linha - numa
+        # fase 5 de 338 pastas isso é 338 avisos.
+        $wfTetoFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        if ($wfTetoFonteP.IndexOf('Test-WinForgeStreamFileCap -Path $StreamTo', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (arquivo): quem escreve não consulta o teto - o arquivo cresce sem limite" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteP.IndexOf('$sync.WinForgeStreamCapped', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (arquivo): o aviso do teto não é marcado por arquivo - ele sairia a cada chamada de processo" -ForegroundColor Red; $wbErrors++ }
+        # Retenção: 30 dias / 20 arquivos POR PREFIXO - 'server' não conta no corte de 'repair'.
+        # Cada um com a SUA data de gravação, e não a de agora: criados no mesmo instante, os 25
+        # ficam empatados em LastWriteTime e a ordem de remoção deixa de ser observável - MEDIDO, um
+        # mutante que apagasse do mais novo para o mais velho SOBREVIVEU a este bloco.
+        foreach ($wfTetoN in 1..25) {
+            $wfTetoF = Join-Path $wfTetoDir ("repair-X-202609{0:00}-101010.txt" -f $wfTetoN)
+            Set-Content -LiteralPath $wfTetoF -Value 'z' -Encoding UTF8
+            (Get-Item -LiteralPath $wfTetoF).LastWriteTime = (Get-Date '2026-09-01 10:10:10').AddDays($wfTetoN - 1)
+        }
+        foreach ($wfTetoN in 1..3) { Set-Content -LiteralPath (Join-Path $wfTetoDir ("server-X-202609{0:00}-101010.txt" -f $wfTetoN)) -Value 'z' -Encoding UTF8 }
+        $wfTetoVelho = Join-Path $wfTetoDir 'repair-Antigo-20250101-101010.txt'
+        Set-Content -LiteralPath $wfTetoVelho -Value 'z' -Encoding UTF8
+        (Get-Item -LiteralPath $wfTetoVelho).LastWriteTime = (Get-Date).AddDays(-45)
+        $wfTetoRet = Remove-WinForgeOldCommandOutput -Prefix 'repair' -Root $wfTetoDir
+        if (@(Get-ChildItem -LiteralPath $wfTetoDir -Filter 'repair-*.txt').Count -gt 20) { Write-Host "  [ERRO] Tetos (retenção): sobraram $(@(Get-ChildItem -LiteralPath $wfTetoDir -Filter 'repair-*.txt').Count) arquivos 'repair', o teto é 20" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfTetoVelho) { Write-Host "  [ERRO] Tetos (retenção): o arquivo de 45 dias não foi apagado" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wfTetoDir -Filter 'server-*.txt').Count -ne 3) { Write-Host "  [ERRO] Tetos (retenção): a limpeza de 'repair' mexeu nos arquivos de 'server'" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfTetoRet.Removed).Count) { Write-Host "  [ERRO] Tetos (retenção): a limpeza não relatou o que apagou" -ForegroundColor Red; $wbErrors++ }
+        # O que SOBRA é o mais NOVO, e o que sai é o mais velho: apagar do fim da fila e não do
+        # começo é o que separa retenção de "apagar o histórico que o usuário acabou de gerar".
+        if (-not (Test-Path -LiteralPath (Join-Path $wfTetoDir 'repair-X-20260925-101010.txt'))) { Write-Host "  [ERRO] Tetos (retenção): o arquivo mais NOVO foi apagado - a fila está sendo cortada pelo lado errado" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath (Join-Path $wfTetoDir 'repair-X-20260901-101010.txt')) { Write-Host "  [ERRO] Tetos (retenção): o arquivo mais VELHO ficou - o corte de 20 não está tirando os de baixo da fila" -ForegroundColor Red; $wbErrors++ }
+        # E a retenção é DISPARADA de verdade, para TODO prefixo, por quem prepara o caminho do
+        # arquivo de saída. Duas coisas trocadas de uma vez, e as duas eram achado:
+        #
+        # - só 'repair' era limpo, porque a chamada morava no botão de fluxo ao vivo; 'server' e
+        #   'command' (aba Servidor e botões de leitura) cresciam para sempre, e a especificação diz
+        #   "por prefixo", sem restringir;
+        # - e a trava era um IndexOf do nome da função com o nome do parâmetro colado, dentro do
+        #   fonte de quem chama. Isso é trava por NOME: ela fica verde com a chamada dentro de um
+        #   'if ($false)', com o parâmetro trocado por uma variante literal, ou com a linha virando
+        #   comentário. Aqui ela é por COMPORTAMENTO - a pasta de logs é sequestrada para dentro da
+        #   raiz desta rodada e o que se confere é o que sobrou no disco.
+        $wfRetDir = Join-Path $wbSelfTestRaiz 'retencao-prefixos'
+        New-Item -ItemType Directory -Path $wfRetDir -Force | Out-Null
+        $wfRetAntes = $sync.logPath
+        try {
+            $sync.logPath = Join-Path $wfRetDir 'winforge.log'
+            foreach ($wfRetPre in @('server', 'command', 'repair')) {
+                foreach ($wfRetN in 1..25) {
+                    $wfRetF = Join-Path $wfRetDir ("{0}-X-202609{1:00}-101010.txt" -f $wfRetPre, $wfRetN)
+                    Set-Content -LiteralPath $wfRetF -Value 'z' -Encoding UTF8
+                    (Get-Item -LiteralPath $wfRetF).LastWriteTime = (Get-Date '2026-09-01 10:10:10').AddDays($wfRetN - 1)
+                }
+            }
+            $wfRetNovo = Get-WinForgeCommandOutputPath -Name 'Teste' -Prefix 'server'
+            if ((Split-Path -Parent $wfRetNovo) -ne $wfRetDir) { Write-Host "  [ERRO] Tetos (retenção): o caminho preparado não caiu na pasta de logs desta rodada ('$wfRetNovo')" -ForegroundColor Red; $wbErrors++ }
+            # O arquivo desta execução nasce agora, como nasce no produto logo depois do preparo: o
+            # teto é do que a pasta fica DEPOIS dele. Sem o '-Incoming', a limpeza deixava 20 e este
+            # fechava 21 - um a mais do que a especificação diz.
+            Set-Content -LiteralPath $wfRetNovo -Value 'novo' -Encoding UTF8
+            $wfRetQuantos = @(Get-ChildItem -LiteralPath $wfRetDir -Filter 'server-*.txt').Count
+            if ($wfRetQuantos -ne 20) { Write-Host "  [ERRO] Tetos (retenção): a pasta ficou com $wfRetQuantos arquivo(s) 'server' depois do novo, e o teto é 20" -ForegroundColor Red; $wbErrors++ }
+            if (Test-Path -LiteralPath (Join-Path $wfRetDir 'server-X-20260901-101010.txt')) { Write-Host "  [ERRO] Tetos (retenção): o 'server' mais velho ficou" -ForegroundColor Red; $wbErrors++ }
+            if (-not (Test-Path -LiteralPath (Join-Path $wfRetDir 'server-X-20260925-101010.txt'))) { Write-Host "  [ERRO] Tetos (retenção): o 'server' mais novo foi apagado" -ForegroundColor Red; $wbErrors++ }
+            # E só o prefixo da vez: os outros dois não podem ter sido tocados.
+            foreach ($wfRetOutro in @('command', 'repair')) {
+                if (@(Get-ChildItem -LiteralPath $wfRetDir -Filter "$wfRetOutro-*.txt").Count -ne 25) { Write-Host "  [ERRO] Tetos (retenção): preparar um caminho 'server' mexeu nos arquivos '$wfRetOutro'" -ForegroundColor Red; $wbErrors++ }
+            }
+            [void](Get-WinForgeCommandOutputPath -Name 'Teste' -Prefix 'command')
+            if (@(Get-ChildItem -LiteralPath $wfRetDir -Filter 'command-*.txt').Count -gt 20) { Write-Host "  [ERRO] Tetos (retenção): o prefixo 'command' não é limpo - ele cresce para sempre" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            $sync.logPath = $wfRetAntes
+        }
+        if ([string]$sync.logPath -ne [string]$wfRetAntes) { Write-Host "  [ERRO] Tetos (retenção): a pasta de logs não voltou ao que era" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath $wfRetDir -Recurse -Force -ErrorAction SilentlyContinue
+        # 'IsUndoEnabled = $false' NÃO MUDA NADA (medido) e não pode aparecer.
+        $wfTetoFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
+        if ($wfTetoFonteT -match 'IsUndoEnabled') { Write-Host "  [ERRO] Tetos (caixa): 'IsUndoEnabled' voltou ao tique - medido, não muda nada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteT -notmatch '524288') { Write-Host "  [ERRO] Tetos (caixa): o bloco por tique deixou de ser 512 KB" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteT.IndexOf('Limit-WinForgeStreamText -Text', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (caixa): o tique não aplica o anel" -ForegroundColor Red; $wbErrors++ }
+        if ($wfTetoFonteT.IndexOf('Get-WinForgeFollowReadWindow -Offset', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Tetos (tique): o tique não usa a janela de leitura - um crescimento de 20 MB volta a vir inteiro" -ForegroundColor Red; $wbErrors++ }
+        # E o anel no COMPORTAMENTO, com janela de verdade e tiques à mão: 6 MB entrando em blocos,
+        # e a caixa tem de parar nos 4 MB. Sem esta metade, as travas de fonte acima ficariam verdes
+        # com um anel que nunca é alcançado - e a caixa voltaria a crescer sem teto.
+        $wfTetoSeg = Join-Path $wfTetoDir 'follow.txt'
+        [System.IO.File]::WriteAllText($wfTetoSeg, "primeira linha`r`n", (New-Object System.Text.UTF8Encoding($true)))
+        $wfTetoJanela = Show-WinForgeOutputWindow -Title 'SelfTest tetos' -FollowPath $wfTetoSeg -NoShow
+        if ($wfTetoJanela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Tetos (caixa): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfTetoCaixa = $wfTetoJanela.FindName('WFOutputText')
+            $wfTetoBloco = ('t' * 199 + "`r`n") * 3500     # ~700 KB por rodada
+            foreach ($wfTetoI in 1..12) {
+                [System.IO.File]::AppendAllText($wfTetoSeg, $wfTetoBloco, (New-Object System.Text.UTF8Encoding($false)))
+                Invoke-WinForgeFollowTick -Window $wfTetoJanela
+            }
+            $wfTetoLen = ([string]$wfTetoCaixa.Text).Length
+            if ($wfTetoLen -gt 4194304) { Write-Host "  [ERRO] Tetos (caixa): depois de 8 MB entrando, a caixa ficou com $wfTetoLen caractere(s) - o anel não pegou" -ForegroundColor Red; $wbErrors++ }
+            if ($wfTetoLen -lt 500000) { Write-Host "  [ERRO] Tetos (caixa): a caixa ficou com só $wfTetoLen caractere(s) - o anel cortou demais" -ForegroundColor Red; $wbErrors++ }
+            # O contador não pode sair do lugar: é ele que decide QUANDO ler a caixa, e um contador
+            # torto faz o corte acontecer tarde (memória) ou nunca.
+            if ([int]$wfTetoJanela.Tag.Chars -ne $wfTetoLen) { Write-Host "  [ERRO] Tetos (caixa): o contador diz $($wfTetoJanela.Tag.Chars) caractere(s) e a caixa tem $wfTetoLen" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Tetos: anel 4 MB -> 2 MB com histerese, tique lê no máximo 1 MB após 8 MB de crescimento, arquivo de 256 MB, retenção 30/20 por prefixo"
+    } catch {
+        Write-Host "  [ERRO] Tetos: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath (Join-Path $wbSelfTestRaiz 'tetos') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Janela de saída: salto em UTF-8
+    # O salto da cauda (8 MB de crescimento -> 1 MB lido) começa num byte QUALQUER, e esse byte pode
+    # ser a continuação de um caractere de vários bytes. O byte solto vira U+FFFD, que tem TRÊS bytes
+    # em UTF-8: o 'GetByteCount' do texto mostrado conta 3 onde 1 foi consumido, e o deslocamento sai
+    # do lugar para sempre. MEDIDO no código real, antes do conserto: deslocamento 11760013 num
+    # arquivo de 11760012 bytes - um byte ALÉM do fim -, e o tique seguinte entregou o marcador com a
+    # primeira letra comida. O arquivo em disco fica íntegro; quem perde é a janela.
+    #
+    # É o mesmo defeito que o corte na última quebra de linha já evitava no FIM da janela. Ninguém
+    # cuidava do começo.
+    $wfUtfDir = Join-Path $wbSelfTestRaiz 'utf8-salto'
+    try {
+        if (Test-Path -LiteralPath $wfUtfDir) { Remove-Item -LiteralPath $wfUtfDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfUtfDir -Force | Out-Null
+        $wfUtfArq = Join-Path $wfUtfDir 'saida.txt'
+        # Linhas só de 'á' (0xC3 0xA1): assim metade dos bytes do arquivo é byte de continuação, e dá
+        # para POSICIONAR o começo da cauda em cima de um deles em vez de torcer para cair lá.
+        $wfUtfSb = New-Object System.Text.StringBuilder
+        $wfUtfLinha = ('á' * 100) + "`r`n"
+        foreach ($wfUtfI in 1..43000) { [void]$wfUtfSb.Append($wfUtfLinha) }     # ~8,7 MB, acima dos 8 MB do salto
+        $wfUtfCorpo = [System.Text.Encoding]::UTF8.GetBytes($wfUtfSb.ToString())
+        $wfUtfSb = $null
+        # Um byte a mais NO FIM desloca o começo da cauda em um sem mexer no corpo, e em duas
+        # tentativas ele cai em cima de um byte de continuação. (Padding no CABEÇALHO não serve:
+        # ele empurra o corpo e a cauda na mesma medida, e o byte de chegada nunca muda.)
+        $wfUtfCab = [System.Text.Encoding]::UTF8.GetBytes('cabecalho' + "`r`n")
+        $wfUtfTudo = $null
+        $wfUtfStart = 0
+        foreach ($wfUtfPad in 0..3) {
+            $wfUtfFim = [System.Text.Encoding]::UTF8.GetBytes(('z' * $wfUtfPad) + "`r`n")
+            $wfUtfTudo = (New-Object byte[] (3 + $wfUtfCab.Length + $wfUtfCorpo.Length + $wfUtfFim.Length))
+            [System.Array]::Copy(([byte[]]@(0xEF, 0xBB, 0xBF)), 0, $wfUtfTudo, 0, 3)
+            [System.Array]::Copy($wfUtfCab, 0, $wfUtfTudo, 3, $wfUtfCab.Length)
+            [System.Array]::Copy($wfUtfCorpo, 0, $wfUtfTudo, 3 + $wfUtfCab.Length, $wfUtfCorpo.Length)
+            [System.Array]::Copy($wfUtfFim, 0, $wfUtfTudo, 3 + $wfUtfCab.Length + $wfUtfCorpo.Length, $wfUtfFim.Length)
+            $wfUtfStart = $wfUtfTudo.Length - 1048576
+            if (($wfUtfTudo[$wfUtfStart] -band 0xC0) -eq 0x80) { break }
+        }
+        if (($wfUtfTudo[$wfUtfStart] -band 0xC0) -ne 0x80) { Write-Host "  [ERRO] Salto (UTF-8): o cenário não vale - o começo da cauda não caiu no meio de um caractere" -ForegroundColor Red; $wbErrors++ }
+        [System.IO.File]::WriteAllBytes($wfUtfArq, $wfUtfTudo)
+        # A janela abre e o PRIMEIRO tique já é o do salto: 8,7 MB de crescimento contra 8 MB de teto.
+        $wfUtfJan = Show-WinForgeOutputWindow -Title 'SelfTest salto' -FollowPath $wfUtfArq -NoShow
+        if ($wfUtfJan -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Salto (UTF-8): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfUtfCaixa = $wfUtfJan.FindName('WFOutputText')
+            # 1. O deslocamento NÃO pode passar do fim do arquivo. É a forma medida do defeito.
+            if ([long]$wfUtfJan.Tag.Offset -gt $wfUtfTudo.Length) { Write-Host "  [ERRO] Salto (UTF-8): o deslocamento ficou em $($wfUtfJan.Tag.Offset) num arquivo de $($wfUtfTudo.Length) byte(s) - passou do fim" -ForegroundColor Red; $wbErrors++ }
+            # 2. E nada de caractere de substituição na tela: é o byte de continuação virando losango.
+            if (([string]$wfUtfCaixa.Text).IndexOf([char]0xFFFD) -ge 0) { Write-Host "  [ERRO] Salto (UTF-8): a caixa recebeu caractere de substituição - o salto pegou o meio de um caractere" -ForegroundColor Red; $wbErrors++ }
+            # 3. E o tique SEGUINTE entrega a linha nova inteira. Com o deslocamento fora do lugar,
+            #    ela chega com a(s) primeira(s) letra(s) comida(s) - foi assim que o defeito apareceu.
+            [System.IO.File]::AppendAllText($wfUtfArq, "MARCADOR-INTEIRO`r`n", (New-Object System.Text.UTF8Encoding($false)))
+            Invoke-WinForgeFollowTick -Window $wfUtfJan
+            if (([string]$wfUtfCaixa.Text).IndexOf('MARCADOR-INTEIRO', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Salto (UTF-8): o marcador não chegou inteiro à janela (deslocamento $($wfUtfJan.Tag.Offset), arquivo $((Get-Item -LiteralPath $wfUtfArq).Length))" -ForegroundColor Red; $wbErrors++ }
+            if ([long]$wfUtfJan.Tag.Offset -gt (Get-Item -LiteralPath $wfUtfArq).Length) { Write-Host "  [ERRO] Salto (UTF-8): depois do segundo tique o deslocamento passou do fim do arquivo" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Salto (UTF-8): cauda começando em byte de continuação não embaralha a janela nem move o deslocamento"
+    } catch {
+        Write-Host "  [ERRO] Salto (UTF-8): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfUtfDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Janela de saída: cabeçalho
+    # O caso que abriu esta leva: 404 minutos olhando um contador subir, sem nada na tela dizendo se
+    # aquilo era normal. O cabeçalho passa a ter a noção do que é normal PARA AQUELA LINHA, e a cor
+    # muda quando o relógio passa de 1,5x e de 3x da estimativa dela.
+    try {
+        $wfCabN = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(5)) -ExpectMinutes 15
+        if ([string]$wfCabN.Level -ne 'normal') { Write-Host "  [ERRO] Cabeçalho: 5 de 15 minutos deu '$($wfCabN.Level)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCabN.Text -notmatch '^Em andamento: Restaurar padrões \(05:00\)$') { Write-Host "  [ERRO] Cabeçalho: '$($wfCabN.Text)'" -ForegroundColor Red; $wbErrors++ }
+        $wfCabA = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(23)) -ExpectMinutes 15
+        if ([string]$wfCabA.Level -ne 'ambar') { Write-Host "  [ERRO] Cabeçalho: 23 de 15 minutos (1,53x) deu '$($wfCabA.Level)', esperado 'ambar'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfCabF in @('Está demorando mais que o normal (o comum são 15 minutos)', 'Continua rodando', 'Não feche esta janela', 'use o botão Parar')) {
+            if ([string]$wfCabA.Text -notmatch [regex]::Escape($wfCabF)) { Write-Host "  [ERRO] Cabeçalho (âmbar): falta '$wfCabF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfCabU = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(46)) -ExpectMinutes 15
+        if ([string]$wfCabU.Level -ne 'urgente') { Write-Host "  [ERRO] Cabeçalho: 46 de 15 minutos (3,06x) deu '$($wfCabU.Level)', esperado 'urgente'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCabU.Text -notmatch 'Parar') { Write-Host "  [ERRO] Cabeçalho (urgente): o Parar não está em destaque" -ForegroundColor Red; $wbErrors++ }
+        # O urgente tem de DIZER algo que o âmbar não diz, e as duas metades são necessárias. MEDIDO:
+        # um mutante que copiava a frase do âmbar para o ramo do triplo SOBREVIVEU a uma comparação
+        # de textos inteiros - eles nunca são iguais, porque o mm:ss do começo é outro. Só a frase,
+        # cobrada dos dois lados (presente lá, ausente aqui), separa 'demorando' de 'demorando muito'.
+        foreach ($wfCabF in @('MUITO mais que o normal', 'passou do triplo')) {
+            if ([string]$wfCabU.Text -notmatch [regex]::Escape($wfCabF)) { Write-Host "  [ERRO] Cabeçalho (urgente): falta '$wfCabF' - passar do triplo não está dizendo nada de novo" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabA.Text -match [regex]::Escape($wfCabF)) { Write-Host "  [ERRO] Cabeçalho (âmbar): ele já diz '$wfCabF' - os dois níveis viraram o mesmo aviso" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfCabD = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(7)) -Done -ExitCode 0
+        if ([string]$wfCabD.Text -ne 'Concluído em 07:00 (código 0)') { Write-Host "  [ERRO] Cabeçalho (fim): '$($wfCabD.Text)'" -ForegroundColor Red; $wbErrors++ }
+        $wfCabC = Get-WinForgeFollowHeader -Title 'Restaurar padrões' -Elapsed ([timespan]::FromMinutes(3)) -Done -ExitCode 0 -Cancelled
+        if ([string]$wfCabC.Text -ne 'Cancelado em 03:00') { Write-Host "  [ERRO] Cabeçalho (cancelado): '$($wfCabC.Text)', esperado 'Cancelado em 03:00' - nunca 'Concluído'" -ForegroundColor Red; $wbErrors++ }
+        # Sem ExpectMinutes não há âmbar: um comando sem estimativa não pode inventar atraso.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromHours(3))).Level -ne 'normal') { Write-Host "  [ERRO] Cabeçalho: sem ExpectMinutes o nível mudou" -ForegroundColor Red; $wbErrors++ }
+        # A FAIXA, e não só os três pontos de cima. 23/15 é 1,53x e 46/15 é 3,06x: com esses dois
+        # sozinhos, QUALQUER corte entre 1,0x e 1,53x (ou entre 1,54x e 3,06x) fica verde. Os quatro
+        # abaixo prendem os dois cortes onde eles estão - 1,4x normal, 1,5x cravado âmbar, 2,9x ainda
+        # âmbar, 3,0x cravado urgente.
+        foreach ($wfCabFaixa in @(@(14, 'normal'), @(15, 'ambar'), @(29, 'ambar'), @(30, 'urgente'))) {
+            $wfCabNivel = [string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes($wfCabFaixa[0])) -ExpectMinutes 10).Level
+            if ($wfCabNivel -ne [string]$wfCabFaixa[1]) { Write-Host "  [ERRO] Cabeçalho (faixa): $($wfCabFaixa[0]) de 10 minutos deu '$wfCabNivel', esperado '$($wfCabFaixa[1])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E é RAZÃO, não minuto fixo: os mesmos 23 minutos são âmbar contra 15 esperados e normais
+        # contra 20. Um corte escrito em minutos absolutos passaria nas linhas de cima.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(23)) -ExpectMinutes 20).Level -ne 'normal') { Write-Host "  [ERRO] Cabeçalho: 23 de 20 minutos (1,15x) deveria ser 'normal' - o corte está em minutos fixos, não na razão" -ForegroundColor Red; $wbErrors++ }
+        # O número que aparece na frase é o da LINHA, e não um 15 escrito à mão.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(31)) -ExpectMinutes 20).Text -notmatch [regex]::Escape('o comum são 20 minutos')) { Write-Host "  [ERRO] Cabeçalho: a estimativa da frase não vem de ExpectMinutes" -ForegroundColor Red; $wbErrors++ }
+        # Fim sem código (a runspace morreu antes de gravar um): 'n/d', e não 'código '.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(2)) -Done).Text -ne 'Concluído em 02:00 (código n/d)') { Write-Host "  [ERRO] Cabeçalho (fim): sem código de saída o texto deveria dizer 'n/d'" -ForegroundColor Red; $wbErrors++ }
+        # Os segundos, e o caso de 404 minutos: 'mm' passa de 60 e NÃO zera. Um contador que voltasse
+        # a 44:00 depois de uma hora seria pior do que não ter contador.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromSeconds(65))).Text -ne 'Em andamento: X (01:05)') { Write-Host "  [ERRO] Cabeçalho: 65 segundos não viraram '01:05'" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(404)) -ExpectMinutes 15).Text -notmatch '\(404:00\)') { Write-Host "  [ERRO] Cabeçalho: 404 minutos não apareceram como '404:00' - o contador está zerando na hora cheia" -ForegroundColor Red; $wbErrors++ }
+        # Relógio que ANDA PARA TRÁS no meio do comando não é hipótese: 'Servidor NTP - Ativar' roda
+        # 'w32tm /resync' com a janela aberta, e a hora do sistema pode recuar. Sem guarda, o
+        # cabeçalho mostra '-1:59'.
+        if ([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text -ne 'Em andamento: X (00:00)') { Write-Host "  [ERRO] Cabeçalho: tempo negativo (o w32tm /resync recuou o relógio) virou '$([string](Get-WinForgeFollowHeader -Title 'X' -Elapsed ([timespan]::FromMinutes(-3))).Text)'" -ForegroundColor Red; $wbErrors++ }
+        # Toda linha que ALTERA a máquina declara ExpectMinutes. A varredura usa as listas canônicas
+        # das outras travas, e não uma cópia à mão: linha nova numa delas entra aqui sozinha.
+        foreach ($wfCabNome in @(@($wfRepNomes) + @($wfStrNomes) + @('AclRestore', 'AclUndo', 'AclCleanup', 'NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverRestore', 'WifiDriverGeneric'))) {
+            $wfCabCmd = Get-WinForgeRepairCommand -Name $wfCabNome
+            if ([string]$wfCabCmd.Kind -eq 'read') { continue }
+            if (-not ([int]$wfCabCmd.ExpectMinutes -gt 0)) { Write-Host "  [ERRO] Cabeçalho: a linha '$wfCabNome' não declara ExpectMinutes" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ([int](Get-WinForgeRepairCommand -Name 'AclRestore').ExpectMinutes -ne 15) { Write-Host "  [ERRO] Cabeçalho: AclRestore deveria estimar 15 minutos" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Get-WinForgeRepairCommand -Name 'AclUndo').ExpectMinutes -ne 10) { Write-Host "  [ERRO] Cabeçalho: AclUndo deveria estimar 10 minutos" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Get-WinForgeRepairCommand -Name 'DotNet35Enable').ExpectMinutes -ne 20) { Write-Host "  [ERRO] Cabeçalho: DotNet35Enable deveria estimar 20 minutos" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Get-WinForgeRepairCommand -Name 'WindowsUpdateReset').ExpectMinutes -ne 20) { Write-Host "  [ERRO] Cabeçalho: WindowsUpdateReset (WPFFixesUpdate) deveria estimar 20 minutos" -ForegroundColor Red; $wbErrors++ }
+        # 'ChkdskScan' é 'read' e estima assim mesmo: ele varre o disco inteiro, e é o outro botão que
+        # deixa alguém olhando o contador sem saber se aquilo é normal.
+        if ([int](Get-WinForgeRepairCommand -Name 'ChkdskScan').ExpectMinutes -ne 10) { Write-Host "  [ERRO] Cabeçalho: ChkdskScan deveria estimar 10 minutos" -ForegroundColor Red; $wbErrors++ }
+        # Os dois tokens novos existem nos dois temas (o contraste é cobrado pela conferência de tema).
+        foreach ($wfCabTema in @('Light', 'Dark')) {
+            foreach ($wfCabTok in @('HeaderWarningColor', 'HeaderUrgentColor')) {
+                if ([string]::IsNullOrWhiteSpace([string]$sync.configs.themes.$wfCabTema.$wfCabTok)) { Write-Host "  [ERRO] Cabeçalho: token '$wfCabTok' ausente no tema $wfCabTema" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # ...e ENTRAM na conferência de contraste, que é outra coisa de existir. Sem esta linha, tirar
+        # os dois da lista de textos não acusa nada e um hexadecimal ilegível volta a caber no
+        # cabeçalho - o piso de 4,5:1 deixaria de valer justamente para o aviso que precisa ser lido.
+        foreach ($wfCabTok in @('HeaderWarningColor', 'HeaderUrgentColor')) {
+            if ($wfCabTok -notin @($wfTemaTextos)) { Write-Host "  [ERRO] Cabeçalho: '$wfCabTok' está fora da conferência de contraste dos temas" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o COMPORTAMENTO, com janela de verdade e tiques à mão: a estimativa chega à Tag, o tique
+        # troca o texto E A COR nos três níveis. As travas de fonte abaixo ficariam verdes com uma
+        # função pura que ninguém chama; estas três cores provam que o cabeçalho muda na tela.
+        $wfCabDir = Join-Path $wbSelfTestRaiz 'cabecalho'
+        New-Item -ItemType Directory -Path $wfCabDir -Force | Out-Null
+        $wfCabArq = Join-Path $wfCabDir 'follow.txt'
+        [System.IO.File]::WriteAllText($wfCabArq, "primeira linha`r`n", (New-Object System.Text.UTF8Encoding($true)))
+        $sync.WinForgeStreamDone[$wfCabArq] = $false
+        # A janela principal é SEQUESTRADA por duas cores inventadas. Sem isto, $sync.Form é nulo
+        # neste ponto do -SelfTest (o bloco roda antes do XAML), a janela de saída cai nas cores de
+        # RESERVA e o caminho que lê os tokens do tema NUNCA é exercitado: as três cores diferem
+        # entre si pelas reservas, e a conferência de "cada nível pinta diferente" fica verde mesmo
+        # com a leitura dos tokens removida - MEDIDO, o mutante sobreviveu com zero erros.
+        #
+        # E o estrago que passava batido é grande: as reservas do código são as cores do tema
+        # ESCURO ('#F59E0B' e '#EF4444'), e no tema CLARO elas dão 2,05:1 de contraste - texto de
+        # alerta ilegível, com build verde.
+        $wfCabAvisoTok = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(0x12, 0x34, 0x56))
+        $wfCabUrgTok = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(0x65, 0x43, 0x21))
+        $wfCabFormAntes = $sync.Form
+        $wfCabJan = $null
+        try {
+            $wfCabFalsa = New-Object System.Windows.Window
+            $wfCabFalsa.Resources['HeaderWarningColor'] = $wfCabAvisoTok
+            $wfCabFalsa.Resources['HeaderUrgentColor'] = $wfCabUrgTok
+            $sync.Form = $wfCabFalsa
+            $wfCabJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfCabArq -ExpectMinutes 15 -Component 'Repair' -NoShow
+        } finally { $sync.Form = $wfCabFormAntes }
+        if ($wfCabJan -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Cabeçalho (janela): -FollowPath -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if ([int]$wfCabJan.Tag.ExpectMinutes -ne 15) { Write-Host "  [ERRO] Cabeçalho (janela): a estimativa não chegou à Tag (veio '$($wfCabJan.Tag.ExpectMinutes)')" -ForegroundColor Red; $wbErrors++ }
+            $wfCabBloco = $wfCabJan.FindName('WFOutputHeader')
+            $wfCabCores = @{}
+            foreach ($wfCabCaso in @(@('normal', 1), @('ambar', 23), @('urgente', 46))) {
+                $wfCabJan.Tag.Start = (Get-Date).AddMinutes(-[int]$wfCabCaso[1])
+                Invoke-WinForgeFollowTick -Window $wfCabJan
+                $wfCabCores[[string]$wfCabCaso[0]] = [string]$wfCabBloco.Foreground.Color
+            }
+            # A prova que faltava: as cores da tela são as do TEMA, e não as reservas. Com a leitura
+            # dos tokens removida, aqui chegam '#FFF59E0B' e '#FFEF4444' em vez das duas inventadas.
+            if ([string]$wfCabCores['ambar'] -ne [string]$wfCabAvisoTok.Color) { Write-Host "  [ERRO] Cabeçalho (cor): o âmbar da tela é '$($wfCabCores['ambar'])' e o token do tema é '$($wfCabAvisoTok.Color)' - a cor não vem do tema, vem da reserva do código" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabCores['urgente'] -ne [string]$wfCabUrgTok.Color) { Write-Host "  [ERRO] Cabeçalho (cor): o urgente da tela é '$($wfCabCores['urgente'])' e o token do tema é '$($wfCabUrgTok.Color)' - a cor não vem do tema, vem da reserva do código" -ForegroundColor Red; $wbErrors++ }
+            # A frase do URGENTE na tela, e não a palavra 'Parar': os dois estados falam do botão, e
+            # cobrar só a palavra não separa um do outro - quem separava era a cor, sozinha.
+            if ([string]$wfCabBloco.Text -notmatch 'Parar') { Write-Host "  [ERRO] Cabeçalho (janela): com 46 de 15 minutos o texto na tela não fala do Parar ('$($wfCabBloco.Text)')" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabBloco.Text -notmatch 'passou do triplo') { Write-Host "  [ERRO] Cabeçalho (janela): com 46 de 15 minutos a tela mostra o aviso do ÂMBAR - o nível urgente não chegou ao texto" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfCabPar in @(@('normal', 'ambar'), @('normal', 'urgente'), @('ambar', 'urgente'))) {
+                if ([string]$wfCabCores[[string]$wfCabPar[0]] -eq [string]$wfCabCores[[string]$wfCabPar[1]]) { Write-Host "  [ERRO] Cabeçalho (cor): '$($wfCabPar[0])' e '$($wfCabPar[1])' pintam igual ('$($wfCabCores[[string]$wfCabPar[0]])') - o tique não troca a cor" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Concluído volta ao normal e para o relógio: 'Concluído em mm:ss' em âmbar seria o
+            # programa dizendo que ainda há algo errado depois de terminar.
+            $sync.WinForgeStreamDone[$wfCabArq] = $true
+            $sync.WinForgeStreamExit[$wfCabArq] = 0
+            Invoke-WinForgeFollowTick -Window $wfCabJan
+            if ([string]$wfCabBloco.Text -notmatch '^Concluído em \d+:\d\d \(código 0\)$') { Write-Host "  [ERRO] Cabeçalho (janela): o fim não virou 'Concluído em mm:ss (código 0)' ('$($wfCabBloco.Text)')" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCabBloco.Foreground.Color -ne [string]$wfCabCores['normal']) { Write-Host "  [ERRO] Cabeçalho (cor): depois de concluído a cor não voltou ao normal" -ForegroundColor Red; $wbErrors++ }
+        }
+        # As travas de FORMA DE CHAMADA, com o argumento junto: o nome solto seria satisfeito pela
+        # prosa do bloco de ajuda, que entra no .ScriptBlock.
+        $wfCabFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
+        if ($wfCabFonteT.IndexOf('Get-WinForgeFollowHeader -Title', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Cabeçalho: o tique não chama Get-WinForgeFollowHeader - ele voltou a montar o texto sozinho" -ForegroundColor Red; $wbErrors++ }
+        $wfCabFonteJ = [string](Get-Command Show-WinForgeOutputWindow).ScriptBlock
+        if ($wfCabFonteJ.IndexOf('ExpectMinutes = [int]$ExpectMinutes', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Cabeçalho: a janela não guarda ExpectMinutes na Tag" -ForegroundColor Red; $wbErrors++ }
+        $wfCabFonteS = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        if ($wfCabFonteS.IndexOf('-ExpectMinutes ([int]$Spec.ExpectMinutes)', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Cabeçalho: quem abre a janela do fluxo ao vivo não passa a estimativa da linha" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Cabeçalho: normal/âmbar (1,5x)/urgente (3x), 'Cancelado em mm:ss' nunca vira 'Concluído', ExpectMinutes em toda linha repair"
+    } catch {
+        Write-Host "  [ERRO] Cabeçalho: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath (Join-Path $wbSelfTestRaiz 'cabecalho') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Parar: encanamento e Job Object
+    # Medido: 'powershell.exe' morto com Stop-Process -Force DEIXA VIVO o filho iniciado com
+    # UseShellExecute=$false - fechar o WinForge deixava um icacls.exe elevado reescrevendo ACL de
+    # sistema. Daí o Job Object. E medido também: tipo criado por Add-Type na runspace PRINCIPAL não
+    # é visto no pool, e um segundo Add-Type do mesmo nome falha - daí a guarda.
+    $wfParRaiz = Join-Path $wbSelfTestRaiz 'parar'
+    try {
+        if (Test-Path -LiteralPath $wfParRaiz) { Remove-Item -LiteralPath $wfParRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfParRaiz -Force | Out-Null
+        $wfParArq = Join-Path $wfParRaiz 'saida.txt'
+        Set-Content -LiteralPath $wfParArq -Value 'cab' -Encoding UTF8
+        foreach ($wfParChave in @('WinForgeStreamCancel', 'WinForgeStreamJob', 'WinForgeStreamProtected')) {
+            if ($null -eq $sync.$wfParChave) { Write-Host "  [ERRO] Parar: `$sync.$wfParChave não existe" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $sync.$wfParChave.IsSynchronized) { Write-Host "  [ERRO] Parar: `$sync.$wfParChave não é sincronizada - ela atravessa duas threads" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (Test-WinForgeStreamCancelled -Path $wfParArq) { Write-Host "  [ERRO] Parar: arquivo novo já nasce cancelado" -ForegroundColor Red; $wbErrors++ }
+        $null = Request-WinForgeStreamCancel -Path $wfParArq
+        if (-not (Test-WinForgeStreamCancelled -Path $wfParArq)) { Write-Host "  [ERRO] Parar: o pedido de cancelamento não levantou a flag" -ForegroundColor Red; $wbErrors++ }
+        # A flag é IGNORADA dentro da janela protegida: cancelar entre 'posse aos Admins' e 'posse de
+        # volta' (Fase 4, Tarefa 12) deixa a pasta do sistema aberta a qualquer processo elevado.
+        Enter-WinForgeStreamProtected -Path $wfParArq
+        if (Test-WinForgeStreamCancelled -Path $wfParArq) { Write-Host "  [ERRO] Parar: a flag venceu dentro da janela protegida" -ForegroundColor Red; $wbErrors++ }
+        Exit-WinForgeStreamProtected -Path $wfParArq
+        if (-not (Test-WinForgeStreamCancelled -Path $wfParArq)) { Write-Host "  [ERRO] Parar: a flag sumiu ao sair da janela protegida" -ForegroundColor Red; $wbErrors++ }
+        # E o pedido feito DENTRO da janela protegida não mata nada na hora: ele fica guardado e vale
+        # a partir do passo seguinte. É a outra ponta da mesma regra.
+        [void]$sync.WinForgeStreamCancel.Remove($wfParArq)
+        Enter-WinForgeStreamProtected -Path $wfParArq
+        $wfParProt = Request-WinForgeStreamCancel -Path $wfParArq
+        if ([string]$wfParProt.Reason -notmatch 'interrompid|protegid') { Write-Host "  [ERRO] Parar: o pedido dentro da janela protegida não avisa que ele só vale depois ('$($wfParProt.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        Exit-WinForgeStreamProtected -Path $wfParArq
+        if (-not (Test-WinForgeStreamCancelled -Path $wfParArq)) { Write-Host "  [ERRO] Parar: o pedido feito na janela protegida não valeu depois que ela fechou" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfParArq)
+        # A checagem acontece ENTRE passos.
+        $wfParFonteS = [string](Get-Command Invoke-WinForgeStreamedSteps).ScriptBlock
+        if ($wfParFonteS.IndexOf('Test-WinForgeStreamCancelled -Path $Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar: Invoke-WinForgeStreamedSteps não confere a flag antes de cada passo" -ForegroundColor Red; $wbErrors++ }
+        # E o laço PARA de verdade: dois passos inofensivos, a flag levantada antes do primeiro, e
+        # nenhum deles pode rodar. Uma trava de fonte sozinha ficaria verde com a checagem num ramo
+        # morto - e é o laço que decide se o Parar para alguma coisa.
+        $wfParSeq = Join-Path $wfParRaiz 'passos.txt'
+        Set-Content -LiteralPath $wfParSeq -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamCancel[$wfParSeq] = $true
+        $wfParCod = Invoke-WinForgeStreamedSteps -Path $wfParSeq -Steps @(
+            @{ FilePath = (Get-WinForgeSystemExe -Name 'cmd.exe'); Arguments = @('/c', 'echo NAO-DEVIA-RODAR-1') }
+            @{ FilePath = (Get-WinForgeSystemExe -Name 'cmd.exe'); Arguments = @('/c', 'echo NAO-DEVIA-RODAR-2') }
+        ) -Final 'fim'
+        Close-WinForgeStreamWriter -Path $wfParSeq
+        $wfParTexto = [string](Get-Content -LiteralPath $wfParSeq -Raw)
+        if ($wfParTexto -match 'NAO-DEVIA-RODAR') { Write-Host "  [ERRO] Parar: com a flag levantada, um passo rodou assim mesmo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTexto -notmatch 'Interrompido') { Write-Host "  [ERRO] Parar: o arquivo não diz que a sequência foi interrompida a pedido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTexto -match '(?m)^fim$') { Write-Host "  [ERRO] Parar: a frase final de sucesso saiu numa sequência CANCELADA" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfParSeq)
+        [void]$sync.WinForgeStreamDone.Remove($wfParSeq)
+        # E o Parar clicado DENTRO de um passo, que é o caso real: a restauração de permissões
+        # inteira é UM passo, e a marca só era conferida ENTRE passos. Medido com dublê: parar
+        # durante a fase 2 imprimia '== Passo 1: ... código 0 ==' e o '== Concluído ==' com a frase
+        # final mandando reiniciar o computador. Vale igual para o Desfazer e para a Limpeza.
+        $wfParDentro = Join-Path $wfParRaiz 'dentro.txt'
+        Set-Content -LiteralPath $wfParDentro -Value 'cab' -Encoding UTF8
+        function Test-WinForgeStopDuranteOPasso {
+            # O dublê faz o que a restauração faz: escreve, e no meio do caminho o usuário clica em
+            # Parar. Ele NÃO devolve código de erro - a função termina normalmente.
+            Write-Host 'trabalhando'
+            $sync.WinForgeStreamCancel[$sync.WinForgeSelfTestPassoArq] = $true
+            Write-Host 'parou no meio'
+        }
+        $sync.WinForgeSelfTestPassoArq = $wfParDentro
+        $wfParCodDentro = Invoke-WinForgeStreamedSteps -Path $wfParDentro -Steps @(@{ Function = 'Test-WinForgeStopDuranteOPasso' }) -Final 'Reinicie o computador.'
+        Close-WinForgeStreamWriter -Path $wfParDentro
+        $wfParTxtDentro = [string](Get-Content -LiteralPath $wfParDentro -Raw)
+        if ($wfParTxtDentro -match '(?m)^== Conclu') { Write-Host "  [ERRO] Parar (dentro do passo): o arquivo diz '== Concluído ==' depois de uma interrupção" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTxtDentro -match '(?m)^Reinicie o computador\.') { Write-Host "  [ERRO] Parar (dentro do passo): a frase final saiu num comando interrompido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTxtDentro -match 'código 0 ==') { Write-Host "  [ERRO] Parar (dentro do passo): o passo interrompido foi dado como terminado com código 0" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParTxtDentro -notmatch 'Interrompido a pedido') { Write-Host "  [ERRO] Parar (dentro do passo): o arquivo não diz que foi interrompido" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfParDentro)
+        [void]$sync.WinForgeStreamDone.Remove($wfParDentro)
+        [void]$sync.Remove('WinForgeSelfTestPassoArq')
+        # Add-Type GUARDADO, dentro do scriptblock do POOL.
+        $wfParCorpo = [string]$sync.WinForgeStreamBody
+        if ($wfParCorpo -notmatch "'WfJob'\s*-as\s*\[type\]") { Write-Host "  [ERRO] Parar: o Add-Type do job não está guardado por ('WfJob' -as [type])" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParCorpo -notmatch 'Add-Type') { Write-Host "  [ERRO] Parar: o Add-Type do job não está dentro do corpo da runspace" -ForegroundColor Red; $wbErrors++ }
+        # A guarda roda DUAS VEZES seguidas sem estourar - e com o MESMO nome nas duas pontas: com
+        # '-Namespace WinForgeProva' o tipo nasceria 'WinForgeProva.WfJobProva', a guarda
+        # ('WfJobProva' -as [type]) daria $null para sempre e o segundo Add-Type é que estouraria.
+        # 'SetLastError = true' aqui também, e pelo mesmo motivo do tipo de produção: a mensagem de
+        # falha logo abaixo imprime GetLastWin32Error, e sem a chave esse número é o erro de outra
+        # chamada qualquer, feita antes, por outro código - diagnóstico falso no teste que existe
+        # justamente para diagnosticar.
+        $wfParDef = '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);' +
+                    '[DllImport("kernel32.dll", SetLastError = true)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);' +
+                    '[DllImport("kernel32.dll", SetLastError = true)] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);' +
+                    '[DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr h);'
+        $wfParGuarda = { if (-not ('WfJobProva' -as [type])) { Add-Type -Namespace '' -Name 'WfJobProva' -MemberDefinition $wfParDef } }
+        & $wfParGuarda; & $wfParGuarda
+        if (-not ('WfJobProva' -as [type])) { Write-Host "  [ERRO] Parar: a guarda não criou o tipo" -ForegroundColor Red; $wbErrors++ }
+        else {
+            # O JOB DE VERDADE, matando o PRÓPRIO filho: um grep de fonte não prova que um handle
+            # mata uma árvore, e é essa a única coisa que o Parar promete.
+            $wfParJob = [WfJobProva]::CreateJobObject([IntPtr]::Zero, $null)
+            if ($wfParJob -eq [IntPtr]::Zero) { Write-Host "  [ERRO] Parar (job): CreateJobObject devolveu handle nulo" -ForegroundColor Red; $wbErrors++ }
+            else {
+                $wfParFilho = Start-Process -FilePath (Get-WinForgeSystemExe -Name 'cmd.exe') -ArgumentList '/c', 'ping -n 30 127.0.0.1' -PassThru -WindowStyle Hidden
+                try {
+                    if (-not [WfJobProva]::AssignProcessToJobObject($wfParJob, $wfParFilho.Handle)) { Write-Host "  [ERRO] Parar (job): AssignProcessToJobObject falhou (erro $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" -ForegroundColor Red; $wbErrors++ }
+                    $null = [WfJobProva]::TerminateJobObject($wfParJob, 1)
+                    if (-not $wfParFilho.WaitForExit(5000)) { Write-Host "  [ERRO] Parar (job): o job NÃO matou a árvore - o filho continuou vivo depois do TerminateJobObject" -ForegroundColor Red; $wbErrors++ }
+                } finally {
+                    if (-not $wfParFilho.HasExited) { Stop-Process -Id $wfParFilho.Id -Force -ErrorAction SilentlyContinue }
+                    $null = [WfJobProva]::CloseHandle($wfParJob)
+                }
+            }
+        }
+        # O job é criado e guardado ANTES do Start(), a Fase 4 fica de fora e a limpeza é no finally.
+        $wfParFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        if ($wfParFonteP -notmatch 'AssignProcessToJobObject') { Write-Host "  [ERRO] Parar: o processo não é atribuído a nenhum job" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParFonteP -notmatch 'WinForgeStreamProtected') { Write-Host "  [ERRO] Parar: a atribuição ao job não pula os processos da janela protegida" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParFonteP -notmatch '(?s)finally\s*\{[^}]*WinForgeStreamJob') { Write-Host "  [ERRO] Parar: o job não é limpo no 'finally'" -ForegroundColor Red; $wbErrors++ }
+        # As duas âncoras são FORMA: a atribuição do handle e a instrução do Start. Os nomes soltos
+        # ('CreateJobObject', '.Start()') aparecem em prosa de bloco de ajuda com a maior facilidade,
+        # e aí a ordem medida seria a das FRASES, não a do código.
+        $wfParPosJob = $wfParFonteP.IndexOf('$trabalho = [WfJob]::CreateJobObject(', [StringComparison]::Ordinal)
+        $wfParPosStart = $wfParFonteP.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
+        if ($wfParPosJob -lt 0 -or $wfParPosStart -lt 0 -or $wfParPosJob -gt $wfParPosStart) { Write-Host "  [ERRO] Parar: o job é criado DEPOIS do Start() - há uma janela em que o filho não pertence a job nenhum" -ForegroundColor Red; $wbErrors++ }
+        # As duas chamadas de API do job devolvem booleano, e ele NÃO pode ser descartado. Com
+        # tamanho errado a primeira responde falso (erro 24) e custa só a morte automática da árvore;
+        # a segunda falhando é pior - o job fica VAZIO, o encerramento não mata nada e o Parar vira
+        # um botão que não para. As duas formas de descarte ficam proibidas, e cada falha avisa.
+        foreach ($wfParDescarte in @('[void][WfJob]::SetInformationJobObject', '[void][WfJob]::AssignProcessToJobObject')) {
+            if ($wfParFonteP.IndexOf($wfParDescarte, [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Parar (job): o retorno de '$wfParDescarte' é descartado - a falha passaria calada" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfParFonteP.IndexOf('if (-not [WfJob]::SetInformationJobObject(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (job): ninguém confere se o job aceitou KILL_ON_JOB_CLOSE" -ForegroundColor Red; $wbErrors++ }
+        if ($wfParFonteP.IndexOf('$atribuiu = [bool][WfJob]::AssignProcessToJobObject(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (job): ninguém confere se o processo entrou no job" -ForegroundColor Red; $wbErrors++ }
+        # E a atribuição que falha TIRA o handle do dicionário: senão o pedido de cancelamento
+        # prometeria matar uma árvore que não está no job.
+        if ($wfParFonteP -notmatch '(?s)-not \$atribuiu.{0,400}WinForgeStreamJob\.Remove') { Write-Host "  [ERRO] Parar (job): com a atribuição falhando o handle continua no dicionário - o Parar prometeria uma morte que não acontece" -ForegroundColor Red; $wbErrors++ }
+        if (@([regex]::Matches($wfParFonteP, 'Write-WinForgeLog -Component "Repair" -Level "WARN"')).Count -lt 2) { Write-Host "  [ERRO] Parar (job): as duas falhas de API do job não avisam no log" -ForegroundColor Red; $wbErrors++ }
+        # '-NoElevate' não promete Parar: medido, OpenProcess sobre processo elevado, de pai não
+        # elevado, devolve handle=0 err=5.
+        $wfParFonteR = [string](Get-Command Request-WinForgeStreamCancel).ScriptBlock
+        if ($wfParFonteR -notmatch 'NoElevate|não elevado') { Write-Host "  [ERRO] Parar: falta a ressalva de '-NoElevate' em Request-WinForgeStreamCancel" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Parar: três hashtables sincronizadas, flag ignorada na janela protegida, guarda do Add-Type roda duas vezes e o job matou a árvore do filho"
+    } catch {
+        Write-Host "  [ERRO] Parar: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfParRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Parar: o laço para no meio
+    # A restauração de permissões INTEIRA é UM passo do ponto de vista do motor, e a marca de
+    # cancelamento só era lida ENTRE passos. Os laços das fases 3 a 5 disparam um processo atrás do
+    # outro: com o Parar clicado no meio da fase 5, o job matava o icacls da pasta da vez e o laço
+    # lançava o da pasta seguinte, com um job novo, até o fim - a janela dizia "Parando" enquanto o
+    # reparo terminava inteiro.
+    #
+    # A conferência é de PONTO ÚNICO, antes do Start(): todo laço fica coberto sem ninguém precisar
+    # lembrar de checar em cada um.
+    $wfLacoDir = Join-Path $wbSelfTestRaiz 'laco'
+    try {
+        if (Test-Path -LiteralPath $wfLacoDir) { Remove-Item -LiteralPath $wfLacoDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfLacoDir -Force | Out-Null
+        $wfLacoExe = Get-WinForgeSystemExe -Name 'cmd.exe'
+        # 1. O PONTO ÚNICO, direto: com a marca levantada, o processo não chega a ser iniciado.
+        $wfLacoUm = Join-Path $wfLacoDir 'ponto.txt'
+        Set-Content -LiteralPath $wfLacoUm -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamCancel[$wfLacoUm] = $true
+        $wfLacoRes = Invoke-WinForgeNativeCommand -FilePath $wfLacoExe -Arguments @('/c', 'echo NAO-DEVIA-RODAR') -StreamTo $wfLacoUm -Encoding 'oem' -NoCapture
+        Close-WinForgeStreamWriter -Path $wfLacoUm
+        $wfLacoTextoUm = [string](Get-Content -LiteralPath $wfLacoUm -Raw)
+        if ([int]$wfLacoRes.ExitCode -ne 1223) { Write-Host "  [ERRO] Parar (laço): com a marca levantada o processo devolveu $($wfLacoRes.ExitCode), esperado 1223 (ERROR_CANCELLED)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLacoTextoUm -match 'NAO-DEVIA-RODAR') { Write-Host "  [ERRO] Parar (laço): o processo rodou mesmo com a marca levantada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLacoTextoUm -notmatch 'Parado a pedido') { Write-Host "  [ERRO] Parar (laço): o arquivo não diz que os passos seguintes não foram iniciados" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfLacoUm)
+        [void]$sync.WinForgeStreamCancelNoted.Remove($wfLacoUm)
+        # 2. O LAÇO LONGO, que é o cenário relatado: 20 chamadas, Parar na quinta. As quatro
+        #    primeiras rodam; da quinta em diante, nenhuma - e o cabeçalho '> cmd.exe ...' também
+        #    não sai, senão o arquivo mostraria comandos que nunca foram executados.
+        $wfLacoArq = Join-Path $wfLacoDir 'laco.txt'
+        Set-Content -LiteralPath $wfLacoArq -Value 'cab' -Encoding UTF8
+        $wfLacoRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+        foreach ($wfLacoI in 1..20) {
+            if ($wfLacoI -eq 5) { $sync.WinForgeStreamCancel[$wfLacoArq] = $true }
+            $null = Invoke-WinForgeAclStreamStep -Path $wfLacoArq -Step @{ FilePath = $wfLacoExe; Arguments = @('/c', "echo MARCA-$wfLacoI") }
+        }
+        $wfLacoRelogio.Stop()
+        Close-WinForgeStreamWriter -Path $wfLacoArq
+        $wfLacoTexto = [string](Get-Content -LiteralPath $wfLacoArq -Raw)
+        foreach ($wfLacoI in 1..4) {
+            if ($wfLacoTexto -notmatch "(?m)^MARCA-$wfLacoI\s*$") { Write-Host "  [ERRO] Parar (laço): a marca $wfLacoI não saiu - ela é ANTES do Parar e tinha de rodar" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfLacoI in 5..20) {
+            if ($wfLacoTexto -match "(?m)^MARCA-$wfLacoI\s*$") { Write-Host "  [ERRO] Parar (laço): o processo $wfLacoI rodou DEPOIS do Parar - o laço não parou no meio" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLacoTexto -match "(?m)^> .*MARCA-$wfLacoI\s*$") { Write-Host "  [ERRO] Parar (laço): o cabeçalho do passo $wfLacoI foi escrito - o arquivo mostra um comando que nunca rodou" -ForegroundColor Red; $wbErrors++ }
+        }
+        [void]$sync.WinForgeStreamCancel.Remove($wfLacoArq)
+        [void]$sync.WinForgeStreamCancelNoted.Remove($wfLacoArq)
+        # A linha explicativa sai UMA vez, e não uma por chamada pulada: numa fase 5 de 338 pastas,
+        # uma por chamada seria o próximo despejo a encher a janela.
+        if (@([regex]::Matches($wfLacoTexto, 'Parado a pedido')).Count -ne 1) { Write-Host "  [ERRO] Parar (laço): a linha do cancelamento saiu $(@([regex]::Matches($wfLacoTexto, 'Parado a pedido')).Count) vez(es), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # E o veredito da fase 5 separa 'cancelada' de 'falha': sem isso, parar no meio de um perfil
+        # com 338 pastas fecharia com "a herança não pôde ser ligada em 334 pasta(s)", que é o
+        # programa culpando o usuário por ter clicado em Parar.
+        if ([string](Get-WinForgeAclInheritOutcome -Path 'C:\Windows' -ExitCode 1223) -ne 'cancelada') { Write-Host "  [ERRO] Parar (laço): o código do cancelamento vira 'falha' no veredito da fase 5" -ForegroundColor Red; $wbErrors++ }
+        $wfLacoFonte5 = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfLacoFonte5 -notmatch "veredito5 -eq 'cancelada'") { Write-Host "  [ERRO] Parar (laço): o laço da fase 5 não trata o veredito 'cancelada'" -ForegroundColor Red; $wbErrors++ }
+        # A conferência é de ponto único, ANTES do Start(), e pela forma da chamada.
+        $wfLacoFonteP = [string](Get-Command Invoke-WinForgeStreamedProcess).ScriptBlock
+        $wfLacoPosChk = $wfLacoFonteP.IndexOf('Test-WinForgeStreamCancelled -Path $StreamTo', [StringComparison]::Ordinal)
+        $wfLacoPosStart = $wfLacoFonteP.IndexOf('[void]$processo.Start()', [StringComparison]::Ordinal)
+        if ($wfLacoPosChk -lt 0) { Write-Host "  [ERRO] Parar (laço): quem roda o processo não confere a marca de cancelamento" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLacoPosStart -lt 0 -or $wfLacoPosChk -gt $wfLacoPosStart) { Write-Host "  [ERRO] Parar (laço): a marca é conferida DEPOIS do Start() - o processo já saiu" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Parar (laço): 20 chamadas com o Parar na quinta - 4 rodaram, 16 não foram iniciadas, uma linha de aviso"
+    } catch {
+        Write-Host "  [ERRO] Parar (laço): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfLacoDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Parar: botão e textos
+    $wfBtnDir = Join-Path $wbSelfTestRaiz 'parar-botao'
+    try {
+        New-Item -ItemType Directory -Path $wfBtnDir -Force | Out-Null
+        $wfBtnArq = Join-Path $wfBtnDir 'saida.txt'
+        Set-Content -LiteralPath $wfBtnArq -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamDone[$wfBtnArq] = $false
+        $wfBtnJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfBtnArq -Component 'Repair' -NoShow
+        $wfBtnParar = $wfBtnJan.FindName('WFOutputStop')
+        if ($null -eq $wfBtnParar) { Write-Host "  [ERRO] Parar (botão): a janela com -FollowPath não tem o botão Parar" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if (-not $wfBtnParar.IsEnabled) { Write-Host "  [ERRO] Parar (botão): nasce desabilitado com o comando em andamento" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfBtnParar.Content -ne 'Parar') { Write-Host "  [ERRO] Parar (botão): o rótulo é '$($wfBtnParar.Content)'" -ForegroundColor Red; $wbErrors++ }
+            $wfBtnBarra = $wfBtnParar.Parent
+            $wfBtnIdx = $wfBtnBarra.Children.IndexOf($wfBtnParar)
+            $wfBtnFechar = @($wfBtnBarra.Children | Where-Object { [string]$_.Content -eq 'Fechar' })[0]
+            if ($wfBtnIdx -ge $wfBtnBarra.Children.IndexOf($wfBtnFechar)) { Write-Host "  [ERRO] Parar (botão): ele tem de ficar à ESQUERDA do Fechar" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem -FollowPath não existe botão Parar: não há o que parar numa saída pronta.
+        $wfBtnJan2 = Show-WinForgeOutputWindow -Title 'Saída pronta' -Text 'ok' -Component 'Repair' -NoShow
+        if ($null -ne $wfBtnJan2.FindName('WFOutputStop')) { Write-Host "  [ERRO] Parar (botão): janela sem -FollowPath ganhou o botão" -ForegroundColor Red; $wbErrors++ }
+        # Na janela PROTEGIDA da Fase 4 o rótulo avisa que a parada não é imediata - e é o tique que
+        # troca o texto, porque a janela protegida abre e fecha durante o comando.
+        $sync.WinForgeStreamProtected[$wfBtnArq] = $true
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        if ($null -ne $wfBtnParar -and [string]$wfBtnParar.Content -ne 'Parar (aguarde alguns segundos)') { Write-Host "  [ERRO] Parar (botão): na janela protegida o rótulo é '$($wfBtnParar.Content)'" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamProtected.Remove($wfBtnArq)
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        if ($null -ne $wfBtnParar -and [string]$wfBtnParar.Content -ne 'Parar') { Write-Host "  [ERRO] Parar (botão): fechada a janela protegida o rótulo não voltou a 'Parar' ('$($wfBtnParar.Content)')" -ForegroundColor Red; $wbErrors++ }
+        # Pedido feito: o cabeçalho vira 'Parando: ' e o botão desabilita.
+        $sync.WinForgeStreamCancel[$wfBtnArq] = $true
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        $wfBtnCab = $wfBtnJan.FindName('WFOutputHeader')
+        if ([string]$wfBtnCab.Text -notmatch '^Parando: Restaurar padrões \(\d+:\d\d\)$') { Write-Host "  [ERRO] Parar (cabeçalho): com o pedido feito o cabeçalho é '$($wfBtnCab.Text)'" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne $wfBtnParar -and $wfBtnParar.IsEnabled) { Write-Host "  [ERRO] Parar (botão): continua habilitado depois do pedido" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamCancel.Remove($wfBtnArq)
+        # Concluído desabilita o botão no tique seguinte.
+        $sync.WinForgeStreamDone[$wfBtnArq] = $true
+        $sync.WinForgeStreamExit[$wfBtnArq] = 0
+        Invoke-WinForgeFollowTick -Window $wfBtnJan
+        if ($null -ne $wfBtnParar -and $wfBtnParar.IsEnabled) { Write-Host "  [ERRO] Parar (botão): continua habilitado depois de concluído" -ForegroundColor Red; $wbErrors++ }
+        [void]$sync.WinForgeStreamDone.Remove($wfBtnArq)
+        [void]$sync.WinForgeStreamExit.Remove($wfBtnArq)
+        # Os textos, literais. Eles são a diferença entre "parei" e "parei e você não perdeu nada".
+        $wfBtnLeitura = Get-WinForgeStreamStopText -Phase 'leitura'
+        if ($wfBtnLeitura -notmatch 'Nada foi alterado até agora') { Write-Host "  [ERRO] Parar (texto): fase de leitura sem 'Nada foi alterado até agora'" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnEscrita = Get-WinForgeStreamStopText -Phase 'escrita'
+        if ($wfBtnEscrita -notmatch 'Algumas pastas já foram alteradas; o Desfazer cobre todas elas') { Write-Host "  [ERRO] Parar (texto): fase de escrita sem a frase do Desfazer" -ForegroundColor Red; $wbErrors++ }
+        # E os dois são DIFERENTES: com o mesmo texto nos dois, quem parou durante a escrita leria
+        # 'nada foi alterado' logo depois de o disco ter sido alterado.
+        if ($wfBtnLeitura -eq $wfBtnEscrita) { Write-Host "  [ERRO] Parar (texto): leitura e escrita dizem a mesma coisa" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnLeitura -match 'Desfazer cobre') { Write-Host "  [ERRO] Parar (texto): a fase de leitura promete Desfazer, e não há o que desfazer" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnF4 = Get-WinForgeAclStopReport -Phase 4 -Folders @('C:\Windows', 'C:\ProgramData') -Profile 'C:\Users\fulano'
+        foreach ($wfBtnF in @('Parado a pedido', 'C:\Windows', 'as demais ficaram como estavam', 'O backup da Fase 2 está completo', 'Desfazer (restaurar backup)')) {
+            if ($wfBtnF4 -notmatch [regex]::Escape($wfBtnF)) { Write-Host "  [ERRO] Parar (texto fase 4): falta '$wfBtnF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfBtnF5 = Get-WinForgeAclStopReport -Phase 5 -Folders @() -Profile 'C:\Users\fulano'
+        foreach ($wfBtnF in @('Parado a pedido durante a herança do perfil', 'C:\Users\fulano', 'o Desfazer vem ANTES')) {
+            if ($wfBtnF5 -notmatch [regex]::Escape($wfBtnF)) { Write-Host "  [ERRO] Parar (texto fase 5): falta '$wfBtnF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A contagem da fase 5 é das pastas DE DENTRO do perfil, e vem da fase 5. Ela era alimentada
+        # só pelo laço da fase 4: parando durante a fase 5, o texto declarava pastas do SISTEMA como
+        # se fossem subpastas do perfil - 'duas pastas de dentro já tinham recebido a herança',
+        # citando C:\Windows e C:\Program Files.
+        $wfBtnFonteR5 = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfBtnFonteR5.IndexOf('$pastasFase5 += [string]$p5.Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase 5): a fase 5 não anota as pastas que receberam a herança" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteR5.IndexOf('if ($faseParada -eq 5) { $pastasFase5 } else { $pastasFeitas }', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase 5): o relato recebe a lista da fase 4 mesmo parando na fase 5 - ele chamaria pasta do sistema de subpasta do perfil" -ForegroundColor Red; $wbErrors++ }
+        # E as duas listas não se misturam: a da fase 4 tem pasta de sistema, a da fase 5 tem pasta
+        # de dentro do perfil, e o texto de cada fase fala de uma delas.
+        if ((Get-WinForgeAclStopReport -Phase 5 -Folders @('C:\Users\fulano\A', 'C:\Users\fulano\B') -Profile 'C:\Users\fulano') -notmatch '2 pasta\(s\) de dentro') { Write-Host "  [ERRO] Parar (texto fase 5): a contagem das pastas de dentro não aparece" -ForegroundColor Red; $wbErrors++ }
+        # As pastas citadas são as que ENTRARAM, e o relato não pode inventar nenhuma.
+        if ($wfBtnF4 -match 'C:\\Program Files') { Write-Host "  [ERRO] Parar (texto fase 4): o relato cita uma pasta que não estava na lista" -ForegroundColor Red; $wbErrors++ }
+        # A FASE sai do NOME do comando, e não do tipo dele. Pelo tipo, os SEIS outros comandos de
+        # reparo - sfc, DISM, netsh, Windows Update, WinGet e o servidor de horário - mostravam
+        # "algumas pastas já foram alteradas; use o Desfazer". Quem acreditasse clicaria no Desfazer
+        # e, havendo conjunto pendente (o estado NORMAL logo depois de uma restauração
+        # bem-sucedida), reverteria justamente a restauração que queria manter. A frase falsa
+        # levava o usuário a destruir o resultado que tinha acabado de obter.
+        foreach ($wfBtnCaso in @(
+            @{ Nome = 'AclRestore antes da fase 3'; Comando = 'AclRestore';         Escrevendo = $false; Espera = 'leitura' },
+            @{ Nome = 'AclRestore na fase 3';       Comando = 'AclRestore';         Escrevendo = $true;  Espera = 'escrita' },
+            @{ Nome = 'SystemRepair';               Comando = 'SystemRepair';       Escrevendo = $true;  Espera = 'indefinida' },
+            @{ Nome = 'NetworkReset';               Comando = 'NetworkReset';       Escrevendo = $false; Espera = 'indefinida' },
+            @{ Nome = 'WindowsUpdateReset';         Comando = 'WindowsUpdateReset'; Escrevendo = $true;  Espera = 'indefinida' },
+            @{ Nome = 'AclUndo';                    Comando = 'AclUndo';            Escrevendo = $true;  Espera = 'indefinida' },
+            @{ Nome = 'sem nome';                   Comando = '';                   Escrevendo = $true;  Espera = 'indefinida' }
+        )) {
+            $wfBtnFaseVeio = [string](Get-WinForgeStreamStopPhase -Command ([string]$wfBtnCaso.Comando) -Writing:([bool]$wfBtnCaso.Escrevendo))
+            if ($wfBtnFaseVeio -ne [string]$wfBtnCaso.Espera) { Write-Host "  [ERRO] Parar (fase): '$($wfBtnCaso.Nome)' deu '$wfBtnFaseVeio', esperado '$($wfBtnCaso.Espera)'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A chave da escrita é ligada em UM lugar - o começo da fase 3, que é onde a escrita começa -
+        # e apagada em UM lugar. Era esse o argumento contra criá-la, e é por isso que ela vale
+        # agora: a alternativa medida custa o backup do usuário.
+        $wfBtnFonteRest = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if (@([regex]::Matches($wfBtnFonteRest, '\$sync\.WinForgeStreamWriting = \$true')).Count -ne 1) { Write-Host "  [ERRO] Parar (fase): a chave da escrita não é ligada exatamente uma vez na restauração" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnPosChave = $wfBtnFonteRest.IndexOf('$sync.WinForgeStreamWriting = $true', [StringComparison]::Ordinal)
+        $wfBtnPosFase3 = $wfBtnFonteRest.IndexOf('-Step $fase3', [StringComparison]::Ordinal)
+        $wfBtnPosFase2 = $wfBtnFonteRest.IndexOf('Get-WinForgeAclContentScope -Path', [StringComparison]::Ordinal)
+        if ($wfBtnPosChave -lt 0 -or $wfBtnPosFase3 -lt 0) { Write-Host "  [ERRO] Parar (fase): não achei a chave da escrita ou a fase 3" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfBtnPosChave -gt $wfBtnPosFase3) { Write-Host "  [ERRO] Parar (fase): a chave é ligada DEPOIS da primeira escrita da fase 3" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfBtnPosFase2 -ge 0 -and $wfBtnPosChave -lt $wfBtnPosFase2) { Write-Host "  [ERRO] Parar (fase): a chave é ligada ANTES da fase 2 - parar durante o backup ofereceria um Desfazer que ainda não existe" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnFonteStart2 = [string](Get-Command Start-WinForgeStreamedCommand).ScriptBlock
+        if ($wfBtnFonteStart2.IndexOf('$sync.WinForgeStreamCommand = [string]$Name', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase): o nome do comando não é anotado ao despachar" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnFonteCorpo2 = [string]$sync.WinForgeStreamBody
+        foreach ($wfBtnLimpa in @('$sync.WinForgeStreamCommand = ''''', '$sync.WinForgeStreamWriting = $false')) {
+            if ($wfBtnFonteCorpo2.IndexOf($wfBtnLimpa, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase): o corpo não limpa '$wfBtnLimpa' - o comando seguinte herdaria a chave deste" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o TEXTO da fase indefinida não afirma nem nega escrita, e não promete Desfazer: os seis
+        # outros comandos de reparo alteram o sistema e NÃO têm backup nenhum - dizer
+        # 'o Desfazer cobre todas elas' ali seria a mesma mentira, do outro lado.
+        $wfBtnIndef = Get-WinForgeStreamStopText -Phase 'indefinida'
+        if ($wfBtnIndef -match 'Nada foi alterado até agora') { Write-Host "  [ERRO] Parar (texto): a fase indefinida afirma que nada foi alterado" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnIndef -match 'Desfazer cobre') { Write-Host "  [ERRO] Parar (texto): a fase indefinida promete um Desfazer que pode não existir" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnIndef -notmatch 'A etapa que estiver rodando termina antes') { Write-Host "  [ERRO] Parar (texto): a fase indefinida não diz o que vai acontecer ao clicar" -ForegroundColor Red; $wbErrors++ }
+        # A confirmação tem 'Não' como padrão, e o clique é um scriptblock de escopo de arquivo.
+        $wfBtnFonteJ = [string](Get-Command Show-WinForgeOutputWindow).ScriptBlock
+        # E o clique USA o nome do comando, em vez de decidir pelo TIPO dele.
+        if ($wfBtnFonteJ.IndexOf('Get-WinForgeStreamStopPhase -Command', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fase): o clique não pergunta pelo NOME do comando - ele volta a afirmar escrita pelo tipo" -ForegroundColor Red; $wbErrors++ }
+        # E o MOTIVO do pedido não é descartado: quando o processo em andamento não pôde ser
+        # encerrado, é ele que diz que o comando ainda vai até o fim da etapa atual.
+        if ($wfBtnFonteJ.IndexOf('$pedidoParada = Request-WinForgeStreamCancel -Path $caminhoSeguido', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (motivo): o clique descarta o motivo que o pedido devolve" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteJ -notmatch '(?s)\$pedidoParada\.Reason.{0,400}Write-WinForgeStreamLine') { Write-Host "  [ERRO] Parar (motivo): o motivo não vai para o arquivo, que é onde a pessoa está olhando" -ForegroundColor Red; $wbErrors++ }
+        # O comentário do clique não pode voltar a dizer que a fase sai do ARQUIVO: essa é a
+        # abordagem descartada, e um texto que descreve o que o código NÃO faz induz ao erro.
+        if ($wfBtnFonteJ -match 'Ela sai do ARQUIVO') { Write-Host "  [ERRO] Parar (fase): o comentário do clique diz que a fase é lida do arquivo, e o código lê o nome do comando" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteJ -match "WinForgeStreamKind -eq 'repair'\) \{ 'escrita'") { Write-Host "  [ERRO] Parar (fase): o clique voltou a decidir a fase pelo tipo do comando" -ForegroundColor Red; $wbErrors++ }
+        # O FIM de um comando interrompido diz 'Cancelado', nunca 'Concluído'. A marca do desfecho é
+        # gravada ANTES de a conclusão ser ligada - na ordem contrária, o cabeçalho saía
+        # 'Concluído (código 1223)' e, parando na fase do backup, 'Concluído (código 0)' com convite
+        # a reiniciar o computador.
+        $wfBtnFimArq = Join-Path $wfBtnDir 'fim.txt'
+        Set-Content -LiteralPath $wfBtnFimArq -Value 'cab' -Encoding UTF8
+        $sync.WinForgeStreamDone[$wfBtnFimArq] = $false
+        $wfBtnFimJan = Show-WinForgeOutputWindow -Title 'Restaurar padrões' -FollowPath $wfBtnFimArq -Component 'Repair' -NoShow
+        $sync.WinForgeStreamStopped[$wfBtnFimArq] = $true
+        $sync.WinForgeStreamExit[$wfBtnFimArq] = 1223
+        $sync.WinForgeStreamDone[$wfBtnFimArq] = $true
+        Invoke-WinForgeFollowTick -Window $wfBtnFimJan
+        $wfBtnFimCab = [string]$wfBtnFimJan.FindName('WFOutputHeader').Text
+        if ($wfBtnFimCab -notmatch '^Cancelado em \d+:\d\d$') { Write-Host "  [ERRO] Parar (fim): um comando interrompido fechou com '$wfBtnFimCab'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFimCab -match 'Conclu') { Write-Host "  [ERRO] Parar (fim): o cabeçalho final diz 'Concluído' depois de uma interrupção" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfBtnFimChave in @('WinForgeStreamDone', 'WinForgeStreamExit', 'WinForgeStreamStopped')) { [void]$sync.$wfBtnFimChave.Remove($wfBtnFimArq) }
+        # E a marca do desfecho é gravada ANTES da conclusão, no corpo da runspace: é a ordem que o
+        # tique lê, e trocá-la faz o cabeçalho voltar a dizer 'Concluído'.
+        $wfBtnPosParou = $wfBtnFonteCorpo2.IndexOf('$sync.WinForgeStreamStopped[$wfCaminho] = $wfParou', [StringComparison]::Ordinal)
+        $wfBtnPosFeito = $wfBtnFonteCorpo2.IndexOf('$sync.WinForgeStreamDone[$wfCaminho] = $true', [StringComparison]::Ordinal)
+        if ($wfBtnPosParou -lt 0 -or $wfBtnPosFeito -lt 0) { Write-Host "  [ERRO] Parar (fim): o corpo não grava o desfecho interrompido" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfBtnPosParou -gt $wfBtnPosFeito) { Write-Host "  [ERRO] Parar (fim): o desfecho é gravado DEPOIS da conclusão - o tique já leu 'Concluído'" -ForegroundColor Red; $wbErrors++ }
+        # E os laços das fases 3 a 5 SAEM quando o processo não chega a nascer, em vez de seguirem
+        # produzindo um erro por pasta restante.
+        foreach ($wfBtnSai in @('if ($codigo4 -eq 1223) { if ($faseParada -eq 0) { $faseParada = 4 }; break }', "if (`$veredito5 -eq 'cancelada') { `$canceladas5 = `$passos5.Count - `$vistas5 + 1; break }")) {
+            if ($wfBtnFonteRest.IndexOf($wfBtnSai, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (laço): o laço não SAI na primeira recusa - ele produziria um erro por pasta restante" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfBtnFonteJ -notmatch 'MessageBoxResult\]::No') { Write-Host "  [ERRO] Parar (confirmação): 'Não' não é o padrão" -ForegroundColor Red; $wbErrors++ }
+        if ($wfBtnFonteJ.IndexOf('Request-WinForgeStreamCancel -Path $caminhoSeguido', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (botão): o clique não pede o cancelamento do arquivo que a janela acompanha" -ForegroundColor Red; $wbErrors++ }
+        $wfBtnFonteT = [string](Get-Command Invoke-WinForgeFollowTick).ScriptBlock
+        if ($wfBtnFonteT.IndexOf('Parar (aguarde alguns segundos)', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (botão): o tique não troca o rótulo na janela protegida" -ForegroundColor Red; $wbErrors++ }
+        # Cancelar na Fase 2 apaga os parciais e NÃO escreve o índice: um índice pela metade faria o
+        # Desfazer apontar para um conjunto que não cobre o que foi alterado.
+        $wfBtnFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        $wfBtnPosCancel = $wfBtnFonteR.IndexOf('Test-WinForgeStreamCancelled -Path $fluxo', [StringComparison]::Ordinal)
+        $wfBtnPosIndice = $wfBtnFonteR.IndexOf('acl-index-', [StringComparison]::Ordinal)
+        if ($wfBtnPosCancel -lt 0 -or $wfBtnPosIndice -lt 0 -or $wfBtnPosCancel -gt $wfBtnPosIndice) { Write-Host "  [ERRO] Parar (fase 2): o cancelamento é conferido DEPOIS de o índice ser escrito - o Desfazer passaria a apontar para um conjunto pela metade" -ForegroundColor Red; $wbErrors++ }
+        # E o RESUMO da parada sai na tela: a função existia, era cobrada literalmente aqui e não
+        # tinha chamador nenhum - quem clicou em Parar ficava sem o resumo que a tarefa prometia.
+        # A busca é pela forma da CHAMADA, com a fase e as pastas juntas.
+        if ($wfBtnFonteR.IndexOf('Get-WinForgeAclStopReport -Phase $faseParada', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (resumo): a restauração não imprime o relato da parada - a função fica provada e invisível" -ForegroundColor Red; $wbErrors++ }
+        # E ele sai NO LUGAR do veredito normal: 'Concluído' depois de uma parada seria o programa
+        # dizendo que terminou o que foi interrompido.
+        $wfBtnPosResumo = $wfBtnFonteR.IndexOf('Get-WinForgeAclStopReport -Phase $faseParada', [StringComparison]::Ordinal)
+        $wfBtnPosVeredito = $wfBtnFonteR.IndexOf('Get-WinForgeAclScopeVerdict -Scope', [StringComparison]::Ordinal)
+        if ($wfBtnPosResumo -ge 0 -and $wfBtnPosVeredito -ge 0 -and $wfBtnPosResumo -gt $wfBtnPosVeredito) { Write-Host "  [ERRO] Parar (resumo): o relato da parada vem DEPOIS do veredito - a tela diria 'Concluído' antes de dizer que parou" -ForegroundColor Red; $wbErrors++ }
+        # A fase em que parou é ANOTADA nos laços, e não adivinhada no fim.
+        foreach ($wfBtnAnota in @('$faseParada = 4', '$faseParada = 5')) {
+            if ($wfBtnFonteR.IndexOf($wfBtnAnota, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (resumo): o laço não anota '$wfBtnAnota' - o relato sairia com a fase errada" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O gatilho de segurança do marcador mora no BLOCO DE AJUDA de quem lê o marcador, e não só
+        # no relatório da tarefa - relatório ninguém abre depois que a leva termina.
+        $wfBtnFonteMarca = [string](Get-Command Get-WinForgeAclOwnerPending).ScriptBlock
+        foreach ($wfBtnGatilho in @('raiz confiável', 'endurecid', 'SecurityIdentifier', 'plano')) {
+            if ($wfBtnFonteMarca -notmatch $wfBtnGatilho) { Write-Host "  [ERRO] Parar (marcador): o bloco de ajuda não avisa sobre '$wfBtnGatilho' antes de alguém usar o SID em comando elevado" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O Add_Closing passa a CANCELAR e ESPERAR, e não só a perguntar.
+        $wfBtnFonteF = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfBtnFonteF = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfBtnFonteF = '' }
+        if ([string]::IsNullOrWhiteSpace($wfBtnFonteF)) { Write-Host "  [ERRO] Parar (fechamento): o próprio arquivo do WinForge não pôde ser lido" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfBtnAlvoF = '$null = Request-WinForge' + 'StreamCancel -Path $wfFechCaminho'
+            if ($wfBtnFonteF.IndexOf($wfBtnAlvoF, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Parar (fechamento): o Add_Closing não cancela de verdade - ele abandona a thread e deixa o processo rodando" -ForegroundColor Red; $wbErrors++ }
+            $wfBtnPosPerg = $wfBtnFonteF.IndexOf('fechar agora pode deixar o sistema pela metade', [StringComparison]::Ordinal)
+            $wfBtnPosCanc = $wfBtnFonteF.IndexOf($wfBtnAlvoF, [StringComparison]::Ordinal)
+            if ($wfBtnPosPerg -ge 0 -and $wfBtnPosCanc -ge 0 -and $wfBtnPosCanc -lt $wfBtnPosPerg) { Write-Host "  [ERRO] Parar (fechamento): o cancelamento acontece ANTES da pergunta - responder 'Não' já teria matado o comando" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Parar (botão): à esquerda do Fechar, só com -FollowPath, desabilita no fim, seis textos literais e fechamento que cancela"
+    } catch {
+        Write-Host "  [ERRO] Parar (botão): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfBtnDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Parar: a Fase 4 fora do job
+    # KILL_ON_JOB_CLOSE mata a árvore quando o processo dono morre - que é exatamente o que a
+    # proibição de cancelar na Fase 4 existe para impedir: morrer entre 'posse aos Admins' e 'posse
+    # de volta' deixa uma pasta de sistema aberta a qualquer processo elevado.
+    $wfF4Raiz = Join-Path $wbSelfTestRaiz 'posse'
+    try {
+        if (Test-Path -LiteralPath $wfF4Raiz) { Remove-Item -LiteralPath $wfF4Raiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfF4Raiz -Force | Out-Null
+        $wfF4Fonte = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
+        if ($wfF4Fonte -notmatch 'Enter-WinForgeStreamProtected -Path') { Write-Host "  [ERRO] Posse: Invoke-WinForgeAclOwnerFallback não abre a janela protegida" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch '(?s)finally\s*\{[^}]*Exit-WinForgeStreamProtected') { Write-Host "  [ERRO] Posse: a janela protegida não fecha no 'finally' - uma exceção deixaria o cancelamento morto para sempre" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch 'Write-WinForgeAclOwnerPending -Folder') { Write-Host "  [ERRO] Posse: o marcador não é escrito antes da troca de posse" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch '(?s)finally\s*\{[^}]*Clear-WinForgeAclOwnerPending') { Write-Host "  [ERRO] Posse: o marcador não é apagado no 'finally', depois de devolver a posse" -ForegroundColor Red; $wbErrors++ }
+        $wfF4PosMarca = $wfF4Fonte.IndexOf('Write-WinForgeAclOwnerPending -Folder', [StringComparison]::Ordinal)
+        $wfF4PosTroca = $wfF4Fonte.IndexOf('-Step $socorro[0]', [StringComparison]::Ordinal)
+        if ($wfF4PosMarca -lt 0 -or $wfF4PosTroca -lt 0 -or $wfF4PosMarca -gt $wfF4PosTroca) { Write-Host "  [ERRO] Posse: o marcador é escrito DEPOIS da troca de posse - a janela sem marcador é justamente a que precisa dele" -ForegroundColor Red; $wbErrors++ }
+        $wfF4PosEntra = $wfF4Fonte.IndexOf('Enter-WinForgeStreamProtected -Path', [StringComparison]::Ordinal)
+        if ($wfF4PosEntra -lt 0 -or $wfF4PosEntra -gt $wfF4PosTroca) { Write-Host "  [ERRO] Posse: a janela protegida abre DEPOIS da troca de posse - o instante desprotegido é o único que importa" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch 'Invoke-WinForgeAclStreamStep') { Write-Host "  [ERRO] Posse: a Fase 4 ficou fora do fluxo ao vivo - ela é a fase que mais escreve" -ForegroundColor Red; $wbErrors++ }
+        # Marcador: escrito ANTES da troca, apagado depois de devolver, e na abertura seguinte ele
+        # RELATA - nunca conserta sozinho.
+        $wfF4SelfAntes = $sync.SelfTest
+        try {
+            $sync.SelfTest = $false
+            $wfF4Marca = Write-WinForgeAclOwnerPending -Folder 'C:\Windows' -OwnerSid 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -Root $wfF4Raiz
+        } finally { $sync.SelfTest = $wfF4SelfAntes }
+        if (-not $wfF4Marca.Ok) { Write-Host "  [ERRO] Posse (marcador): a gravação falhou ('$($wfF4Marca.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $wfF4Lido = Get-WinForgeAclOwnerPending -Root $wfF4Raiz
+        if (-not $wfF4Lido.Present) { Write-Host "  [ERRO] Posse (marcador): o marcador plantado não foi lido" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF4Lido.Folder -ne 'C:\Windows') { Write-Host "  [ERRO] Posse (marcador): a pasta lida é '$($wfF4Lido.Folder)'" -ForegroundColor Red; $wbErrors++ }
+        # O botão oferecido tem de EXISTIR, e a prova sai da tabela de comandos, não de um literal
+        # escrito aqui: a frase oferecia 'Devolver ao padrão do Windows', que não é botão nenhum
+        # desta base - mandar a pessoa procurar o que não está lá é pior do que não oferecer saída.
+        $wfF4Botao = [string](Get-WinForgeRepairCommand -Name 'AclRestore').Title
+        if ([string]::IsNullOrWhiteSpace($wfF4Botao)) { Write-Host "  [ERRO] Posse (marcador): a linha 'AclRestore' não tem título para o relato oferecer" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfF4Lido.Text -notmatch [regex]::Escape($wfF4Botao)) { Write-Host "  [ERRO] Posse (marcador): o relato não oferece um botão que existe ('$($wfF4Lido.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # E nenhum dos textos desta área pode citar um botão inventado. A varredura é sobre os nomes
+        # que APARECEM entre aspas depois de 'Permissões do disco C: - '.
+        foreach ($wfF4Texto in @([string]$wfF4Lido.Text, [string](Get-WinForgeAclStopReport -Phase 4 -Folders @('C:\Windows') -Profile 'C:\Users\fulano'), [string](Get-WinForgeAclStopReport -Phase 5 -Folders @() -Profile 'C:\Users\fulano'), [string](Get-WinForgeStreamStopText -Phase 'escrita'))) {
+            foreach ($wfF4Citado in @([regex]::Matches($wfF4Texto, "Permissões do disco C: - ([^'`",.]+)"))) {
+                $wfF4Nome = ('Permissões do disco C: - ' + [string]$wfF4Citado.Groups[1].Value).Trim()
+                if ($wfF4Nome -notin @(@($wfRepNomes) + @($wfStrNomes) + @('AclVerify', 'AclRestore', 'AclUndo', 'AclCleanup') | ForEach-Object { [string](Get-WinForgeRepairCommand -Name $_).Title })) { Write-Host "  [ERRO] Posse (botão): o texto cita '$wfF4Nome', que não é nenhum botão desta base" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # O relato traz o DONO ORIGINAL: sem ele a frase diz "alguma pasta está com o dono errado" e
+        # não diz para quem ela tem de voltar, que é a única coisa acionável ali.
+        if ([string]$wfF4Lido.Text -notmatch [regex]::Escape('S-1-5-80-956008885')) { Write-Host "  [ERRO] Posse (marcador): o relato não diz o dono original ('$($wfF4Lido.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # E a gravação é o único ponto que escreve: com SelfTest ligado ela LANÇA.
+        $wfF4Lancou = $false
+        try { $null = Write-WinForgeAclOwnerPending -Folder 'C:\Windows' -OwnerSid 'S-1-5-18' -Root $wfF4Raiz } catch { $wfF4Lancou = $true }
+        if (-not $wfF4Lancou) { Write-Host "  [ERRO] Posse (marcador): a gravação passou com `$sync.SelfTest ligado - falta Assert-WinForgeNotSelfTest" -ForegroundColor Red; $wbErrors++ }
+        # A leitura não ESCREVE, e a prova principal é comportamento (o marcador continua no disco
+        # depois do relato, mais abaixo). As formas proibidas são de CHAMADA, e não nomes soltos: a
+        # descrição desta função precisa dizer que ela não roda icacls nem apaga nada, e uma lista de
+        # nomes soltos ficaria vermelha por causa da própria frase que explica a regra.
+        $wfF4FonteM = [string](Get-Command Get-WinForgeAclOwnerPending).ScriptBlock
+        foreach ($wfF4Proibido in @('Remove-Item -LiteralPath', 'Set-Content -LiteralPath', "Get-WinForgeSystemExe -Name 'icacls.exe'", 'Invoke-WinForgeAclStreamStep -Path')) {
+            if ($wfF4FonteM.IndexOf($wfF4Proibido, [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Posse (marcador): a leitura da abertura ESCREVE ('$wfF4Proibido') - ela só relata" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E ler duas vezes não muda nada: o marcador é do disco, não da leitura.
+        if (-not (Get-WinForgeAclOwnerPending -Root $wfF4Raiz).Present) { Write-Host "  [ERRO] Posse (marcador): a segunda leitura não achou o marcador - a primeira consumiu ele" -ForegroundColor Red; $wbErrors++ }
+        # De ONDE sai o dono original: do passo de devolução do PLANO. A extração era embutida na
+        # Fase 4 e por isso não era exercitada - MEDIDO, um mutante que a apagava SOBREVIVEU, e o
+        # marcador teria saído sem dono (e um marcador sem dono nem é lido de volta).
+        $wfF4Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wfF4Raiz 'plano') -Stamp '20260912-101010')
+        $wfF4Dev = @($wfF4Plano | Where-Object { [int]$_.Phase -eq 4 -and [string]$_.Kind -eq 'setowner-devolver' })
+        if (-not $wfF4Dev.Count) { Write-Host "  [ERRO] Posse (dono): o plano não tem passo de devolução de posse" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfF4Extraidos = 0
+            foreach ($wfF4P in $wfF4Dev) {
+                $wfF4Sid = [string](Get-WinForgeAclStepOwnerSid -Step $wfF4P)
+                if ($wfF4Sid -notmatch '^S-1-') { Write-Host "  [ERRO] Posse (dono): o passo de devolução de '$($wfF4P.Folder)' devolveu o SID '$wfF4Sid'" -ForegroundColor Red; $wbErrors++ }
+                elseif (@($wfF4P.Arguments | ForEach-Object { [string]$_ }) -notcontains "*$wfF4Sid") { Write-Host "  [ERRO] Posse (dono): o SID '$wfF4Sid' não é o que o passo entrega ao icacls" -ForegroundColor Red; $wbErrors++ }
+                else { $wfF4Extraidos++ }
+            }
+            if ($wfF4Extraidos -ne $wfF4Dev.Count) { Write-Host "  [ERRO] Posse (dono): $wfF4Extraidos de $($wfF4Dev.Count) passo(s) de devolução tiveram o dono extraído" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Passo sem SID devolve vazio e NÃO estoura: é o ramo que impede a Fase 4 de morrer por causa
+        # do aviso que existe para protegê-la.
+        if ([string](Get-WinForgeAclStepOwnerSid -Step @{ Arguments = @('C:\Windows', '/setowner') }) -ne '') { Write-Host "  [ERRO] Posse (dono): passo sem SID não devolveu vazio" -ForegroundColor Red; $wbErrors++ }
+        # E a Fase 4 USA a função, em vez de voltar a garimpar o vetor à mão.
+        if ($wfF4Fonte.IndexOf('Get-WinForgeAclStepOwnerSid -Step', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Posse (dono): a Fase 4 não usa Get-WinForgeAclStepOwnerSid" -ForegroundColor Red; $wbErrors++ }
+        # A DEVOLUÇÃO QUE FALHA é o caso em que o marcador mais importa, e era onde ele era apagado:
+        # devolver a posse ao TrustedInstaller nem sempre é possível, mesmo elevado, e a função já
+        # diz isso. Com a limpeza incondicional, a abertura seguinte ficava em silêncio justamente
+        # sobre a pasta que ficou com o dono errado.
+        #
+        # A prova é o par de estados que o 'finally' consulta, e a FORMA da condição: a limpeza é
+        # condicional, e a condição é sobre a POSSE, não sobre o código de retorno da função.
+        if ($wfF4Fonte -notmatch '\$posseVoltou = \(\$codigoDevolver -eq 0\)') { Write-Host "  [ERRO] Posse (devolução): a volta da posse não é marcada só com código zero" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch 'if \(\$posseVoltou -or -not \$posseTomada\) \{ \$null = Clear-WinForgeAclOwnerPending \}') { Write-Host "  [ERRO] Posse (devolução): o marcador é apagado sem olhar se a posse voltou - o caso que ele existe para denunciar fica calado" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF4Fonte -notmatch '\$posseTomada = \$true') { Write-Host "  [ERRO] Posse (devolução): ninguém anota que a posse foi tomada - sem isso o caminho que nem tomou a posse deixaria o marcador para trás" -ForegroundColor Red; $wbErrors++ }
+        # E a ORDEM dentro do 'finally': a saída da janela protegida vem ANTES da limpeza. A limpeza
+        # toca no disco e pode estourar; na frente, uma falha ali deixaria o Parar ignorado até o fim
+        # do comando inteiro.
+        $wfF4PosSai = $wfF4Fonte.IndexOf('Exit-WinForgeStreamProtected -Path $chaveProtegida', [StringComparison]::Ordinal)
+        $wfF4PosLimpa = $wfF4Fonte.IndexOf('Clear-WinForgeAclOwnerPending }', [StringComparison]::Ordinal)
+        if ($wfF4PosSai -lt 0 -or $wfF4PosLimpa -lt 0) { Write-Host "  [ERRO] Posse (finally): não achei a saída da janela protegida ou a limpeza do marcador" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfF4PosSai -gt $wfF4PosLimpa) { Write-Host "  [ERRO] Posse (finally): a limpeza do marcador vem ANTES da saída da janela protegida - se ela estourar, o Parar fica ignorado até o fim do comando" -ForegroundColor Red; $wbErrors++ }
+        # E o COMPORTAMENTO dos três desfechos, com os colaboradores sombreados. A Fase 4 de verdade
+        # roda icacls contra pasta do sistema e não tem como ser exercitada aqui; o que dá para
+        # exercitar - e é o que interessa - é QUEM ela chama em cada desfecho.
+        $wfF4OrigStep = ${function:Invoke-WinForgeAclStreamStep}
+        $wfF4OrigWrite = ${function:Write-WinForgeAclOwnerPending}
+        $wfF4OrigClear = ${function:Clear-WinForgeAclOwnerPending}
+        $wfF4ErrAntes = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'SilentlyContinue'
+            ${function:Write-WinForgeAclOwnerPending} = { param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$OwnerSid, [string]$Root) $sync.WinForgeSelfTestPosse.Escreveu++; return @{ Ok = $true; Reason = ''; Path = 'sombra' } }
+            ${function:Clear-WinForgeAclOwnerPending} = { param([string]$Root) $sync.WinForgeSelfTestPosse.Limpou++; return @{ Ok = $true; Reason = '' } }
+            ${function:Invoke-WinForgeAclStreamStep} = {
+                param([Parameter(Mandatory)][hashtable]$Step, [string]$Path = '')
+                if ([string]$Step.Kind -eq 'setowner-socorro') { return [int]$sync.WinForgeSelfTestPosse.CodigoSocorro }
+                if ([string]$Step.Kind -eq 'setowner-devolver') { return [int]$sync.WinForgeSelfTestPosse.CodigoDevolver }
+                return 0
+            }
+            $wfF4PlanoFake = @(
+                @{ Phase = 4; Kind = 'setowner-socorro'; Folder = 'C:\PastaDeTeste'; Title = 'posse aos Administradores'; FilePath = 'x'; Arguments = @('C:\PastaDeTeste', '/setowner', '*S-1-5-32-544') }
+                @{ Phase = 4; Kind = 'setowner-devolver'; Folder = 'C:\PastaDeTeste'; Title = 'posse de volta'; FilePath = 'x'; Arguments = @('C:\PastaDeTeste', '/setowner', '*S-1-5-80-956008885') }
+            )
+            $wfF4PassoFake = @{ Phase = 4; Kind = 'grant'; Folder = 'C:\PastaDeTeste'; Title = 'concessão'; FilePath = 'x'; Arguments = @('C:\PastaDeTeste', '/grant:r', '*S-1-5-32-544:(OI)(CI)F') }
+            foreach ($wfF4Caso in @(
+                @{ Nome = 'devolução OK';          Socorro = 0; Devolver = 0; Escreveu = 1; Limpou = 1; Porque = 'a posse voltou: o marcador tem de sair' },
+                @{ Nome = 'devolução FALHOU';      Socorro = 0; Devolver = 5; Escreveu = 1; Limpou = 0; Porque = 'a pasta ficou com os Administradores como dona: o marcador tem de FICAR' },
+                @{ Nome = 'posse nem foi tomada';  Socorro = 5; Devolver = 0; Escreveu = 1; Limpou = 1; Porque = 'a posse nunca foi trocada: não há o que denunciar' }
+            )) {
+                $sync.WinForgeSelfTestPosse = @{ Escreveu = 0; Limpou = 0; CodigoSocorro = [int]$wfF4Caso.Socorro; CodigoDevolver = [int]$wfF4Caso.Devolver }
+                $null = Invoke-WinForgeAclOwnerFallback -Plan $wfF4PlanoFake -Step $wfF4PassoFake -StreamPath '' 6>$null 2>$null
+                if ([int]$sync.WinForgeSelfTestPosse.Escreveu -ne [int]$wfF4Caso.Escreveu) { Write-Host "  [ERRO] Posse ($($wfF4Caso.Nome)): o marcador foi escrito $($sync.WinForgeSelfTestPosse.Escreveu) vez(es), esperado $($wfF4Caso.Escreveu)" -ForegroundColor Red; $wbErrors++ }
+                if ([int]$sync.WinForgeSelfTestPosse.Limpou -ne [int]$wfF4Caso.Limpou) { Write-Host "  [ERRO] Posse ($($wfF4Caso.Nome)): o marcador foi apagado $($sync.WinForgeSelfTestPosse.Limpou) vez(es), esperado $($wfF4Caso.Limpou) - $($wfF4Caso.Porque)" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.WinForgeStreamProtected.ContainsKey('(fase 4 sem fluxo)')) { Write-Host "  [ERRO] Posse ($($wfF4Caso.Nome)): a janela protegida ficou aberta depois da Fase 4" -ForegroundColor Red; $wbErrors++; [void]$sync.WinForgeStreamProtected.Remove('(fase 4 sem fluxo)') }
+            }
+        } finally {
+            ${function:Invoke-WinForgeAclStreamStep} = $wfF4OrigStep
+            ${function:Write-WinForgeAclOwnerPending} = $wfF4OrigWrite
+            ${function:Clear-WinForgeAclOwnerPending} = $wfF4OrigClear
+            $ErrorActionPreference = $wfF4ErrAntes
+            [void]$sync.Remove('WinForgeSelfTestPosse')
+        }
+        # E as três voltaram: sem isto, um 'finally' quebrado deixaria os testes seguintes rodando
+        # contra sombras, e a Fase 4 de verdade nunca mais seria conferida.
+        if ([string]${function:Invoke-WinForgeAclStreamStep} -match 'WinForgeSelfTestPosse') { Write-Host "  [ERRO] Posse (sombra): Invoke-WinForgeAclStreamStep não voltou ao original" -ForegroundColor Red; $wbErrors++ }
+        # A ABERTURA relata e NÃO conserta: o marcador continua lá depois do relato. É a diferença
+        # entre avisar e mexer sozinho na posse de uma pasta do Windows.
+        $wfF4Relatou = Show-WinForgeAclOwnerPending -Root $wfF4Raiz
+        if (-not $wfF4Relatou) { Write-Host "  [ERRO] Posse (abertura): com o marcador plantado, a abertura não relatou nada" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Get-WinForgeAclOwnerPending -Root $wfF4Raiz).Present) { Write-Host "  [ERRO] Posse (abertura): o relato APAGOU o marcador - ele tem de aparecer em toda abertura até alguém resolver" -ForegroundColor Red; $wbErrors++ }
+        $wfF4FonteS = [string](Get-Command Show-WinForgeAclOwnerPending).ScriptBlock
+        if ($wfF4FonteS -match 'MessageBox') { Write-Host "  [ERRO] Posse (abertura): o relato abre caixa de mensagem - ele escreve no log e na barra, e nada mais" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfF4Esp in @('Write-WinForgeLog', 'Set-WinForgeProfileProgress')) {
+            if ($wfF4FonteS.IndexOf($wfF4Esp, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Posse (abertura): o relato não usa '$wfF4Esp'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Pendurado no MESMO gancho da varredura da Tarefa 6, e pela forma da chamada.
+        $wfF4FonteJ = [string](Get-Command Start-WinForgeProfileJob).ScriptBlock
+        if ($wfF4FonteJ.IndexOf('$null = Show-WinForgeAclOwnerPending', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Posse (abertura): o diagnóstico não CHAMA o relato do marcador - a posse pendente ficaria calada" -ForegroundColor Red; $wbErrors++ }
+        # Sem marcador não há relato: um aviso que sai em toda abertura vira ruído e deixa de ser lido.
+        $wfF4SelfAntes2 = $sync.SelfTest
+        try { $sync.SelfTest = $false; $null = Clear-WinForgeAclOwnerPending -Root $wfF4Raiz } finally { $sync.SelfTest = $wfF4SelfAntes2 }
+        if ((Get-WinForgeAclOwnerPending -Root $wfF4Raiz).Present) { Write-Host "  [ERRO] Posse (marcador): o marcador não foi apagado" -ForegroundColor Red; $wbErrors++ }
+        if (Show-WinForgeAclOwnerPending -Root $wfF4Raiz) { Write-Host "  [ERRO] Posse (abertura): sem marcador o relato saiu assim mesmo" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Posse: janela protegida aberta e fechada no finally, marcador escrito antes da troca, leitura da abertura só relata"
+    } catch {
+        Write-Host "  [ERRO] Posse: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfF4Raiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
     # ---------------------------------------------------------------- Permissões do disco do sistema
     # O caso real: uma atualização de fabricante derrubou a cadeia de permissões do disco do Windows,
     # e o dono da máquina ficou sem acesso às próprias pastas. São três botões - Verificar (só lê),
@@ -3329,7 +4482,7 @@ if ($SelfTest) {
     # contra pastas descartáveis em %TEMP%, com o alvo trocado. Sem ele, um erro de sintaxe do
     # icacls (direito específico sem parênteses é código 87, "Parâmetro inválido") só apareceria na
     # máquina de quem clicou no botão - foi assim que 'AD' virou '(AD)'.
-    $wfAclNomes = @('AclVerify', 'AclRestore', 'AclUndo')
+    $wfAclNomes = @('AclVerify', 'AclRestore', 'AclUndo', 'AclCleanup')
     # 1. A comparação. Ela é quem decide o veredito, e as três DACLs abaixo são o gabarito dela:
     # uma completa (nenhuma diferença), uma sem a ACE do SYSTEM e uma com o dono trocado.
     try {
@@ -3435,17 +4588,27 @@ if ($SelfTest) {
         }
         foreach ($wfAclPasso in $wfAclPlano) {
             if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Title)) { Write-Host "  [ERRO] Permissões (plano): passo da fase $($wfAclPasso.Phase) sem título" -ForegroundColor Red; $wbErrors++ }
-            # O passo 'sddl' não chama executável nenhum: ele lê a DACL e o dono da pasta com
-            # Get-Acl e grava o resultado no índice. É o ÚNICO tipo sem FilePath, e a trava cobra
-            # isso dos dois lados - sem FilePath tem de ser 'sddl', e 'sddl' não pode ter FilePath.
-            if ([string]$wfAclPasso.Kind -eq 'sddl') {
-                if (-not [string]::IsNullOrWhiteSpace([string]$wfAclPasso.FilePath)) { Write-Host "  [ERRO] Permissões (plano): o passo 'sddl' de '$($wfAclPasso.Path)' traz um executável ('$($wfAclPasso.FilePath)')" -ForegroundColor Red; $wbErrors++ }
-                if ($null -ne $wfAclPasso.Arguments) { Write-Host "  [ERRO] Permissões (plano): o passo 'sddl' de '$($wfAclPasso.Path)' traz argumentos" -ForegroundColor Red; $wbErrors++ }
-                if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Path)) { Write-Host "  [ERRO] Permissões (plano): passo 'sddl' sem pasta" -ForegroundColor Red; $wbErrors++ }
+            # Dois passos não chamam executável nenhum: o 'sddl' lê a DACL e o dono da pasta e grava
+            # no índice, e o 'scope' é a caminhada que o MOTOR faz. A trava cobra isso dos dois
+            # lados - sem FilePath tem de ser um desses dois, e nenhum deles pode ter FilePath.
+            if (@('sddl', 'scope') -contains [string]$wfAclPasso.Kind) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$wfAclPasso.FilePath)) { Write-Host "  [ERRO] Permissões (plano): o passo '$($wfAclPasso.Kind)' de '$($wfAclPasso.Path)' traz um executável ('$($wfAclPasso.FilePath)')" -ForegroundColor Red; $wbErrors++ }
+                if ($null -ne $wfAclPasso.Arguments) { Write-Host "  [ERRO] Permissões (plano): o passo '$($wfAclPasso.Kind)' de '$($wfAclPasso.Path)' traz argumentos" -ForegroundColor Red; $wbErrors++ }
+                if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Path)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Kind)' sem pasta" -ForegroundColor Red; $wbErrors++ }
+                continue
+            }
+            # O terceiro sem executável, e pelo mesmo motivo: as chamadas do 'inherit-list' saem de
+            # Get-WinForgeAclInheritSteps, uma por pasta da lista que a fase 2 guardou. Um FilePath
+            # ou um vetor aqui seria o '/T' voltando pela porta dos fundos, agora sem nem a trava
+            # de '/T ⇒ /L' abaixo, que só olha vetor de argumentos.
+            if ([string]$wfAclPasso.Kind -eq 'inherit-list') {
+                if (-not [string]::IsNullOrWhiteSpace([string]$wfAclPasso.FilePath)) { Write-Host "  [ERRO] Permissões (plano): o passo 'inherit-list' de '$($wfAclPasso.Folder)' traz um executável ('$($wfAclPasso.FilePath)')" -ForegroundColor Red; $wbErrors++ }
+                if ($null -ne $wfAclPasso.Arguments) { Write-Host "  [ERRO] Permissões (plano): o passo 'inherit-list' de '$($wfAclPasso.Folder)' traz argumentos - a lista é que manda as chamadas" -ForegroundColor Red; $wbErrors++ }
+                if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Folder)) { Write-Host "  [ERRO] Permissões (plano): passo 'inherit-list' sem pasta" -ForegroundColor Red; $wbErrors++ }
                 continue
             }
             $wfAclExe = [string]$wfAclPasso.FilePath
-            if ([string]::IsNullOrWhiteSpace($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Title)' sem executável e sem ser do tipo 'sddl'" -ForegroundColor Red; $wbErrors++; continue }
+            if ([string]::IsNullOrWhiteSpace($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): passo '$($wfAclPasso.Title)' sem executável e sem ser do tipo 'sddl', 'scope' ou 'inherit-list'" -ForegroundColor Red; $wbErrors++; continue }
             if (-not [System.IO.Path]::IsPathRooted($wfAclExe)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' não é caminho completo" -ForegroundColor Red; $wbErrors++ }
             elseif (-not $wfAclExe.StartsWith($wfAclSys, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' fora de '$wfAclSys'" -ForegroundColor Red; $wbErrors++ }
             elseif (-not (Test-Path -LiteralPath $wfAclExe -PathType Leaf)) { Write-Host "  [ERRO] Permissões (plano): '$wfAclExe' não existe nesta máquina" -ForegroundColor Red; $wbErrors++ }
@@ -3482,17 +4645,17 @@ if ($SelfTest) {
         # índice, e existe para toda pasta do conjunto - foi medido, elevado, que
         # 'icacls <pasta>\ /save' grava a entrada da própria pasta com o NOME VAZIO e que o
         # '/restore' NÃO a aplica (procura '<pasta>\<sddl>' e responde "arquivo não encontrado").
-        # O 'save' guarda o CONTEÚDO num arquivo de icacls, e só o perfil tem um: é a única pasta
-        # em que a restauração desce a árvore ('/inheritance:e /T /L' na fase 5).
+        # O 'scope' guarda o CONTEÚDO num arquivo no formato do icacls, escrito pelo MOTOR, e só o
+        # perfil tem um: é a única pasta em que a restauração mexe no que está DENTRO (fase 5).
         $wfAclSddl = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'sddl' })
-        $wfAclBk = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'save' })
-        $wfAclF2Outros = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and @('sddl', 'save') -notcontains [string]$_.Kind })
+        $wfAclBk = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })
+        $wfAclF2Outros = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 2 -and @('sddl', 'scope') -notcontains [string]$_.Kind })
         if ($wfAclF2Outros.Count) { Write-Host "  [ERRO] Permissões (plano): a fase 2 tem $($wfAclF2Outros.Count) passo(s) de tipo desconhecido ('$(@($wfAclF2Outros | ForEach-Object { [string]$_.Kind }) -join ', ')')" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclSddl.Count -lt 2) { Write-Host "  [ERRO] Permissões (plano): a fase 2 guarda $($wfAclSddl.Count) lista(s) em SDDL, esperado a raiz, as pastas de primeiro nível, as aninhadas e o perfil" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclBk.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): a fase 2 deveria ter exatamente um backup de conteúdo (o do perfil), tem $($wfAclBk.Count)" -ForegroundColor Red; $wbErrors++ }
-        # A raiz NÃO pode ter arquivo de icacls: o '/restore' dela nunca aplicou nada, e manter o
+        # A raiz NÃO pode ter arquivo de conteúdo: o '/restore' dela nunca aplicou nada, e manter o
         # passo era prometer um desfazer que não existe.
-        if (@($wfAclBk | Where-Object { ([string]$_.Path).TrimEnd('\') -eq $wfAclRaiz.TrimEnd('\') }).Count) { Write-Host "  [ERRO] Permissões (plano): a raiz voltou a ter '/save' - o '/restore' da raiz não aplica a entrada de nome vazio" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfAclBk | Where-Object { ([string]$_.Path).TrimEnd('\') -eq $wfAclRaiz.TrimEnd('\') }).Count) { Write-Host "  [ERRO] Permissões (plano): a raiz voltou a ter backup de conteúdo - o '/restore' da raiz não aplica a entrada de nome vazio" -ForegroundColor Red; $wbErrors++ }
         foreach ($wfAclPasso in $wfAclBk) {
             if ([string]::IsNullOrWhiteSpace([string]$wfAclPasso.Backup)) { Write-Host "  [ERRO] Permissões (plano): passo de backup sem arquivo de destino" -ForegroundColor Red; $wbErrors++ }
             elseif (-not ([string]$wfAclPasso.Backup).StartsWith('C:\ProgramData\WinForge\acl-backup\', [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Permissões (plano): backup fora da pasta protegida ('$($wfAclPasso.Backup)')" -ForegroundColor Red; $wbErrors++ }
@@ -3505,13 +4668,6 @@ if ($SelfTest) {
         $wfAclAlvoPerfil = @($wfAclBk | Where-Object { [string]$_.Path -eq 'C:\Users\PerfilDeTeste' })
         if ($wfAclAlvoPerfil.Count -ne 1) { Write-Host "  [ERRO] Permissões (plano): o perfil deveria ter exatamente um backup de conteúdo, tem $($wfAclAlvoPerfil.Count)" -ForegroundColor Red; $wbErrors++ }
         elseif ([string]$wfAclAlvoPerfil[0].Target -ne 'C:\Users') { Write-Host "  [ERRO] Permissões (plano): o /restore do perfil deveria mirar 'C:\Users', mira '$($wfAclAlvoPerfil[0].Target)'" -ForegroundColor Red; $wbErrors++ }
-        elseif (@($wfAclAlvoPerfil[0].Arguments) -notcontains '/T') { Write-Host "  [ERRO] Permissões (plano): o backup do perfil deveria ser recursivo (/T)" -ForegroundColor Red; $wbErrors++ }
-        # '/Q' em todo '/save': sem ele o icacls escreve 'arquivo processado: <caminho>' por ARQUIVO,
-        # e um perfil tem centenas de milhares deles. Esse texto ia inteiro para o arquivo de saída
-        # e daí para a caixa de texto da janela, num bloco só.
-        foreach ($wfAclPasso in $wfAclBk) {
-            if (@($wfAclPasso.Arguments | ForEach-Object { [string]$_ }) -notcontains '/Q') { Write-Host "  [ERRO] Permissões (plano): o '/save' de '$($wfAclPasso.Path)' sem '/Q' - uma linha por arquivo do perfil na janela" -ForegroundColor Red; $wbErrors++ }
-        }
         # Toda pasta que a fase 3 ou a fase 4 reescreve TEM de ter a lista DELA MESMA guardada na
         # fase 2, e é isso que o Desfazer reaplica. 'Users\Public' é o caso que a listagem de
         # primeiro nível não alcança; a raiz é o caso que o '/save' nunca soube desfazer.
@@ -3586,7 +4742,10 @@ if ($SelfTest) {
         # concessão, DEVOLVER a posse. Sem o terceiro a pasta do sistema fica com os
         # Administradores como dona e passa a aceitar alteração de qualquer processo elevado.
         $wfAclFonteFb = [string](Get-Command Invoke-WinForgeAclOwnerFallback).ScriptBlock
-        $wfAclPosFb = @('$socorro[0].FilePath', '$Step.FilePath', '$devolver[0].FilePath') | ForEach-Object { $wfAclFonteFb.IndexOf($_, [StringComparison]::Ordinal) }
+        # As três âncoras são a CHAMADA que executa o movimento, e não '-Step <passo>' solto: o
+        # mesmo passo de devolução é citado antes, para tirar dele o SID do dono original, e com a
+        # âncora curta a ordem medida passava a ser a dessa citação.
+        $wfAclPosFb = @('Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $socorro[0]', 'Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $Step', 'Invoke-WinForgeAclStreamStep -Path $StreamPath -Step $devolver[0]') | ForEach-Object { $wfAclFonteFb.IndexOf($_, [StringComparison]::Ordinal) }
         if (@($wfAclPosFb | Where-Object { $_ -lt 0 }).Count) { Write-Host "  [ERRO] Permissões (socorro): a função não roda os três movimentos (posse, segunda tentativa, devolução)" -ForegroundColor Red; $wbErrors++ }
         elseif (-not ($wfAclPosFb[0] -lt $wfAclPosFb[1] -and $wfAclPosFb[1] -lt $wfAclPosFb[2])) { Write-Host "  [ERRO] Permissões (socorro): a ordem é posse -> segunda tentativa -> devolução, e o fonte está em outra" -ForegroundColor Red; $wbErrors++ }
         # Fase 5: conceder na RAIZ do perfil antes de ligar a herança do conteúdo. Ao contrário, a
@@ -3595,13 +4754,15 @@ if ($SelfTest) {
         $wfAclF5 = @($wfAclPlano | Where-Object { [int]$_.Phase -eq 5 })
         $wfAclF5Tipos = @($wfAclF5 | ForEach-Object { [string]$_.Kind })
         $wfAclIdxGrant = [array]::IndexOf($wfAclF5Tipos, 'grant')
-        $wfAclIdxHerda = [array]::IndexOf($wfAclF5Tipos, 'inherit')
+        $wfAclIdxHerda = [array]::IndexOf($wfAclF5Tipos, 'inherit-list')
         if ($wfAclIdxGrant -lt 0 -or $wfAclIdxHerda -lt 0) { Write-Host "  [ERRO] Permissões (plano): a fase 5 precisa da concessão na raiz do perfil e da herança do conteúdo" -ForegroundColor Red; $wbErrors++ }
         elseif ($wfAclIdxGrant -gt $wfAclIdxHerda) { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo vem ANTES da concessão na raiz do perfil - nessa ordem ela propaga o que ainda não existe" -ForegroundColor Red; $wbErrors++ }
         else {
-            $wfAclArgs5 = @($wfAclF5[$wfAclIdxHerda].Arguments | ForEach-Object { [string]$_ })
-            if ($wfAclArgs5 -notcontains '/inheritance:e') { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo do perfil deveria usar '/inheritance:e'" -ForegroundColor Red; $wbErrors++ }
-            if ([string]$wfAclArgs5[0] -ne 'C:\Users\PerfilDeTeste\*') { Write-Host "  [ERRO] Permissões (plano): a herança deveria mirar o CONTEÚDO do perfil, mira '$($wfAclArgs5[0])'" -ForegroundColor Red; $wbErrors++ }
+            # A herança mira a PASTA do perfil como escopo e nada mais: as chamadas de verdade saem
+            # da lista da fase 2. Um alvo com '*' aqui, como o que existia até a 1.7.0, é o que
+            # levava o '/T' para dentro de junção e OneDrive.
+            if (([string]$wfAclF5[$wfAclIdxHerda].Folder).TrimEnd('\') -ne 'C:\Users\PerfilDeTeste') { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo aponta para '$($wfAclF5[$wfAclIdxHerda].Folder)', esperado o perfil" -ForegroundColor Red; $wbErrors++ }
+            if (([string]$wfAclF5[$wfAclIdxHerda].Folder).IndexOf('*', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (plano): a herança do conteúdo voltou a mirar um curinga ('$($wfAclF5[$wfAclIdxHerda].Folder)')" -ForegroundColor Red; $wbErrors++ }
         }
         foreach ($wfAclPasso in $wfAclF5) {
             if (@($wfAclPasso.Arguments | ForEach-Object { [string]$_ }) -contains '/reset') { Write-Host "  [ERRO] Permissões (plano): '/reset' no perfil apagaria as ACEs explícitas dos aplicativos (AppData\Local\Packages, OneDrive)" -ForegroundColor Red; $wbErrors++ }
@@ -3680,7 +4841,7 @@ if ($SelfTest) {
         if ((Get-WinForgeAclSlug -Text 'abc123') -ne 'abc123') { Write-Host "  [ERRO] Permissões (apelido): texto já seguro não deveria mudar ('$(Get-WinForgeAclSlug -Text 'abc123')')" -ForegroundColor Red; $wbErrors++ }
         if ((Get-WinForgeAclSlug -Text '') -ne '') { Write-Host "  [ERRO] Permissões (apelido): texto vazio deveria dar apelido vazio" -ForegroundColor Red; $wbErrors++ }
         # E o plano gerado com um perfil de nome ruim continua gravando dentro da pasta protegida.
-        $wfAclSlugPlano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\Fulano de Tal' -UserSid 'S-1-5-21-11-22-33-1001' -BackupRoot 'C:\ProgramData\WinForge\acl-backup' -Stamp '20260911-120000' | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'save' })
+        $wfAclSlugPlano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\Fulano de Tal' -UserSid 'S-1-5-21-11-22-33-1001' -BackupRoot 'C:\ProgramData\WinForge\acl-backup' -Stamp '20260911-120000' | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })
         if ($wfAclSlugPlano.Count -ne 1) { Write-Host "  [ERRO] Permissões (apelido): o perfil 'Fulano de Tal' deveria dar um backup de conteúdo, deu $($wfAclSlugPlano.Count)" -ForegroundColor Red; $wbErrors++ }
         elseif ((Split-Path -Leaf ([string]$wfAclSlugPlano[0].Backup)) -notmatch '^acl-perfil-[A-Za-z0-9%]+-20260911-120000\.txt$') { Write-Host "  [ERRO] Permissões (apelido): o nome do backup do perfil saiu '$(Split-Path -Leaf ([string]$wfAclSlugPlano[0].Backup))'" -ForegroundColor Red; $wbErrors++ }
         if (-not $wfAclSlugRuins) { Write-Host "  Permissões (apelido): $($wfAclSlugPares.Count) par(es) que colidiam no apelido antigo dão apelidos distintos" }
@@ -3696,7 +4857,7 @@ if ($SelfTest) {
     # dono é a própria identidade. O '/restore' do CONTEÚDO do perfil continua fora do SelfTest -
     # ele precisa de SeRestorePrivilege e mora no plano, que o -DryRun lista sem rodar.
     try {
-        $wfAclRtRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\sddl-ida-e-volta'
+        $wfAclRtRaiz = Join-Path $wbSelfTestRaiz 'sddl-ida-e-volta'
         New-Item -ItemType Directory -Path $wfAclRtRaiz -Force | Out-Null
         $wfAclRtSeg = Get-WinForgeAclFolderSecurity -Path $wfAclRtRaiz
         if (-not $wfAclRtSeg.Ok) { Write-Host "  [ERRO] Permissões (SDDL): a lista da pasta de teste não pôde ser lida ($($wfAclRtSeg.Reason))" -ForegroundColor Red; $wbErrors++ }
@@ -3777,7 +4938,7 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Permissões (SDDL): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        $wfAclRtLimpa = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\sddl-ida-e-volta'
+        $wfAclRtLimpa = Join-Path $wbSelfTestRaiz 'sddl-ida-e-volta'
         if (Test-Path -LiteralPath $wfAclRtLimpa) {
             Remove-Item -LiteralPath $wfAclRtLimpa -Recurse -Force -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $wfAclRtLimpa) { Write-Host "  [ERRO] Permissões (SDDL): a pasta de teste '$wfAclRtLimpa' não pôde ser apagada" -ForegroundColor Red; $wbErrors++ }
@@ -3790,7 +4951,7 @@ if ($SelfTest) {
     # sintaxe e custa tempo. Quem paga a conta desta trava é o 'AD' que precisava ser '(AD)': o
     # plano inteiro passava na revisão por leitura e o icacls respondia 87 na máquina do usuário.
     try {
-        $wfAclSintRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\icacls-syntax'
+        $wfAclSintRaiz = Join-Path $wbSelfTestRaiz 'icacls-syntax'
         $wfAclSintExe = Get-WinForgeSystemExe -Name 'icacls.exe'
         # O plano do teste de sintaxe usa o SID REAL desta identidade: o icacls recusa um SID que
         # não existe na máquina com 1332 ("nenhum mapeamento"), e isso não é erro de sintaxe.
@@ -3820,7 +4981,7 @@ if ($SelfTest) {
     } finally {
         # As concessões tiram o acesso desta identidade das pastas de teste; sem devolver a herança
         # do %TEMP% antes, o Remove-Item deixaria a sujeira plantada (dono não é quem apaga).
-        $wfAclSintLimpa = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\icacls-syntax'
+        $wfAclSintLimpa = Join-Path $wbSelfTestRaiz 'icacls-syntax'
         if (Test-Path -LiteralPath $wfAclSintLimpa) {
             & (Get-WinForgeSystemExe -Name 'icacls.exe') $wfAclSintLimpa '/reset' '/T' '/L' '/C' '/Q' | Out-Null
             Remove-Item -LiteralPath $wfAclSintLimpa -Recurse -Force -ErrorAction SilentlyContinue
@@ -3862,32 +5023,51 @@ if ($SelfTest) {
             if (([string]$wfAclLinhaU).IndexOf(' /L', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (simulação): '$wfAclLinhaU' faz '/restore' sem '/L' - a DACL das junções do perfil cairia nos destinos delas" -ForegroundColor Red; $wbErrors++ }
         }
         $wfAclFonteUndo = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
-        if ($wfAclFonteUndo.IndexOf("'/restore', [string]`$item.File, '/C', '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não traz '/L'" -ForegroundColor Red; $wbErrors++ }
+        # O vetor traz '/C' E '/L', e o '/C' é o OPOSTO do que a fase 5 faz - de propósito, porque a
+        # pergunta é outra. Lá é um alvo único por chamada: não há o que continuar, e o código de
+        # saída é o único sinal (medido: pasta inexistente sai 2 sem '/C' e 0 com). Aqui é UMA
+        # chamada para um arquivo de centenas de entradas, e continuar apesar do erro é o
+        # comportamento desejado: sem '/C' o icacls pode PARAR na primeira entrada morta, e uma
+        # pasta que sumiu desde o backup não pode custar a restauração das outras. Abortar no meio é
+        # pior do que contar errado - este botão é o último recurso de quem acabou de ter as
+        # permissões do disco reescritas. O sinal de "aplicou mesmo" vem da conferência por
+        # amostragem da Tarefa 5, e não do código de saída daqui.
+        # O nome da variável do arquivo é '$arquivoUsado', e não mais '$item.File': o arquivo do
+        # conteúdo pode estar na pasta protegida ou no disco que o usuário escolheu ('ExternalPath'),
+        # e quem decide qual dos dois entra no vetor é o bloco que vem antes. O que esta trava cobra
+        # continua sendo a FORMA do vetor.
+        if ($wfAclFonteUndo.IndexOf("'/restore', `$arquivoUsado, '/C', '/L'", [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o vetor de argumentos do '/restore' não é '<pasta> /restore <arquivo> /C /L' - sem '/C' o icacls pode parar na primeira entrada morta; sem '/L' a DACL das junções cai nos destinos delas" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclFonteUndo.IndexOf('Restore-WinForgeAclSddl -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o Desfazer não reaplica a lista da pasta em si (SDDL)" -ForegroundColor Red; $wbErrors++ }
-        # E a outra ponta: o que a fase 2 indexa. Um '/save' que termina em acesso negado AINDA
-        # deixa arquivo no disco - indexá-lo pela simples existência inflava o "N pasta(s)
-        # guardadas" com rede de segurança que não existe. Entre o '/save' e o endurecimento do
-        # arquivo têm de estar as duas conferências: o CÓDIGO e o número de ENTRADAS.
+        # E a outra ponta: o que a fase 2 indexa. O arquivo do conteúdo só pode ser endurecido - e
+        # daí indexado - depois de a caminhada ter terminado inteira, do espaço ter sido conferido
+        # e de a gravação ter dito Ok. A ORDEM é a trava: um endurecimento antes da conferência
+        # indexaria um arquivo que ninguém garantiu.
         $wfAclFonteRest = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
         if ($wfAclFonteRest.IndexOf('Get-WinForgeAclFolderSecurity -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): a fase 2 não guarda a lista da pasta em si (SDDL)" -ForegroundColor Red; $wbErrors++ }
         if ($wfAclFonteRest.IndexOf('ConvertTo-Json', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): o índice não é gravado em JSON" -ForegroundColor Red; $wbErrors++ }
         $wfAclPosSave = $wfAclFonteRest.IndexOf('Fase 2 de 6 - $($passo.Title)', [StringComparison]::Ordinal)
-        $wfAclPosProt = $wfAclFonteRest.IndexOf('Protect-WinForgeSnapshotFile -Path ([string]$passo.Backup)', [StringComparison]::Ordinal)
+        $wfAclPosProt = $wfAclFonteRest.IndexOf('Protect-WinForgeSnapshotFile -Path $parcial', [StringComparison]::Ordinal)
         if ($wfAclPosSave -lt 0 -or $wfAclPosProt -le $wfAclPosSave) { Write-Host "  [ERRO] Permissões (desfazer): não dá para achar o trecho da fase 2 que grava o backup do conteúdo" -ForegroundColor Red; $wbErrors++ }
         else {
             $wfAclTrechoF2 = $wfAclFonteRest.Substring($wfAclPosSave, $wfAclPosProt - $wfAclPosSave)
             foreach ($wfAclF2Esp in @(
-                @('if ([int]$r.ExitCode -ne 0) {', 'o código do ''/save'' não é conferido antes de o arquivo ser indexado'),
-                @('Measure-WinForgeAclSaveEntry -Path', 'o número de entradas do arquivo não é conferido antes de ele ser indexado')
+                @('Get-WinForgeAclContentScope -Path', 'a caminhada não roda antes de o arquivo ser endurecido e indexado'),
+                @('Test-WinForgeAclFreeSpace -Path', 'o espaço livre não é conferido antes de a gravação começar'),
+                @('Write-WinForgeAclContentBackup -Path', 'o arquivo não é gravado pelo motor antes de ser endurecido')
             )) {
                 if ($wfAclTrechoF2.IndexOf($wfAclF2Esp[0], [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (desfazer): $($wfAclF2Esp[1])" -ForegroundColor Red; $wbErrors++ }
             }
+            # O espaço vem ANTES da gravação, e não depois: conferir com o arquivo já escrito é
+            # conferir o que não adianta mais.
+            $wfAclPosEsp = $wfAclTrechoF2.IndexOf('Test-WinForgeAclFreeSpace -Path', [StringComparison]::Ordinal)
+            $wfAclPosGrav = $wfAclTrechoF2.IndexOf('Write-WinForgeAclContentBackup -Path', [StringComparison]::Ordinal)
+            if ($wfAclPosEsp -ge 0 -and $wfAclPosGrav -ge 0 -and $wfAclPosEsp -gt $wfAclPosGrav) { Write-Host "  [ERRO] Permissões (desfazer): o espaço livre é conferido DEPOIS de a gravação começar" -ForegroundColor Red; $wbErrors++ }
         }
         # O índice de verdade, ida e volta: um conjunto MONTADO em %TEMP% (a máquina de quem
         # compila normalmente não tem nenhum), lido por Get-WinForgeAclBackupSet e transformado em
         # plano pelo -DryRun. É o que prova que os dois tipos de item sobrevivem ao JSON e que cada
         # um vira a ação certa - SDDL na pasta, '/restore /C /L' no conteúdo do perfil.
-        $wfAclIdxRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-indice'
+        $wfAclIdxRaiz = Join-Path $wbSelfTestRaiz 'acl-indice'
         try {
             New-Item -ItemType Directory -Path $wfAclIdxRaiz -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $wfAclIdxRaiz 'acl-perfil-teste-20260911-120000.txt') -Value '' -Encoding Unicode
@@ -3924,8 +5104,11 @@ if ($SelfTest) {
             foreach ($wfAclIdxLinha in $wfAclIdxSeco) {
                 if (-not ([string]$wfAclIdxLinha).StartsWith('[simulação] ')) { Write-Host "  [ERRO] Permissões (índice): '$wfAclIdxLinha' deveria começar com '[simulação] '" -ForegroundColor Red; $wbErrors++ }
             }
-            # Índice ilegível não pode virar "nada a desfazer" silencioso nem estourar.
-            Set-Content -LiteralPath (Join-Path $wfAclIdxRaiz 'acl-index-20260911-130000.json') -Value 'isto não é json' -Encoding UTF8
+            # Índice ilegível não pode virar "nada a desfazer" silencioso nem estourar. O carimbo é
+            # o MAIS ANTIGO da pasta de propósito: o Desfazer escolhe o mais antigo não consumido, e
+            # um ilegível conta como não consumido - ninguém o desfez. Com um carimbo mais novo este
+            # teste não exercitaria nada, porque o conjunto escolhido seria o bom ao lado.
+            Set-Content -LiteralPath (Join-Path $wfAclIdxRaiz 'acl-index-20260911-110000.json') -Value 'isto não é json' -Encoding UTF8
             $wfAclIdxRuim = Get-WinForgeAclBackupSet -Root $wfAclIdxRaiz
             if (@($wfAclIdxRuim.Items).Count) { Write-Host "  [ERRO] Permissões (índice): um índice ilegível devolveu $(@($wfAclIdxRuim.Items).Count) item(ns)" -ForegroundColor Red; $wbErrors++ }
             elseif ([string]::IsNullOrWhiteSpace([string]$wfAclIdxRuim.Reason)) { Write-Host "  [ERRO] Permissões (índice): um índice ilegível não disse por que não deu" -ForegroundColor Red; $wbErrors++ }
@@ -3955,7 +5138,8 @@ if ($SelfTest) {
         }
         foreach ($wfAclTrava in @(
             @('Invoke-WinForgeAclRestore', { Invoke-WinForgeAclRestore }),
-            @('Invoke-WinForgeAclUndo', { Invoke-WinForgeAclUndo })
+            @('Invoke-WinForgeAclUndo', { Invoke-WinForgeAclUndo }),
+            @('Invoke-WinForgeAclCleanup', { Invoke-WinForgeAclCleanup })
         )) {
             $wfAclMsg = $null
             try { & $wfAclTrava[1] | Out-Null } catch { $wfAclMsg = [string]$_.Exception.Message }
@@ -3976,8 +5160,8 @@ if ($SelfTest) {
     # o -Probe (que responde à primeira porta e volta, sem tocar em nada), a ordem no fonte e a
     # lista de coisas que NÃO podem aparecer antes da checagem.
     try {
-        $wfAclRaizFantasma = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-nao-deve-nascer'
-        foreach ($wfAclFn in @('Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo')) {
+        $wfAclRaizFantasma = Join-Path $wbSelfTestRaiz 'acl-backup-nao-deve-nascer'
+        foreach ($wfAclFn in @('Invoke-WinForgeAclRestore', 'Invoke-WinForgeAclUndo', 'Invoke-WinForgeAclCleanup')) {
             $wfAclFonteEl = [string](Get-Command $wfAclFn).ScriptBlock
             # A âncora é a trava de SelfTest, e não o começo da função: acima dela ficam o -DryRun
             # e o -Probe, que também citam Test-WinForgeRepairElevated e não escrevem nada. Medir a
@@ -4016,7 +5200,7 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Permissões (elevação): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-nao-deve-nascer') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'acl-backup-nao-deve-nascer') -Recurse -Force -ErrorAction SilentlyContinue
     }
     # 5. A pasta de backup e o arquivo que o Desfazer aceita. Valem as regras da pasta PADRÃO, sem o
     # afrouxamento de -ExplicitRoot: o /restore reescreve permissões do disco inteiro a partir do que
@@ -4028,7 +5212,7 @@ if ($SelfTest) {
         $wfAclFonteRaiz = [string](Get-Command Get-WinForgeAclBackupRoot).ScriptBlock
         if ($wfAclFonteRaiz.IndexOf('$env:', [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (pasta): a pasta de backup não pode sair de variável de ambiente" -ForegroundColor Red; $wbErrors++ }
         if ((Get-WinForgeAclBackupRoot) -notlike '*\WinForge\acl-backup') { Write-Host "  [ERRO] Permissões (pasta): o padrão deveria terminar em 'WinForge\acl-backup', veio '$(Get-WinForgeAclBackupRoot)'" -ForegroundColor Red; $wbErrors++ }
-        $wfAclRaizAberta = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-aberto'
+        $wfAclRaizAberta = Join-Path $wbSelfTestRaiz 'acl-backup-aberto'
         New-Item -ItemType Directory -Path $wfAclRaizAberta -Force | Out-Null
         $wfAclAclAberta = Get-Acl -LiteralPath $wfAclRaizAberta
         $wfAclAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -4037,7 +5221,7 @@ if ($SelfTest) {
         if ($wfAclConf.Ok) { Write-Host "  [ERRO] Permissões (pasta): uma pasta em %TEMP% com escrita para 'Todos' foi aceita" -ForegroundColor Red; $wbErrors++ }
         elseif ([string]::IsNullOrWhiteSpace([string]$wfAclConf.Reason)) { Write-Host "  [ERRO] Permissões (pasta): recusou sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
         # E o arquivo: fora da pasta protegida, recusado antes de qualquer leitura de conteúdo.
-        $wfAclFora = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-fora-da-pasta.txt'
+        $wfAclFora = Join-Path $wbSelfTestRaiz 'acl-fora-da-pasta.txt'
         Set-Content -LiteralPath $wfAclFora -Value 'D:PAI(A;;FA;;;WD)' -Encoding UTF8
         $wfAclJulg = Test-WinForgeAclBackupFile -Path $wfAclFora -Root (Get-WinForgeAclBackupRoot)
         if ($wfAclJulg.Trusted) { Write-Host "  [ERRO] Permissões (arquivo): um arquivo em %TEMP% foi aceito como backup" -ForegroundColor Red; $wbErrors++ }
@@ -4050,12 +5234,12 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] Permissões (pasta): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-backup-aberto') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\acl-fora-da-pasta.txt') -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'acl-backup-aberto') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'acl-fora-da-pasta.txt') -Force -ErrorAction SilentlyContinue
     }
     # 6. As três linhas da tabela, a entrada da config e a pergunta antes de agir.
     try {
-        $wfAclChaves = @{ AclVerify = 'read'; AclRestore = 'repair'; AclUndo = 'repair' }
+        $wfAclChaves = @{ AclVerify = 'read'; AclRestore = 'repair'; AclUndo = 'repair'; AclCleanup = 'repair' }
         foreach ($wfAclNome in $wfAclNomes) {
             $wfAclSpec = Get-WinForgeRepairCommand -Name $wfAclNome
             if ([string]$wfAclSpec.Kind -ne $wfAclChaves[$wfAclNome]) { Write-Host "  [ERRO] Permissões $wfAclNome`: tipo '$($wfAclSpec.Kind)', esperado '$($wfAclChaves[$wfAclNome])'" -ForegroundColor Red; $wbErrors++ }
@@ -4093,7 +5277,7 @@ if ($SelfTest) {
         # O Desfazer diz o que NÃO devolve: /restore repõe a lista, nunca a posse.
         $wfAclPerguntaU = [string](Get-WinForgeRepairConfirmText -Name AclUndo)
         if ($wfAclPerguntaU.IndexOf('posse', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (confirmação) AclUndo: a pergunta não diz que o /restore não devolve a posse" -ForegroundColor Red; $wbErrors++ }
-        Write-Host "  Permissões (tabela): $($wfAclNomes.Count) botão(ões) - 1 leitura e 2 com fluxo ao vivo, confirmação vinda da aba Config"
+        Write-Host "  Permissões (tabela): $($wfAclNomes.Count) botão(ões) - 1 leitura e 3 com fluxo ao vivo, confirmação vinda da aba Config"
     } catch {
         Write-Host "  [ERRO] Permissões (tabela): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
@@ -4134,6 +5318,1565 @@ if ($SelfTest) {
         $wbNv = Get-WinForgeNvidiaLatestDriver -GpuName 'NVIDIA GeForce RTX 3070'
         Write-Host "  NVIDIA (rede): status=$($wbNv.Status) versão=$($wbNv.Version) lançamento=$($wbNv.ReleaseDate)"
         if ($wbNv.Status -ne 'ok' -or $wbNv.Version -notmatch '^\d{3}\.\d{2}$') { Write-Host "  [ERRO] Get-WinForgeNvidiaLatestDriver: esperado status 'ok' e versão no formato 000.00" -ForegroundColor Red; $wbErrors++ }
+    }
+    # ---------------------------------------------------------------- Permissões: a caminhada
+    # O laço que encheu o disco em produção: 'AppData\Local\Dados de Aplicativos' é uma junção para
+    # 'AppData\Local', alcançável por dois caminhos, e quem para a recursão é o limite de 63 saltos
+    # de reparse - não o MAX_PATH. A caminhada nova não desce em ponto de reanálise E não o indexa:
+    # o .NET lê a ACL do ALVO e o '/restore /L' a devolveria ao LINK, trocando permissão por
+    # permissão. As duas coisas, e é isto que o teste cobra.
+    $wfCamRaiz = Join-Path $wbSelfTestRaiz 'acl-caminhada'
+    try {
+        if (Test-Path -LiteralPath $wfCamRaiz) { Remove-Item -LiteralPath $wfCamRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfCamPerfil = Join-Path $wfCamRaiz 'perfil'
+        $wfCamLocal = Join-Path $wfCamPerfil 'AppData\Local'
+        New-Item -ItemType Directory -Path $wfCamLocal -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $wfCamPerfil 'Documentos') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $wfCamPerfil 'nota.txt') -Value 'x' -Encoding UTF8
+        # A junção auto-referente: 'Dados de Aplicativos' -> o próprio pai. É o laço exato da máquina real.
+        $wfCamJuncao = Join-Path $wfCamLocal 'Dados de Aplicativos'
+        cmd.exe /c mklink /J "$wfCamJuncao" "$wfCamLocal" | Out-Null
+        if (-not (Test-Path -LiteralPath $wfCamJuncao)) { throw "a junção de teste não pôde ser criada em '$wfCamJuncao'" }
+        # Herança bloqueada em UMA pasta: é ela, e só ela, que o filtro tem de guardar.
+        $wfCamProt = New-Object System.IO.DirectoryInfo (Join-Path $wfCamPerfil 'Documentos')
+        $wfCamSd = $wfCamProt.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfCamSd.SetAccessRuleProtection($true, $true)
+        $wfCamProt.SetAccessControl($wfCamSd)
+
+        $wfCamR = Get-WinForgeAclContentScope -Path $wfCamPerfil
+        if (-not $wfCamR.Ok) { Write-Host "  [ERRO] Permissões (caminhada): devolveu Ok=`$false ('$($wfCamR.Reason)') numa pasta de teste íntegra" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamR.Reparse -lt 1) { Write-Host "  [ERRO] Permissões (caminhada): a junção não foi contada em Reparse (veio $($wfCamR.Reparse))" -ForegroundColor Red; $wbErrors++ }
+        $wfCamNomes = @($wfCamR.Entries | ForEach-Object { [string]$_.Name })
+        if (@($wfCamNomes | Where-Object { $_ -like '*Dados de Aplicativos*' }).Count) { Write-Host "  [ERRO] Permissões (caminhada): o ponto de reanálise virou ENTRADA ('$($wfCamNomes -join ' | ')') - o /restore /L aplicaria no link a ACL do destino" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfCamNomes | Sort-Object -Unique).Count -ne $wfCamNomes.Count) { Write-Host "  [ERRO] Permissões (caminhada): item visitado duas vezes ('$($wfCamNomes -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # CONTAGEM EXATA, e não 'pelo menos': com uma entrada só, "sem duplicata" é vácuo, e contar o
+        # reparse E empilhá-lo passaria verde com o laço inteiro vivo e invisível. São quatro pastas -
+        # perfil, AppData, Local, Documentos - e nenhuma quinta: 'Scanned' conta pasta ENUMERADA, o
+        # ponto de reanálise conta só em 'Reparse'. Descer na junção traria Local e Documentos de novo
+        # e isto viraria 6.
+        if ([int]$wfCamR.Scanned -ne 4) { Write-Host "  [ERRO] Permissões (caminhada): Scanned=$($wfCamR.Scanned), esperado exatamente 4 (perfil, AppData, Local, Documentos) - mais que isso é a junção sendo descida" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamR.Reparse -ne 1) { Write-Host "  [ERRO] Permissões (caminhada): Reparse=$($wfCamR.Reparse), esperado exatamente 1" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfCamR.Entries).Count -ne 1) { Write-Host "  [ERRO] Permissões (caminhada): o filtro é AreAccessRulesProtected - esperava 1 entrada, veio $(@($wfCamR.Entries).Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfCamR.Entries[0].Name -notlike '*Documentos') { Write-Host "  [ERRO] Permissões (caminhada): a entrada guardada é '$($wfCamR.Entries[0].Name)', esperada a pasta com herança bloqueada" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfCamR.Entries[0].Sddl)) { Write-Host "  [ERRO] Permissões (caminhada): a entrada veio sem SDDL" -ForegroundColor Red; $wbErrors++ }
+        # Nome RELATIVO à pasta ACIMA do perfil, com a folha do perfil na frente: é o que o
+        # 'icacls <pasta acima> /restore' espera, e é o que o Desfazer vai consumir.
+        if ([string]$wfCamR.Entries[0].Name -ne 'perfil\Documentos') { Write-Host "  [ERRO] Permissões (caminhada): o nome relativo veio '$($wfCamR.Entries[0].Name)', esperado 'perfil\Documentos'" -ForegroundColor Red; $wbErrors++ }
+        # Arquivo fica FORA por padrão (84 protegidos em 294.011 na máquina medida, todos cache).
+        # Contagem EXATA outra vez: há um único arquivo na árvore ('nota.txt'), então -IncludeFiles
+        # soma exatamente 1. "Aumentou" passaria verde com a árvore inteira sendo varrida duas vezes.
+        $wfCamArq = Get-WinForgeAclContentScope -Path $wfCamPerfil -IncludeFiles
+        if ([int]$wfCamArq.Scanned -ne ([int]$wfCamR.Scanned + 1)) { Write-Host "  [ERRO] Permissões (caminhada): -IncludeFiles deu Scanned=$($wfCamArq.Scanned), esperado $([int]$wfCamR.Scanned + 1) (só 'nota.txt' entra)" -ForegroundColor Red; $wbErrors++ }
+
+        # Os quatro tetos: Entries VAZIO, nunca o coletado até ali, e a frase de §1.6.
+        # '@($h)[0]' NÃO é splat - é argumento posicional, e os quatro tetos rodariam com o padrão,
+        # sem estourar nunca. Splat é '@nome', sobre uma VARIÁVEL.
+        foreach ($wfCamTeto in @(
+            @{ Nome = 'MaxItems';   Args = @{ MaxItems = 0 } },
+            @{ Nome = 'MaxBytes';   Args = @{ MaxBytes = 1 } },
+            @{ Nome = 'MaxDepth';   Args = @{ MaxDepth = 0 } },
+            @{ Nome = 'MaxSeconds'; Args = @{ MaxSeconds = 0 } })) {
+            $wfCamArgs = $wfCamTeto.Args
+            $wfCamEstouro = Get-WinForgeAclContentScope -Path $wfCamPerfil @wfCamArgs
+            if ($wfCamEstouro.Ok) { Write-Host "  [ERRO] Permissões (tetos): $($wfCamTeto.Nome) estourado devolveu Ok=`$true" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfCamEstouro.Entries).Count -ne 0) { Write-Host "  [ERRO] Permissões (tetos): $($wfCamTeto.Nome) devolveu $(@($wfCamEstouro.Entries).Count) entrada(s) - o parcial não pode sair" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfCamEstouro.Reason -notmatch 'nada foi alterado') { Write-Host "  [ERRO] Permissões (tetos): $($wfCamTeto.Nome) sem a frase de §1.6 ('$($wfCamEstouro.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Caminho longo: sem o prefixo '\\?\' isto estoura PathTooLongException no PC do usuário,
+        # porque LongPathsEnabled=1 não é o padrão.
+        $wfCamLongo = $wfCamPerfil
+        while ($wfCamLongo.Length -lt 294) { $wfCamLongo = Join-Path $wfCamLongo ('n' * 30) }
+        [System.IO.Directory]::CreateDirectory('\\?\' + $wfCamLongo) | Out-Null
+        # O prefixo '\\?\' não é só comprimento: ele desliga a normalização do Win32, e ISSO nenhum
+        # LongPathsEnabled reverte. 'cache ' - com espaço no fim - é criada pelo prefixo e, sem ele,
+        # o Win32 come o espaço, procura 'cache' e não acha: medido, Exists=False e GetAttributes e
+        # GetAccessControl lançam, enquanto a enumeração da pasta acima devolve o nome do mesmo
+        # jeito. É esta pasta, e não o comprimento, que mata a mutação do prefixo NESTA máquina:
+        # aqui LongPathsEnabled=1, então o caminho de 300 caracteres abre sem prefixo nenhum.
+        $wfCamEspaco = Join-Path $wfCamPerfil 'cache '
+        [System.IO.Directory]::CreateDirectory('\\?\' + $wfCamEspaco) | Out-Null
+        $wfCamRLongo = Get-WinForgeAclContentScope -Path $wfCamPerfil
+        if (-not $wfCamRLongo.Ok) { Write-Host "  [ERRO] Permissões (caminho longo): a caminhada falhou ('$($wfCamRLongo.Reason)') - falta o prefixo \\?\" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamRLongo.Denied -ne 0) { Write-Host "  [ERRO] Permissões (caminho longo): $($wfCamRLongo.Denied) negada(s) - sem o prefixo \\?\ em TODA chamada a pasta 'cache ' (espaço no fim) some da árvore e o caminho de $($wfCamLongo.Length) caracteres não abre" -ForegroundColor Red; $wbErrors++ }
+
+        # Atributo ilegível NÃO é "não é ponto de reanálise". Quando o GetAttributes lança, não se
+        # sabe o que o item é, e descer nele é descer justamente no que não se conseguiu
+        # identificar - o caminho de volta ao laço. A caminhada falha FECHADA: conta em Denied e não
+        # desce. Caminho inexistente é a forma determinística de fazer o GetAttributes lançar mesmo
+        # COM o prefixo. 'Scanned' exato é o que mata a mutação: falhando aberta ele vem 1, porque a
+        # pasta é contada antes de o GetAccessControl recusar.
+        $wfCamSumiu = Get-WinForgeAclContentScope -Path (Join-Path $wfCamPerfil 'pasta-que-nunca-existiu')
+        if ([int]$wfCamSumiu.Scanned -ne 0) { Write-Host "  [ERRO] Permissões (atributo ilegível): Scanned=$($wfCamSumiu.Scanned), esperado 0 - o item cujo atributo não pôde ser lido foi visitado assim mesmo" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamSumiu.Denied -ne 1) { Write-Host "  [ERRO] Permissões (atributo ilegível): Denied=$($wfCamSumiu.Denied), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfCamSumiu.DeniedPaths).Count -ne 1 -or ([string](@($wfCamSumiu.DeniedPaths)[0])) -notlike '*pasta-que-nunca-existiu') { Write-Host "  [ERRO] Permissões (atributo ilegível): DeniedPaths veio '$(@($wfCamSumiu.DeniedPaths) -join ' | ')' - é esta lista que a Fase 2 mostra ao usuário" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfCamSumiu.Reparse -ne 0) { Write-Host "  [ERRO] Permissões (atributo ilegível): Reparse=$($wfCamSumiu.Reparse), esperado 0 - atributo ilegível não é ponto de reanálise" -ForegroundColor Red; $wbErrors++ }
+
+        # Profundidade x laço: as duas causas estouram o MESMO teto, e mandar a mesma frase nas duas
+        # esconde justamente o defeito que esta função existe para evitar. Controle negativo
+        # PRIMEIRO, enquanto não há atalho nenhum no caminho da descida.
+        $wfCamFundo = Get-WinForgeAclContentScope -Path $wfCamPerfil -MaxDepth 3
+        if ([string]$wfCamFundo.Reason -notmatch 'níveis de pasta') { Write-Host "  [ERRO] Permissões (profundidade): árvore funda não deu a frase de profundidade ('$($wfCamFundo.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCamFundo.Reason -match 'laço') { Write-Host "  [ERRO] Permissões (profundidade): árvore funda, sem atalho nenhum no caminho, foi chamada de laço ('$($wfCamFundo.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # Agora três atalhos com nome em 'z'. O NTFS enumera em ordem e a pilha é LIFO, então eles
+        # saem PRIMEIRO e a contagem de reparse já está alta quando a descida bate no teto - que é a
+        # assinatura do laço de verdade.
+        foreach ($wfCamZ in @('z1', 'z2', 'z3')) {
+            cmd.exe /c mklink /J "$wfCamPerfil\$wfCamZ" "$wfCamPerfil\Documentos" | Out-Null
+        }
+        $wfCamLaco = Get-WinForgeAclContentScope -Path $wfCamPerfil -MaxDepth 4
+        if ([string]$wfCamLaco.Reason -notmatch 'laço') { Write-Host "  [ERRO] Permissões (laço): $($wfCamLaco.Reparse) atalho(s) em $($wfCamLaco.Scanned) item(ns) e veio a frase de árvore funda ('$($wfCamLaco.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfCamLaco.Reason -notmatch 'nada foi alterado') { Write-Host "  [ERRO] Permissões (laço): a frase do laço não diz que nada foi alterado ('$($wfCamLaco.Reason)')" -ForegroundColor Red; $wbErrors++ }
+
+        # 'Denied' POSITIVO, com pasta de verdade: negação explícita de "listar pasta" para o próprio
+        # usuário. Medido: o DONO mantém READ_CONTROL por direito implícito, então o GetAccessControl
+        # continua lendo a lista e a entrada entra no backup, mas a enumeração dos filhos é recusada.
+        # É o caso da §1.2 - pasta que fica fora do backup sem que nada exploda - e o SDDL dela é o
+        # único ACE de negação real desta árvore, o que prova a contagem de 'Deny' de ponta a ponta.
+        $wfCamNegada = Join-Path $wfCamPerfil 'negada'
+        New-Item -ItemType Directory -Path (Join-Path $wfCamNegada 'filha') -Force | Out-Null
+        $wfCamEu = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $wfCamNegDi = New-Object System.IO.DirectoryInfo $wfCamNegada
+        $wfCamNegSd = $wfCamNegDi.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfCamNegSd.SetAccessRuleProtection($true, $true)
+        $wfCamNegRegra = New-Object System.Security.AccessControl.FileSystemAccessRule($wfCamEu, [System.Security.AccessControl.FileSystemRights]::ListDirectory, [System.Security.AccessControl.InheritanceFlags]::None, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny)
+        $wfCamNegSd.AddAccessRule($wfCamNegRegra)
+        $wfCamNegDi.SetAccessControl($wfCamNegSd)
+        try {
+            $wfCamRNeg = Get-WinForgeAclContentScope -Path $wfCamPerfil
+            if (-not $wfCamRNeg.Ok) { Write-Host "  [ERRO] Permissões (negada): uma pasta recusada derrubou a caminhada inteira ('$($wfCamRNeg.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            if ([int]$wfCamRNeg.Denied -ne 1) { Write-Host "  [ERRO] Permissões (negada): Denied=$($wfCamRNeg.Denied), esperado exatamente 1" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfCamRNeg.DeniedPaths | Where-Object { $_ -like '*\negada' }).Count) { Write-Host "  [ERRO] Permissões (negada): DeniedPaths não traz a pasta recusada ('$(@($wfCamRNeg.DeniedPaths) -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            if ([int]$wfCamRNeg.Deny -ne 1) { Write-Host "  [ERRO] Permissões (negada): Deny=$($wfCamRNeg.Deny), esperado 1 - o ACE de negação da pasta recusada tem de ser contado" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            # Sai no finally: a pasta só volta a ser apagável depois que a negação some.
+            $wfCamNegDi2 = New-Object System.IO.DirectoryInfo $wfCamNegada
+            $wfCamNegSd2 = $wfCamNegDi2.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            $null = $wfCamNegSd2.RemoveAccessRuleSpecific($wfCamNegRegra)
+            $wfCamNegDi2.SetAccessControl($wfCamNegSd2)
+        }
+
+        # 'Denied' conta o GetAccessControl, a enumeração dos filhos e o GetAttributes que LANÇA. Em
+        # pasta apenas negada o GetAttributes não lança (medido), e por isso não é ele quem detecta
+        # negação; quando ele lança, o item é desconhecido e a caminhada falha fechada - é o que o
+        # bloco do atributo ilegível acima cobra.
+        $wfCamFonte = [string](Get-Command Get-WinForgeAclContentScope).ScriptBlock
+        if ($wfCamFonte -match 'AllDirectories') { Write-Host "  [ERRO] Permissões (caminhada): EnumerateFileSystemEntries com AllDirectories é proibido - ele segue reparse point" -ForegroundColor Red; $wbErrors++ }
+        if ($wfCamFonte -match 'AccessControlSections\]::All') { Write-Host "  [ERRO] Permissões (caminhada): AccessControlSections::All lança sem SeSecurityPrivilege" -ForegroundColor Red; $wbErrors++ }
+        if ($wfCamFonte -notmatch 'GetSecurityDescriptorSddlForm') { Write-Host "  [ERRO] Permissões (caminhada): o SDDL tem de sair de GetSecurityDescriptorSddlForm('Access')" -ForegroundColor Red; $wbErrors++ }
+        # O SDDL tem quatro formas de ACE de negação e o NTFS só sabe produzir uma: não existe pasta
+        # que gere '(OD;'. Então o padrão é pescado do fonte pelo marcador SDDL-NEGACAO e aplicado em
+        # SDDL sintético - é a única prova possível das outras três. A forma '(D;' já foi provada de
+        # ponta a ponta na pasta recusada, acima.
+        $wfCamNegPad = [regex]::Match($wfCamFonte, "'([^']+)'\s*#\s*SDDL-NEGACAO").Groups[1].Value
+        if ([string]::IsNullOrWhiteSpace($wfCamNegPad)) { Write-Host "  [ERRO] Permissões (negação): o marcador SDDL-NEGACAO sumiu do fonte - sem ele não há como provar o padrão" -ForegroundColor Red; $wbErrors++ }
+        else {
+            foreach ($wfCamNegCaso in @('D:P(A;;FA;;;SY)(D;;FA;;;WD)', 'D:P(A;;FA;;;SY)(OD;;CR;;;WD)', 'D:P(A;;FA;;;SY)(XD;;FA;;;WD)', 'D:P(A;;FA;;;SY)(ZD;;FA;;;WD)')) {
+                if ($wfCamNegCaso -notmatch $wfCamNegPad) { Write-Host "  [ERRO] Permissões (negação): o padrão '$wfCamNegPad' não pega '$wfCamNegCaso'" -ForegroundColor Red; $wbErrors++ }
+            }
+            foreach ($wfCamNegNao in @('D:P(A;;FA;;;SY)(A;;FA;;;WD)', 'D:P(A;;FA;;;SY)(OA;;CR;;;WD)')) {
+                if ($wfCamNegNao -match $wfCamNegPad) { Write-Host "  [ERRO] Permissões (negação): o padrão '$wfCamNegPad' pegou uma ACE de permissão ('$wfCamNegNao')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        Write-Host "  Permissões (caminhada): junção auto-referente não é descida nem indexada, 1 entrada protegida, tetos devolvem lista vazia, caminho de $($wfCamLongo.Length) caracteres lido"
+    } catch {
+        Write-Host "  [ERRO] Permissões (caminhada): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        # Os atalhos primeiro, e por 'rmdir': medido, o Directory.Delete recursivo do .NET NÃO segue
+        # ponto de reanálise - o arquivo do outro lado sobreviveu -, mas LANÇA ao tentar apagá-lo.
+        # Depois o Delete COM prefixo, porque o Remove-Item deixa 'cache ' para trás: medido, ela
+        # some do Win32 e a pasta fica em %TEMP% para sempre.
+        foreach ($wfCamLixo in @('perfil\AppData\Local\Dados de Aplicativos', 'perfil\z1', 'perfil\z2', 'perfil\z3')) {
+            try { cmd.exe /c rmdir "$wfCamRaiz\$wfCamLixo" 2>$null | Out-Null } catch { }
+        }
+        try { [System.IO.Directory]::Delete('\\?\' + $wfCamRaiz, $true) } catch { }
+    }
+    # ---------------------------------------------------------------- Permissões: o arquivo e a contraprova
+    # É o único ponto do desenho sem prova: gravar o arquivo de conteúdo e conferir byte a byte que
+    # ele é o que o icacls escreveria. Roda em %TEMP%, sem elevação.
+    #
+    # A prova NÃO é um '/restore'. Medido aqui, sem elevação: 'icacls <raiz> /restore <arq> /C /L'
+    # responde 1300 ("Nem todos os privilégios ou grupos mencionados estão atribuídos ao chamador"),
+    # diz "Processados com sucesso 0 arquivos" e deixa a DACL como estava - com QUALQUER combinação
+    # de /C, /L e /Q, e mesmo com o arquivo que o próprio icacls acabou de gravar. Ele habilita
+    # SeRestorePrivilege na entrada, antes de olhar o conteúdo, e o SelfTest roda sem admin. É a
+    # mesma razão que já mantém o '/restore' do conteúdo fora do SelfTest (bloco 3a3).
+    #
+    # A contraprova é o '/save', que roda sem elevação E é o AUTOR do formato: o arquivo que ele
+    # escreve para a MESMA árvore tem de trazer o mesmo nome relativo, o mesmo SDDL e o mesmo
+    # encoding que o nosso. Um '/restore' que aceitasse o arquivo diria menos: ele aceita em
+    # silêncio o que decodificar, e é justo o encoding que precisa ser cobrado.
+    $wfArqRaiz = Join-Path $wbSelfTestRaiz 'acl-arquivo'
+    $wfArqSelfAntes = $sync.SelfTest
+    try {
+        if (Test-Path -LiteralPath $wfArqRaiz) { Remove-Item -LiteralPath $wfArqRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfArqPerfil = Join-Path $wfArqRaiz 'perfil'
+        $wfArqAlvo = Join-Path $wfArqPerfil 'Protegida'
+        New-Item -ItemType Directory -Path $wfArqAlvo -Force | Out-Null
+        $wfArqDir = New-Object System.IO.DirectoryInfo $wfArqAlvo
+        $wfArqSd = $wfArqDir.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfArqSd.SetAccessRuleProtection($true, $true)
+        $wfArqDir.SetAccessControl($wfArqSd)
+        $wfArqEscopo = Get-WinForgeAclContentScope -Path $wfArqPerfil
+        if (-not $wfArqEscopo.Ok -or @($wfArqEscopo.Entries).Count -lt 1) { throw "o escopo de teste saiu vazio ($($wfArqEscopo.Reason))" }
+        $wfArqSddlAntes = [string]@($wfArqEscopo.Entries)[0].Sddl
+
+        $wfArqArquivo = Join-Path $wfArqRaiz 'conteudo.txt'
+        # A gravação é o ÚNICO ponto que escreve o arquivo de conteúdo, e por isso recusa em
+        # SelfTest. A trava é desligada só em volta desta chamada; o 'finally' a devolve mesmo se
+        # algo estourar no meio.
+        $sync.SelfTest = $false
+        $wfArqGrav = Write-WinForgeAclContentBackup -Path $wfArqArquivo -Entries @($wfArqEscopo.Entries)
+        $sync.SelfTest = $wfArqSelfAntes
+        if (-not $sync.SelfTest) { Write-Host "  [ERRO] Permissões (arquivo): a trava de SelfTest não voltou depois da gravação" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfArqGrav.Ok) { throw "a gravação falhou: $($wfArqGrav.Reason)" }
+        # UTF-16LE SEM BOM, pares de linhas - é o que o arquivo do icacls traz, conferido logo
+        # abaixo. Cobrar só a AUSÊNCIA de 'FF FE' deixaria passar UTF-8, ASCII e arquivo vazio (o
+        # mutante que troca o encoder por UTF8Encoding sobreviveria), por isso o teste afirma
+        # o encoding: o primeiro nome é 'perfil\Protegida', então os dois primeiros bytes têm de ser
+        # 0x70 ('p') e 0x00 (o byte alto do UTF-16LE).
+        $wfArqBytes = [System.IO.File]::ReadAllBytes($wfArqArquivo)
+        if ($wfArqBytes.Length -lt 4) { Write-Host "  [ERRO] Permissões (arquivo): o arquivo saiu com $($wfArqBytes.Length) byte(s)" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqBytes[0] -eq 0xFF -and $wfArqBytes[1] -eq 0xFE) { Write-Host "  [ERRO] Permissões (arquivo): o arquivo saiu COM BOM - o formato medido é UTF-16LE sem BOM" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqBytes[0] -ne 0x70 -or $wfArqBytes[1] -ne 0x00) { Write-Host "  [ERRO] Permissões (arquivo): os dois primeiros bytes são $('0x{0:X2} 0x{1:X2}' -f $wfArqBytes[0], $wfArqBytes[1]), esperado 0x70 0x00 - isto não é UTF-16LE" -ForegroundColor Red; $wbErrors++ }
+        # Count no caminho feliz. Sozinha esta linha é fraca - compara a lista de entrada com ela
+        # mesma -, e quem prova que 'Count' vem do ARQUIVO é o bloco "contagem" mais abaixo.
+        if ([int]$wfArqGrav.Count -ne @($wfArqEscopo.Entries).Count) { Write-Host "  [ERRO] Permissões (arquivo): a gravação relatou Count=$($wfArqGrav.Count) para $(@($wfArqEscopo.Entries).Count) entrada(s)" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfArqGrav.Bytes -ne [long]$wfArqBytes.Length) { Write-Host "  [ERRO] Permissões (arquivo): a gravação relatou Bytes=$($wfArqGrav.Bytes) e o arquivo tem $($wfArqBytes.Length)" -ForegroundColor Red; $wbErrors++ }
+        $wfArqLinhas = @([System.IO.File]::ReadAllText($wfArqArquivo, [System.Text.Encoding]::Unicode) -split "`r`n" | Where-Object { $_ -ne '' })
+        if ($wfArqLinhas.Count -ne (2 * @($wfArqEscopo.Entries).Count)) { Write-Host "  [ERRO] Permissões (arquivo): $($wfArqLinhas.Count) linha(s) úteis para $(@($wfArqEscopo.Entries).Count) entrada(s) - o formato é um par por entrada" -ForegroundColor Red; $wbErrors++ }
+        # -cne nas duas: o arquivo tem de trazer o texto que a caminhada leu, e não uma versão dele
+        # com a caixa mexida. O icacls trata 'FA' e 'fa' como o mesmo direito, então uma comparação
+        # sem caixa aceitaria um escritor que reescreve o que copia - e aí não é mais cópia.
+        if ([string]$wfArqLinhas[0] -cne 'perfil\Protegida') { Write-Host "  [ERRO] Permissões (arquivo): a primeira linha é '$($wfArqLinhas[0])', esperado o nome relativo 'perfil\Protegida'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfArqLinhas[1] -cne $wfArqSddlAntes) { Write-Host "  [ERRO] Permissões (arquivo): o SDDL gravado difere do lido" -ForegroundColor Red; $wbErrors++ }
+        if ((Measure-WinForgeAclSaveEntry -Path $wfArqArquivo) -ne @($wfArqEscopo.Entries).Count) { Write-Host "  [ERRO] Permissões (arquivo): a contagem de entradas não bate" -ForegroundColor Red; $wbErrors++ }
+
+        # CONTRAPROVA: o arquivo que o PRÓPRIO icacls escreve para a mesma árvore.
+        $wfArqIcacls = Get-WinForgeSystemExe -Name 'icacls.exe'
+        $wfArqRef = Join-Path $wfArqRaiz 'referencia.txt'
+        $wfArqRes = Invoke-WinForgeNativeCommand -FilePath $wfArqIcacls -Arguments @($wfArqPerfil, '/save', $wfArqRef, '/T', '/C', '/L') -Encoding 'oem'
+        if ([int]$wfArqRes.ExitCode -ne 0) { Write-Host "  [ERRO] Permissões (contraprova): o /save terminou com código $($wfArqRes.ExitCode): $(([string]$wfArqRes.Text).Trim())" -ForegroundColor Red; $wbErrors++ }
+        $wfArqRefBytes = [System.IO.File]::ReadAllBytes($wfArqRef)
+        # A medida que justifica UnicodeEncoding($false, $false), feita AQUI e não copiada da
+        # pesquisa: o arquivo do icacls não começa com a marca. Se um dia começar, é o nosso
+        # escritor que passa a estar errado, e é este erro que avisa.
+        if ($wfArqRefBytes.Length -lt 4) { Write-Host "  [ERRO] Permissões (contraprova): o /save gravou $($wfArqRefBytes.Length) byte(s)" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqRefBytes[0] -eq 0xFF -and $wfArqRefBytes[1] -eq 0xFE) { Write-Host "  [ERRO] Permissões (contraprova): o arquivo do icacls veio COM BOM - o formato medido mudou e o escritor tem de acompanhar" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfArqRefBytes[0] -ne 0x70 -or $wfArqRefBytes[1] -ne 0x00) { Write-Host "  [ERRO] Permissões (contraprova): o arquivo do icacls começa com $('0x{0:X2} 0x{1:X2}' -f $wfArqRefBytes[0], $wfArqRefBytes[1]), esperado 0x70 0x00" -ForegroundColor Red; $wbErrors++ }
+        $wfArqRefLinhas = @([System.IO.File]::ReadAllText($wfArqRef, [System.Text.Encoding]::Unicode) -split "`r`n" | Where-Object { $_ -ne '' })
+        # O nome relativo é escolha do icacls, não nossa: dado '<pasta>\perfil', ele grava
+        # 'perfil\Protegida'. É o que a caminhada monta, e é aqui que as duas versões se encontram.
+        $wfArqRefIdx = [array]::IndexOf($wfArqRefLinhas, 'perfil\Protegida')
+        if ($wfArqRefIdx -lt 0 -or $wfArqRefIdx + 1 -ge $wfArqRefLinhas.Count) { Write-Host "  [ERRO] Permissões (contraprova): o icacls não gravou o par de 'perfil\Protegida' ($($wfArqRefLinhas.Count) linha(s) úteis)" -ForegroundColor Red; $wbErrors++ }
+        # -cne: o SDDL é comparado com MAIÚSCULAS E MINÚSCULAS. 'FA' e 'fa' são o mesmo direito para
+        # o icacls, mas uma diferença de caixa aqui significaria que o texto não saiu do mesmo lugar.
+        elseif ([string]$wfArqRefLinhas[$wfArqRefIdx + 1] -cne $wfArqSddlAntes) { Write-Host "  [ERRO] Permissões (contraprova): o SDDL do .NET difere do que o icacls gravou`n    .NET  : $wfArqSddlAntes`n    icacls: $($wfArqRefLinhas[$wfArqRefIdx + 1])" -ForegroundColor Red; $wbErrors++ }
+        # E a contagem lida num arquivo do PRÓPRIO icacls, que é o caso real: duas entradas, 'perfil'
+        # e 'perfil\Protegida'. Contar só o arquivo que nós mesmos escrevemos deixaria passar um erro
+        # que o escritor e o leitor cometessem juntos.
+        if ((Measure-WinForgeAclSaveEntry -Path $wfArqRef) -ne 2) { Write-Host "  [ERRO] Permissões (contraprova): a contagem no arquivo do icacls deu $(Measure-WinForgeAclSaveEntry -Path $wfArqRef), esperado 2 ('perfil' e 'perfil\Protegida')" -ForegroundColor Red; $wbErrors++ }
+
+        # SHA-256: um byte muda e a impressão digital muda.
+        $wfArqH1 = Get-WinForgeAclContentHash -Path $wfArqArquivo
+        # 64 hexadecimais em MAIÚSCULAS, cobrado com -cnotmatch: o índice grava esta impressão e
+        # depois a compara como texto, então a caixa faz parte do contrato.
+        if (-not $wfArqH1.Ok -or [string]$wfArqH1.Hash -cnotmatch '^[0-9A-F]{64}$') { Write-Host "  [ERRO] Permissões (SHA-256): '$($wfArqH1.Hash)' ($($wfArqH1.Reason))" -ForegroundColor Red; $wbErrors++ }
+        Add-Content -LiteralPath $wfArqArquivo -Value ' ' -Encoding Unicode
+        $wfArqH2 = Get-WinForgeAclContentHash -Path $wfArqArquivo
+        if ([string]$wfArqH2.Hash -eq [string]$wfArqH1.Hash) { Write-Host "  [ERRO] Permissões (SHA-256): a impressão digital não mudou com o arquivo alterado" -ForegroundColor Red; $wbErrors++ }
+        # Lista vazia não pode virar arquivo vazio: o índice contaria esse arquivo como rede de
+        # segurança e ele não segura nada. Quem chama trata a recusa como "esta pasta fica fora".
+        $wfArqVazioCam = Join-Path $wfArqRaiz 'vazio.txt'
+        $sync.SelfTest = $false
+        $wfArqVazio = Write-WinForgeAclContentBackup -Path $wfArqVazioCam -Entries @()
+        $sync.SelfTest = $wfArqSelfAntes
+        if ($wfArqVazio.Ok) { Write-Host "  [ERRO] Permissões (arquivo): a lista vazia devolveu Ok=`$true" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfArqVazioCam) { Write-Host "  [ERRO] Permissões (arquivo): a lista vazia deixou um arquivo em '$wfArqVazioCam'" -ForegroundColor Red; $wbErrors++ }
+        # CONTAGEM LIDA DO ARQUIVO, e não da lista de entrada. Medido: '[string]$e.Sddl' sobre uma
+        # propriedade que LANÇA devolve '' em silêncio - o PowerShell engole erro de propriedade -, e
+        # o par vira nome + linha em branco. Contando a lista, a função respondia Ok=$true com
+        # Count=2 e um descritor só no disco: backup incompleto passando por bom, descoberto só na
+        # hora de desfazer. A asserção de Count lá em cima não pega isto, porque compara a lista de
+        # entrada com ela mesma.
+        $wfArqMau = New-Object PSObject
+        $wfArqMau | Add-Member -MemberType NoteProperty -Name Name -Value 'perfil\Explode'
+        $wfArqMau | Add-Member -MemberType ScriptProperty -Name Sddl -Value { throw 'leitura do SDDL falhou' }
+        $wfArqMeioCam = Join-Path $wfArqRaiz 'meio.txt'
+        $sync.SelfTest = $false
+        $wfArqMeio = Write-WinForgeAclContentBackup -Path $wfArqMeioCam -Entries @(@($wfArqEscopo.Entries)[0], $wfArqMau)
+        $sync.SelfTest = $wfArqSelfAntes
+        if ($wfArqMeio.Ok) { Write-Host "  [ERRO] Permissões (contagem): uma entrada que falha no meio devolveu Ok=`$true com Count=$($wfArqMeio.Count)" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfArqMeio.Reason -notmatch 'incompleta') { Write-Host "  [ERRO] Permissões (contagem): a recusa não diz que a cópia está incompleta ('$($wfArqMeio.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfArqMeio.Count -ne 0) { Write-Host "  [ERRO] Permissões (contagem): a gravação recusada relatou Count=$($wfArqMeio.Count), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        # §1.6: o arquivo pela metade não fica no disco.
+        if (Test-Path -LiteralPath $wfArqMeioCam) { Write-Host "  [ERRO] Permissões (contagem): o arquivo pela metade ficou em '$wfArqMeioCam'" -ForegroundColor Red; $wbErrors++ }
+
+        # ORDEM ORDINAL (§1.3). Não é estética: a fase 5 roda 'icacls <pasta> /inheritance:e' entrada
+        # por entrada, SEM '/T', e depende do pai chegar antes do filho - garantia que só o ordinal
+        # dá, porque nele um prefixo ordena sempre antes do que o estende. A lista de teste foi
+        # escolhida para SEPARAR ordinal de cultura: por 'Sort-Object' ela sai
+        # 'ab | a-b | AppData | AppData\Local | Zebra' (o hífen é ignorado, a caixa não separa); no
+        # ordinal, 'A'(0x41) e 'Z'(0x5A) vêm antes de 'a'(0x61), e '-'(0x2D) antes de 'b'(0x62).
+        $wfArqOrdEsperado = @('perfil\AppData', 'perfil\AppData\Local', 'perfil\Zebra', 'perfil\a-b', 'perfil\ab')
+        $wfArqOrdEntradas = @(@('perfil\ab', 'perfil\a-b', 'perfil\Zebra', 'perfil\AppData\Local', 'perfil\AppData') | ForEach-Object { @{ Name = $_; Sddl = 'D:PAI(A;OICI;FA;;;SY)' } })
+        $wfArqOrdCam = Join-Path $wfArqRaiz 'ordem.txt'
+        $sync.SelfTest = $false
+        $wfArqOrd = Write-WinForgeAclContentBackup -Path $wfArqOrdCam -Entries $wfArqOrdEntradas
+        $sync.SelfTest = $wfArqSelfAntes
+        if (-not $wfArqOrd.Ok) { Write-Host "  [ERRO] Permissões (ordem): a gravação de teste falhou ('$($wfArqOrd.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfArqOrdSaiu = @(@([System.IO.File]::ReadAllText($wfArqOrdCam, [System.Text.Encoding]::Unicode) -split "`r`n" | Where-Object { $_ -ne '' }) | Where-Object { -not ([string]$_).StartsWith('D:', [StringComparison]::Ordinal) })
+            if (($wfArqOrdSaiu -join ' | ') -cne ($wfArqOrdEsperado -join ' | ')) { Write-Host "  [ERRO] Permissões (ordem): saiu '$($wfArqOrdSaiu -join ' | ')', esperada a ordem ordinal '$($wfArqOrdEsperado -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+            if ([int]$wfArqOrd.Count -ne $wfArqOrdEsperado.Count) { Write-Host "  [ERRO] Permissões (ordem): Count=$($wfArqOrd.Count) para $($wfArqOrdEsperado.Count) entrada(s)" -ForegroundColor Red; $wbErrors++ }
+        }
+
+        # Caminho RELATIVO recusado nas duas funções: StreamWriter e File::Open resolvem contra o
+        # diretório do PROCESSO, e não contra a localização do PowerShell como o Set-Content faria.
+        # O backup nasceria fora da pasta protegida sem ninguém ver.
+        $sync.SelfTest = $false
+        $wfArqRel = Write-WinForgeAclContentBackup -Path 'acl-relativo-do-selftest.txt' -Entries @($wfArqEscopo.Entries)
+        $sync.SelfTest = $wfArqSelfAntes
+        $wfArqRelH = Get-WinForgeAclContentHash -Path 'acl-relativo-do-selftest.txt'
+        if ($wfArqRel.Ok) { Write-Host "  [ERRO] Permissões (caminho): a gravação aceitou caminho relativo" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfArqRel.Reason -notmatch 'absoluto') { Write-Host "  [ERRO] Permissões (caminho): a recusa da gravação não fala em caminho absoluto ('$($wfArqRel.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfArqRelH.Ok) { Write-Host "  [ERRO] Permissões (caminho): a impressão digital aceitou caminho relativo" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfArqRelH.Reason -notmatch 'absoluto') { Write-Host "  [ERRO] Permissões (caminho): a recusa da impressão digital não fala em caminho absoluto ('$($wfArqRelH.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # E o prefixo '\\?\' provado por COMPORTAMENTO, não por grep no fonte. Duas medições feitas
+        # aqui, e as duas custaram um mutante sobrevivente antes de aparecerem:
+        #   1. COMPRIMENTO sozinho não prova nada nesta máquina: LongPathsEnabled=1, e 306
+        #      caracteres abrem sem prefixo nenhum. Continua valendo para o PC do usuário, onde a
+        #      chave é 0 - por isso o caminho fundo fica -, mas não mata mutação aqui.
+        #   2. ESPAÇO no fim também não, para ESTAS chamadas: medido, 'Directory::Exists' sem
+        #      prefixo responde False numa pasta 'cache ', mas o StreamWriter escreve no destino
+        #      exato do mesmo jeito. (No bloco da caminhada o espaço MATA, porque lá quem pergunta é
+        #      GetAttributes/GetAccessControl - outro caminho de normalização.)
+        # Quem mata aqui é o PONTO no fim: o Win32 come o '.', o StreamWriter vai procurar a pasta
+        # 'cache', não acha e estoura. O prefixo desliga essa normalização, e isso nenhuma chave de
+        # registro reverte.
+        $wfArqFundo = $wfArqRaiz
+        while ($wfArqFundo.Length -lt 250) { $wfArqFundo = $wfArqFundo + '\' + ('n' * 30) }
+        $wfArqFundo = $wfArqFundo + '\cache.'
+        [System.IO.Directory]::CreateDirectory('\\?\' + $wfArqFundo) | Out-Null
+        $wfArqLongoCam = $wfArqFundo + '\conteudo-longo.txt'
+        $sync.SelfTest = $false
+        $wfArqLongo = Write-WinForgeAclContentBackup -Path $wfArqLongoCam -Entries @($wfArqEscopo.Entries)
+        $sync.SelfTest = $wfArqSelfAntes
+        $wfArqLongoH = Get-WinForgeAclContentHash -Path $wfArqLongoCam
+        if (-not $wfArqLongo.Ok) { Write-Host "  [ERRO] Permissões (caminho longo): a gravação em $($wfArqLongoCam.Length) caracteres falhou ('$($wfArqLongo.Reason)') - falta o prefixo \\?\" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfArqLongoH.Ok) { Write-Host "  [ERRO] Permissões (caminho longo): a impressão digital em $($wfArqLongoCam.Length) caracteres falhou ('$($wfArqLongoH.Reason)') - falta o prefixo \\?\" -ForegroundColor Red; $wbErrors++ }
+        # E o arquivo foi mesmo parar DENTRO de 'cache.' - sem o prefixo ele nem chegaria lá.
+        if (-not [System.IO.File]::Exists('\\?\' + $wfArqLongoCam)) { Write-Host "  [ERRO] Permissões (caminho longo): nada foi gravado em '$wfArqLongoCam' (a pasta com ponto no fim)" -ForegroundColor Red; $wbErrors++ }
+
+        # E a gravação recusa em modo SelfTest - é o único ponto que escreve. Duas provas: a trava no
+        # fonte e o COMPORTAMENTO, porque uma trava posta depois da abertura do arquivo passaria na
+        # primeira e escreveria assim mesmo.
+        $wfArqFonteW = [string](Get-Command Write-WinForgeAclContentBackup).ScriptBlock
+        if ($wfArqFonteW -notmatch 'Assert-WinForgeNotSelfTest') { Write-Host "  [ERRO] Permissões (arquivo): Write-WinForgeAclContentBackup sem a trava de SelfTest" -ForegroundColor Red; $wbErrors++ }
+        $wfArqRecusaCam = Join-Path $wfArqRaiz 'recusado.txt'
+        $wfArqRecusa = $null
+        try { Write-WinForgeAclContentBackup -Path $wfArqRecusaCam -Entries @($wfArqEscopo.Entries) | Out-Null } catch { $wfArqRecusa = [string]$_.Exception.Message }
+        if ($null -eq $wfArqRecusa -or $wfArqRecusa -notmatch 'SelfTest') { Write-Host "  [ERRO] Permissões (arquivo): a gravação não recusou em modo SelfTest ('$wfArqRecusa')" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath $wfArqRecusaCam) { Write-Host "  [ERRO] Permissões (arquivo): a gravação recusada ainda deixou '$wfArqRecusaCam' no disco" -ForegroundColor Red; $wbErrors++ }
+        # A porta do caminho ABSOLUTO, nas duas funções que tocam o arquivo de backup. Ela diz
+        # "precisa ser absoluto" e até aqui perguntava 'IsPathRooted', que é outra pergunta. MEDIDO:
+        # 'C:acl.txt' (relativo ao diretório corrente DAQUELE disco) e '\acl.txt' (relativo ao disco
+        # corrente) são "rooted", passavam pela porta, viravam '\\?\C:acl.txt' e morriam adiante em
+        # "Não foi possível localizar o arquivo". Falha fechada - nada é gravado, medido aqui
+        # também -, mas com a mensagem culpando o disco por um caminho que o programa montou.
+        # Quem separa os três casos é a RAIZ: 'C:\' e '\\servidor\share' já dizem onde estão;
+        # 'C:', '\' e '' dependem de onde o processo está, e GetFullPath resolve cada uma para
+        # outra coisa.
+        $wfArqSelfAntes2 = $sync.SelfTest
+        $sync.SelfTest = $false
+        try {
+            foreach ($wfArqRel in @('acl.txt', 'C:acl.txt', '\acl.txt')) {
+                $wfArqRelG = Write-WinForgeAclContentBackup -Path $wfArqRel -Entries @($wfArqEscopo.Entries)
+                if ($wfArqRelG.Ok) { Write-Host "  [ERRO] Permissões (absoluto): a gravação aceitou '$wfArqRel'" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfArqRelG.Reason -notmatch 'precisa ser absoluto') { Write-Host "  [ERRO] Permissões (absoluto): a gravação recusou '$wfArqRel' pelo motivo errado ('$($wfArqRelG.Reason)')" -ForegroundColor Red; $wbErrors++ }
+                $wfArqRelH = Get-WinForgeAclContentHash -Path $wfArqRel
+                if ($wfArqRelH.Ok) { Write-Host "  [ERRO] Permissões (absoluto): a impressão digital aceitou '$wfArqRel'" -ForegroundColor Red; $wbErrors++ }
+                elseif ([string]$wfArqRelH.Reason -notmatch 'precisa ser absoluto') { Write-Host "  [ERRO] Permissões (absoluto): a impressão digital recusou '$wfArqRel' pelo motivo errado ('$($wfArqRelH.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E nada foi para o disco por nenhum dos três: recusar com a frase certa e ainda assim
+            # gravar seria trocar uma mentira por outra.
+            foreach ($wfArqRelCam in @((Join-Path (Get-Location).Path 'acl.txt'), 'C:\acl.txt')) {
+                if (Test-Path -LiteralPath $wfArqRelCam) { Write-Host "  [ERRO] Permissões (absoluto): a recusa ainda gravou '$wfArqRelCam'" -ForegroundColor Red; $wbErrors++ }
+            }
+        } finally { $sync.SelfTest = $wfArqSelfAntes2 }
+        # A porta NÃO pode recusar caminho absoluto que só o prefixo '\\?\' alcança - é o caso que
+        # ela existe para servir. MEDIDO: 'GetFullPath' sobre o caminho INTEIRO come o ponto final
+        # de 'cache.' e resolve '..', então comparar o caminho todo recusaria justamente a pasta
+        # criada acima. A comparação é sobre a raiz, e por isso estes dois passam.
+        foreach ($wfArqAbs in @($wfArqLongoCam, ('\\?\' + $wfArqLongoCam))) {
+            $wfArqAbsH = Get-WinForgeAclContentHash -Path $wfArqAbs
+            if (-not $wfArqAbsH.Ok) { Write-Host "  [ERRO] Permissões (absoluto): '$wfArqAbs' foi recusado ('$($wfArqAbsH.Reason)') - a porta está comendo o ponto final de 'cache.'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Measure-WinForgeAclSaveEntry lê por FLUXO: 'Get-Content' sem -Raw materializa um array e um
+        # backup antigo grande vira OutOfMemoryException numa função que só conta linhas.
+        $wfArqFonteM = [string](Get-Command Measure-WinForgeAclSaveEntry).ScriptBlock
+        if ($wfArqFonteM -match 'Get-Content') { Write-Host "  [ERRO] Permissões (contagem): Measure-WinForgeAclSaveEntry ainda usa Get-Content - tem de ler por StreamReader" -ForegroundColor Red; $wbErrors++ }
+        if ($wfArqFonteM -notmatch 'StreamReader') { Write-Host "  [ERRO] Permissões (contagem): Measure-WinForgeAclSaveEntry não usa StreamReader" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (arquivo): UTF-16LE sem BOM, o par de 'perfil\Protegida' idêntico ao do 'icacls /save' da mesma árvore, contagem lida do arquivo, ordem ordinal em $($wfArqOrdEsperado.Count) nomes, caminho de $($wfArqLongoCam.Length) caracteres, SHA-256 sensível a um byte"
+    } catch {
+        Write-Host "  [ERRO] Permissões (arquivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        $sync.SelfTest = $wfArqSelfAntes
+        # Delete COM prefixo, como no bloco da caminhada: o Remove-Item não alcança o caminho de mais
+        # de 250 caracteres criado aqui e deixaria a árvore plantada em %TEMP% para sempre.
+        try { [System.IO.Directory]::Delete('\\?\' + $wfArqRaiz, $true) } catch { }
+        Remove-Item -LiteralPath $wfArqRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: a fase 2 no plano
+    try {
+        $wfF2Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestRaiz 'acl-plano') -Stamp '20260912-101010')
+        $wfF2Save = @($wfF2Plano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'save' })
+        if ($wfF2Save.Count) { Write-Host "  [ERRO] Permissões (fase 2): o passo 'save' com 'icacls /T' continua no plano - ele é o laço que encheu o disco" -ForegroundColor Red; $wbErrors++ }
+        $wfF2Escopo = @($wfF2Plano | Where-Object { [int]$_.Phase -eq 2 -and [string]$_.Kind -eq 'scope' })
+        if ($wfF2Escopo.Count -ne 1) { Write-Host "  [ERRO] Permissões (fase 2): esperava 1 passo 'scope', veio $($wfF2Escopo.Count)" -ForegroundColor Red; $wbErrors++ }
+        else {
+            if ($wfF2Escopo[0].FilePath) { Write-Host "  [ERRO] Permissões (fase 2): o passo 'scope' não pode ter executável - quem caminha é o motor" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfF2Escopo[0].Target -ne 'C:\Users') { Write-Host "  [ERRO] Permissões (fase 2): Target='$($wfF2Escopo[0].Target)', esperado 'C:\Users' (a pasta de onde o /restore roda)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Nenhum passo do plano inteiro pode carregar '/T' sobre a pasta de perfil. A varredura é
+        # geral de novo: a fase 5 era a última exceção e caiu junto com o passo 'inherit', então o
+        # pino que cobrava "exatamente uma" saiu daqui no mesmo commit. Exceção anotada que
+        # sobrevive à própria causa vira moradia.
+        foreach ($wfF2P in $wfF2Plano) {
+            $wfF2Args = @($wfF2P.Arguments | ForEach-Object { [string]$_ })
+            if (-not (($wfF2Args -contains '/T') -and ((@($wfF2Args) -join ' ') -like '*C:\Users\fulano*'))) { continue }
+            Write-Host "  [ERRO] Permissões (plano): passo da fase $($wfF2P.Phase) ainda usa '/T' sobre a pasta de perfil ('$($wfF2Args -join ' ')')" -ForegroundColor Red; $wbErrors++
+        }
+        # Espaço livre conferido ANTES: pedir mais do que o disco tem recusa, e diz quanto há.
+        $wfF2Esp = Test-WinForgeAclFreeSpace -Path $wbSelfTestTemp -Bytes ([long]1PB)
+        if ($wfF2Esp.Ok) { Write-Host "  [ERRO] Permissões (espaço): 1 PB deveria ser recusado" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Esp.Reason -notmatch '\d') { Write-Host "  [ERRO] Permissões (espaço): a recusa não traz o número na tela ('$($wfF2Esp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclFreeSpace -Path $wbSelfTestTemp -Bytes 103400).Ok) { Write-Host "  [ERRO] Permissões (espaço): 103,4 KB foram recusados" -ForegroundColor Red; $wbErrors++ }
+        # 'Denied > 0' muda o VEREDITO: cabeçalho, contagem e as 20 primeiras pastas.
+        $wfF2Ver = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 3; DeniedPaths = @('C:\Users\fulano\A', 'C:\Users\fulano\B', 'C:\Users\fulano\C'); Entries = @(1, 2) }
+        if ([string]$wfF2Ver.Header -ne 'Concluído com ressalvas') { Write-Host "  [ERRO] Permissões (ressalvas): cabeçalho '$($wfF2Ver.Header)', esperado 'Concluído com ressalvas'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Ver.Text -notmatch 'não foram copiadas nem alteradas') { Write-Host "  [ERRO] Permissões (ressalvas): falta a frase de que essas pastas não foram copiadas nem alteradas" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Ver.Text -notmatch 'C:\\Users\\fulano\\A') { Write-Host "  [ERRO] Permissões (ressalvas): a lista de DeniedPaths não aparece no texto" -ForegroundColor Red; $wbErrors++ }
+        # A CONTAGEM no texto, e não só a frase. §1.7 pede o número; sem esta linha, trocar
+        # "$negadas pasta(s)" por "Algumas pasta(s)" passava verde - mutante que sobreviveu na
+        # revisão da Tarefa 3.
+        if ([string]$wfF2Ver.Text -notmatch '(?m)^3 pasta\(s\)') { Write-Host "  [ERRO] Permissões (ressalvas): o texto não abre com a CONTAGEM de pastas não lidas ('$([string]$wfF2Ver.Text -split "`n" | Select-Object -First 1)')" -ForegroundColor Red; $wbErrors++ }
+        $wfF2Muitas = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 50; DeniedPaths = @(1..50 | ForEach-Object { "C:\p$_" }); Entries = @(1) }
+        if (@([regex]::Matches([string]$wfF2Muitas.Text, 'C:\\p\d+')).Count -ne 20) { Write-Host "  [ERRO] Permissões (ressalvas): o texto tem de listar as 20 PRIMEIRAS, veio $(@([regex]::Matches([string]$wfF2Muitas.Text, 'C:\\p\d+')).Count)" -ForegroundColor Red; $wbErrors++ }
+        # Contagem e lista de caminhos têm tetos DIFERENTES: a contagem não tem, a anotação de
+        # caminhos para em 200. Com 500 negadas o texto dizia "500 pasta(s)" e emendava "As 20
+        # primeiras, de 200" - quem lê conclui que 300 sumiram do relatório. Os números têm de
+        # fechar, ou o texto tem de dizer por que não fecham.
+        $wfF2Trunc = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 500; DeniedPaths = @(1..200 | ForEach-Object { "C:\q$_" }); Entries = @(1) }
+        if ([string]$wfF2Trunc.Text -notmatch '(?m)^500 pasta\(s\)') { Write-Host "  [ERRO] Permissões (ressalvas): com a lista truncada a contagem total sumiu da primeira linha" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Trunc.Text -notmatch '300') { Write-Host "  [ERRO] Permissões (ressalvas): o texto não diz que 300 pastas foram contadas sem o caminho anotado - '500' e 'de 200' se contradizem na tela" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF2Trunc.Text -match 'primeiras, de 200') { Write-Host "  [ERRO] Permissões (ressalvas): o texto ainda emenda 'de 200' logo abaixo de '500 pasta(s)'" -ForegroundColor Red; $wbErrors++ }
+        $wfF2Limpo = Get-WinForgeAclScopeVerdict -Scope @{ Ok = $true; Denied = 0; DeniedPaths = @(); Entries = @(1) }
+        if ([string]$wfF2Limpo.Header -ne 'Concluído') { Write-Host "  [ERRO] Permissões (ressalvas): sem Denied o cabeçalho é 'Concluído', veio '$($wfF2Limpo.Header)'" -ForegroundColor Red; $wbErrors++ }
+        # O arquivo parcial some no 'finally', e não dentro do laço: hoje o descarte não roda se o
+        # processo morre no meio.
+        $wfF2Fonte = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfF2Fonte -notmatch '(?s)finally\s*\{[^}]*Remove-Item[^}]*parcial') { Write-Host "  [ERRO] Permissões (parcial): falta o 'finally' que apaga o arquivo de conteúdo pela metade" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF2Fonte -notmatch 'Get-WinForgeAclContentScope') { Write-Host "  [ERRO] Permissões (fase 2): Invoke-WinForgeAclRestore não usa a caminhada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF2Fonte -notmatch 'Get-WinForgeAclContentHash') { Write-Host "  [ERRO] Permissões (fase 2): o índice não recebe o SHA-256 do arquivo de conteúdo" -ForegroundColor Red; $wbErrors++ }
+        # A linha acima prova que o hash é CALCULADO, não que ele CHEGA ao índice. Mutante que
+        # sobreviveu na revisão da Tarefa 3: trocar 'Sha256 = $impressao' por 'Sha256 = ''' ficava
+        # verde, e a Tarefa 5 - que recusa o backup cujo hash não bate - herdaria um campo vazio sem
+        # aviso nenhum. As duas pontas da corrente, então: o hash sai da função, e o campo do índice
+        # recebe esse valor.
+        if ($wfF2Fonte -notmatch '\$impressao\s*=\s*\[string\]\$hash\.Hash') { Write-Host "  [ERRO] Permissões (fase 2): o SHA-256 do índice não sai de Get-WinForgeAclContentHash" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF2Fonte -notmatch 'Sha256\s*=\s*\$impressao') { Write-Host "  [ERRO] Permissões (fase 2): o item de conteúdo do índice não grava o SHA-256 calculado - um campo vazio ali passa por 'sem conferência' sem nenhum aviso" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (fase 2): passo 'scope' sem icacls, nenhum '/T' sobre o perfil, espaço conferido antes, veredito com ressalvas e finally do parcial"
+    } catch {
+        Write-Host "  [ERRO] Permissões (fase 2): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Permissões: a ordem das ACEs de negação
+    # O SDDL da caminhada vem do .NET, em ordem CANÔNICA - negação antes de permissão. Numa lista só
+    # de permissão isso é indiferente (34 das 338 do perfil medido diferem só nisso). Com NEGAÇÃO
+    # não é: devolver a ordem canônica a uma pasta que não estava canônica faz a negação passar a
+    # vencer, e o Desfazer TRANCA o usuário. Por isso a entrada que nega traz o texto do próprio
+    # icacls. Aqui a pasta é criada em %TEMP%, com uma negação de verdade, e o que a função devolve
+    # é comparado com o que o icacls escreve por fora - sem elevação: 'icacls /save' não precisa
+    # dela numa pasta cuja dona é a própria identidade.
+    $wfOrdRaiz = Join-Path $wbSelfTestRaiz 'acl-ordem'
+    $wfOrdRegra = $null
+    $wfOrdDi = $null
+    try {
+        if (Test-Path -LiteralPath $wfOrdRaiz) { Remove-Item -LiteralPath $wfOrdRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfOrdPerfil = Join-Path $wfOrdRaiz 'perfil'
+        $wfOrdAlvo = Join-Path $wfOrdPerfil 'Negada'
+        New-Item -ItemType Directory -Path $wfOrdAlvo -Force | Out-Null
+        $wfOrdDi = New-Object System.IO.DirectoryInfo $wfOrdAlvo
+        $wfOrdSd = $wfOrdDi.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $wfOrdSd.SetAccessRuleProtection($true, $true)
+        $wfOrdRegra = New-Object System.Security.AccessControl.FileSystemAccessRule(([System.Security.Principal.WindowsIdentity]::GetCurrent().User), [System.Security.AccessControl.FileSystemRights]::WriteData, [System.Security.AccessControl.InheritanceFlags]::None, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny)
+        $wfOrdSd.AddAccessRule($wfOrdRegra)
+        $wfOrdDi.SetAccessControl($wfOrdSd)
+        # 1. A caminhada marca a entrada, e não só conta: quem vai reler é o chamador, e ele precisa
+        # saber QUAL entrada nega. Um segundo detector no chamador seria um segundo padrão a manter.
+        $wfOrdEscopo = Get-WinForgeAclContentScope -Path $wfOrdPerfil
+        if (-not $wfOrdEscopo.Ok) { throw "o escopo de teste falhou ($($wfOrdEscopo.Reason))" }
+        $wfOrdNegadas = @(@($wfOrdEscopo.Entries) | Where-Object { $_.Deny })
+        if ($wfOrdNegadas.Count -ne 1) { Write-Host "  [ERRO] Permissões (ordem de ACE): $($wfOrdNegadas.Count) entrada(s) marcadas com Deny, esperado 1 - sem a marca por entrada o chamador não sabe qual reler" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfOrdNegadas[0].Name -ne 'perfil\Negada') { Write-Host "  [ERRO] Permissões (ordem de ACE): a entrada marcada é '$($wfOrdNegadas[0].Name)', esperada 'perfil\Negada'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfOrdEscopo.Deny -ne @(@($wfOrdEscopo.Entries) | Where-Object { $_.Deny }).Count) { Write-Host "  [ERRO] Permissões (ordem de ACE): o contador 'Deny' ($($wfOrdEscopo.Deny)) discorda das entradas marcadas" -ForegroundColor Red; $wbErrors++ }
+        # 2. E o texto do icacls, comparado com o que ele mesmo escreve por fora. -cne: 'FA' e 'fa'
+        # são o mesmo direito para o icacls, mas caixa diferente aqui significaria que o texto não
+        # saiu do mesmo lugar.
+        $wfOrdTrab = Join-Path $wfOrdRaiz 'trabalho.tmp'
+        $wfOrdRes = Get-WinForgeAclIcaclsSddl -Path $wfOrdAlvo -WorkFile $wfOrdTrab
+        if (-not $wfOrdRes.Ok) { Write-Host "  [ERRO] Permissões (ordem de ACE): o texto do icacls não pôde ser lido ('$($wfOrdRes.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        else {
+            # MEDIDO: 'icacls <pasta absoluta> /save f /L /Q', sem barra no fim e sem '/T', sai com
+            # UM par só, e o nome dele é a FOLHA da pasta - não um nome vazio e não os filhos. É
+            # esse par que a função tem de devolver.
+            $wfOrdRef = Join-Path $wfOrdRaiz 'referencia.txt'
+            & (Get-WinForgeSystemExe -Name 'icacls.exe') $wfOrdAlvo '/save' $wfOrdRef '/L' '/Q' | Out-Null
+            $wfOrdLinhas = @([System.IO.File]::ReadAllText($wfOrdRef, [System.Text.Encoding]::Unicode) -split "`r`n")
+            if ([string]$wfOrdLinhas[0] -cne 'Negada') { Write-Host "  [ERRO] Permissões (ordem de ACE): o '/save' de referência nomeou a entrada '$($wfOrdLinhas[0])', esperada a folha 'Negada'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfOrdRes.Sddl -cne [string]$wfOrdLinhas[1]) { Write-Host "  [ERRO] Permissões (ordem de ACE): o texto devolvido difere do que o icacls escreve`n    função: $($wfOrdRes.Sddl)`n    icacls: $($wfOrdLinhas[1])" -ForegroundColor Red; $wbErrors++ }
+            # E o texto é mesmo uma lista com negação: sem isso a pasta de teste não exercitaria o
+            # caminho que esta função existe para cobrir.
+            if ([string]$wfOrdRes.Sddl -notmatch '\([OXZ]?D;') { Write-Host "  [ERRO] Permissões (ordem de ACE): o texto devolvido não tem ACE de negação ('$($wfOrdRes.Sddl)') - a pasta de teste não exercita o caminho" -ForegroundColor Red; $wbErrors++ }
+        }
+        # 3. O arquivo de trabalho não fica no disco: ele carrega a lista de permissões de uma pasta
+        # do usuário e some assim que o texto é lido.
+        if (Test-Path -LiteralPath $wfOrdTrab) { Write-Host "  [ERRO] Permissões (ordem de ACE): o arquivo de trabalho ficou em '$wfOrdTrab'" -ForegroundColor Red; $wbErrors++ }
+        # 4. Pasta que não existe: recusa, com o CÓDIGO do icacls na frase. Duas medições feitas
+        # aqui sustentam esta linha, e a primeira custou um mutante sobrevivente:
+        #   1. COM '/C' o icacls sai com 0 mesmo sem achar a pasta - '/C' é "continue apesar do
+        #      erro", e num alvo único ele só apaga o sinal de falha. Sem '/C' o mesmo caso sai com
+        #      2. Por isso o '/C' ficou de fora desta chamada, ao contrário do resto do reparo.
+        #   2. O arquivo de saída é TRUNCADO antes de o icacls falhar, então quem não conferir o
+        #      código ainda assim recusa - só que pela frase errada ("não trouxe '' onde era
+        #      esperada a folha"), que não diz nada a quem lê o log de um reparo elevado. O código
+        #      na frase é o que esta asserção cobra.
+        $wfOrdSumiu = Get-WinForgeAclIcaclsSddl -Path (Join-Path $wfOrdPerfil 'nunca-existiu') -WorkFile $wfOrdTrab
+        if ($wfOrdSumiu.Ok) { Write-Host "  [ERRO] Permissões (ordem de ACE): uma pasta inexistente devolveu Ok=`$true" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfOrdSumiu.Reason -notmatch 'código \d+') { Write-Host "  [ERRO] Permissões (ordem de ACE): a recusa não diz com que código o icacls saiu ('$($wfOrdSumiu.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # 5. A conferência do NOME, provada na raiz do volume - o caso em que o icacls escolhe outro
+        # nome. Medido aqui, sem elevação: 'icacls C:\ /save f /L /Q' sai com 0 e grava a entrada
+        # com o NOME VAZIO, enquanto a folha de 'C:\' é 'C:\'. É a mesma entrada de nome vazio que
+        # o '/restore' nunca soube aplicar, e aceitá-la como resposta poria o descritor da RAIZ do
+        # disco no backup do conteúdo do perfil. Sem a conferência de nome nada disso apareceria.
+        $wfOrdRaizVol = Get-WinForgeAclIcaclsSddl -Path 'C:\' -WorkFile $wfOrdTrab
+        if ($wfOrdRaizVol.Ok) { Write-Host "  [ERRO] Permissões (ordem de ACE): a raiz do volume foi aceita ('$($wfOrdRaizVol.Sddl)') - o icacls grava a entrada dela com o nome VAZIO e o nome não está sendo conferido" -ForegroundColor Red; $wbErrors++ }
+        if (-not [string]::IsNullOrEmpty([string]$wfOrdRaizVol.Sddl)) { Write-Host "  [ERRO] Permissões (ordem de ACE): a recusa da raiz ainda devolveu um SDDL ('$($wfOrdRaizVol.Sddl)')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (ordem de ACE): a entrada que nega vem marcada da caminhada e o SDDL dela sai do próprio icacls, igual ao do '/save' de referência"
+    } catch {
+        Write-Host "  [ERRO] Permissões (ordem de ACE): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        # A negação sai antes da faxina: com ela no lugar a pasta não volta a ser apagável.
+        if ($null -ne $wfOrdRegra -and $null -ne $wfOrdDi) {
+            try {
+                $wfOrdDi2 = New-Object System.IO.DirectoryInfo $wfOrdDi.FullName
+                $wfOrdSd2 = $wfOrdDi2.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+                $null = $wfOrdSd2.RemoveAccessRuleSpecific($wfOrdRegra)
+                $wfOrdDi2.SetAccessControl($wfOrdSd2)
+            } catch { }
+        }
+        Remove-Item -LiteralPath $wfOrdRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: a fase 5 sem /T
+    # Conserta de quebra um defeito da 1.7.0: '/inheritance:e /T /L' liga herança FORA do perfil,
+    # no destino de cada junção e no OneDrive. Uma chamada por entrada da lista da fase 2 não sai
+    # do conjunto que o backup cobre - e é isso que mantém "guardado = alterado".
+    try {
+        $wfF5Entradas = @(
+            @{ Name = 'fulano\AppData\Local\Pacotes'; Sddl = 'D:P(A;;FA;;;SY)' },
+            @{ Name = 'fulano'; Sddl = 'D:P(A;;FA;;;SY)' },
+            @{ Name = 'fulano\AppData'; Sddl = 'D:P(A;;FA;;;SY)' }
+        )
+        $wfF5Passos = @(Get-WinForgeAclInheritSteps -Root 'C:\Users' -Entries $wfF5Entradas)
+        if ($wfF5Passos.Count -ne 3) { Write-Host "  [ERRO] Permissões (fase 5): $($wfF5Passos.Count) passo(s) para 3 entradas" -ForegroundColor Red; $wbErrors++ }
+        $wfF5Ordem = @($wfF5Passos | ForEach-Object { [string]$_.Path })
+        if ([string]$wfF5Ordem[0] -ne 'C:\Users\fulano') { Write-Host "  [ERRO] Permissões (fase 5): a ordem ordinal tem de entregar o pai primeiro, veio '$($wfF5Ordem -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfF5Ordem[2] -ne 'C:\Users\fulano\AppData\Local\Pacotes') { Write-Host "  [ERRO] Permissões (fase 5): o filho mais fundo tem de vir por último, veio '$($wfF5Ordem -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfF5P in $wfF5Passos) {
+            $wfF5A = @($wfF5P.Arguments | ForEach-Object { [string]$_ })
+            if ($wfF5A -contains '/T') { Write-Host "  [ERRO] Permissões (fase 5): '/T' voltou ao vetor ('$($wfF5A -join ' ')')" -ForegroundColor Red; $wbErrors++ }
+            if ($wfF5A -notcontains '/inheritance:e') { Write-Host "  [ERRO] Permissões (fase 5): falta '/inheritance:e' ('$($wfF5A -join ' ')')" -ForegroundColor Red; $wbErrors++ }
+            # E sem '/C'. MEDIDO nesta forma exata, sem elevação: pasta que não existe sai com 2 sem
+            # '/C' e com 0 COM '/C'. Num alvo único não há o que "continuar"; o '/C' só apagaria o
+            # código de saída, e com ele o 'if' do chamador vira código morto - a fase 5 poderia não
+            # ligar herança em pasta nenhuma e o log dizer "Concluído".
+            if ($wfF5A -contains '/C') { Write-Host "  [ERRO] Permissões (fase 5): '/C' voltou ao vetor ('$($wfF5A -join ' ')') - ele zera o código de saída e o chamador perde o sinal" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfF5P.FilePath -ne (Get-WinForgeSystemExe -Name 'icacls.exe')) { Write-Host "  [ERRO] Permissões (fase 5): o executável não é o icacls do System32 ('$($wfF5P.FilePath)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O conjunto coberto é o conjunto alterado: mesma lista, mesma contagem.
+        $wfF5Plano = @(Get-WinForgeAclRestorePlan -Profile 'C:\Users\fulano' -UserSid 'S-1-5-21-1-2-3-1001' -BackupRoot (Join-Path $wbSelfTestRaiz 'acl-plano') -Stamp '20260912-101010')
+        $wfF5Velho = @($wfF5Plano | Where-Object { [int]$_.Phase -eq 5 -and [string]$_.Kind -eq 'inherit' })
+        if ($wfF5Velho.Count) { Write-Host "  [ERRO] Permissões (fase 5): o passo 'inherit' com '/T' continua no plano" -ForegroundColor Red; $wbErrors++ }
+        $wfF5Lista = @($wfF5Plano | Where-Object { [int]$_.Phase -eq 5 -and [string]$_.Kind -eq 'inherit-list' })
+        if ($wfF5Lista.Count -ne 1) { Write-Host "  [ERRO] Permissões (fase 5): esperava 1 passo 'inherit-list', veio $($wfF5Lista.Count)" -ForegroundColor Red; $wbErrors++ }
+        $wfF5Fonte = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfF5Fonte -notmatch 'Get-WinForgeAclInheritSteps') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não monta os passos a partir da lista da fase 2" -ForegroundColor Red; $wbErrors++ }
+        # A busca é pela CHAMADA ('-Root' junto), e não pelo nome. O nome também aparece no bloco de
+        # ajuda de Invoke-WinForgeAclRestore, que entra no ScriptBlock e faria a linha acima passar
+        # sozinha: um mutante que trocasse a chamada por um laço à mão sobreviveria. É a mesma trava
+        # que a fase 4 já usa para Invoke-WinForgeAclOwnerFallback.
+        if ($wfF5Fonte.IndexOf('Get-WinForgeAclInheritSteps -Root', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 CITA Get-WinForgeAclInheritSteps mas não a chama - a lista da fase 2 não está virando chamada nenhuma" -ForegroundColor Red; $wbErrors++ }
+        # Com o '/C' fora, o código de saída volta a dizer alguma coisa - mas ele NÃO serve para
+        # separar "sumiu" de "falhou", e foi esse o defeito. MEDIDO nesta forma exata de chamada
+        # ('icacls <alvo> /inheritance:e /Q', sem elevação e sem curinga): pasta inexistente com o
+        # pai no lugar sai 2, mas PAI inexistente sai 3, pai inexistente a dois níveis sai 3 e
+        # unidade inexistente sai 3 - e o curinga sem correspondência, que a descrição antiga
+        # culpava pelo 3, sai 0.
+        #
+        # E pai e filho estão os DOIS nesta lista: a caminhada da fase 2 desce em toda pasta com
+        # herança bloqueada, e 'AppData\Local\Packages\<app>' com '...\<app>\LocalCache' é o arranjo
+        # normal de aplicativo da Loja. Desinstalado o aplicativo entre as fases, a ordem ordinal
+        # manda o pai primeiro: o pai sai com 2 (aviso) e cada descendente com 3 (erro) - um reparo
+        # que correu bem terminando numa lista de erros, que é o oposto do que o ramo existe para
+        # fazer. Por isso a classificação é pela EXISTÊNCIA da pasta.
+        $wfF5Existe = Join-Path $wbSelfTestRaiz 'acl-fase5-existe'
+        $wfF5Espaco = ''
+        try {
+            if (Test-Path -LiteralPath $wfF5Existe) { Remove-Item -LiteralPath $wfF5Existe -Recurse -Force -ErrorAction SilentlyContinue }
+            New-Item -ItemType Directory -Path $wfF5Existe -Force | Out-Null
+            $wfF5Sumiu = Join-Path $wfF5Existe 'nunca-existiu\mais-fundo'
+            foreach ($wfF5Caso in @(
+                @{ Path = $wfF5Existe; Code = 0; Esperado = 'ok';     Porque = 'chamada que deu certo' },
+                @{ Path = $wfF5Existe; Code = 2; Esperado = 'falha';  Porque = 'a pasta está no lugar - código 2 aqui é falha de verdade' },
+                @{ Path = $wfF5Existe; Code = 3; Esperado = 'falha';  Porque = 'a pasta está no lugar' },
+                @{ Path = $wfF5Existe; Code = 5; Esperado = 'falha';  Porque = 'acesso negado numa pasta que existe' },
+                @{ Path = $wfF5Sumiu;  Code = 2; Esperado = 'sumida'; Porque = 'a pasta foi apagada desde o backup' },
+                @{ Path = $wfF5Sumiu;  Code = 3; Esperado = 'sumida'; Porque = 'o PAI foi apagado desde o backup - o 3 que o ramo antigo tratava como erro' },
+                @{ Path = $wfF5Sumiu;  Code = 0; Esperado = 'ok';     Porque = 'código 0 responde antes de qualquer pergunta ao disco' },
+                @{ Path = '';          Code = 3; Esperado = 'falha';  Porque = 'sem caminho não dá para AFIRMAR que sumiu' }
+            )) {
+                $wfF5Ver = [string](Get-WinForgeAclInheritOutcome -Path ([string]$wfF5Caso.Path) -ExitCode ([int]$wfF5Caso.Code))
+                if ($wfF5Ver -ne [string]$wfF5Caso.Esperado) { Write-Host "  [ERRO] Permissões (fase 5): '$($wfF5Caso.Path)' com código $($wfF5Caso.Code) deu '$wfF5Ver', esperado '$($wfF5Caso.Esperado)' ($($wfF5Caso.Porque))" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Pasta com ESPAÇO no fim do nome. Ela existe (o Windows cria por '\\?\'), e é a pergunta
+            # pelo caminho longo que a enxerga: sem o prefixo, a API normaliza o nome, corta o espaço
+            # e responde que não existe - a pasta viraria "sumiu desde o backup" e a falha de verdade
+            # sairia como aviso, calada. O mesmo prefixo que a caminhada da fase 2 já usa.
+            $wfF5Espaco = (Join-Path $wfF5Existe 'com espaco ')
+            try { [void][System.IO.Directory]::CreateDirectory('\\?\' + $wfF5Espaco) } catch { $wfF5Espaco = '' }
+            if ([string]::IsNullOrEmpty($wfF5Espaco)) { Write-Host "  [ERRO] Permissões (fase 5): a pasta com espaço no fim não pôde ser criada - o caso do caminho longo não foi exercitado" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string](Get-WinForgeAclInheritOutcome -Path $wfF5Espaco -ExitCode 5) -ne 'falha') { Write-Host "  [ERRO] Permissões (fase 5): pasta com espaço no fim do nome foi dada como sumida - a existência tem de ser perguntada pelo caminho longo ('\\?\')" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            if (-not [string]::IsNullOrEmpty($wfF5Espaco)) { try { [System.IO.Directory]::Delete('\\?\' + $wfF5Espaco) } catch { } }
+            Remove-Item -LiteralPath $wfF5Existe -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # E a fase 5 CHAMA a classificação, em vez de só citá-la: o nome também aparece no bloco de
+        # ajuda, que entra no ScriptBlock. A cobrança é pela chamada, com o parâmetro junto.
+        if ($wfF5Fonte.IndexOf('Get-WinForgeAclInheritOutcome -Path', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não classifica o resultado por Get-WinForgeAclInheritOutcome" -ForegroundColor Red; $wbErrors++ }
+        # E o veredito está LIGADO aos contadores. Chamar a classificação e depois ignorar o que ela
+        # respondeu daria o mesmo resultado de não chamar - e a linha acima passaria. As duas agulhas
+        # são montadas por concatenação: escritas inteiras, elas contêm o próprio '$sumidas5' e
+        # ficariam sujeitas à expansão de variável na hora do teste.
+        foreach ($wfF5Fio in @(("'ok'" + ') { $pastasFase5 +='), ("'sumida'" + ') { $sumidas5++'), ("'cancelada'" + ') { $canceladas5 ='))) {
+            if ($wfF5Fonte.IndexOf($wfF5Fio, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (fase 5): o veredito da classificação não está ligado aos contadores (falta ""$wfF5Fio"")" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A medição errada não pode voltar à descrição: era ela que atribuía o código 3 ao curinga, e
+        # foi por ela que se concluiu que o 3 não era produzível nesta forma de chamada. MEDIDO aqui:
+        # o curinga sem correspondência sai 0, e quem sai 3 é caminho inexistente ACIMA do alvo.
+        $wfF5FonteP = [string](Get-Command Get-WinForgeAclInheritSteps).ScriptBlock
+        if ($wfF5FonteP -match "curinga sem correspond.ncia\s*->\s*0 com '/C' e 3 sem") { Write-Host "  [ERRO] Permissões (fase 5): a descrição voltou a atribuir o código 3 ao curinga - medido, o curinga sem correspondência sai 0" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF5FonteP -notmatch 'PAI da pasta não existe') { Write-Host "  [ERRO] Permissões (fase 5): a descrição não registra que PAI inexistente sai 3 - foi a falta dessa linha que fez o código 3 parecer improduzível aqui" -ForegroundColor Red; $wbErrors++ }
+        # E o ramo antigo não volta: separar aviso de erro por um código de saída, qualquer que seja
+        # ele, reintroduz o defeito que esta trava existe para prender.
+        if ($wfF5Fonte -match '\$c5\s*-eq\s*\d') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 voltou a separar aviso de erro pelo CÓDIGO de saída do icacls" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF5Fonte -notmatch 'sumidas5') { Write-Host "  [ERRO] Permissões (fase 5): o resumo não conta quantas pastas já não existiam" -ForegroundColor Red; $wbErrors++ }
+        if ($wfF5Fonte -notmatch 'WinForgeAclScope') { Write-Host "  [ERRO] Permissões (fase 5): a fase 5 não lê o escopo guardado pela fase 2 - guardado e alterado divergiriam" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (fase 5): $($wfF5Passos.Count) chamada(s) '/inheritance:e' por entrada, pai antes de filho, nenhum '/T'; aviso e erro separados pela existência da pasta, não pelo código"
+    } catch {
+        Write-Host "  [ERRO] Permissões (fase 5): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Permissões: um índice por vez
+    # Defeito da 1.7.0, confirmado no código (:3044 e :2760-2769): o Desfazer lia o índice MAIS NOVO.
+    # Na 2ª execução a fase 5 da 1ª já tinha removido a proteção de herança, o escopo caía para perto
+    # de zero e o índice novo - que continua com os itens 'sddl' das fases 3 e 4 - virava o único
+    # visível. As 338 originais ficavam irrecuperáveis.
+    $wfIdxRaiz = Join-Path $wbSelfTestRaiz 'acl-indices'
+    try {
+        if (Test-Path -LiteralPath $wfIdxRaiz) { Remove-Item -LiteralPath $wfIdxRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfIdxRaiz -Force | Out-Null
+        $wfIdxOrigem = New-WinForgeAclIndexOrigin
+        if ([string]::IsNullOrWhiteSpace([string]$wfIdxOrigem.MachineGuid) -or [string]::IsNullOrWhiteSpace([string]$wfIdxOrigem.ProfileSid)) { Write-Host "  [ERRO] Permissões (origem): New-WinForgeAclIndexOrigin veio incompleta ('$($wfIdxOrigem.MachineGuid)' / '$($wfIdxOrigem.ProfileSid)')" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxGrava = {
+            param($Nome, $Consumido, $Origem)
+            $conteudo = [pscustomobject]@{
+                Stamp = $Nome; Consumed = $Consumido; Origin = $Origem
+                Items = @([pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = 'D:P(A;;FA;;;SY)'; Owner = 'SYSTEM'; OwnerSid = 'S-1-5-18'; File = ''; Target = ''; Sha256 = ''; ExternalPath = '' })
+            }
+            Set-Content -LiteralPath (Join-Path $wfIdxRaiz "acl-index-$Nome.json") -Value ($conteudo | ConvertTo-Json -Depth 5) -Encoding UTF8
+        }
+        & $wfIdxGrava '20260101-000000' $false $wfIdxOrigem
+        & $wfIdxGrava '20260202-000000' $false $wfIdxOrigem
+        $wfIdxLista = @(Get-WinForgeAclIndexList -Root $wfIdxRaiz)
+        if ($wfIdxLista.Count -ne 2) { Write-Host "  [ERRO] Permissões (índices): a lista trouxe $($wfIdxLista.Count), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfIdxLista[0].Stamp -ne '20260101-000000') { Write-Host "  [ERRO] Permissões (índices): a lista não vem do mais antigo para o mais novo ('$($wfIdxLista[0].Stamp)')" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxConj = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
+        if ([string]$wfIdxConj.Stamp -ne '20260101-000000') { Write-Host "  [ERRO] Permissões (Desfazer): o conjunto escolhido é '$($wfIdxConj.Stamp)', esperado o MAIS ANTIGO não consumido '20260101-000000'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfIdxConj.Pending -ne 2) { Write-Host "  [ERRO] Permissões (Desfazer): Pending=$($wfIdxConj.Pending), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        # ---- A marca é gravada por TROCA, e não por reescrita no lugar. 'Set-Content' trunca o
+        # arquivo antes de escrever: interrompido no meio - queda de energia, disco cheio - o índice
+        # vira ILEGÍVEL, que é exatamente a armadilha que prende o conjunto para sempre. O que a
+        # troca precisa entregar é um índice PROTEGIDO no lugar do antigo, e é isso - só isso - que
+        # se cobra aqui: ninguém novo passa a ter acesso ao arquivo.
+        #
+        # A cobrança NÃO é mais "o SDDL do destino é idêntico antes e depois". Esse texto é o
+        # resultado da mescla de ACL que o próprio ReplaceFile faz: qual das duas listas sobrevive,
+        # em que ordem e com quais marcas de herança não é contrato de lugar nenhum. Varia por
+        # versão do Windows e muda conforme o temporário tenha sido endurecido ou não - elevado, ele
+        # nasce com DACL protegida. MEDIDO nesta máquina (Windows 11): a lista do DESTINO sobrevive
+        # mesmo quando a do temporário é protegida, e por isso a trava ficava verde aqui aconteça o
+        # que acontecer com o temporário. No executor da integração contínua o texto sai diferente e
+        # ela ficava vermelha sem nada estar quebrado. Comparar texto de SDDL é cobrar do Windows
+        # uma promessa que ele não fez, e ler a máquina em vez do gabarito.
+        #
+        # O que se compara é o CONJUNTO de SIDs com Allow, e por SID, nunca por nome: nome de grupo
+        # é traduzido ('BUILTIN\Administradores' aqui, 'BUILTIN\Administrators' no executor). A
+        # troca PODE fechar o arquivo - é o que o endurecimento faz, e ele só acrescenta SYSTEM e
+        # Administradores; o que ela não pode é ABRIR o índice para quem não alcançava o destino.
+        # A leitura é pela seção de acesso (GetAccessControl), e não por Get-Acl: Get-Acl pede
+        # também dono e grupo e tropeça em DACL protegida, que é justo o estado do arquivo
+        # endurecido - a trava acusaria "não pôde ser lida" no caso em que o código acertou.
+        $wfIdxAlvoM = Join-Path $wfIdxRaiz 'acl-index-20260101-000000.json'
+        $wfIdxQuemAcessa = {
+            param($Caminho)
+            $sids = @{}
+            try {
+                $regras = @((New-Object System.IO.FileInfo ([string]$Caminho)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+            } catch { return $null }
+            foreach ($regra in $regras) {
+                if ($regra.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+                $sids[[string]$regra.IdentityReference.Value] = $true
+            }
+            return $sids
+        }
+        $wfIdxAcessoAntes = & $wfIdxQuemAcessa $wfIdxAlvoM
+        # Consumido some da fila; o seguinte assume.
+        if (-not (Set-WinForgeAclIndexConsumed -Path $wfIdxAlvoM).Ok) { Write-Host "  [ERRO] Permissões (Consumed): a marcação falhou" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxAcessoDepois = & $wfIdxQuemAcessa $wfIdxAlvoM
+        # S-1-5-18 é SYSTEM e S-1-5-32-544 é o grupo Administradores: são os dois que o endurecimento
+        # acrescenta de propósito (wf-server.ps1, Protect-WinForgeSnapshotFile). Qualquer OUTRO nome
+        # novo na lista é o índice aberto para quem não o alcançava.
+        $wfIdxDuros = @('S-1-5-18', 'S-1-5-32-544')
+        if ($null -eq $wfIdxAcessoAntes -or -not $wfIdxAcessoAntes.Count) { Write-Host "  [ERRO] Permissões (Consumed): a lista do índice não pôde ser lida antes da marcação" -ForegroundColor Red; $wbErrors++ }
+        elseif ($null -eq $wfIdxAcessoDepois -or -not $wfIdxAcessoDepois.Count) { Write-Host "  [ERRO] Permissões (Consumed): a lista do índice trocado não pôde ser lida depois da marcação" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfIdxAbriu = @(@($wfIdxAcessoDepois.Keys) | Where-Object { -not $wfIdxAcessoAntes.ContainsKey([string]$_) -and [string]$_ -notin $wfIdxDuros })
+            if ($wfIdxAbriu.Count) { Write-Host "  [ERRO] Permissões (Consumed): a troca do arquivo ABRIU o índice para quem não tinha acesso ao destino ($($wfIdxAbriu -join ', '))`n    antes:  $(@($wfIdxAcessoAntes.Keys) -join ', ')`n    depois: $(@($wfIdxAcessoDepois.Keys) -join ', ')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o temporário não fica no disco: um '.tmp' esquecido na pasta vira órfão para a limpeza e
+        # entra na conta do aviso de tamanho.
+        $wfIdxSobra = @(Get-ChildItem -LiteralPath $wfIdxRaiz -Filter '*.tmp' -File -ErrorAction SilentlyContinue)
+        if ($wfIdxSobra.Count) { Write-Host "  [ERRO] Permissões (Consumed): sobrou $($wfIdxSobra.Count) arquivo(s) temporário(s) na pasta ('$(@($wfIdxSobra | ForEach-Object { $_.Name }) -join ', ')')" -ForegroundColor Red; $wbErrors++ }
+        # A busca é pela forma da CHAMADA: o nome solto apareceria também no bloco de ajuda, que
+        # entra no ScriptBlock, e um mutante que voltasse ao Set-Content no lugar sobreviveria.
+        $wfIdxFonteM = [string](Get-Command Set-WinForgeAclIndexConsumed).ScriptBlock
+        if ($wfIdxFonteM.IndexOf('[System.IO.File]::Replace(', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): a marca não é gravada por troca ([System.IO.File]::Replace) - truncado no meio, o índice vira ilegível" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteM -match "Set-Content -LiteralPath \(\[string\]\`$Path\)") { Write-Host "  [ERRO] Permissões (Consumed): a reescrita no lugar voltou - é ela que transforma uma interrupção em índice ilegível" -ForegroundColor Red; $wbErrors++ }
+        # O TEMPORÁRIO é endurecido ANTES da troca, e esta é a metade de segurança do conserto. O
+        # arquivo que fica no lugar é o TEMPORÁRIO renomeado - e arquivo criado por processo elevado nasce
+        # pertencendo à CONTA, não ao grupo Administradores (wf-server.ps1, Protect-WinForgeSnapshotFile).
+        # Dono guarda WRITE_DAC implícito: um processo de integridade MÉDIA da mesma conta reabriria
+        # o índice já consumido, plantaria um 'ExternalPath' e a limpeza elevada apagaria aquele
+        # caminho. A busca é pela forma da CHAMADA, com o argumento junto.
+        $wfIdxPosProt = $wfIdxFonteM.IndexOf('Protect-WinForgeSnapshotFile -Path $temporario', [StringComparison]::Ordinal)
+        $wfIdxPosTroca = $wfIdxFonteM.IndexOf('[System.IO.File]::Replace(', [StringComparison]::Ordinal)
+        if ($wfIdxPosProt -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): o temporário não passa por Protect-WinForgeSnapshotFile - o índice trocado fica com o dono errado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIdxPosTroca -ge 0 -and $wfIdxPosProt -gt $wfIdxPosTroca) { Write-Host "  [ERRO] Permissões (Consumed): o endurecimento vem DEPOIS da troca - a essa altura o arquivo já está no lugar com o dono errado" -ForegroundColor Red; $wbErrors++ }
+        # A marca continua avançando a fila mesmo quando o endurecimento não é possível, e DIZ isso:
+        # parar aqui deixaria o conjunto pendente para sempre, que é o beco sem saída que a rodada
+        # anterior fechou. Sem elevação o endurecimento não acontece - é o caso desta máquina de build.
+        $wfIdxMarca = Set-WinForgeAclIndexConsumed -Path $wfIdxAlvoM
+        if (-not $wfIdxMarca.Ok) { Write-Host "  [ERRO] Permissões (Consumed): a marca deixou de avançar a fila quando o endurecimento falha ('$($wfIdxMarca.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfIdxMarca.ContainsKey('Hardened')) { Write-Host "  [ERRO] Permissões (Consumed): a marca não diz se o índice trocado ficou endurecido" -ForegroundColor Red; $wbErrors++ }
+        elseif ([bool]$wfIdxMarca.Hardened -and -not (Test-WinForgeRepairElevated)) { Write-Host "  [ERRO] Permissões (Consumed): a marca afirmou ter endurecido o arquivo SEM elevação - trocar o dono para Administradores exige elevação" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not [bool]$wfIdxMarca.Hardened -and [string]::IsNullOrWhiteSpace([string]$wfIdxMarca.Reason)) { Write-Host "  [ERRO] Permissões (Consumed): o endurecimento falhou CALADO - quem chama não tem como avisar" -ForegroundColor Red; $wbErrors++ }
+        # E quem chama AVISA. A trava acima prova que a função DEVOLVE o motivo; sem esta, o motivo
+        # morria no retorno: com 'Ok' verdadeiro e 'Hardened' falso o Desfazer imprimia só "o
+        # conjunto sai da fila", e o usuário descobria o problema no Desfazer SEGUINTE, que recusa o
+        # índice por causa do dono sem dizer por quê. A busca é pela LEITURA da chave dentro do ramo
+        # do sucesso, e não pelo nome dela - 'Hardened' também aparece no bloco de ajuda.
+        $wfIdxFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        $wfIdxPosOk = $wfIdxFonteU.IndexOf('if ($marca.Ok)', [StringComparison]::Ordinal)
+        $wfIdxPosDuro = $wfIdxFonteU.IndexOf('-not $marca.Hardened', [StringComparison]::Ordinal)
+        if ($wfIdxPosOk -lt 0) { Write-Host "  [ERRO] Permissões (Consumed): o Desfazer não consulta o resultado da marcação" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIdxPosDuro -lt $wfIdxPosOk) { Write-Host "  [ERRO] Permissões (Consumed): o Desfazer não avisa quando a marca foi gravada mas o índice NÃO ficou endurecido" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxConj2 = Get-WinForgeAclBackupSet -Root $wfIdxRaiz
+        if ([string]$wfIdxConj2.Stamp -ne '20260202-000000') { Write-Host "  [ERRO] Permissões (Consumed): depois de consumido o primeiro, o conjunto é '$($wfIdxConj2.Stamp)', esperado '20260202-000000'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfIdxConj2.Pending -ne 1) { Write-Host "  [ERRO] Permissões (Consumed): Pending=$($wfIdxConj2.Pending), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # Índice de OUTRA máquina é recusado: SDDL com SIDs alheios entra como SID cru e tranca o perfil.
+        $wfIdxOutra = Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Origin = [pscustomobject]@{ MachineGuid = '00000000-0000-0000-0000-000000000000'; ProfileSid = [string]$wfIdxOrigem.ProfileSid } })
+        if ($wfIdxOutra.Ok) { Write-Host "  [ERRO] Permissões (origem): MachineGuid trocado foi aceito" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxOutroSid = Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Origin = [pscustomobject]@{ MachineGuid = [string]$wfIdxOrigem.MachineGuid; ProfileSid = 'S-1-5-21-9-9-9-1001' } })
+        if ($wfIdxOutroSid.Ok) { Write-Host "  [ERRO] Permissões (origem): SID de perfil trocado foi aceito" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Origin = $wfIdxOrigem })).Ok) { Write-Host "  [ERRO] Permissões (origem): o índice desta máquina foi recusado" -ForegroundColor Red; $wbErrors++ }
+        # Índice da 1.7.0 NÃO tem origem: ele é aceito, com aviso. Recusá-lo mataria o Desfazer
+        # justamente do backup que a guarda da segunda restauração manda desfazer - e a pasta
+        # protegida já garante que quem escreveu ali estava elevado nesta máquina.
+        $wfIdxVelho = Test-WinForgeAclIndexOrigin -Index ([pscustomobject]@{ Stamp = '20250101-000000' })
+        if (-not $wfIdxVelho.Ok) { Write-Host "  [ERRO] Permissões (origem): um índice SEM o campo de origem (1.7.0) foi recusado - o Desfazer que a própria recusa manda usar deixaria de funcionar" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfIdxVelho.Reason)) { Write-Host "  [ERRO] Permissões (origem): o índice sem origem foi aceito CALADO - quem confere tem de dizer que não houve o que conferir" -ForegroundColor Red; $wbErrors++ }
+        # Restauração NOVA é recusada enquanto houver índice não consumido, e diz o que fazer.
+        $wfIdxProva = Test-WinForgeAclRestoreAllowed -Root $wfIdxRaiz
+        if ($wfIdxProva.Ok) { Write-Host "  [ERRO] Permissões (segunda execução): com 1 índice não consumido a restauração foi permitida - é o defeito que destrói o backup bom" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfIdxProva.Reason -notmatch 'Limpar backups antigos') { Write-Host "  [ERRO] Permissões (segunda execução): a recusa não manda usar Desfazer ou 'Limpar backups antigos' ('$($wfIdxProva.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeAclIndexConsumed -Path (Join-Path $wfIdxRaiz 'acl-index-20260202-000000.json')
+        if (-not (Test-WinForgeAclRestoreAllowed -Root $wfIdxRaiz).Ok) { Write-Host "  [ERRO] Permissões (segunda execução): com todos consumidos a restauração continua recusada" -ForegroundColor Red; $wbErrors++ }
+        # E a restauração CHAMA a guarda: exercer Test-WinForgeAclRestoreAllowed solto prova que ela
+        # sabe responder, não que alguém pergunta. Implementá-la e nunca invocá-la deixaria o defeito
+        # que destrói o backup bom inteiro, com o teste verde.
+        $wfIdxFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfIdxFonteR -notmatch 'Test-WinForgeAclRestoreAllowed') { Write-Host "  [ERRO] Permissões (segunda execução): Invoke-WinForgeAclRestore não chama Test-WinForgeAclRestoreAllowed - a guarda existe e ninguém pergunta a ela" -ForegroundColor Red; $wbErrors++ }
+        $wfIdxPosGuarda = $wfIdxFonteR.IndexOf('Test-WinForgeAclRestoreAllowed', [StringComparison]::Ordinal)
+        $wfIdxPosEscopo = $wfIdxFonteR.IndexOf('Get-WinForgeAclContentScope', [StringComparison]::Ordinal)
+        if ($wfIdxPosGuarda -lt 0 -or $wfIdxPosEscopo -lt 0 -or $wfIdxPosGuarda -gt $wfIdxPosEscopo) { Write-Host "  [ERRO] Permissões (segunda execução): a guarda é conferida DEPOIS da caminhada - a recusa tem de vir antes de qualquer trabalho" -ForegroundColor Red; $wbErrors++ }
+        # As duas linhas acima pescam o NOME, e o nome também aparece em comentário e no bloco de
+        # ajuda - que entram no ScriptBlock. Um mutante que apagasse a CHAMADA e deixasse o
+        # comentário sobreviveria às duas. Aqui a cobrança é pela chamada, com o parâmetro junto, e
+        # é ela que fixa também a POSIÇÃO.
+        $wfIdxPosChamada = $wfIdxFonteR.IndexOf('Test-WinForgeAclRestoreAllowed -Root', [StringComparison]::Ordinal)
+        if ($wfIdxPosChamada -lt 0) { Write-Host "  [ERRO] Permissões (segunda execução): Invoke-WinForgeAclRestore CITA Test-WinForgeAclRestoreAllowed e não a chama" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfIdxPosEscopo -ge 0 -and $wfIdxPosChamada -gt $wfIdxPosEscopo) { Write-Host "  [ERRO] Permissões (segunda execução): a guarda é CHAMADA depois da caminhada - a recusa tem de vir antes de qualquer trabalho" -ForegroundColor Red; $wbErrors++ }
+        # E o índice que a fase 2 grava nasce com os dois campos novos: sem 'Consumed' a fila não
+        # anda, e sem 'Origin' o Desfazer perde a única prova de que o índice é desta máquina.
+        if ($wfIdxFonteR -notmatch 'Consumed\s*=\s*\$false') { Write-Host "  [ERRO] Permissões (índices): o índice gravado na fase 2 não nasce com Consumed = `$false" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteR.IndexOf('Origin = (New-WinForgeAclIndexOrigin)', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (índices): o índice gravado na fase 2 não anota a máquina de origem" -ForegroundColor Red; $wbErrors++ }
+        # Toda recusa do Desfazer termina com a frase de §1.7.
+        $wfIdxFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        if ($wfIdxFonteU -notmatch 'coloque-a de volta em') { Write-Host "  [ERRO] Permissões (Desfazer): falta a frase 'Nada foi alterado. Se tiver uma cópia do arquivo original…'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'Set-WinForgeAclIndexConsumed') { Write-Host "  [ERRO] Permissões (Desfazer): um Desfazer bem-sucedido não marca o índice como consumido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'Test-WinForgeAclIndexOrigin') { Write-Host "  [ERRO] Permissões (Desfazer): a origem do índice não é conferida" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'Get-WinForgeAclContentHash') { Write-Host "  [ERRO] Permissões (Desfazer): o SHA-256 do arquivo de conteúdo não é recalculado" -ForegroundColor Red; $wbErrors++ }
+        # As três travas acima pescam o NOME, e os três nomes também aparecem no bloco de ajuda da
+        # função, que entra no ScriptBlock: um mutante que trocasse a CHAMADA por um valor fixo
+        # sobreviveria a elas. Aqui a cobrança é pela chamada, com o parâmetro junto.
+        foreach ($wfIdxChamada in @(
+            @('Test-WinForgeAclIndexOrigin -Index', 'a origem do índice é CITADA, mas não conferida'),
+            @('Get-WinForgeAclContentHash -Path', 'o SHA-256 do arquivo de conteúdo é CITADO, mas não recalculado'),
+            @('Set-WinForgeAclIndexConsumed -Path', 'a marca de consumido é CITADA, mas não gravada - o conjunto ficaria na fila para sempre')
+        )) {
+            if ($wfIdxFonteU.IndexOf([string]$wfIdxChamada[0], [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (Desfazer): $($wfIdxChamada[1])" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Ancorado no INDEXADOR, e não em 'Count - 1': essa string casa com qualquer comentário que
+        # explique o defeito antigo, e o teste ficaria vermelho justamente na implementação correta.
+        if ($wfIdxFonteU -match '\$indices\[\s*\$indices\.Count\s*-\s*1\s*\]') { Write-Host "  [ERRO] Permissões (Desfazer): ainda existe a escolha pelo índice mais novo (`$indices[`$indices.Count-1])" -ForegroundColor Red; $wbErrors++ }
+        # AVISO INOFENSIVO NÃO É RECUSA. Os dois casos de "a pasta não existe mais" são pulos, não
+        # falhas: a pasta sumiu entre o backup e o Desfazer, não há o que devolver nela, e o resto do
+        # conjunto voltou inteiro. Contá-los como recusa prendia o conjunto na fila para sempre - a
+        # restauração seguia recusada e o Desfazer repetia a mesma pasta sumida, sem saída.
+        if (([regex]::Matches($wfIdxFonteU, '\$pulados\+\+')).Count -ne 2) { Write-Host "  [ERRO] Permissões (Desfazer): os dois casos de 'a pasta não existe mais' têm de contar como PULADOS, não como recusa ($(([regex]::Matches($wfIdxFonteU, '\$pulados\+\+')).Count) de 2)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -notmatch 'pulada\(s\)') { Write-Host "  [ERRO] Permissões (Desfazer): o resumo não diz quantas pastas foram puladas" -ForegroundColor Red; $wbErrors++ }
+        # E a porta que marca o conjunto como consumido continua sendo recusa + amostra, e não pulo.
+        if ($wfIdxFonteU -notmatch '\$recusados -eq 0 -and \$amostraFora -eq 0') { Write-Host "  [ERRO] Permissões (Desfazer): a porta da marca de consumido deixou de ser 'nenhuma recusa e nenhuma divergência de amostra'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfIdxFonteU -match '\$pulados -eq 0') { Write-Host "  [ERRO] Permissões (Desfazer): a porta da marca de consumido voltou a prender o conjunto por causa de pasta que sumiu" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (índices): Desfazer no mais antigo não consumido, Consumed avança a fila, origem por MachineGuid+SID, restauração recusada com pendente, pasta sumida é pulo e não recusa"
+    } catch {
+        Write-Host "  [ERRO] Permissões (índices): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfIdxRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: limpar backups antigos
+    # A saída de quem matou a 1.7.0 na fase 2 e ficou com centenas de GB numa pasta que só SYSTEM e
+    # Administradores apagam. É também a outra metade da guarda da segunda restauração: numa máquina
+    # que já rodou a 1.7.0 o índice antigo não tem a marca de consumido, conta como pendente e
+    # recusa toda restauração nova - a recusa manda usar este botão, e sem ele não havia saída.
+    $wfLimpRaiz = Join-Path $wbSelfTestRaiz 'acl-limpeza'
+    try {
+        if (Test-Path -LiteralPath $wfLimpRaiz) { Remove-Item -LiteralPath $wfLimpRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfLimpRaiz -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-perfil-fulano-20260101-000000.txt') -Value 'usado' -Encoding Unicode
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-perfil-fulano-19990101-000000.txt') -Value 'orfao' -Encoding Unicode
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20260101-000000.json') -Value (([pscustomobject]@{
+            Stamp = '20260101-000000'; Consumed = $false; Origin = (New-WinForgeAclIndexOrigin)
+            Items = @([pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-fulano-20260101-000000.txt'; Target = 'C:\Users'; Sha256 = ''; ExternalPath = '' })
+        } | ConvertTo-Json -Depth 5)) -Encoding UTF8
+        $wfLimpInv = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz)
+        if ($wfLimpInv.Count -ne 3) { Write-Host "  [ERRO] Permissões (limpeza): o inventário trouxe $($wfLimpInv.Count) item(ns), esperado 3" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpOrf = @($wfLimpInv | Where-Object { $_.Orphan })
+        if ($wfLimpOrf.Count -ne 1) { Write-Host "  [ERRO] Permissões (limpeza): $($wfLimpOrf.Count) órfão(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfLimpOrf[0].Name -ne 'acl-perfil-fulano-19990101-000000.txt') { Write-Host "  [ERRO] Permissões (limpeza): o órfão apontado é '$($wfLimpOrf[0].Name)'" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfLimpInv | Where-Object { [string]$_.Name -eq 'acl-perfil-fulano-20260101-000000.txt' -and $_.Orphan }).Count) { Write-Host "  [ERRO] Permissões (limpeza): arquivo referenciado por índice foi marcado como órfão" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLimpI in $wfLimpInv) {
+            if ([long]$wfLimpI.Bytes -le 0) { Write-Host "  [ERRO] Permissões (limpeza): '$($wfLimpI.Name)' sem tamanho" -ForegroundColor Red; $wbErrors++ }
+            if ($null -eq $wfLimpI.Date) { Write-Host "  [ERRO] Permissões (limpeza): '$($wfLimpI.Name)' sem data" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O tipo separa o índice do conteúdo: é ele que decide o que pode ser apagado junto de quê.
+        $wfLimpTipos = @($wfLimpInv | Group-Object { [string]$_.Kind } | ForEach-Object { "$($_.Name)=$($_.Count)" } | Sort-Object)
+        if (($wfLimpTipos -join ',') -ne 'conteudo=2,indice=1') { Write-Host "  [ERRO] Permissões (limpeza): os tipos do inventário saíram '$($wfLimpTipos -join ',')', esperado 'conteudo=2,indice=1'" -ForegroundColor Red; $wbErrors++ }
+        # A linha nova existe e é 'repair'. O título é conferido AQUI, com o índice ainda pendente:
+        # a recusa da segunda restauração cita o botão pelo nome, e quem lê a recusa vai procurar
+        # esse nome na aba Config - um travessão de um lado com hífen do outro manda a pessoa
+        # procurar um botão que ela não encontra.
+        $wfLimpCmd = Get-WinForgeRepairCommand -Name 'AclCleanup'
+        if ([string]$wfLimpCmd.Kind -ne 'repair') { Write-Host "  [ERRO] Permissões (limpeza): a linha AclCleanup é '$($wfLimpCmd.Kind)', esperado 'repair'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLimpCmd.Title -ne 'Permissões do disco C: - Limpar backups antigos') { Write-Host "  [ERRO] Permissões (limpeza): título '$($wfLimpCmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpRecusa = Test-WinForgeAclRestoreAllowed -Root $wfLimpRaiz
+        if ($wfLimpRecusa.Ok) { Write-Host "  [ERRO] Permissões (limpeza): com um índice pendente a restauração deveria ser recusada - é a recusa que manda usar este botão" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpRecusa.Reason).IndexOf([string]$wfLimpCmd.Title, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (limpeza): a recusa da restauração não cita o botão com o título EXATO da tabela ('$($wfLimpCmd.Title)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepAclCleanup.Content -ne [string]$wfLimpCmd.Title) { Write-Host "  [ERRO] Permissões (limpeza): o Content da config ('$($sync.configs.feature.WPFWFRepAclCleanup.Content)') não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSeco = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+        if (-not @($wfLimpSeco | Where-Object { [string]$_ -like '*[simulação]*' }).Count) { Write-Host "  [ERRO] Permissões (limpeza): -DryRun não devolveu linhas prefixadas com '[simulação] '" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfLimpSeco | Where-Object { [string]$_ -like '*20260101*' }).Count) { Write-Host "  [ERRO] Permissões (limpeza): a simulação apagaria um arquivo em uso" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-Path -LiteralPath (Join-Path $wfLimpRaiz 'acl-perfil-fulano-19990101-000000.txt'))) { Write-Host "  [ERRO] Permissões (limpeza): o -DryRun APAGOU arquivo" -ForegroundColor Red; $wbErrors++ }
+        # Marcado o índice como desfeito, o conjunto INTEIRO passa a poder sair - o índice e o
+        # arquivo que ele referencia. É a saída de quem já desfez e continua com a pasta cheia.
+        $null = Set-WinForgeAclIndexConsumed -Path (Join-Path $wfLimpRaiz 'acl-index-20260101-000000.json')
+        $wfLimpSeco2 = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+        if ($wfLimpSeco2.Count -ne 3) { Write-Host "  [ERRO] Permissões (limpeza): com o índice consumido a simulação apagaria $($wfLimpSeco2.Count) arquivo(s), esperado 3" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfLimpSeco2 | Where-Object { [string]$_ -like '*acl-index-20260101-000000.json*' }).Count) { Write-Host "  [ERRO] Permissões (limpeza): o índice já desfeito não entrou na simulação" -ForegroundColor Red; $wbErrors++ }
+        # Varredura de abertura: acima de 1 GB ela RELATA, e não apaga nada.
+        $wfLimpAviso = Get-WinForgeAclBackupSizeWarning -Root $wfLimpRaiz -LimitBytes 1
+        if (-not $wfLimpAviso.Over) { Write-Host "  [ERRO] Permissões (varredura): 1 byte de limite deveria disparar o aviso" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfLimpAviso.Bytes -le 0) { Write-Host "  [ERRO] Permissões (varredura): o aviso não soma os bytes da pasta ($($wfLimpAviso.Bytes))" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLimpAviso.Text -notmatch 'Limpar backups antigos') { Write-Host "  [ERRO] Permissões (varredura): o aviso não aponta o botão ('$($wfLimpAviso.Text)')" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeAclBackupSizeWarning -Root $wfLimpRaiz -LimitBytes 1073741824).Over) { Write-Host "  [ERRO] Permissões (varredura): três arquivos minúsculos dispararam o aviso de 1 GB" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpFonteV = [string](Get-Command Get-WinForgeAclBackupSizeWarning).ScriptBlock
+        if ($wfLimpFonteV -match 'Remove-Item') { Write-Host "  [ERRO] Permissões (varredura): a varredura de abertura SÓ RELATA - não pode apagar nada" -ForegroundColor Red; $wbErrors++ }
+        # Índice ILEGÍVEL cega o inventário: não dá para saber o que ele referenciava, e chutar
+        # "órfão" aqui apagaria o backup que ele cobre. Nada é marcado, e a limpeza não acha alvo.
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-19990101-000000.json') -Value 'isto não é json' -Encoding UTF8
+        $wfLimpCego = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { $_.Orphan })
+        if ($wfLimpCego.Count) { Write-Host "  [ERRO] Permissões (limpeza): com um índice ilegível na pasta, $($wfLimpCego.Count) arquivo(s) foram marcados como órfãos - não há como saber o que ele referenciava" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSecoCego = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*acl-perfil-fulano-19990101*' })
+        if ($wfLimpSecoCego.Count) { Write-Host "  [ERRO] Permissões (limpeza): a simulação apagaria um arquivo que um índice ilegível pode referenciar" -ForegroundColor Red; $wbErrors++ }
+        # Mas o ÍNDICE ilegível em si é alvo SEMPRE, e essa era a outra ponta do beco sem saída: o
+        # Desfazer não consegue aplicá-lo (Get-WinForgeAclBackupSet devolve zero item para ele), a
+        # restauração fica recusada porque ele conta como pendente, e a limpeza respondia que não
+        # havia nada para apagar. Decidir isso NÃO depende de interpretar o conteúdo dele.
+        $wfLimpInvCego = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { [string]$_.Name -eq 'acl-index-19990101-000000.json' })
+        if ($wfLimpInvCego.Count -ne 1) { Write-Host "  [ERRO] Permissões (limpeza): o índice ilegível não apareceu no inventário" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not $wfLimpInvCego[0].Unreadable) { Write-Host "  [ERRO] Permissões (limpeza): o índice ilegível não foi marcado com Unreadable" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSecoIleg = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*acl-index-19990101-000000.json*' })
+        if (-not $wfLimpSecoIleg.Count) { Write-Host "  [ERRO] Permissões (limpeza): o índice ILEGÍVEL não entra na limpeza - a recusa da restauração manda limpar e a limpeza não acha nada, que é o beco sem saída" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-19990101-000000.json') -Force -ErrorAction SilentlyContinue
+        # ---- O beco sem saída medido pelo revisor: um índice PENDENTE no formato da 1.7.0, sem as
+        # marcas novas. A restauração é recusada por causa dele, e antes deste conserto a limpeza
+        # respondia "nada a apagar". Basta uma pasta que sumiu, um hash divergente ou um índice
+        # ilegível para o conjunto ficar pendente para sempre.
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20250101-000000.json') -Value (([pscustomobject]@{
+            Stamp = '20250101-000000'
+            Items = @([pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = 'D:P(A;;FA;;;SY)'; Owner = ''; OwnerSid = ''; File = ''; Target = ''; Sha256 = ''; ExternalPath = '' })
+        } | ConvertTo-Json -Depth 5)) -Encoding UTF8
+        $wfLimpBeco = Test-WinForgeAclRestoreAllowed -Root $wfLimpRaiz
+        if ($wfLimpBeco.Ok) { Write-Host "  [ERRO] Permissões (limpeza): com um índice da 1.7.0 na pasta a restauração deveria ser recusada" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpBeco.Reason).IndexOf('inclusive os pendentes', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (limpeza): a recusa manda limpar sem dizer que a limpeza alcança conjunto pendente - foi essa a saída que não existia ('$($wfLimpBeco.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpSemDesc = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*20250101*' })
+        if ($wfLimpSemDesc.Count) { Write-Host "  [ERRO] Permissões (limpeza): sem o descarte pedido, a limpeza apagaria um conjunto que ninguém desfez" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpComDesc = @(Invoke-WinForgeAclCleanup -DryRun -DiscardPending -BackupRoot $wfLimpRaiz | Where-Object { [string]$_ -like '*20250101*' })
+        if (-not $wfLimpComDesc.Count) { Write-Host "  [ERRO] Permissões (limpeza): com o descarte pedido o conjunto pendente continua fora - o beco sem saída volta inteiro" -ForegroundColor Red; $wbErrors++ }
+        # ---- Nenhum relato de parada pode mandar rodar a restauração de novo sem o Desfazer
+        # antes. O índice do backup é gravado no fim da Fase 2: quem parou depois disso tem um
+        # conjunto na fila, e a nova restauração é RECUSADA. Três destes textos mandavam bater na
+        # recusa, e a saída que ela oferece (limpar os backups) apagaria o Desfazer de um disco
+        # alterado pela metade. A ordem das duas palavras é o que a trava mede: 'Desfazer' tem de
+        # vir ANTES de 'de novo', senão a frase manda tentar primeiro e explicar depois.
+        $wfParadaRaiz = Join-Path $wbSelfTestRaiz 'acl-parada'
+        New-Item -ItemType Directory -Path $wfParadaRaiz -Force | Out-Null
+        $wfParadaSelf = $sync.SelfTest
+        try {
+            $sync.SelfTest = $false
+            $null = Write-WinForgeAclOwnerPending -Folder 'C:\Windows\System32' -OwnerSid 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -Root $wfParadaRaiz
+        } finally { $sync.SelfTest = $wfParadaSelf }
+        foreach ($wfParada in @(
+            @{ Onde = 'fase 4';         Texto = [string](Get-WinForgeAclStopReport -Phase 4 -Folders @('C:\Windows') -Profile 'C:\Users\fulano') },
+            @{ Onde = 'fase 5';         Texto = [string](Get-WinForgeAclStopReport -Phase 5 -Folders @('C:\Users\fulano\Documents') -Profile 'C:\Users\fulano') },
+            @{ Onde = 'genérico';       Texto = [string](Get-WinForgeAclStopReport -Phase 2 -Folders @() -Profile 'C:\Users\fulano') },
+            @{ Onde = 'posse pendente'; Texto = [string](Get-WinForgeAclOwnerPending -Root $wfParadaRaiz).Text })) {
+            $wfParadaTexto = [string]$wfParada.Texto
+            if ([string]::IsNullOrWhiteSpace($wfParadaTexto)) { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): o relato saiu vazio" -ForegroundColor Red; $wbErrors++; continue }
+            $wfParadaDesf = $wfParadaTexto.IndexOf('Desfazer', [StringComparison]::Ordinal)
+            $wfParadaDeNovo = $wfParadaTexto.IndexOf('de novo', [StringComparison]::Ordinal)
+            if ($wfParadaDeNovo -ge 0 -and ($wfParadaDesf -lt 0 -or $wfParadaDesf -gt $wfParadaDeNovo)) { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): manda tentar 'de novo' antes de falar no Desfazer, e a guarda recusa essa tentativa ('$wfParadaTexto')" -ForegroundColor Red; $wbErrors++ }
+            # E a frase tem de DIZER que a guarda recusa enquanto o backup estiver na fila: citar o
+            # Desfazer em outro parágrafo e mandar tentar de novo no seguinte ainda manda bater na recusa.
+            if ($wfParadaDeNovo -ge 0 -and $wfParadaTexto -notmatch 'recusad') { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): manda tentar de novo sem dizer que a nova restauração é recusada enquanto o backup desta rodada estiver na fila" -ForegroundColor Red; $wbErrors++ }
+            if ($wfParadaTexto -match 'rode a restaura' -and $wfParadaDesf -lt 0) { Write-Host "  [ERRO] Permissões (parada, $($wfParada.Onde)): manda rodar a restauração sem citar o Desfazer" -ForegroundColor Red; $wbErrors++ }
+        }
+        Remove-Item -LiteralPath $wfParadaRaiz -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  Permissões (parada): os quatro relatos de interrupção mandam desfazer ANTES de tentar de novo"
+        # A confirmação do descarte é DIGITADA, e distinta da caixa Sim/Não do clique.
+        foreach ($wfLimpFrase in @(
+            @{ Texto = 'APAGAR';      Vale = $true },
+            @{ Texto = 'apagar';      Vale = $true },
+            @{ Texto = '  APAGAR  ';  Vale = $true },
+            @{ Texto = 'APAGA';       Vale = $false },
+            @{ Texto = 'APAGAR TUDO'; Vale = $false },
+            @{ Texto = '';            Vale = $false },
+            @{ Texto = 'sim';         Vale = $false }
+        )) {
+            if ([bool](Test-WinForgeAclCleanupPhrase -Typed ([string]$wfLimpFrase.Texto)) -ne [bool]$wfLimpFrase.Vale) { Write-Host "  [ERRO] Permissões (descarte): '$($wfLimpFrase.Texto)' deveria $(if ($wfLimpFrase.Vale) { 'valer' } else { 'NÃO valer' }) como confirmação digitada" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfLimpJanela = Show-WinForgeAclCleanupConfirm -Stamps @('20250101-000000') -Bytes 1234 -NoShow
+        if ($wfLimpJanela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Permissões (descarte): Show-WinForgeAclCleanupConfirm -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfLimpOk = $wfLimpJanela.FindName('WFAclCleanupOk')
+            $wfLimpCaixa = $wfLimpJanela.FindName('WFAclCleanupPhrase')
+            $wfLimpTexto = $wfLimpJanela.FindName('WFAclCleanupText')
+            if ($null -eq $wfLimpOk -or $null -eq $wfLimpCaixa -or $null -eq $wfLimpTexto) { Write-Host "  [ERRO] Permissões (descarte): a caixa de confirmação não registrou o botão, a caixa de texto ou a mensagem" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ($wfLimpOk.IsEnabled) { Write-Host "  [ERRO] Permissões (descarte): o botão de descartar nasce HABILITADO - a confirmação digitada não segura nada" -ForegroundColor Red; $wbErrors++ }
+                $wfLimpCaixa.Text = 'APAGAR'
+                if (-not $wfLimpOk.IsEnabled) { Write-Host "  [ERRO] Permissões (descarte): digitada a palavra, o botão continua desabilitado" -ForegroundColor Red; $wbErrors++ }
+                $wfLimpCaixa.Text = 'APAG'
+                if ($wfLimpOk.IsEnabled) { Write-Host "  [ERRO] Permissões (descarte): apagada a palavra, o botão continua habilitado" -ForegroundColor Red; $wbErrors++ }
+                if (([string]$wfLimpTexto.Text).IndexOf('20250101-000000', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (descarte): a caixa não diz QUAIS conjuntos vão embora ('$($wfLimpTexto.Text)')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # E a limpeza de verdade PEDE essa confirmação antes de descartar pendente. A busca é pela
+        # forma da CHAMADA, e não pelo nome: o nome também aparece no bloco de ajuda, que entra no
+        # ScriptBlock - foi essa fresta que já pegou três implementadores desta leva.
+        $wfLimpFonteC = [string](Get-Command Invoke-WinForgeAclCleanup).ScriptBlock
+        if ($wfLimpFonteC.IndexOf('Request-WinForgeAclCleanupDiscard -Stamps', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (descarte): a limpeza não CHAMA a confirmação digitada antes de descartar conjunto pendente" -ForegroundColor Red; $wbErrors++ }
+        # O salto para a thread da janela precisa do callback nascido na runspace PRINCIPAL. Sem ele
+        # no lugar, o pedido morre no Dispatcher e o descarte nunca acontece - calado.
+        if ($sync.WinForgeAclCleanupConfirmCallback -isnot [scriptblock]) { Write-Host "  [ERRO] Permissões (descarte): `$sync.WinForgeAclCleanupConfirmCallback não é um scriptblock - o pedido não chega à thread da janela" -ForegroundColor Red; $wbErrors++ }
+        # Janela FECHANDO: Invoke-WPFUIThread é Dispatcher.Invoke síncrono e ficaria parado esperando
+        # um Dispatcher que já está desligando - a thread do pool trava e a limpeza não termina. É a
+        # mesma guarda que o download de driver já tem (wf-diag.ps1), e ela vem ANTES da de janela
+        # ausente: as duas respondem NÃO, mas a ordem é o que faz a guarda existir no fonte.
+        $wfLimpFonteQ = [string](Get-Command Request-WinForgeAclCleanupDiscard).ScriptBlock
+        $wfLimpPosFec = $wfLimpFonteQ.IndexOf('if ($sync.WinForgeClosing) { return $false }', [StringComparison]::Ordinal)
+        $wfLimpPosForm = $wfLimpFonteQ.IndexOf('$null -eq $sync.Form', [StringComparison]::Ordinal)
+        if ($wfLimpPosFec -lt 0) { Write-Host "  [ERRO] Permissões (descarte): o pedido não desiste com a janela fechando - Invoke-WPFUIThread ficaria parado esperando um Dispatcher que já está desligando" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosForm -ge 0 -and $wfLimpPosFec -gt $wfLimpPosForm) { Write-Host "  [ERRO] Permissões (descarte): a guarda de janela fechando vem depois da de janela ausente" -ForegroundColor Red; $wbErrors++ }
+        # E ela responde de verdade, não só existe no fonte.
+        $wfLimpFechandoAntes = $sync.WinForgeClosing
+        try {
+            $sync.WinForgeClosing = $true
+            if (Request-WinForgeAclCleanupDiscard -Stamps @('20250101-000000') -Bytes 1) { Write-Host "  [ERRO] Permissões (descarte): com a janela fechando o pedido respondeu SIM" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            $sync.WinForgeClosing = $wfLimpFechandoAntes
+        }
+        Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20250101-000000.json') -Force -ErrorAction SilentlyContinue
+        # ---- O arquivo de conteúdo que a Tarefa 7 manda para OUTRO disco. A limpeza não o enxergava:
+        # ele não está na pasta protegida, e o inventário só olhava a pasta. Ficava metade do backup
+        # apagada e metade esquecida num pen drive, sem uma linha dizendo isso.
+        $wfLimpExtDir = Join-Path $wbSelfTestRaiz 'acl-limpeza-externo'
+        if (Test-Path -LiteralPath $wfLimpExtDir) { Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfLimpExtDir -Force | Out-Null
+        $wfLimpExtArq = Join-Path $wfLimpExtDir 'acl-perfil-externo-20270101-000000.txt'
+        Set-Content -LiteralPath $wfLimpExtArq -Value 'conteudo externo' -Encoding Unicode
+        # O segundo mora num caminho que NÃO existe: é o disco desligado, o caso comum de quem
+        # guardou o backup num pen drive e voltou uma semana depois.
+        # A pasta que não existe NÃO pode ter 'disco' no nome: a linha da simulação traz o caminho
+        # completo, e a asserção de baixo procura a frase do motivo. Com 'disco' no caminho ela
+        # casaria com o caminho e um mutante que apagasse o motivo passaria batido.
+        $wfLimpExtSumido = Join-Path $wfLimpExtDir 'unidade-fora\acl-perfil-externo-20270202-000000.txt'
+        Set-Content -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Value (([pscustomobject]@{
+            Stamp = '20270101-000000'; Consumed = $true; Origin = (New-WinForgeAclIndexOrigin)
+            Items = @(
+                [pscustomobject]@{ Path = 'C:\Users\fulano'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-externo-20270101-000000.txt'; Target = 'C:\Users'; Sha256 = 'abc'; ExternalPath = $wfLimpExtArq },
+                [pscustomobject]@{ Path = 'C:\Users\sicrano'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-externo-20270202-000000.txt'; Target = 'C:\Users'; Sha256 = 'def'; ExternalPath = $wfLimpExtSumido }
+            )
+        } | ConvertTo-Json -Depth 5)) -Encoding UTF8
+        $wfLimpInvExt = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { $_.External })
+        if ($wfLimpInvExt.Count -ne 2) { Write-Host "  [ERRO] Permissões (externo): o inventário trouxe $($wfLimpInvExt.Count) item(ns) de outro disco, esperado 2" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfLimpExtOk = @($wfLimpInvExt | Where-Object { [string]$_.Path -eq $wfLimpExtArq })
+            $wfLimpExtNao = @($wfLimpInvExt | Where-Object { [string]$_.Path -eq $wfLimpExtSumido })
+            if ($wfLimpExtOk.Count -ne 1) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo que EXISTE não saiu no inventário pelo caminho completo" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfLimpExtOk[0].Missing) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo que existe foi marcado como ausente" -ForegroundColor Red; $wbErrors++ }
+            elseif ([long]$wfLimpExtOk[0].Bytes -le 0) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo saiu sem tamanho" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLimpExtNao.Count -ne 1) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo do disco desligado sumiu do inventário - é justamente ele que não pode ser omitido em silêncio" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wfLimpExtNao[0].Missing) { Write-Host "  [ERRO] Permissões (externo): o arquivo externo ausente não foi marcado com Missing" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O aviso de tamanho fala da PASTA: byte que está em outro disco não entra nessa conta.
+        $wfLimpAvisoExt = Get-WinForgeAclBackupSizeWarning -Root $wfLimpRaiz -LimitBytes 1
+        $wfLimpBytesPasta = [long]0
+        foreach ($wfLimpFP in @(Get-ChildItem -LiteralPath $wfLimpRaiz -File)) { $wfLimpBytesPasta += [long]$wfLimpFP.Length }
+        if ([long]$wfLimpAvisoExt.Bytes -ne $wfLimpBytesPasta) { Write-Host "  [ERRO] Permissões (externo): o aviso de tamanho somou $($wfLimpAvisoExt.Bytes) byte(s) e a pasta tem $wfLimpBytesPasta - arquivo de outro disco entrou na conta da pasta" -ForegroundColor Red; $wbErrors++ }
+        # SEGURANÇA. O índice desta pasta de teste NÃO passa em Test-WinForgeAclBackupFile - ele mora
+        # em %TEMP% e pertence à identidade atual -, então o caminho externo que ele nomeia não pode
+        # virar argumento de um Remove-Item ELEVADO. É o caminho de escalonamento: conteúdo que um
+        # processo de integridade média controla virando remoção com privilégio.
+        foreach ($wfLimpX in $wfLimpInvExt) {
+            if ($wfLimpX.Trusted) { Write-Host "  [ERRO] Permissões (externo): '$($wfLimpX.Path)' saiu como CONFIÁVEL, e quem o nomeia é um índice de %TEMP% que não passa na conferência de confiança" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfLimpSecoExt = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+        $wfLimpApagaExt = @($wfLimpSecoExt | Where-Object { ([string]$_).StartsWith('[simulação] apagar ', [StringComparison]::Ordinal) -and ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if ($wfLimpApagaExt.Count) { Write-Host "  [ERRO] Permissões (externo): um caminho vindo de índice NÃO confiável virou alvo de remoção elevada ('$($wfLimpApagaExt[0])')" -ForegroundColor Red; $wbErrors++ }
+        # E o que está DENTRO da pasta continua apagável: a porta de confiança é sobre caminho que
+        # veio de dentro de um arquivo de texto, não sobre a pasta já conferida. Sem esta trava,
+        # marcar todo item da pasta como não confiável passaria batido - medido, o mutante sobreviveu.
+        $wfLimpDentro = @($wfLimpSecoExt | Where-Object { ([string]$_).StartsWith('[simulação] apagar ', [StringComparison]::Ordinal) })
+        if (-not $wfLimpDentro.Count) { Write-Host "  [ERRO] Permissões (externo): nenhuma linha da simulação é de remoção - os arquivos da própria pasta deixaram de ser apagáveis" -ForegroundColor Red; $wbErrors++ }
+        # Mas ele continua APARECENDO: omitir em silêncio é o defeito que a rodada passada consertou.
+        # O que muda é a instrução - apagar à mão, com o caminho completo na frente.
+        $wfLimpAvisaExt = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if (-not $wfLimpAvisaExt.Count) { Write-Host "  [ERRO] Permissões (externo): o arquivo de outro disco sumiu da simulação - ele tem de aparecer mesmo sem ser apagado" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpAvisaExt[0]).IndexOf('à mão', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo que o WinForge não vai apagar não diz o que fazer ('$($wfLimpAvisaExt[0])')" -ForegroundColor Red; $wbErrors++ }
+        # A promessa falsa do disco ausente: o ÍNDICE sai no mesmo laço, e o arquivo de outro disco
+        # só existe no inventário através dele. "Rode a limpeza de novo com o disco ligado" nunca
+        # mais encontraria o arquivo - na segunda passada não há índice que o nomeie. Guardar o
+        # índice para depois reabriria o beco sem saída, então a instrução é apagar à mão.
+        $wfLimpFonteC2 = [string](Get-Command Invoke-WinForgeAclCleanup).ScriptBlock
+        # A frase proibida é a do DISCO ("ligue o disco e rode a limpeza de novo"), e não qualquer
+        # "rode a limpeza de novo": o arquivo PENDENTE que fica na pasta continua alcançável numa
+        # segunda passada, e a mensagem dele diz isso com razão.
+        if ($wfLimpFonteC2 -match 'Ligue o disco e rode a limpeza de novo') { Write-Host "  [ERRO] Permissões (externo): a limpeza ainda promete uma segunda passada com o disco ligado - o índice saiu no mesmo laço e o arquivo nunca mais aparece" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLimpFonteC2.IndexOf('o índice que o nomeava saiu junto', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a mensagem do disco ausente não diz que o índice foi embora nesta mesma limpeza - sem isso ela volta a prometer uma segunda passada" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpAvisaSumido = @($wfLimpSecoExt | Where-Object { ([string]$_).IndexOf($wfLimpExtSumido, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        if (-not $wfLimpAvisaSumido.Count) { Write-Host "  [ERRO] Permissões (externo): a simulação omite o arquivo externo cujo disco não está disponível" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfLimpAvisaSumido[0]).IndexOf('não está disponível', [StringComparison]::OrdinalIgnoreCase) -lt 0) { Write-Host "  [ERRO] Permissões (externo): a linha do arquivo ausente não diz que o disco não está disponível ('$($wfLimpAvisaSumido[0])')" -ForegroundColor Red; $wbErrors++ }
+        # O LADO POSITIVO, que faltava. Até aqui só o lado negativo era exercitado - índice não
+        # confiável, arquivo externo que não vira remoção -, e um erro de comparação que devolvesse
+        # "não confiável" para TUDO passaria batido: a limpeza mandaria todo arquivo de outro disco
+        # para a instrução manual, em silêncio, e o teste continuaria verde.
+        #
+        # A conferência de verdade exige pasta protegida e elevação, que este build não tem. O que se
+        # troca é a FUNÇÃO que responde por ela, dentro deste bloco e devolvida no 'finally'.
+        $wfLimpConfOriginal = ${function:Test-WinForgeAclBackupFile}
+        try {
+            ${function:Test-WinForgeAclBackupFile} = { param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Root) return @{ Trusted = $true; Reason = '' } }
+            $wfLimpInvFiel = @(Get-WinForgeAclBackupInventory -Root $wfLimpRaiz | Where-Object { $_.External -and [string]$_.Path -eq $wfLimpExtArq })
+            if ($wfLimpInvFiel.Count -ne 1) { Write-Host "  [ERRO] Permissões (externo confiável): o arquivo externo sumiu do inventário com o índice confiável" -ForegroundColor Red; $wbErrors++ }
+            elseif (-not $wfLimpInvFiel[0].Trusted) { Write-Host "  [ERRO] Permissões (externo confiável): o índice passou na conferência e o caminho externo saiu NÃO confiável - nenhum arquivo de outro disco seria apagado" -ForegroundColor Red; $wbErrors++ }
+            $wfLimpSecoFiel = @(Invoke-WinForgeAclCleanup -DryRun -BackupRoot $wfLimpRaiz)
+            $wfLimpApagaFiel = @($wfLimpSecoFiel | Where-Object { ([string]$_).StartsWith('[simulação] apagar ', [StringComparison]::Ordinal) -and ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+            if (-not $wfLimpApagaFiel.Count) { Write-Host "  [ERRO] Permissões (externo confiável): o arquivo de outro disco não virou linha de remoção nem com o índice confiável" -ForegroundColor Red; $wbErrors++ }
+            $wfLimpMaoFiel = @($wfLimpSecoFiel | Where-Object { ([string]$_).IndexOf('apague à mão', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and ([string]$_).IndexOf($wfLimpExtArq, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+            if ($wfLimpMaoFiel.Count) { Write-Host "  [ERRO] Permissões (externo confiável): o arquivo continuou mandado para a instrução manual ('$($wfLimpMaoFiel[0])')" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            ${function:Test-WinForgeAclBackupFile} = $wfLimpConfOriginal
+        }
+        # E a conferência VOLTOU. Sem esta linha, um 'finally' quebrado deixaria todo teste seguinte
+        # rodando com a porta de confiança desligada - inclusive a trava de segurança aqui de cima,
+        # que ficaria verde por acidente.
+        if ((Test-WinForgeAclBackupFile -Path $wfLimpExtArq -Root $wfLimpRaiz).Trusted) { Write-Host "  [ERRO] Permissões (externo confiável): a conferência de confiança não voltou ao que era depois do teste" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath (Join-Path $wfLimpRaiz 'acl-index-20270101-000000.json') -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $wfLimpExtDir -Recurse -Force -ErrorAction SilentlyContinue
+        # E a linha recusa despacho sem ninguém para confirmar.
+        $wfLimpDesp = Invoke-WinForgeRepairCommand -Name 'AclCleanup' -NoUI
+        if ($wfLimpDesp.Dispatched) { Write-Host "  [ERRO] Permissões (limpeza): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepAclCleanup.Description)) { Write-Host "  [ERRO] Permissões (limpeza): WPFWFRepAclCleanup sem Description na config" -ForegroundColor Red; $wbErrors++ }
+        # A varredura NÃO fica mais pendurada no gancho da janela. Ali ela escrevia na barra logo
+        # depois de o job de diagnóstico começar, e o job cobria o texto em milissegundos: quem tinha
+        # trezentos gigabytes presos não via nada, e o aviso ia só para o arquivo de log. Agora ela é
+        # ENCADEADA depois da mensagem "Diagnóstico pronto", que é a última coisa que o job escreve
+        # na barra - a posição é o conserto, não a prioridade.
+        #
+        # A cobrança é pela forma da CHAMADA ('$null = ' junto), e não pelo nome solto: o nome
+        # aparece também no bloco de ajuda, que entra no ScriptBlock, e essa fresta já pegou três
+        # implementadores desta leva.
+        $wfLimpFonteJ = [string](Get-Command Start-WinForgeProfileJob).ScriptBlock
+        $wfLimpPosJ = $wfLimpFonteJ.IndexOf('$null = Show-WinForgeAclBackupSizeWarning', [StringComparison]::Ordinal)
+        $wfLimpPosD = $wfLimpFonteJ.IndexOf('Set-WinForgeProfileProgress -Label $wfDone', [StringComparison]::Ordinal)
+        if ($wfLimpPosJ -lt 0) { Write-Host "  [ERRO] Permissões (varredura): o diagnóstico não CHAMA a varredura no fim - a pasta cresceria calada" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosD -lt 0) { Write-Host "  [ERRO] Permissões (varredura): a mensagem final do diagnóstico mudou de forma e a trava de ordem deixou de valer" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosJ -lt $wfLimpPosD) { Write-Host "  [ERRO] Permissões (varredura): a varredura é chamada ANTES da mensagem 'Diagnóstico pronto' - o job cobre o aviso na barra em milissegundos" -ForegroundColor Red; $wbErrors++ }
+        # E a SEGUNDA ordem, pelo mesmo padrão: a posse pendente vem DEPOIS da varredura. A barra
+        # guarda a última mensagem escrita, e a posse é a mais grave das duas - uma pasta do Windows
+        # pode estar com o dono errado AGORA, enquanto a pasta cheia espera. Isto era só comentário:
+        # trocar as duas linhas de lugar deixava o build verde e enterrava a mensagem mais grave.
+        $wfLimpPosP = $wfLimpFonteJ.IndexOf('$null = Show-WinForgeAclOwnerPending', [StringComparison]::Ordinal)
+        if ($wfLimpPosP -lt 0) { Write-Host "  [ERRO] Permissões (varredura): o diagnóstico não CHAMA o relato da posse pendente" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosJ -lt 0) { Write-Host "  [ERRO] Permissões (varredura): sem a varredura não dá para prender a ordem das duas mensagens" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpPosP -lt $wfLimpPosJ) { Write-Host "  [ERRO] Permissões (varredura): a posse pendente é relatada ANTES da varredura - a barra guarda a última, e a posse é a mais grave" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpFonteG = ''
+        try { if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $wfLimpFonteG = [IO.File]::ReadAllText($PSCommandPath) } } catch { $wfLimpFonteG = '' }
+        # A agulha é MONTADA, e não escrita inteira: esta linha mora no mesmo arquivo que ela
+        # procura, e um literal contíguo casaria consigo mesmo. Medido na Tarefa 6: com a busca
+        # escrita inteira, o mutante que mexia no gancho sobrevivia.
+        $wfLimpAlvoG = '::Background, [action]{ Show-WinForgeAcl' + 'BackupSizeWarning }'
+        if ([string]::IsNullOrWhiteSpace($wfLimpFonteG)) { Write-Host "  [ERRO] Permissões (varredura): o próprio arquivo do WinForge não pôde ser lido para conferir o gancho de abertura" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLimpFonteG.IndexOf($wfLimpAlvoG, [StringComparison]::Ordinal) -ge 0) { Write-Host "  [ERRO] Permissões (varredura): o gancho antigo voltou ao arranque - ali o aviso é coberto pelo job de diagnóstico" -ForegroundColor Red; $wbErrors++ }
+        $wfLimpFonteS = [string](Get-Command Show-WinForgeAclBackupSizeWarning).ScriptBlock
+        if ($wfLimpFonteS -match 'MessageBox') { Write-Host "  [ERRO] Permissões (varredura): a varredura de abertura abre caixa de mensagem - ela escreve no log e na barra, e nada mais" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLimpEsp in @('Write-WinForgeLog', 'Set-WinForgeProfileProgress')) {
+            if ($wfLimpFonteS.IndexOf($wfLimpEsp, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (varredura): a varredura de abertura não usa '$wfLimpEsp'" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Permissões (limpeza): inventário com tamanho e data, 1 órfão marcado, simulação não apaga, varredura de 1 GB só relata"
+    } catch {
+        Write-Host "  [ERRO] Permissões (limpeza): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfLimpRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: conferência por amostragem
+    # A dívida que o '/C' deixou no '/restore' do Desfazer: com ele o icacls sai 0 quase sempre, então
+    # o '$aplicados++' de lá diz "o icacls rodou", e não "as entradas foram aplicadas". O sinal volta
+    # por COMPORTAMENTO - reler a lista de algumas pastas e comparar com o descritor do arquivo -, e
+    # nunca pela frase de resumo do icacls: a integração contínua deste projeto roda em inglês e uma
+    # asserção presa ao idioma já quebrou antes.
+    $wfAmRaiz = Join-Path $wbSelfTestRaiz 'acl-amostra'
+    try {
+        if (Test-Path -LiteralPath $wfAmRaiz) { Remove-Item -LiteralPath $wfAmRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $wfAmRaiz -Force | Out-Null
+        $wfAmPai = [string](Split-Path -Parent $wfAmRaiz)
+        $wfAmArq = Join-Path $wfAmRaiz 'amostra.txt'
+        # O backup só guarda pasta com a herança BLOQUEADA, então o fixture bloqueia a herança das
+        # quatro - é a mesma condição que a caminhada da fase 2 exige para indexar.
+        $wfAmNomes = @('alfa', 'beta', 'gama', 'delta')
+        foreach ($wfAmN in $wfAmNomes) {
+            $wfAmP = Join-Path $wfAmRaiz $wfAmN
+            New-Item -ItemType Directory -Path $wfAmP -Force | Out-Null
+            $wfAmAcl = Get-Acl -LiteralPath $wfAmP
+            $wfAmAcl.SetAccessRuleProtection($true, $true)
+            Set-Acl -LiteralPath $wfAmP -AclObject $wfAmAcl
+        }
+        # Os pares saem da CAMINHADA de verdade, e não de uma segunda forma de ler a ACL: o que se
+        # confere depois é exatamente o texto que a fase 2 teria gravado.
+        $wfAmEsc = Get-WinForgeAclContentScope -Path $wfAmRaiz
+        if (-not $wfAmEsc.Ok) { throw "a caminhada do fixture falhou: $($wfAmEsc.Reason)" }
+        $wfAmEntradas = @($wfAmEsc.Entries)
+        if ($wfAmEntradas.Count -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): o fixture deu $($wfAmEntradas.Count) entrada(s), esperado 4" -ForegroundColor Red; $wbErrors++ }
+        # Formato medido do 'icacls /save': pares <nome>CRLF<SDDL>CRLF em UTF-16LE SEM marca. Escrito
+        # aqui à mão porque Write-WinForgeAclContentBackup se recusa a rodar sob -SelfTest, e é
+        # justamente essa recusa que não se quer afrouxar.
+        $wfAmGrava = {
+            param($Destino, $Pares)
+            $wfAmEnc = New-Object System.Text.UnicodeEncoding($false, $false)
+            $wfAmW = New-Object System.IO.StreamWriter($Destino, $false, $wfAmEnc)
+            try { foreach ($wfAmPar in $Pares) { $wfAmW.Write([string]$wfAmPar.Name); $wfAmW.Write("`r`n"); $wfAmW.Write([string]$wfAmPar.Sddl); $wfAmW.Write("`r`n") } } finally { $wfAmW.Dispose() }
+        }
+        & $wfAmGrava $wfAmArq $wfAmEntradas
+        $wfAmTudo = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmArq -Size 4
+        if (-not $wfAmTudo.Ok) { Write-Host "  [ERRO] Permissões (amostragem): a conferência não rodou ($($wfAmTudo.Reason))" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmTudo.Checked -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): conferiu $($wfAmTudo.Checked) pasta(s), esperado 4" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmTudo.Match -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): $($wfAmTudo.Match) de 4 bateram com o backup logo depois de gravá-lo - a comparação está acusando o que não mudou" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmTudo.Differ -ne 0 -or [int]$wfAmTudo.Missing -ne 0) { Write-Host "  [ERRO] Permissões (amostragem): Differ=$($wfAmTudo.Differ) e Missing=$($wfAmTudo.Missing) num fixture intacto" -ForegroundColor Red; $wbErrors++ }
+        # A prova de COMPORTAMENTO: uma pasta cuja lista mudou depois do backup tem de sair como
+        # divergente. É este caso que o código de saída do icacls com '/C' não denuncia.
+        #
+        # A mexida vai por Restore-WinForgeAclSddl, e não por 'Get-Acl | Set-Acl': MEDIDO aqui, o
+        # par Get-Acl/Set-Acl sobre uma pasta com a herança JÁ bloqueada tenta escrever a SACL junto
+        # e morre com PrivilegeNotHeldException ('SeSecurityPrivilege'), deixando a pasta intacta -
+        # o teste passaria a não mexer em nada e acusaria a comparação no lugar do fixture.
+        $wfAmAlvo = Join-Path $wfAmRaiz 'beta'
+        $wfAmSddlBeta = [string](@($wfAmEntradas | Where-Object { ([string]$_.Name) -like '*beta' })[0].Sddl)
+        $wfAmMex = Restore-WinForgeAclSddl -Path $wfAmAlvo -Sddl ($wfAmSddlBeta + '(A;OICI;FA;;;WD)')
+        if (-not $wfAmMex.DaclOk) { throw "a ACE plantada em 'beta' não foi aplicada: $($wfAmMex.Reason)" }
+        if ([string](Get-WinForgeAclFolderSecurity -Path $wfAmAlvo).Sddl -eq $wfAmSddlBeta) { Write-Host "  [ERRO] Permissões (amostragem): a ACE plantada não mudou o descritor de 'beta' - o teste não está provando nada" -ForegroundColor Red; $wbErrors++ }
+        $wfAmMexida = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmArq -Size 4
+        if ([int]$wfAmMexida.Differ -ne 1) { Write-Host "  [ERRO] Permissões (amostragem): uma pasta com a lista alterada deu Differ=$($wfAmMexida.Differ), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmMexida.Match -ne 3) { Write-Host "  [ERRO] Permissões (amostragem): Match=$($wfAmMexida.Match) com uma pasta alterada, esperado 3" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfAmMexida.Paths) -notcontains $wfAmAlvo) { Write-Host "  [ERRO] Permissões (amostragem): a divergente não foi nomeada ('$(@($wfAmMexida.Paths) -join '; ')')" -ForegroundColor Red; $wbErrors++ }
+        # Pasta que sumiu desde o backup não é divergência: é o caso comum de pasta de cache.
+        Remove-Item -LiteralPath (Join-Path $wfAmRaiz 'delta') -Recurse -Force
+        $wfAmSumida = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmArq -Size 4
+        if ([int]$wfAmSumida.Missing -ne 1) { Write-Host "  [ERRO] Permissões (amostragem): a pasta apagada deu Missing=$($wfAmSumida.Missing), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # A amostra ATRAVESSA o arquivo. Um '/restore' que morre no meio deixa o começo certo e o fim
+        # intocado; uma amostra presa nas primeiras N entradas diria "tudo certo" exatamente aí. Aqui
+        # só a ÚLTIMA das 20 entradas existe de verdade: quem não chega ao fim devolve Match=0.
+        $wfAmLongo = Join-Path $wfAmRaiz 'amostra-longa.txt'
+        $wfAmPares = @()
+        for ($wfAmI = 1; $wfAmI -le 19; $wfAmI++) { $wfAmPares += @{ Name = ('acl-amostra\fantasma-{0:D2}' -f $wfAmI); Sddl = 'D:P(A;;FA;;;SY)' } }
+        $wfAmPares += @($wfAmEntradas | Where-Object { ([string]$_.Name) -like '*alfa' })[0]
+        & $wfAmGrava $wfAmLongo $wfAmPares
+        $wfAmEspalhada = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmLongo -Size 4
+        if ([int]$wfAmEspalhada.Checked -ne 4) { Write-Host "  [ERRO] Permissões (amostragem): conferiu $($wfAmEspalhada.Checked) de 20 com -Size 4" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmEspalhada.Match -ne 1) { Write-Host "  [ERRO] Permissões (amostragem): a amostra não alcançou a ÚLTIMA entrada do arquivo (Match=$($wfAmEspalhada.Match), esperado 1) - presa no começo ela aprova um '/restore' que morreu no meio" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfAmEspalhada.Total -ne 20) { Write-Host "  [ERRO] Permissões (amostragem): Total=$($wfAmEspalhada.Total), esperado 20" -ForegroundColor Red; $wbErrors++ }
+        # O tamanho padrão é 20, e é ele que roda no Desfazer de verdade.
+        $wfAmPadrao = Test-WinForgeAclRestoreSample -Root $wfAmPai -File $wfAmLongo
+        if ([int]$wfAmPadrao.Checked -ne 20) { Write-Host "  [ERRO] Permissões (amostragem): sem -Size conferiu $($wfAmPadrao.Checked) de 20, esperado 20" -ForegroundColor Red; $wbErrors++ }
+        # Arquivo que não existe é recusa com motivo, e não uma conferência silenciosamente vazia.
+        $wfAmSemArq = Test-WinForgeAclRestoreSample -Root $wfAmPai -File (Join-Path $wfAmRaiz 'nao-existe.txt')
+        if ($wfAmSemArq.Ok) { Write-Host "  [ERRO] Permissões (amostragem): um arquivo inexistente passou por conferência boa" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfAmSemArq.Reason)) { Write-Host "  [ERRO] Permissões (amostragem): recusou o arquivo inexistente sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        # As duas normalizações da comparação, cobradas direto: 'P' (herança bloqueada) é semântica e
+        # tem de separar; 'AI' aparece sozinha na primeira gravação de uma pasta nova e não pode
+        # separar; e a ORDEM das ACEs não pode separar, porque o descritor guardado pode ter vindo do
+        # icacls (pastas com negação) e a releitura vem do .NET, em ordem canônica.
+        if (Test-WinForgeAclSddlSame -A 'D:P(A;;FA;;;SY)' -B 'D:(A;;FA;;;SY)') { Write-Host "  [ERRO] Permissões (amostragem): pasta com herança bloqueada e pasta sem foram dadas como iguais" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclSddlSame -A 'D:PAI(A;;FA;;;SY)' -B 'D:P(A;;FA;;;SY)')) { Write-Host "  [ERRO] Permissões (amostragem): a flag 'AI' separou dois descritores com a MESMA lista - ela aparece sozinha na primeira gravação de uma pasta nova" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeAclSddlSame -A 'D:P(A;;FA;;;SY)(A;;FA;;;BA)' -B 'D:P(A;;FA;;;BA)(A;;FA;;;SY)')) { Write-Host "  [ERRO] Permissões (amostragem): a ORDEM das ACEs separou duas listas iguais - o texto guardado pode vir do icacls e a releitura vem do .NET" -ForegroundColor Red; $wbErrors++ }
+        if (Test-WinForgeAclSddlSame -A 'D:P(A;;FA;;;SY)' -B 'D:P(A;;FA;;;SY)(A;;FA;;;WD)') { Write-Host "  [ERRO] Permissões (amostragem): uma ACE a mais não separou os descritores" -ForegroundColor Red; $wbErrors++ }
+        # O sinal é comportamento, não texto: nada de processo nem de frase do icacls. A integração
+        # contínua roda em inglês e 'Processados com sucesso N arquivos' não aparece lá.
+        $wfAmFonte = [string](Get-Command Test-WinForgeAclRestoreSample).ScriptBlock
+        if ($wfAmFonte -match 'Invoke-WinForgeNativeCommand') { Write-Host "  [ERRO] Permissões (amostragem): a conferência roda um processo - ela tem de reler a ACL pelo .NET" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAmFonte -match '(?i)processad|processed|com sucesso|successfully') { Write-Host "  [ERRO] Permissões (amostragem): a conferência parseia a frase de resumo do icacls, que muda com o idioma do sistema" -ForegroundColor Red; $wbErrors++ }
+        # E o Desfazer CHAMA a conferência, depois do '/restore' e não antes.
+        $wfAmFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        if ($wfAmFonteU.IndexOf('Test-WinForgeAclRestoreSample -Root', [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (amostragem): o Desfazer não chama a conferência por amostragem - a dívida do '/C' continua sem pagar" -ForegroundColor Red; $wbErrors++ }
+        $wfAmPosRestore = $wfAmFonteU.IndexOf("'/restore'", [StringComparison]::Ordinal)
+        $wfAmPosAmostra = $wfAmFonteU.IndexOf('Test-WinForgeAclRestoreSample -Root', [StringComparison]::Ordinal)
+        if ($wfAmPosRestore -lt 0 -or $wfAmPosAmostra -lt 0 -or $wfAmPosAmostra -lt $wfAmPosRestore) { Write-Host "  [ERRO] Permissões (amostragem): a conferência vem ANTES do '/restore' - ali ela mediria o disco que ninguém restaurou ainda" -ForegroundColor Red; $wbErrors++ }
+        if ($wfAmFonteU -notmatch 'amostragem') { Write-Host "  [ERRO] Permissões (amostragem): o resumo do Desfazer não diz ao usuário que a conferência é por amostra" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (amostragem): 4 de 4 conferem no fixture intacto, 1 divergente nomeada, 1 sumida separada, amostra espalhada alcança a última de 20, padrão 20"
+    } catch {
+        Write-Host "  [ERRO] Permissões (amostragem): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        Remove-Item -LiteralPath $wfAmRaiz -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Permissões: destino do conteúdo
+    # O backup de conteúdo é OBRIGATÓRIO (103,4 KB: não há o que economizar). O que é opcional é o
+    # DESTINO. As sete recusas abaixo existem porque o que sai desta pasta volta por um /restore
+    # elevado sobre o perfil inteiro.
+    $wfDestRaiz = Join-Path $wbSelfTestRaiz 'acl-destino'
+    try {
+        if (Test-Path -LiteralPath $wfDestRaiz) { Remove-Item -LiteralPath $wfDestRaiz -Recurse -Force -ErrorAction SilentlyContinue }
+        $wfDestPerfil = Join-Path $wfDestRaiz 'perfil'
+        $wfDestBom = Join-Path $wfDestRaiz 'destino'
+        New-Item -ItemType Directory -Path $wfDestPerfil -Force | Out-Null
+        New-Item -ItemType Directory -Path $wfDestBom -Force | Out-Null
+        foreach ($wfDestCaso in @(
+            @{ Nome = 'relativo';    Path = 'pasta\destino';                        Match = 'absoluto' },
+            @{ Nome = 'UNC';         Path = '\\servidor\compartilhada\acl';         Match = 'rede' },
+            @{ Nome = 'raiz';        Path = ([System.IO.Path]::GetPathRoot($wfDestRaiz)); Match = 'raiz' },
+            @{ Nome = 'no perfil';   Path = (Join-Path $wfDestPerfil 'dentro');     Match = 'perfil' },
+            @{ Nome = 'sobre o perfil'; Path = $wfDestRaiz;                          Match = 'perfil' })) {
+            $wfDestR = Test-WinForgeAclContentRoot -Path ([string]$wfDestCaso.Path) -ProfilePath $wfDestPerfil
+            if ($wfDestR.Ok) { Write-Host "  [ERRO] Permissões (destino): '$($wfDestCaso.Nome)' foi aceito ('$($wfDestCaso.Path)')" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfDestR.Reason -notmatch [string]$wfDestCaso.Match) { Write-Host "  [ERRO] Permissões (destino): a recusa de '$($wfDestCaso.Nome)' não diz o motivo ('$($wfDestR.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A recusa de 'no perfil' acima é lida sobre uma pasta que NÃO EXISTE, e sozinha ela não
+        # prova nada: o caminho do fixture tem a palavra 'perfil' dentro dele, então QUALQUER recusa
+        # que cite o caminho casa com o padrão. Medido por mutação: com a conferência de "dentro do
+        # perfil" desligada, o teste continuava passando pela recusa de "a pasta não existe". A
+        # pasta abaixo EXISTE - sem a conferência ela seria ACEITA, e é isso que fecha o buraco.
+        $wfDestDentro = Join-Path $wfDestPerfil 'dentro'
+        New-Item -ItemType Directory -Path $wfDestDentro -Force | Out-Null
+        $wfDestRD = Test-WinForgeAclContentRoot -Path $wfDestDentro -ProfilePath $wfDestPerfil
+        if ($wfDestRD.Ok) { Write-Host "  [ERRO] Permissões (destino): uma pasta que EXISTE dentro do perfil foi aceita" -ForegroundColor Red; $wbErrors++ }
+        # Ponto de reanálise na cadeia: o caminho aponta para outro lugar sem parecer que aponta.
+        $wfDestLink = Join-Path $wfDestRaiz 'atalho'
+        cmd.exe /c mklink /J "$wfDestLink" "$wfDestBom" | Out-Null
+        if (Test-Path -LiteralPath $wfDestLink) {
+            $wfDestRL = Test-WinForgeAclContentRoot -Path $wfDestLink -ProfilePath $wfDestPerfil
+            if ($wfDestRL.Ok) { Write-Host "  [ERRO] Permissões (destino): pasta com ponto de reanálise na cadeia foi aceita" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sistema de arquivos e tipo de unidade são conferidos: exFAT/FAT32 não guardam DACL e não
+        # dão erro - o arquivo sairia mudo e o Desfazer aplicaria lixo.
+        $wfDestFonte = [string](Get-Command Test-WinForgeAclContentRoot).ScriptBlock
+        foreach ($wfDestExig in @('DriveFormat', 'NTFS', 'DriveType', 'Fixed', 'Removable')) {
+            if ($wfDestFonte -notmatch [regex]::Escape($wfDestExig)) { Write-Host "  [ERRO] Permissões (destino): a conferência não olha '$wfDestExig'" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfDestFonte -match '\$env:') { Write-Host "  [ERRO] Permissões (destino): o caminho não pode vir de variável de ambiente" -ForegroundColor Red; $wbErrors++ }
+        # A recusa 3 não era exercitada por nenhum teste, só por trava de forma - e o revisor
+        # encontrou um volume não-NTFS nesta máquina (o G: do Google Drive: formato FAT32, tipo
+        # fixo). VARRER é melhor do que fixar a letra: numa máquina só de NTFS o laço não roda e não
+        # cobra nada; onde houver um volume assim, ele tem de ser recusado PELO FORMATO, e é isso que
+        # se cobra - a recusa nomeia o formato que leu. Nada é criado: a pasta nem precisa existir,
+        # porque a conferência do sistema de arquivos vem ANTES da de existência.
+        $wfDestNaoNtfs = 0
+        foreach ($wfDestUn in @([System.IO.DriveInfo]::GetDrives())) {
+            $wfDestPronta = $false
+            try { $wfDestPronta = [bool]$wfDestUn.IsReady } catch { $wfDestPronta = $false }
+            if (-not $wfDestPronta) { continue }
+            $wfDestFmt = ''
+            try { $wfDestFmt = [string]$wfDestUn.DriveFormat } catch { $wfDestFmt = '' }
+            if ([string]::IsNullOrWhiteSpace($wfDestFmt) -or $wfDestFmt -eq 'NTFS') { continue }
+            $wfDestNaoNtfs++
+            $wfDestRV = Test-WinForgeAclContentRoot -Path (Join-Path ([string]$wfDestUn.Name) 'WinForge-SelfTest-destino') -ProfilePath $wfDestPerfil
+            if ($wfDestRV.Ok) { Write-Host "  [ERRO] Permissões (destino): o volume $($wfDestUn.Name) é $wfDestFmt e foi ACEITO - lista de permissão nenhuma seria guardada lá" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfDestRV.Reason -notmatch [regex]::Escape($wfDestFmt)) { Write-Host "  [ERRO] Permissões (destino): o volume $($wfDestUn.Name) foi recusado sem nomear o formato '$wfDestFmt' ('$($wfDestRV.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Pasta boa passa e traz o aviso literal de §1.4.
+        $wfDestOk = Test-WinForgeAclContentRoot -Path $wfDestBom -ProfilePath $wfDestPerfil
+        if (-not $wfDestOk.Ok) { Write-Host "  [ERRO] Permissões (destino): a pasta de teste foi recusada ('$($wfDestOk.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfDestFrase in @('qualquer conta de administrador', 'recusa restaurar, mas não recupera arquivo apagado', 'disco desligado na hora de desfazer')) {
+            if ([string]$wfDestOk.Warning -notmatch [regex]::Escape($wfDestFrase)) { Write-Host "  [ERRO] Permissões (destino): o aviso não traz '$wfDestFrase'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O arquivo de conteúdo, dentro ou fora do %ProgramData%, passa por Protect-WinForgeSnapshotFile.
+        # A trava é por FORMA DE CHAMADA, e uma para cada arquivo. Contar ocorrências do NOME era da
+        # classe que o revisor apontou: ele aparece três vezes na função (a descrição, o arquivo de
+        # conteúdo e o índice), então apagar a chamada do arquivo de conteúdo deixava duas e a
+        # exigência de "pelo menos duas" continuava satisfeita.
+        $wfDestFonteR = [string](Get-Command Invoke-WinForgeAclRestore).ScriptBlock
+        if ($wfDestFonteR -notmatch 'WinForgeAclExternalRoot') { Write-Host "  [ERRO] Permissões (destino): a runspace não lê o destino escolhido na thread da janela" -ForegroundColor Red; $wbErrors++ }
+        # A caixa nasce DESMARCADA e o diálogo é criado na thread da janela.
+        $wfDestFonteD = [string](Get-Command Show-WinForgeAclBackupDestination).ScriptBlock
+        if ($wfDestFonteD -notmatch 'IsChecked\s*=\s*\$false') { Write-Host "  [ERRO] Permissões (destino): a caixa 'em outro disco' não nasce desmarcada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfDestFonteD -notmatch 'FolderBrowserDialog') { Write-Host "  [ERRO] Permissões (destino): o caminho não vem do seletor de pasta" -ForegroundColor Red; $wbErrors++ }
+        # E a caixa de verdade, montada sem aparecer na tela ('-NoShow', o mesmo desenho de
+        # Show-WinForgeOutputWindow e de Show-WinForgeAclCleanupConfirm). Daqui para baixo é
+        # COMPORTAMENTO: a regex acima aceita a prosa do bloco de ajuda, e os handlers ela não vê.
+        $wfDestJan = Show-WinForgeAclBackupDestination -NoShow
+        if ($wfDestJan -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Permissões (destino): Show-WinForgeAclBackupDestination -NoShow não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfDestCx = $wfDestJan.FindName('WFAclDestCaixa')
+            $wfDestBtnEsc = $wfDestJan.FindName('WFAclDestEscolher')
+            $wfDestBtnOk = $wfDestJan.FindName('WFAclDestOk')
+            $wfDestRol = $wfDestJan.FindName('WFAclDestRolagem')
+            $wfDestBar = $wfDestJan.FindName('WFAclDestBarra')
+            if ($null -eq $wfDestCx -or $null -eq $wfDestBtnEsc -or $null -eq $wfDestBtnOk -or $null -eq $wfDestRol -or $null -eq $wfDestBar) { Write-Host "  [ERRO] Permissões (destino): a caixa não registrou a caixa de marcação, os botões, a rolagem ou a barra" -ForegroundColor Red; $wbErrors++ }
+            else {
+                # 1. O estado inicial e os dois handlers, que nenhuma leitura de fonte alcança.
+                if ($wfDestCx.IsChecked) { Write-Host "  [ERRO] Permissões (destino): a caixa 'em outro disco' nasceu MARCADA" -ForegroundColor Red; $wbErrors++ }
+                if ($wfDestBtnEsc.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): o botão de escolher pasta nasce habilitado com a caixa desmarcada" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wfDestBtnOk.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): 'Continuar' nasce desabilitado - o caminho padrão (pasta protegida) tem de estar a um clique" -ForegroundColor Red; $wbErrors++ }
+                $wfDestCx.IsChecked = $true
+                if (-not $wfDestBtnEsc.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): marcada a caixa, o botão de escolher pasta continua desabilitado" -ForegroundColor Red; $wbErrors++ }
+                if ($wfDestBtnOk.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): marcada a caixa e sem pasta conferida, 'Continuar' ficou habilitado - confirmar assim cairia na pasta protegida em silêncio" -ForegroundColor Red; $wbErrors++ }
+                $wfDestCx.IsChecked = $false
+                if ($wfDestBtnEsc.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): desmarcada a caixa, o botão de escolher pasta continua habilitado" -ForegroundColor Red; $wbErrors++ }
+                if (-not $wfDestBtnOk.IsEnabled) { Write-Host "  [ERRO] Permissões (destino): desmarcada a caixa, 'Continuar' continua desabilitado" -ForegroundColor Red; $wbErrors++ }
+                # 2. A altura. Medição do revisor na versão de altura fixa: o conteúdo ocupava 316,7
+                # pixels num cliente de 369 e, com a fonte do sistema 50% maior, ia a 460,2 - a barra
+                # com 'Continuar' e 'Cancelar' saía da janela, e a caixa modal ficava sem saída.
+                if ($wfDestJan.SizeToContent -ne [System.Windows.SizeToContent]::Height) { Write-Host "  [ERRO] Permissões (destino): a janela não acompanha a altura do conteúdo ('$($wfDestJan.SizeToContent)')" -ForegroundColor Red; $wbErrors++ }
+                if ([double]::IsInfinity([double]$wfDestJan.MaxHeight) -or [double]$wfDestJan.MaxHeight -le 0) { Write-Host "  [ERRO] Permissões (destino): a janela cresce sem teto - em fonte grande ela sai da tela e a barra vai junto" -ForegroundColor Red; $wbErrors++ }
+                # A barra fica FORA da rolagem: numa pilha única o teto de altura cortaria os botões
+                # junto com o texto.
+                if ([System.Windows.Controls.Grid]::GetRow($wfDestRol) -eq [System.Windows.Controls.Grid]::GetRow($wfDestBar)) { Write-Host "  [ERRO] Permissões (destino): a barra de botões está na mesma linha da rolagem - ela rolaria junto com o texto" -ForegroundColor Red; $wbErrors++ }
+                $wfDestDentro = $false
+                $wfDestSubindo = [System.Windows.Media.VisualTreeHelper]::GetParent($wfDestBar)
+                while ($null -ne $wfDestSubindo) {
+                    if ($wfDestSubindo -is [System.Windows.Controls.ScrollViewer]) { $wfDestDentro = $true; break }
+                    $wfDestSubindo = [System.Windows.Media.VisualTreeHelper]::GetParent($wfDestSubindo)
+                }
+                if ($wfDestDentro) { Write-Host "  [ERRO] Permissões (destino): a barra de botões está DENTRO da rolagem" -ForegroundColor Red; $wbErrors++ }
+                # As duas linhas da grade são o que garante isso quando o teto entra em ação: a do
+                # texto é ESTRELA (cede espaço) e a da barra é AUTO (fica com o que precisa). Com as
+                # duas em estrela, ou as duas em auto, o teto voltaria a comer os botões.
+                $wfDestGrade = $wfDestJan.Content
+                if ($wfDestGrade -isnot [System.Windows.Controls.Grid] -or @($wfDestGrade.RowDefinitions).Count -ne 2) { Write-Host "  [ERRO] Permissões (destino): o conteúdo da janela não é uma grade de duas linhas" -ForegroundColor Red; $wbErrors++ }
+                else {
+                    if (-not $wfDestGrade.RowDefinitions[0].Height.IsStar) { Write-Host "  [ERRO] Permissões (destino): a linha do texto não é estrela - ela não cede espaço para a barra quando o teto de altura entra" -ForegroundColor Red; $wbErrors++ }
+                    if (-not $wfDestGrade.RowDefinitions[1].Height.IsAuto) { Write-Host "  [ERRO] Permissões (destino): a linha da barra não é automática - os botões podem ser espremidos" -ForegroundColor Red; $wbErrors++ }
+                    # E a medição com a fonte 50% maior, que é o tamanho de quem usa acessibilidade:
+                    # o conteúdo cresce E a barra cresce junto. Se a barra não crescesse, ela estaria
+                    # fora da árvore em que a fonte é herdada, e a prova acima não valeria nada.
+                    # ('Measure' e não 'ShowDialog': a janela nunca aparece no -SelfTest.)
+                    $wfDestMedida = { param($Alvo) $Alvo.Measure((New-Object System.Windows.Size(608, [double]::PositiveInfinity))); return [double]$Alvo.DesiredSize.Height }
+                    $wfDestAlt1 = [double](& $wfDestMedida $wfDestGrade)
+                    $wfDestBarAlt1 = [double]$wfDestBar.DesiredSize.Height
+                    $wfDestJan.FontSize = [double]$wfDestJan.FontSize * 1.5
+                    $wfDestAlt2 = [double](& $wfDestMedida $wfDestGrade)
+                    $wfDestBarAlt2 = [double]$wfDestBar.DesiredSize.Height
+                    if ($wfDestBarAlt1 -le 0) { Write-Host "  [ERRO] Permissões (destino): a barra de botões mediu altura zero" -ForegroundColor Red; $wbErrors++ }
+                    if ($wfDestAlt2 -le $wfDestAlt1) { Write-Host "  [ERRO] Permissões (destino): com a fonte 50% maior o conteúdo não cresceu ($wfDestAlt1 -> $wfDestAlt2) - a medição não está vendo a fonte" -ForegroundColor Red; $wbErrors++ }
+                    if ($wfDestBarAlt2 -le $wfDestBarAlt1) { Write-Host "  [ERRO] Permissões (destino): com a fonte 50% maior a barra não cresceu ($wfDestBarAlt1 -> $wfDestBarAlt2) - ela não está na árvore que herda a fonte" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+        }
+        # Desfazer: caminho externo ausente diz QUAL disco ligar, e a recusa termina com a frase de §1.7.
+        $wfDestFonteU = [string](Get-Command Invoke-WinForgeAclUndo).ScriptBlock
+        if ($wfDestFonteU -notmatch 'ExternalPath') { Write-Host "  [ERRO] Permissões (Desfazer): o item de conteúdo não considera ExternalPath" -ForegroundColor Red; $wbErrors++ }
+        # A instrução de "qual disco plugar" vem INTEIRA de Get-WinForgeAclDriveHint, e por isso é
+        # provada NELA, por comportamento - a trava que procurava a frase 'ligue o disco' dentro do
+        # Desfazer era da classe que o próprio revisor apontou: prosa satisfaz.
+        #
+        # Letra AUSENTE: a instrução é ligar aquele disco, e o rótulo NÃO entra. O WinForge nunca
+        # guardou o rótulo no índice, então quando o disco some não há de onde tirar o nome - e
+        # '[string]$obj.VolumeLabel' de um volume ausente lança e devolve '' em silêncio.
+        $wfDestLivre = ''
+        $wfDestUsadas = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { ([string]$_.Name).Substring(0, 1).ToUpperInvariant() })
+        foreach ($wfDestL in @('Z', 'Y', 'X', 'W', 'V', 'U', 'T')) { if ($wfDestUsadas -notcontains $wfDestL) { $wfDestLivre = $wfDestL; break } }
+        if ([string]::IsNullOrWhiteSpace($wfDestLivre)) { Write-Host "  [ERRO] Permissões (Desfazer): esta máquina não tem letra de unidade livre para provar o disco ausente" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfDestDica = [string](Get-WinForgeAclDriveHint -Path ("{0}:\backup\acl.txt" -f $wfDestLivre))
+            if ($wfDestDica -notmatch [regex]::Escape("ligue o disco $($wfDestLivre):")) { Write-Host "  [ERRO] Permissões (Desfazer): com a letra $($wfDestLivre): ausente, a instrução não manda ligar aquele disco ('$wfDestDica')" -ForegroundColor Red; $wbErrors++ }
+            if ($wfDestDica -match 'rótulo') { Write-Host "  [ERRO] Permissões (Desfazer): a instrução do disco ausente inventa um rótulo que ninguém consegue ler ('$wfDestDica')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Letra LIGADA e arquivo fora: mandar "ligue o disco C: (rótulo)" é mandar ligar o que já
+        # está ligado, com o nome do volume ERRADO - o que estiver nessa letra agora. Achado do
+        # revisor. A instrução tem de dizer que a letra está ligada e que é outro disco.
+        $wfDestDicaLigada = [string](Get-WinForgeAclDriveHint -Path (Join-Path $wfDestBom 'nao-existe.txt'))
+        foreach ($wfDestDicaFrase in @('está ligada agora', 'outro disco')) {
+            if ($wfDestDicaLigada -notmatch [regex]::Escape($wfDestDicaFrase)) { Write-Host "  [ERRO] Permissões (Desfazer): com a letra ligada, a instrução não traz '$wfDestDicaFrase' ('$wfDestDicaLigada')" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfDestDicaLigada -match '^ligue o disco') { Write-Host "  [ERRO] Permissões (Desfazer): com a letra JÁ ligada, a instrução ainda começa mandando ligar o disco ('$wfDestDicaLigada')" -ForegroundColor Red; $wbErrors++ }
+        # Caminho sem raiz não inventa letra nenhuma.
+        if ([string](Get-WinForgeAclDriveHint -Path '') -notmatch 'ligue o disco em que o backup foi guardado') { Write-Host "  [ERRO] Permissões (Desfazer): sem raiz no caminho, a instrução deveria ser a genérica" -ForegroundColor Red; $wbErrors++ }
+        # Caminho de REDE: a porta do absoluto ACEITA '\\servidor\share', e ela era a única
+        # conferência estrutural do caminho externo no Desfazer e na limpeza. Achado do revisor.
+        foreach ($wfDestRedeCaso in @(
+            @{ Path = '\\servidor\compartilhada\acl.txt'; Vale = $true },
+            @{ Path = '\\?\UNC\servidor\compartilhada\acl.txt'; Vale = $true },
+            @{ Path = 'C:\pasta\acl.txt'; Vale = $false },
+            @{ Path = '\\?\C:\pasta\acl.txt'; Vale = $false },
+            @{ Path = ''; Vale = $false }
+        )) {
+            if ([bool](Test-WinForgeAclNetworkPath -Path ([string]$wfDestRedeCaso.Path)) -ne [bool]$wfDestRedeCaso.Vale) { Write-Host "  [ERRO] Permissões (rede): '$($wfDestRedeCaso.Path)' deveria $(if ($wfDestRedeCaso.Vale) { 'ser' } else { 'NÃO ser' }) caminho de rede" -ForegroundColor Red; $wbErrors++ }
+            # E a prova de que a porta do absoluto não basta: ela ACEITA o caminho de rede.
+            if ($wfDestRedeCaso.Vale -and -not (Test-WinForgeAclAbsolutePath -Path ([string]$wfDestRedeCaso.Path))) { Write-Host "  [ERRO] Permissões (rede): '$($wfDestRedeCaso.Path)' foi recusado pela porta do absoluto - a trava de rede perderia o motivo de existir" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O destino é ESTADO COMPARTILHADO, e o clique que o escolhe pode ser recusado lá embaixo,
+        # em Start-WinForgeStreamedCommand, que tem a conferência de trava dela própria. Zerar
+        # '$sync.WinForgeAclExternalRoot' antes disso mandava o backup de uma restauração de quinze
+        # minutos JÁ EM CURSO para a pasta protegida, calado - o usuário escolheu um disco e o
+        # arquivo não estaria lá. Achado do revisor da Tarefa 7.
+        #
+        # Primeiro a pergunta, por comportamento, com as duas travas nos dois valores. O estado é
+        # devolvido no fim: o -SelfTest não pode deixar a máquina de comandos travada.
+        $wfDestCmdAntes = $sync.CommandRunning
+        $wfDestProcAntes = $sync.ProcessRunning
+        try {
+            $sync.CommandRunning = $false
+            $sync.ProcessRunning = $false
+            if (-not [string]::IsNullOrWhiteSpace([string](Get-WinForgeRepairBusyReason -Kind 'repair'))) { Write-Host "  [ERRO] Permissões (destino): com nada rodando, a pergunta de ocupado respondeu '$(Get-WinForgeRepairBusyReason -Kind 'repair')'" -ForegroundColor Red; $wbErrors++ }
+            $sync.CommandRunning = $true
+            if ([string](Get-WinForgeRepairBusyReason -Kind 'repair') -notmatch 'comando em andamento') { Write-Host "  [ERRO] Permissões (destino): com um comando em andamento, a pergunta de ocupado não acusa" -ForegroundColor Red; $wbErrors++ }
+            if ([string](Get-WinForgeRepairBusyReason -Kind 'read') -notmatch 'comando em andamento') { Write-Host "  [ERRO] Permissões (destino): a trava de comando vale também para leitura" -ForegroundColor Red; $wbErrors++ }
+            # E o botão inteiro recusa, com o motivo 'ocupado', antes de qualquer caixa.
+            $wfDestOcup = Invoke-WinForgeRepairCommand -Name AclRestore -NoUI
+            if ($null -eq $wfDestOcup -or [string]$wfDestOcup.Reason -ne 'ocupado') { Write-Host "  [ERRO] Permissões (destino): com um comando em andamento, AclRestore respondeu '$($wfDestOcup.Reason)', esperado 'ocupado'" -ForegroundColor Red; $wbErrors++ }
+            $sync.CommandRunning = $false
+            $sync.ProcessRunning = $true
+            if ([string](Get-WinForgeRepairBusyReason -Kind 'repair') -notmatch 'instalação ou manutenção') { Write-Host "  [ERRO] Permissões (destino): com o base em andamento, a pergunta de ocupado não acusa para 'repair'" -ForegroundColor Red; $wbErrors++ }
+            # 'read' não é barrado pelo base: ler o estado da máquina enquanto ele trabalha não atrapalha.
+            if (-not [string]::IsNullOrWhiteSpace([string](Get-WinForgeRepairBusyReason -Kind 'read'))) { Write-Host "  [ERRO] Permissões (destino): a trava do base barrou uma leitura" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            $sync.CommandRunning = $wfDestCmdAntes
+            $sync.ProcessRunning = $wfDestProcAntes
+        }
+        if ($sync.CommandRunning -ne $wfDestCmdAntes -or $sync.ProcessRunning -ne $wfDestProcAntes) { Write-Host "  [ERRO] Permissões (destino): as travas de comando não voltaram ao que eram" -ForegroundColor Red; $wbErrors++ }
+        # Depois a ORDEM no fonte do botão, que é o que a prova de comportamento não alcança: a
+        # segunda pergunta de ocupado vem ANTES da caixa, a caixa vem ANTES da escrita, e a escrita
+        # acontece UMA vez só - "zera agora, preenche depois" é exatamente o defeito consertado.
+        $wfDestFonteB = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        $wfDestNEscritas = @([regex]::Matches($wfDestFonteB, [regex]::Escape('$sync.WinForgeAclExternalRoot ='))).Count
+        if ($wfDestNEscritas -ne 1) { Write-Host "  [ERRO] Permissões (destino): o botão escreve em `$sync.WinForgeAclExternalRoot $wfDestNEscritas vez(es), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        # A agulha é a ATRIBUIÇÃO da segunda pergunta, e não o nome da função: as duas chamadas usam
+        # '-Kind $kind', e procurar pela última ocorrência faria a trava cair na PRIMEIRA quando
+        # alguém apagasse a segunda - e a primeira está antes da caixa, então a ordem passaria.
+        $wfDestPosOcup = $wfDestFonteB.IndexOf('$ocupadoDestino = [string](Get-WinForgeRepairBusyReason', [StringComparison]::Ordinal)
+        $wfDestPosCaixa = $wfDestFonteB.IndexOf('$destino = Show-WinForgeAclBackupDestination', [StringComparison]::Ordinal)
+        $wfDestPosEscrita = $wfDestFonteB.IndexOf('$sync.WinForgeAclExternalRoot =', [StringComparison]::Ordinal)
+        if ($wfDestPosOcup -lt 0 -or $wfDestPosCaixa -lt 0 -or $wfDestPosEscrita -lt 0) { Write-Host "  [ERRO] Permissões (destino): o botão não tem a sequência pergunta-caixa-escrita no fonte" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfDestPosOcup -gt $wfDestPosCaixa) { Write-Host "  [ERRO] Permissões (destino): a caixa de destino abre ANTES de perguntar se há coisa rodando" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfDestPosCaixa -gt $wfDestPosEscrita) { Write-Host "  [ERRO] Permissões (destino): `$sync.WinForgeAclExternalRoot é escrito ANTES da caixa - o destino de uma restauração em curso seria perdido" -ForegroundColor Red; $wbErrors++ }
+        # Travas de FORMA DE CHAMADA, e não de nome solto, pelo mesmo motivo de
+        # 'Test-WinForgeAclRestoreAllowed -Root' mais acima: o bloco de ajuda destas mesmas funções
+        # explica o campo e cita o nome dele, então procurar pelo nome aceitaria a PROSA no lugar do
+        # código. Não é hipótese - medido por mutação, trocar o FolderBrowserDialog por um seletor de
+        # ARQUIVO passava batido, porque o nome continuava na descrição da função.
+        #
+        # As três últimas cobrem as recusas 3, 4 e 7, que são as que o -SelfTest não consegue
+        # exercitar de verdade: esta máquina é NTFS e Fixed, e encher um volume para provar a
+        # conferência de espaço seria um teste pior do que a falta dele.
+        foreach ($wfDestChamada in @(
+            @($wfDestFonteR, 'Protect-WinForgeSnapshotFile -Path $parcial', 'o arquivo de conteúdo (dentro ou fora do %ProgramData%) não é endurecido'),
+            @($wfDestFonteR, 'Protect-WinForgeSnapshotFile -Path $arquivoIndice', 'o índice não é endurecido'),
+            @($wfDestFonteR, '[string]$sync.WinForgeAclExternalRoot', 'a restauração CITA o destino escolhido e não o LÊ'),
+            @($wfDestFonteR, 'ExternalPath = [string]$externoArquivo', 'a restauração não anota o caminho externo no índice'),
+            @($wfDestFonteU, '([string]$item.ExternalPath).Trim()', 'o Desfazer CITA o caminho externo e não o LÊ do item'),
+            @($wfDestFonteU, 'Test-WinForgeAclNetworkPath -Path $externo', 'o Desfazer não recusa caminho de rede antes do /restore elevado'),
+            @($wfDestFonteU, 'Get-WinForgeAclDriveHint -Path $externo', 'o Desfazer não diz qual disco ligar quando o arquivo externo não está lá'),
+            @([string](Get-Command Invoke-WinForgeAclCleanup).ScriptBlock, 'Test-WinForgeAclNetworkPath -Path ([string]$a.Path)', 'a limpeza não recusa caminho de rede antes do Remove-Item elevado'),
+            @($wfDestFonteD, 'New-Object System.Windows.Forms.FolderBrowserDialog', 'a caixa CITA o seletor de pasta e não o CRIA'),
+            @($wfDestFonte, '$formato -ne ''NTFS''', 'a conferência não compara o sistema de arquivos com NTFS'),
+            @($wfDestFonte, '$tipo -ne ''Fixed'' -and $tipo -ne ''Removable''', 'a conferência não separa disco interno e removível dos outros tipos'),
+            @($wfDestFonte, 'Test-WinForgeAclFreeSpace -Path $completo -Bytes', 'a conferência do destino não pergunta pelo espaço livre')
+        )) {
+            if ([string]$wfDestChamada[0] -notmatch [regex]::Escape([string]$wfDestChamada[1])) { Write-Host "  [ERRO] Permissões (destino): $($wfDestChamada[2]) - '$($wfDestChamada[1])' não aparece no código" -ForegroundColor Red; $wbErrors++ }
+        }
+        # As travas acima leem FONTE, e fonte é prova fraca: um comentário que cite o nome do
+        # campo as satisfaz. A parte da cadeia que dá para provar por COMPORTAMENTO sem elevação é
+        # esta - o caminho externo atravessando o JSON do índice e chegando ao vetor do '/restore'.
+        # É exatamente o trecho que some em silêncio se alguém trocar o campo por ''.
+        $wfDestIdx = Join-Path $wfDestRaiz 'indice'
+        New-Item -ItemType Directory -Path $wfDestIdx -Force | Out-Null
+        $wfDestArqExt = Join-Path $wfDestBom 'acl-perfil-teste-20260912-120000.txt'
+        Set-Content -LiteralPath $wfDestArqExt -Value '' -Encoding Unicode
+        $wfDestDados = [pscustomobject]@{
+            Stamp = '20260912-120000'
+            Items = @(
+                [pscustomobject]@{ Path = 'C:\Users\Teste'; Sddl = ''; Owner = ''; OwnerSid = ''; File = 'acl-perfil-teste-20260912-120000.txt'; Target = 'C:\Users'; Sha256 = 'ABC'; ExternalPath = $wfDestArqExt }
+            )
+        }
+        Set-Content -LiteralPath (Join-Path $wfDestIdx 'acl-index-20260912-120000.json') -Value ($wfDestDados | ConvertTo-Json -Depth 4) -Encoding UTF8
+        $wfDestConj = Get-WinForgeAclBackupSet -Root $wfDestIdx
+        if (@($wfDestConj.Items).Count -ne 1) { Write-Host "  [ERRO] Permissões (destino): o índice com caminho externo deu $(@($wfDestConj.Items).Count) item(ns), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfDestConj.Items)[0].ExternalPath -ne $wfDestArqExt) { Write-Host "  [ERRO] Permissões (destino): o caminho externo não sobreviveu ao JSON do índice ('$([string]@($wfDestConj.Items)[0].ExternalPath)')" -ForegroundColor Red; $wbErrors++ }
+        $wfDestSeco = @(Invoke-WinForgeAclUndo -DryRun -BackupRoot $wfDestIdx)
+        if ($wfDestSeco.Count -ne 1) { Write-Host "  [ERRO] Permissões (destino): a simulação do Desfazer deu $($wfDestSeco.Count) linha(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif (([string]$wfDestSeco[0]).IndexOf($wfDestArqExt, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Permissões (destino): o '/restore' da simulação não aponta para o arquivo de fora ('$($wfDestSeco[0])')" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Permissões (destino): sete recusas de Test-WinForgeAclContentRoot ($wfDestNaoNtfs volume(s) não-NTFS desta máquina recusados pelo formato), aviso literal, caixa e barra provadas na janela montada sem aparecer, e caminho externo do índice até o vetor do '/restore'"
+    } catch {
+        Write-Host "  [ERRO] Permissões (destino): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    } finally {
+        try { cmd.exe /c rmdir "$wfDestRaiz\atalho" 2>$null | Out-Null } catch { }
+        Remove-Item -LiteralPath $wfDestRaiz -Recurse -Force -ErrorAction SilentlyContinue
     }
     # ---------------------------------------------------------------- Windows Update: uma linha por dispositivo
     # O Windows Update oferece a MESMA placa duas vezes quando o fabricante publica uma revisão: os
@@ -4219,6 +6962,571 @@ if ($SelfTest) {
         # Lista vazia é lista vazia, e não um item nulo.
         $wfWuNada = Select-WinForgeWindowsUpdateLatest -Rows @()
         if (@($wfWuNada.Kept).Count -ne 0 -or @($wfWuNada.Superseded).Count -ne 0) { Write-Host "  [ERRO] uma linha por dispositivo: lista vazia devolveu $(@($wfWuNada.Kept).Count)/$(@($wfWuNada.Superseded).Count)" -ForegroundColor Red; $wbErrors++ }
+        # ---- agrupamento dos INFs sem versão. As três constantes são PROVISÓRIAS: os casos abaixo
+        # leem $script:WinForgeNullDriver*, e nenhum deles escreve 256 KB, 5 ou nome de classe à mão.
+        $wfGrpMax = [int]$script:WinForgeNullDriverMaxBytes
+        $wfGrpMin = [int]$script:WinForgeNullDriverMinGroup
+        $wfGrpClasses = @($script:WinForgeNullDriverClasses)
+        if ($wfGrpMax -le 0 -or $wfGrpMin -le 1 -or -not $wfGrpClasses.Count) { Write-Host "  [ERRO] Agrupamento: as constantes não existem ou estão vazias ($wfGrpMax / $wfGrpMin / $($wfGrpClasses.Count))" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpFonteC = [string](Get-Content -LiteralPath $PSCommandPath -Raw -ErrorAction SilentlyContinue)
+        # A marca é cobrada NA LINHA DA CONSTANTE. Procurar 'PROVISÓRIO' no arquivo inteiro é
+        # autoaprovação: a palavra está neste próprio comentário de teste, e o motor gerado junta
+        # teste e função no mesmo arquivo.
+        foreach ($wfGrpConst in @('WinForgeNullDriverMaxBytes', 'WinForgeNullDriverMinGroup', 'WinForgeNullDriverClasses')) {
+            if ($wfGrpFonteC -notmatch ('\$script:' + $wfGrpConst + '[^\r\n]*#[^\r\n]*PROVISÓRIO')) { Write-Host "  [ERRO] Agrupamento: a constante '$wfGrpConst' não está marcada como PROVISÓRIA na própria linha" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfGrpClasseBoa = [string]@($wfGrpClasses | Where-Object { $_ -ne '' })[0]
+        # Sem uma classe nomeada na lista, TODA linha do fixture sairia com Class = '' - que também é
+        # permitida - e os casos abaixo continuariam verdes sem exercitar a lista de permissão.
+        if ([string]::IsNullOrWhiteSpace($wfGrpClasseBoa)) { Write-Host "  [ERRO] Agrupamento: a lista de classes não tem nenhuma classe nomeada; o fixture abaixo não exercitaria a lista de permissão" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpLinha = {
+            param($Id, $Classe, $Tamanho, $Titulo, $Data, $Fornecedor, $Versao)
+            [pscustomobject]@{ Title = $Titulo; Driver = ''; Provider = $Fornecedor; Class = $Classe; Version = $Versao; Date = $Data; UpdateId = $Id; SizeBytes = $Tamanho; HardwareId = 'PCI\VEN_8086&DEV_8D44'; ProblemCode = 28 }
+        }
+        # 47 ofertas iguais em fornecedor, classe e data: vira UM grupo.
+        $wfGrp47 = @(1..47 | ForEach-Object { & $wfGrpLinha "n-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null })
+        $wfGrpR = Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrp47
+        if (@($wfGrpR.Groups).Count -ne 1) { Write-Host "  [ERRO] Agrupamento: 47 ofertas deram $(@($wfGrpR.Groups).Count) grupo(s)" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfGrpR.Rows).Count -ne 1) { Write-Host "  [ERRO] Agrupamento: sobraram $(@($wfGrpR.Rows).Count) linha(s), esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif (@(@($wfGrpR.Groups)[0].Members).Count -ne 47) { Write-Host "  [ERRO] Agrupamento: o grupo tem $(@(@($wfGrpR.Groups)[0].Members).Count) membro(s)" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfGrpR.Rows)[0].UpdateId -notlike 'grupo:*') { Write-Host "  [ERRO] Agrupamento: o id sintético é '$(@($wfGrpR.Rows)[0].UpdateId)', esperado 'grupo:<hash>'" -ForegroundColor Red; $wbErrors++ }
+        if (@(@($wfGrpR.Groups)[0].Members) -join ',' -ne (@($wfGrp47 | ForEach-Object { $_.UpdateId }) -join ',')) { Write-Host "  [ERRO] Agrupamento: os membros não estão na ordem original" -ForegroundColor Red; $wbErrors++ }
+        # Abaixo de MinGroup, ninguém agrupa: a linha fica sozinha.
+        $wfGrpPoucos = Group-WinForgeWindowsUpdateNullDrivers -Rows @($wfGrp47 | Select-Object -First ($wfGrpMin - 1))
+        if (@($wfGrpPoucos.Groups).Count -ne 0) { Write-Host "  [ERRO] Agrupamento: $($wfGrpMin - 1) ofertas formaram grupo" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfGrpPoucos.Rows).Count -ne ($wfGrpMin - 1)) { Write-Host "  [ERRO] Agrupamento: as linhas soltas sumiram" -ForegroundColor Red; $wbErrors++ }
+        # Qualquer dúvida, a linha fica sozinha: título com versão, classe fora da lista de permissão,
+        # tamanho desconhecido, tamanho acima do corte.
+        foreach ($wfGrpNao in @(
+            @{ Nome = 'título com versão';   Muda = { param($l) $l.Title = 'INTEL - System - 10.1.1.44'; $l } },
+            @{ Nome = 'versão preenchida';   Muda = { param($l) $l.Version = '10.1.1.44'; $l } },
+            @{ Nome = 'classe Display';      Muda = { param($l) $l.Class = 'Display'; $l } },
+            @{ Nome = 'classe Firmware';     Muda = { param($l) $l.Class = 'Firmware'; $l } },
+            @{ Nome = 'classe Extension';    Muda = { param($l) $l.Class = 'Extension'; $l } },
+            @{ Nome = 'classe SoftwareComponent'; Muda = { param($l) $l.Class = 'SoftwareComponent'; $l } },
+            @{ Nome = 'tamanho desconhecido'; Muda = { param($l) $l.SizeBytes = 0; $l } },
+            @{ Nome = 'acima do corte';      Muda = { param($l) $l.SizeBytes = $wfGrpMax + 1; $l } })) {
+            $wfGrpCaso = @(1..47 | ForEach-Object { & $wfGrpNao.Muda (& $wfGrpLinha "x-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null) })
+            $wfGrpRes = Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpCaso
+            if (@($wfGrpRes.Groups).Count -ne 0) { Write-Host "  [ERRO] Agrupamento: '$($wfGrpNao.Nome)' foi agrupado - o erro caro é esconder o driver que o usuário veio buscar" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfGrpRes.Rows).Count -ne 47) { Write-Host "  [ERRO] Agrupamento: '$($wfGrpNao.Nome)' perdeu linha ($(@($wfGrpRes.Rows).Count) de 47)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Fornecedor, classe ou data diferentes dão grupos diferentes - a DATA entra na chave para
+        # amarrar o lote a uma publicação de INF.
+        $wfGrpDatas = @(1..47 | ForEach-Object { & $wfGrpLinha "d1-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null }) +
+                      @(1..47 | ForEach-Object { & $wfGrpLinha "d2-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-07-15' 'INTEL' $null })
+        if (@((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpDatas).Groups).Count -ne 2) { Write-Host "  [ERRO] Agrupamento: datas diferentes não deram dois grupos" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpForn = @(1..47 | ForEach-Object { & $wfGrpLinha "f1-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null }) +
+                     @(1..47 | ForEach-Object { & $wfGrpLinha "f2-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "AMD - System - $_" '2026-03-01' 'AMD' $null })
+        if (@((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpForn).Groups).Count -ne 2) { Write-Host "  [ERRO] Agrupamento: fornecedores diferentes não deram dois grupos" -ForegroundColor Red; $wbErrors++ }
+        # A linha agrupada ocupa a posição da PRIMEIRA que a originou; as não agrupadas mantêm a ordem.
+        $wfGrpMistura = @((& $wfGrpLinha 'solta-a' 'Display' 5000 'Realtek - Display - 1.2.3' '2026-03-01' 'Realtek' '1.2.3')) +
+                        @(1..47 | ForEach-Object { & $wfGrpLinha "m-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null }) +
+                        @((& $wfGrpLinha 'solta-b' 'Net' 5000 'Intel - Net - 22.1' '2026-03-01' 'Intel' '22.1'))
+        $wfGrpOrd = @((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpMistura).Rows)
+        if ($wfGrpOrd.Count -ne 3) { Write-Host "  [ERRO] Agrupamento: a mistura virou $($wfGrpOrd.Count) linha(s), esperado 3" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfGrpOrd[0].UpdateId -ne 'solta-a' -or [string]$wfGrpOrd[1].UpdateId -notlike 'grupo:*' -or [string]$wfGrpOrd[2].UpdateId -ne 'solta-b') { Write-Host "  [ERRO] Agrupamento: a ordem saiu '$(@($wfGrpOrd | ForEach-Object { $_.UpdateId }) -join ', ')'" -ForegroundColor Red; $wbErrors++ }
+        # Lista vazia é lista vazia, e nulo na entrada não vira linha na saída.
+        $wfGrpNada = Group-WinForgeWindowsUpdateNullDrivers -Rows @()
+        if (@($wfGrpNada.Rows).Count -ne 0 -or @($wfGrpNada.Groups).Count -ne 0) { Write-Host "  [ERRO] Agrupamento: lista vazia devolveu $(@($wfGrpNada.Rows).Count)/$(@($wfGrpNada.Groups).Count)" -ForegroundColor Red; $wbErrors++ }
+        $wfGrpNulo = Group-WinForgeWindowsUpdateNullDrivers -Rows @($null, (& $wfGrpLinha 'so-uma' 'Display' 5000 'Realtek - Display - 1.2.3' '2026-03-01' 'Realtek' '1.2.3'), $null)
+        if (@($wfGrpNulo.Rows).Count -ne 1) { Write-Host "  [ERRO] Agrupamento: nulo na entrada virou linha na saída ($(@($wfGrpNulo.Rows).Count) linha(s), esperado 1)" -ForegroundColor Red; $wbErrors++ }
+        # A busca real traz os três campos novos, e 'Categories.Name' continua descartado (vem no
+        # idioma de UserLocale).
+        $wfGrpFonteB = [string]${function:Search-WinForgeWindowsUpdateDrivers}
+        # A âncora é a LEITURA ('$u.<campo>'), e não o nome solto. Com o nome solto a trava era
+        # satisfeita pelo COMENTÁRIO que explica a regra dentro da própria busca: medido, o mutante
+        # que troca a leitura de MinDownloadSize por zero ficava VERDE, porque a palavra continuava
+        # no comentário três linhas acima.
+        foreach ($wfGrpCampo in @('MaxDownloadSize', 'MinDownloadSize', 'DriverHardwareID', 'DeviceProblemNumber')) {
+            if ($wfGrpFonteB -notmatch ('\$u\.' + $wfGrpCampo + '\b')) { Write-Host "  [ERRO] Agrupamento: a busca não lê '`$u.$wfGrpCampo'" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfGrpFonteB -match 'Categories') { Write-Host "  [ERRO] Agrupamento: 'Categories' voltou à busca - ele vem no idioma de UserLocale" -ForegroundColor Red; $wbErrors++ }
+        # Ler o campo do COM não é o mesmo que DEVOLVÊ-LO na linha, e a busca é a única parte deste
+        # caminho que o -SelfTest não executa (fala com o serviço do Windows Update). Sem esta trava,
+        # trocar 'SizeBytes = $sizeBytes' por outro nome no objeto de saída deixava a suíte inteira
+        # verde e o agrupamento sem o campo que ele exige - medido.
+        foreach ($wfGrpProp in @('SizeBytes', 'HardwareId', 'ProblemCode')) {
+            if ($wfGrpFonteB -notmatch ('[\r\n]\s*' + $wfGrpProp + '\s+=\s+\$')) { Write-Host "  [ERRO] Agrupamento: a busca lê o campo mas não devolve '$wfGrpProp' na linha" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfGrpFonteG = [string]${function:Group-WinForgeWindowsUpdateNullDrivers}
+        # 'ProblemCode' no singular é o CRITÉRIO e está proibido; 'ProblemCodes' no plural é o campo
+        # que o grupo TEM de emitir para a Tarefa 22. Proibir a substring reprovaria a implementação
+        # correta - daí o \b(?!s).
+        if ($wfGrpFonteG -match 'ProblemCode\b(?!s)') { Write-Host "  [ERRO] Agrupamento: ProblemCode NÃO participa do critério - as linhas a agrupar são justamente as de problema 28" -ForegroundColor Red; $wbErrors++ }
+        # O grupo emite HardwareIds e ProblemCodes, na ordem original: são o que a Tarefa 22 lê.
+        $wfGrpG0 = @($wfGrpR.Groups)[0]
+        foreach ($wfGrpCampoG in @('HardwareIds', 'ProblemCodes', 'MemberTitles')) {
+            if (@($wfGrpG0.$wfGrpCampoG).Count -ne 47) { Write-Host "  [ERRO] Agrupamento: o grupo emitiu $(@($wfGrpG0.$wfGrpCampoG).Count) item(ns) em '$wfGrpCampoG', esperado 47" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (@($wfGrpG0.HardwareIds)[0] -ne 'PCI\VEN_8086&DEV_8D44') { Write-Host "  [ERRO] Agrupamento: HardwareIds veio '$(@($wfGrpG0.HardwareIds)[0])' - sem ele o reforço PCI\VEN_8086 da §4 lê vazio em produção" -ForegroundColor Red; $wbErrors++ }
+        # A linha de grupo tem de ser LIGÁVEL ao grupo: é por ela que a tabela chega a HardwareIds e
+        # ProblemCodes. Sem esse laço, quem monta a tela recebe um id sintético e mais nada.
+        if (-not @($wfGrpR.Rows)[0].IsGroup -or [string]@($wfGrpR.Rows)[0].Group.Key -ne [string]$wfGrpG0.Key) { Write-Host "  [ERRO] Agrupamento: a linha de grupo não carrega o grupo cru (IsGroup='$(@($wfGrpR.Rows)[0].IsGroup)')" -ForegroundColor Red; $wbErrors++ }
+        # ORDEM e VALOR das listas por membro. O fixture de cima repete o mesmo id de hardware e o
+        # mesmo código nas 47 linhas: ele conta, mas não observaria uma inversão nem um campo
+        # preenchido com zero. Este observa - cada membro com o seu valor - e o lote tem exatamente o
+        # tamanho mínimo, que é o outro lado da fronteira testada logo acima com MinGroup - 1.
+        $wfGrpVar = @(1..$wfGrpMin | ForEach-Object {
+            $wfGrpUm = & $wfGrpLinha "v-$_" $wfGrpClasseBoa ([int]($wfGrpMax / 8)) "INTEL - System - $_" '2026-03-01' 'INTEL' $null
+            $wfGrpUm.HardwareId = "PCI\VEN_8086&DEV_000$_"
+            $wfGrpUm.ProblemCode = 20 + $_
+            $wfGrpUm
+        })
+        $wfGrpGVar = @((Group-WinForgeWindowsUpdateNullDrivers -Rows $wfGrpVar).Groups)[0]
+        if ($null -eq $wfGrpGVar) { Write-Host "  [ERRO] Agrupamento: o lote com exatamente $wfGrpMin membro(s) não virou grupo" -ForegroundColor Red; $wbErrors++ }
+        else {
+            foreach ($wfGrpPar in @(
+                @{ Nome = 'HardwareIds';  Veio = @($wfGrpGVar.HardwareIds);  Esperado = @($wfGrpVar | ForEach-Object { $_.HardwareId }) },
+                @{ Nome = 'ProblemCodes'; Veio = @($wfGrpGVar.ProblemCodes); Esperado = @($wfGrpVar | ForEach-Object { $_.ProblemCode }) },
+                @{ Nome = 'MemberTitles'; Veio = @($wfGrpGVar.MemberTitles); Esperado = @($wfGrpVar | ForEach-Object { $_.Title }) }
+            )) {
+                if ((@($wfGrpPar.Veio) -join '|') -ne (@($wfGrpPar.Esperado) -join '|')) { Write-Host "  [ERRO] Agrupamento: '$($wfGrpPar.Nome)' saiu '$(@($wfGrpPar.Veio) -join '|')', esperado '$(@($wfGrpPar.Esperado) -join '|')'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Fornecedor, classe e data saem do primeiro membro COM A CAIXA ORIGINAL: a chave é
+            # minúscula porque o serviço não é consistente nisso, o texto de tela não tem de ser.
+            if ([string]$wfGrpGVar.Provider -ne 'INTEL' -or [string]$wfGrpGVar.Class -ne $wfGrpClasseBoa -or [string]$wfGrpGVar.Date -ne '2026-03-01') { Write-Host "  [ERRO] Agrupamento: o grupo não repetiu fornecedor/classe/data do primeiro membro ('$($wfGrpGVar.Provider)' / '$($wfGrpGVar.Class)' / '$($wfGrpGVar.Date)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A agulha é o VALOR da constante, e ela não pode ser ESCRITA aqui. Escrita à mão nesta mesma
+        # linha, ela ficava a 159, 147 e 127 caracteres da mensagem de erro logo abaixo - dentro da
+        # janela de 200 - e a trava se reprovava sozinha: medido, três vermelhos com a implementação
+        # correta e verde. Lida da constante, a agulha continua exata e a trava deixa de falar de si
+        # mesma. De quebra ela passa a cobrir as QUATRO classes nomeadas, e não duas.
+        $wfGrpProibidos = @([string]$wfGrpMax) + @($wfGrpClasses | Where-Object { $_ -ne '' } | ForEach-Object { "'" + $_ + "'" })
+        foreach ($wfGrpLit in $wfGrpProibidos) {
+            if ($wfGrpFonteC -match ([regex]::Escape($wfGrpLit) + '[\s\S]{0,200}\[ERRO\] Agrupamento')) { Write-Host "  [ERRO] Agrupamento: o teste escreve o literal '$wfGrpLit' em vez de ler a constante" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O relatório HTML continua CRU: ganha a coluna "Classe" e a nota do que a aba agrupou.
+        $wfGrpFonteRel = [string](Get-Command Export-WinForgeDiagnosticsReport).ScriptBlock
+        if ($wfGrpFonteRel -match 'Group-WinForgeWindowsUpdateNullDrivers') { Write-Host "  [ERRO] Agrupamento: o relatório passou a agrupar - ele continua cru" -ForegroundColor Red; $wbErrors++ }
+        if ($wfGrpFonteRel -notmatch '<th>Classe</th>[\s\S]{0,400}Windows Update|Windows Update[\s\S]{0,400}<th>Classe</th>') { Write-Host "  [ERRO] Agrupamento: a tabela do Windows Update no relatório não tem a coluna 'Classe'" -ForegroundColor Red; $wbErrors++ }
+        # E o relatório é conferido pelo que ELE GERA, não só pelo texto da função: âncora de fonte já
+        # passou verde neste repositório com o comportamento quebrado. A tabela do Windows Update só
+        # existe depois de uma busca, então o fixture entra em $sync.DiagWUResults e sai no finally.
+        $wfGrpWuAntes  = $sync.DiagWUResults
+        $wfGrpDobAntes = $sync.DiagWUGrouped
+        $wfGrpRelArq   = Join-Path $env:TEMP 't20-relatorio-agrupamento.html'
+        try {
+            $sync.DiagWUResults = @((& $wfGrpLinha 'rel-1' $wfGrpClasseBoa 7662 'INTEL - registradores de estado - 1' '2016-07-05' 'INTEL' $null))
+            # 43: o número vem da ABA, que é quem agrupa. O relatório só o repete.
+            $sync.DiagWUGrouped = 43
+            $null = Export-WinForgeDiagnosticsReport -Path $wfGrpRelArq -NoOpen
+            $wfGrpRelHtml = [string][System.IO.File]::ReadAllText($wfGrpRelArq, [System.Text.Encoding]::UTF8)
+            if ($wfGrpRelHtml -notmatch '<th>Classe</th>[\s\S]{0,120}<th>Fornecedor</th>') { Write-Host "  [ERRO] Agrupamento (relatório): o HTML gerado não tem a coluna 'Classe' antes de 'Fornecedor'" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelHtml -notmatch ('<td>' + [regex]::Escape($wfGrpClasseBoa) + '</td>')) { Write-Host "  [ERRO] Agrupamento (relatório): a coluna 'Classe' saiu sem o valor da linha" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelHtml -notmatch 'aba Diagnóstico[^<]{0,80}43') { Write-Host "  [ERRO] Agrupamento (relatório): a nota não diz quantas ofertas a aba dobrou" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelHtml -notmatch 'INTEL - registradores de estado - 1') { Write-Host "  [ERRO] Agrupamento (relatório): a oferta crua sumiu da tabela" -ForegroundColor Red; $wbErrors++ }
+            # Sem número publicado pela aba não sai nota: relatório gerado antes de a tabela ser
+            # montada não pode afirmar um agrupamento que não aconteceu.
+            $sync.DiagWUGrouped = 0
+            $null = Export-WinForgeDiagnosticsReport -Path $wfGrpRelArq -NoOpen
+            $wfGrpRelZero = [string][System.IO.File]::ReadAllText($wfGrpRelArq, [System.Text.Encoding]::UTF8)
+            if ($wfGrpRelZero -match 'aba Diagnóstico[^<]{0,80}\d') { Write-Host "  [ERRO] Agrupamento (relatório): sem número da aba o relatório afirmou um agrupamento mesmo assim" -ForegroundColor Red; $wbErrors++ }
+            if ($wfGrpRelZero -notmatch 'INTEL - registradores de estado - 1') { Write-Host "  [ERRO] Agrupamento (relatório): a tabela crua depende da nota para existir" -ForegroundColor Red; $wbErrors++ }
+        } catch {
+            Write-Host "  [ERRO] Agrupamento (relatório): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            $sync.DiagWUResults = $wfGrpWuAntes
+            $sync.DiagWUGrouped = $wfGrpDobAntes
+            Remove-Item -LiteralPath $wfGrpRelArq -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "  Agrupamento: 47 -> 1 grupo lendo as constantes provisórias ($wfGrpMax B / $wfGrpMin / $($wfGrpClasses.Count) classes), oito recusas, ordem preservada, relatório cru com a coluna Classe e a nota da aba"
+        # ---- a linha de grupo. O estado é DERIVADO a cada remontagem, nunca armazenado.
+        $wfLgMembros = @(1..47 | ForEach-Object { "g-$_" })
+        $sync.DiagWUState = @{}
+        $wfLgPend = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgPend.ActionLabel -ne 'Instalar todos (47)') { Write-Host "  [ERRO] Grupo (estado): pendente deu '$($wfLgPend.ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfLgPend.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): pendente nasceu desabilitado" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 13)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalando' -Text 'instalando...' }
+        $wfLgAnd = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgAnd.StatusText -ne 'instalando 13 de 47...') { Write-Host "  [ERRO] Grupo (estado): em andamento deu '$($wfLgAnd.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgAnd.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): em andamento continua habilitado" -ForegroundColor Red; $wbErrors++ }
+        # O contador ANDA PARA FRENTE, e é esta a forma que a produção produz: um membro marcado por
+        # vez, os anteriores já com resultado. Contando só os marcados, este caso daria "instalando 1
+        # de 47" enquanto a barra de status diz 13 - e, com todos marcados no clique, a linha contava
+        # ao contrário (47, 46, 45...). O numerador é o andamento: instalados + falhados + o da vez.
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 12)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-13' -State 'instalando' -Text 'instalando...'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne 'instalando 13 de 47...') { Write-Host "  [ERRO] Grupo (contador): com 12 prontos e o 13º na mão a linha diz '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText)', esperado 'instalando 13 de 47...'" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-3' -State 'falhou' -Text 'falhou (código 5)'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne 'instalando 13 de 47...') { Write-Host "  [ERRO] Grupo (contador): o membro que falhou saiu da conta do andamento ('$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText)')" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in $wfLgMembros) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $wfLgTudo = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgTudo.StatusText -ne '47 de 47 instalados') { Write-Host "  [ERRO] Grupo (estado): tudo instalado deu '$($wfLgTudo.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgTudo.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): tudo instalado continua habilitado" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-1' -State 'instalado' -Text 'instalado (reinicie)'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne '47 de 47 instalados (reinicie)') { Write-Host "  [ERRO] Grupo (estado): o '(reinicie)' não aparece no grupo" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 45)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -Last 2)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'falhou' -Text 'falhou (código 5)' }
+        $wfLgFalha = Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros
+        if ([string]$wfLgFalha.StatusText -ne '45 de 47 instalados, 2 falharam') { Write-Host "  [ERRO] Grupo (estado): falha deu '$($wfLgFalha.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfLgFalha.ActionEnabled) { Write-Host "  [ERRO] Grupo (estado): com falha o botão tem de continuar clicável" -ForegroundColor Red; $wbErrors++ }
+        # O State é o que PINTA a linha, e ele não é o texto: lote terminado com falha fica vermelho,
+        # lote parado no meio fica neutro (ainda há o que fazer, e vermelho diria que acabou mal).
+        if ([string]$wfLgFalha.State -ne 'falhou') { Write-Host "  [ERRO] Grupo (estado): lote terminado com 2 falhas veio State '$($wfLgFalha.State)', esperado 'falhou'" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 12)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-13' -State 'falhou' -Text 'falhou'
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne '12 de 47 instalados, 1 falhou, 34 pendentes') { Write-Host "  [ERRO] Grupo (estado): parcial deu '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).State -ne 'pendente') { Write-Host "  [ERRO] Grupo (estado): lote parado no meio veio State '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).State)', esperado 'pendente' - vermelho ali diria que o lote acabou mal" -ForegroundColor Red; $wbErrors++ }
+        # Faltando UM, o rótulo é no singular. 'Instalar os 1 que faltam' é o tipo de coisa que passa
+        # despercebida em revisão e salta aos olhos na tela do usuário.
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -SkipLast 1)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).ActionLabel -ne 'Instalar o 1 que falta') { Write-Host "  [ERRO] Grupo (rótulo): faltando um, o botão diz '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        # Rótulos da linha. A palavra "chipset" NÃO entra: o rótulo nasce de Provider e classe, mais
+        # frouxos que o filtro de §4, e dizer "chipset" ali afirmaria o que §4 proíbe afirmar.
+        # HardwareIds de propósito FORA do 'PCI\VEN_8086&DEV_': este grupo não passa no filtro de
+        # chipset da Tarefa 22, e é assim que o lote deste teste continua rodando sem ponto de
+        # restauração depois que aquela tarefa entrar. O rótulo da linha não depende daquele filtro -
+        # ele nasce de Provider e classe, que são mais frouxos de propósito (§3.2).
+        $wfLgGrupo = @{ Key = 'intel|system|2026-03-01'; Provider = 'Intel'; Class = 'System'; Date = '2026-03-01'; Members = $wfLgMembros; MemberTitles = @($wfLgMembros | ForEach-Object { "INTEL - System - $_" }); HardwareIds = @(1..47 | ForEach-Object { 'PCI\VEN_1022&DEV_1450' }); ProblemCodes = @(1..47 | ForEach-Object { 28 }) }
+        $wfLgLinha = Format-WinForgeWindowsUpdateGroupRow -Group $wfLgGrupo
+        if ([string]$wfLgLinha.Title -ne 'Intel — 47 itens que só dão nome a componentes da placa-mãe') { Write-Host "  [ERRO] Grupo (rótulo): Atualização = '$($wfLgLinha.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLgLinha.Driver -ne '47 dispositivos') { Write-Host "  [ERRO] Grupo (rótulo): Driver = '$($wfLgLinha.Driver)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfLgLinha.Version -ne 'sem número de versão') { Write-Host "  [ERRO] Grupo (rótulo): Versão = '$($wfLgLinha.Version)'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLgProp in @('Title', 'Driver', 'Provider', 'Version', 'Date', 'ActionLabel', 'StatusText')) {
+            if ([string]$wfLgLinha.$wfLgProp -match '(?i)chipset') { Write-Host "  [ERRO] Grupo (rótulo): a palavra 'chipset' apareceu em '$wfLgProp'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A data duvidosa vem de uma CÓPIA do grupo. '@{} + $g + @{ Date = ... }' estoura no PS 5.1
+        # ("o item já foi adicionado") porque a chave Date já existe nos dois lados - ver relatório.
+        $wfLgGrupoData = $wfLgGrupo.Clone()
+        $wfLgGrupoData.Date = '1980-01-01'
+        if ([string](Format-WinForgeWindowsUpdateGroupRow -Group $wfLgGrupoData).Date -ne 'sem data confiável') { Write-Host "  [ERRO] Grupo (rótulo): data anterior a 1990 não virou 'sem data confiável'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfLgLinha.IsGroup) { Write-Host "  [ERRO] Grupo (linha): IsGroup não está marcado" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfLgLinha.MemberTitles).Count -ne 47) { Write-Host "  [ERRO] Grupo (linha): MemberTitles tem $(@($wfLgLinha.MemberTitles).Count) item(ns)" -ForegroundColor Red; $wbErrors++ }
+        # O grupo cru viaja na linha: 'Date' já virou texto de tela, e a Tarefa 22 precisa de Class,
+        # Provider, HardwareIds e ProblemCodes como vieram.
+        foreach ($wfLgCru in @('Class', 'Provider', 'HardwareIds', 'ProblemCodes')) {
+            if ($null -eq $wfLgLinha.Group.$wfLgCru) { Write-Host "  [ERRO] Grupo (linha): a linha não carrega '$wfLgCru' do grupo cru - o filtro de chipset ficaria sem o que ler" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Instalação: UM runspace com foreach, e não um job por membro (dois jobs disputariam a trava
+        # CommandRunning consigo mesmos). O segundo clique instala só os que faltam.
+        $wfLgFonteI = [string](Get-Command Invoke-WinForgeWindowsUpdateGroupAction).ScriptBlock
+        if (@([regex]::Matches($wfLgFonteI, 'Invoke-WPFRunspace')).Count -ne 1) { Write-Host "  [ERRO] Grupo (instalação): $(@([regex]::Matches($wfLgFonteI, 'Invoke-WPFRunspace')).Count) despachos, esperado 1" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgFonteI -notmatch 'foreach') { Write-Host "  [ERRO] Grupo (instalação): falta o foreach sobre os membros" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgFonteI -notmatch 'WUGroupCancel') { Write-Host "  [ERRO] Grupo (instalação): não confere `$sync.WUGroupCancel entre membros" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgFonteI -notmatch 'WinForgeClosing') { Write-Host "  [ERRO] Grupo (instalação): não confere `$sync.WinForgeClosing entre membros" -ForegroundColor Red; $wbErrors++ }
+        # UMA caixa de REINÍCIO, e ela vem depois do laço. O teste conta a caixa de reinício
+        # (MessageBoxImage::Information), e não 'MessageBox' cru: a Tarefa 22 acrescenta a
+        # confirmação do chipset (MessageBoxImage::Warning) a esta mesma função, e contar todas
+        # deixaria este teste vermelho no dia em que aquela tarefa entrasse.
+        if (@([regex]::Matches($wfLgFonteI, 'MessageBoxImage\]::Information')).Count -ne 1) { Write-Host "  [ERRO] Grupo (instalação): $(@([regex]::Matches($wfLgFonteI, 'MessageBoxImage\]::Information')).Count) caixas de reinício, esperado UMA no fim" -ForegroundColor Red; $wbErrors++ }
+        # A âncora do laço é a forma COMPLETA, com a variável: 'foreach' solto acha primeiro o laço do
+        # bloco do fim (o que devolve a pendente quem não chegou a ser instalado), e não o dos membros.
+        # E a cobrança mudou de forma junto com o código: a caixa mora no bloco do FIM, que desde a
+        # trava de travamento nasce ANTES do corpo - posição de texto deixou de significar ordem de
+        # execução. O que prende a intenção ("uma caixa, depois de tudo") são duas coisas:
+        #   1. a caixa NÃO está dentro do corpo que roda no pool - se estivesse, sairia por membro E
+        #      viria de uma thread que não é a da janela;
+        #   2. o bloco do fim é invocado DEPOIS do laço dos membros, de dentro do finally.
+        $wfLgPosLaco = $wfLgFonteI.IndexOf('foreach ($wfId in $wfIds) {', [StringComparison]::Ordinal)
+        $wfLgPosCaixa = $wfLgFonteI.IndexOf('MessageBoxImage]::Information', [StringComparison]::Ordinal)
+        $wfLgPosCorpoAbre = $wfLgFonteI.IndexOf('$corpo = {', [StringComparison]::Ordinal)
+        if ($wfLgPosCaixa -lt 0 -or $wfLgPosLaco -lt 0 -or $wfLgPosCorpoAbre -lt 0) { Write-Host "  [ERRO] Grupo (instalação): não achei a caixa de reinício, o laço dos membros ou a abertura do corpo" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLgPosCaixa -gt $wfLgPosCorpoAbre) { Write-Host "  [ERRO] Grupo (instalação): a caixa de reinício está DENTRO do corpo que roda no pool - sairia uma por membro, e de uma thread que não é a da janela" -ForegroundColor Red; $wbErrors++ }
+        $wfLgPosFimCham = $wfLgFonteI.IndexOf('Invoke-WPFUIThread $sync.WinForgeWUGroupDoneCallback', [StringComparison]::Ordinal)
+        if ($wfLgPosFimCham -lt 0 -or $wfLgPosFimCham -lt $wfLgPosLaco) { Write-Host "  [ERRO] Grupo (instalação): o bloco do fim é chamado antes do laço dos membros - a caixa de reinício sairia antes de instalar" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -First 40)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        $wfLgSeco = Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI
+        if ($wfLgSeco -notmatch '7') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diria '$wfLgSeco', esperado só os 7 que faltam" -ForegroundColor Red; $wbErrors++ }
+        # ...e a CONTA inteira, porque '47' também casa com '7': com a conta errada ('instalaria 47
+        # de 47') a trava de cima fica verde reinstalando os 40 que já entraram. O que vem depois do
+        # ponto é o aviso da rede de segurança, que é de todo lote e tem trava própria no bloco §4.
+        if ([string]$wfLgSeco -notlike 'instalaria 7 de 47.*') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diz '$wfLgSeco', esperado começar por 'instalaria 7 de 47'" -ForegroundColor Red; $wbErrors++ }
+        # Lote inteiro instalado: recusa, e a recusa não é a mesma palavra do 'em andamento'.
+        foreach ($wfLgId in $wfLgMembros) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI) -ne 'já instalado') { Write-Host "  [ERRO] Grupo (instalação): o lote todo instalado não foi recusado ('$(Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI)')" -ForegroundColor Red; $wbErrors++ }
+        $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-1' -State 'instalando' -Text 'instalando...'
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI) -ne 'instalando') { Write-Host "  [ERRO] Grupo (instalação): com um membro em andamento o lote não foi recusado" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $null -NoUI) -ne 'none') { Write-Host "  [ERRO] Grupo (instalação): linha nula deveria dar 'none'" -ForegroundColor Red; $wbErrors++ }
+        # As três formas que o laço do lote precisa ter, ancoradas na CHAMADA com o argumento - o nome
+        # solto que o brief cobra é satisfeito pelo comentário que explica a regra.
+        foreach ($wfLgForma in @(
+            'if \(\$sync\.WinForgeClosing -or \$sync\.WUGroupCancel\) \{ break \}',
+            'Set-WinForgeWindowsUpdateRowState -UpdateId \(\[string\]@\(\$faltam\)\[0\]\) -State ''instalando''',
+            'Invoke-WPFUIThread \$sync\.WinForgeWUGroupStartCallback',
+            'Set-WinForgeWindowsUpdateRowState -UpdateId \(\[string\]\$wfPendente\) -State ''pendente''',
+            'Invoke-WPFUIThread \$sync\.WinForgeWUGroupTickCallback'
+        )) {
+            if ($wfLgFonteI -notmatch $wfLgForma) { Write-Host "  [ERRO] Grupo (instalação): falta a forma '$wfLgForma' no lote" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Os blocos que a THREAD DA JANELA executa nascem na runspace principal, e isso é preso por
+        # POSIÇÃO: cada declaração tem de vir antes da abertura do corpo que vai para o pool. Sem esta
+        # trava, mover uma delas para dentro do corpo deixa a suíte verde - foi medido, com o bloco de
+        # tique logo depois do param() - e é exatamente a forma que já travou a janela deste projeto:
+        # bloco criado na runspace do pool e invocado pelo Dispatcher para no primeiro pipeline.
+        $wfLgPosCorpo = $wfLgFonteI.IndexOf('$corpo = {', [StringComparison]::Ordinal)
+        if ($wfLgPosCorpo -lt 0) { Write-Host "  [ERRO] Grupo (runspace): não achei a abertura do corpo do lote" -ForegroundColor Red; $wbErrors++ }
+        # LastIndexOf, e não IndexOf: mover o bloco para dentro do corpo é um caso, DUPLICÁ-LO lá
+        # dentro é o outro - e o duplicado é pior, porque sobrescreve o bom em $sync quando o corpo
+        # roda, sem sumir com a declaração de fora que a trava procuraria.
+        foreach ($wfLgBloco in @('WinForgeWUGroupStartCallback', 'WinForgeWUGroupTickCallback', 'WinForgeWUGroupDoneCallback')) {
+            $wfLgPosBloco = $wfLgFonteI.LastIndexOf('$sync.' + $wfLgBloco + ' = {', [StringComparison]::Ordinal)
+            if ($wfLgPosBloco -lt 0) { Write-Host "  [ERRO] Grupo (runspace): '$wfLgBloco' não é declarado no corpo da função, onde a runspace é a principal" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfLgPosCorpo -ge 0 -and $wfLgPosBloco -gt $wfLgPosCorpo) { Write-Host "  [ERRO] Grupo (runspace): '$wfLgBloco' é declarado DEPOIS da abertura do corpo - bloco nascido na runspace do pool trava a janela no Dispatcher" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E a trava do comando em andamento é a última coisa antes do corpo: os três blocos já têm de
+        # existir quando ela sobe, senão um despacho que falhe entre uma coisa e outra deixaria a
+        # trava presa com bloco nenhum para soltá-la.
+        $wfLgPosTrava = $wfLgFonteI.IndexOf('$sync.CommandRunning = $true', [StringComparison]::Ordinal)
+        $wfLgPosDone  = $wfLgFonteI.LastIndexOf('$sync.WinForgeWUGroupDoneCallback = {', [StringComparison]::Ordinal)
+        if ($wfLgPosTrava -lt 0 -or $wfLgPosDone -lt 0 -or $wfLgPosDone -gt $wfLgPosTrava) { Write-Host "  [ERRO] Grupo (runspace): o bloco do fim é declarado depois de a trava do comando subir" -ForegroundColor Red; $wbErrors++ }
+        # E o -SelfTest não instala: a trava vem DEPOIS do -NoUI, e antes de qualquer caixa.
+        $wfLgPosNoUI = $wfLgFonteI.IndexOf('if ($NoUI)', [StringComparison]::Ordinal)
+        $wfLgPosTrava = $wfLgFonteI.IndexOf('Assert-WinForgeNotSelfTest', [StringComparison]::Ordinal)
+        if ($wfLgPosNoUI -lt 0 -or $wfLgPosTrava -lt 0 -or $wfLgPosTrava -lt $wfLgPosNoUI) { Write-Host "  [ERRO] Grupo (instalação): a trava de SelfTest não está depois do -NoUI" -ForegroundColor Red; $wbErrors++ }
+        $sync.DiagWUState = @{}
+        # A lista expandida sai na JANELA DE SAÍDA por um botão "Ver lista": gabarito próprio de
+        # célula (RowDetailsTemplate, expander) quebra a rolagem da aba - wf-xaml-styles.xml:334-344.
+        $wfLgXaml = [string](Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Engine\xaml\wf-xaml-diag-tab.xml') -Raw -ErrorAction SilentlyContinue)
+        if ([string]::IsNullOrWhiteSpace($wfLgXaml)) { $wfLgXaml = [string]$inputXML }
+        if ($wfLgXaml -match 'RowDetailsTemplate|<Expander') { Write-Host "  [ERRO] Grupo (XAML): RowDetailsTemplate/Expander quebram a rolagem da aba" -ForegroundColor Red; $wbErrors++ }
+        if ($wfLgXaml -notmatch 'Ver lista') { Write-Host "  [ERRO] Grupo (XAML): falta a coluna 'Detalhes' com o botão 'Ver lista'" -ForegroundColor Red; $wbErrors++ }
+        # A ligação do rótulo é cobrada DENTRO da tabela do Windows Update, recortando a região dela
+        # no XAML. A âncora por distância do brief - 'Instalar' a menos de 600 caracteres depois da
+        # ligação - não passa com a sétima coluna no lugar: medido no motor gerado, a palavra fica a
+        # 1072 caracteres, porque são oito linhas de fechamento com 56 espaços de recuo cada. Ela só
+        # passaria contorcendo o markup, e o recorte prova mais: a ligação está na tabela CERTA, e
+        # não só em algum lugar do arquivo (a tabela de drivers instalados já tinha uma igual).
+        $wfLgIniGrade = $wfLgXaml.IndexOf('Name="WPFDiagWU"', [StringComparison]::Ordinal)
+        $wfLgFimGrade = $(if ($wfLgIniGrade -ge 0) { $wfLgXaml.IndexOf('</DataGrid>', $wfLgIniGrade, [StringComparison]::Ordinal) } else { -1 })
+        if ($wfLgIniGrade -lt 0 -or $wfLgFimGrade -lt 0) { Write-Host "  [ERRO] Grupo (XAML): não achei a região da tabela do Windows Update no XAML" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfLgRegiao = $wfLgXaml.Substring($wfLgIniGrade, $wfLgFimGrade - $wfLgIniGrade)
+            if ($wfLgRegiao -notmatch 'Content="\{Binding ActionLabel\}"') { Write-Host "  [ERRO] Grupo (XAML): o botão da coluna Instalar não liga o Content a ActionLabel" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLgRegiao -notmatch 'Uid="WFWUGroupDetails"[\s\S]{0,300}Visibility="\{Binding DetailsVisible\}"') { Write-Host "  [ERRO] Grupo (XAML): o botão 'Ver lista' não tem o Uid que o clique usa, ou não esconde pelo DetailsVisible" -ForegroundColor Red; $wbErrors++ }
+            if ($wfLgRegiao -notmatch 'Header="Detalhes"') { Write-Host "  [ERRO] Grupo (XAML): a coluna 'Detalhes' não está na tabela do Windows Update" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfLgTema in @('Light', 'Dark')) {
+            if ([string]::IsNullOrWhiteSpace([string]$sync.configs.themes.$wfLgTema.RowGroupBackgroundColor)) { Write-Host "  [ERRO] Grupo (tema): RowGroupBackgroundColor ausente em $wfLgTema" -ForegroundColor Red; $wbErrors++ }
+        }
+        # ---- A criação do ponto de restauração roda na thread da janela e leva dezenas de
+        # segundos. O que a trava cobra é o AVISO antes dela: a linha muda de texto, a grade é
+        # repintada e o Dispatcher é empurrado - nessa ordem - antes da chamada que bloqueia.
+        $wfPontoFonte = [string](Get-Command Invoke-WinForgeWindowsUpdateGroupAction).ScriptBlock
+        $wfPontoOndeAviso = $wfPontoFonte.IndexOf("-State 'pendente' -Text 'criando ponto de restauração...'", [StringComparison]::Ordinal)
+        $wfPontoOndeCria = $wfPontoFonte.IndexOf('$ponto = New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
+        $wfPontoOndePinta = $wfPontoFonte.IndexOf('DispatcherPriority]::Render', [StringComparison]::Ordinal)
+        if ($wfPontoOndeAviso -lt 0) { Write-Host "  [ERRO] Lote (aviso): a linha não diz que o ponto de restauração está sendo criado" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPontoOndeCria -lt 0 -or $wfPontoOndeAviso -gt $wfPontoOndeCria) { Write-Host "  [ERRO] Lote (aviso): o aviso aparece DEPOIS da criação do ponto - a janela trava calada" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPontoOndePinta -lt 0 -or $wfPontoOndePinta -gt $wfPontoOndeCria) { Write-Host "  [ERRO] Lote (aviso): nada força a pintura antes da chamada que bloqueia - o texto só apareceria no fim" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPontoFonte -notmatch 'Cursors\]::Wait') { Write-Host "  [ERRO] Lote (aviso): o cursor não vira ampulheta durante a espera" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPontoFonte -notmatch '(?s)finally\s*\{[^}]*\$sync\.Form\.Cursor = \$wfPontoCursor') { Write-Host "  [ERRO] Lote (aviso): o cursor não é devolvido num finally - uma falha deixaria a ampulheta para sempre" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Lote (aviso): a linha anuncia o ponto de restauração, a grade repinta e o cursor volta no finally"
+        Write-Host "  Grupo: cinco estados derivados, rótulos sem a palavra 'chipset', um runspace com foreach, uma caixa de reinício e lista na janela de saída"
+        # ---- §4: chipset INF pela via do Windows Update
+        # Classe 'System' = {4d36e97d-e325-11ce-bfc1-08002be10318}, invariante de idioma. Vídeo é
+        # 'Display', rede 'Net', áudio 'MEDIA'. E NÃO se filtra por "chipset" no título:
+        # 'INTEL - System - 10.1.1.44' não contém a palavra e é o pacote do X99.
+        # O grupo vem de Group-WinForgeWindowsUpdateNullDrivers, e não escrito à mão: é a única forma
+        # de o reforço 'PCI\VEN_8086&DEV_' ser cheque coberto. Se a Tarefa 20 parar de emitir
+        # HardwareIds, é aqui que fica vermelho, e não em produção.
+        # A cópia com troca é CLONE, e não '@{} + $a + $b': duas tabelas com a mesma chave estouram
+        # ("o item já foi adicionado"), e Class/Provider já existem nos dois lados - ver relatório.
+        $wfChCom = {
+            param($Base, [hashtable]$Troca)
+            $wfChNovo = ([hashtable]$Base).Clone()
+            foreach ($wfChK in $Troca.Keys) { $wfChNovo[$wfChK] = $Troca[$wfChK] }
+            return $wfChNovo
+        }
+        $wfChLinhas = @(1..47 | ForEach-Object {
+            [pscustomobject]@{ Title = "INTEL - System - $_"; Driver = ''; Provider = 'INTEL'; Class = [string]@($script:WinForgeNullDriverClasses | Where-Object { $_ -ne '' })[0]; Version = $null; Date = '2026-03-01'; UpdateId = "c-$_"; SizeBytes = [int]($script:WinForgeNullDriverMaxBytes / 8); HardwareId = 'PCI\VEN_8086&DEV_8D44'; ProblemCode = 28 }
+        })
+        $wfChGrupo = @(@(Group-WinForgeWindowsUpdateNullDrivers -Rows $wfChLinhas).Groups)[0]
+        if ($null -eq $wfChGrupo) { Write-Host "  [ERRO] Chipset: o agrupamento da Tarefa 20 não devolveu grupo para o caso do X99" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfChGrupo.HardwareIds).Count -ne 47) { Write-Host "  [ERRO] Chipset: o grupo veio com $(@($wfChGrupo.HardwareIds).Count) HardwareIds - o reforço PCI\VEN_8086 leria vazio em produção" -ForegroundColor Red; $wbErrors++ }
+        # A classe do grupo sai da lista de permissão, que é PROVISÓRIA e pode mudar com os dados da
+        # X99; o filtro de §4 exige 'System' e é outro teste, mais apertado. Fixar a classe aqui
+        # mantém este bloco medindo o FILTRO, e não a constante.
+        $wfChGrupo = & $wfChCom $wfChGrupo @{ Class = 'System'; Provider = 'INTEL' }
+        if (-not (Test-WinForgeChipsetGroup -Group $wfChGrupo).Ok) { Write-Host "  [ERRO] Chipset: o grupo Intel/System/PCI\VEN_8086 foi recusado ('$((Test-WinForgeChipsetGroup -Group $wfChGrupo).Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeChipsetGroup -Group (& $wfChCom $wfChGrupo @{ Provider = 'Intel' })).Ok) { Write-Host "  [ERRO] Chipset: '^intel$' tem de casar sem ligar para a caixa" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfChNao in @(
+            @{ Nome = 'classe vazia';        Muda = @{ Class = '' } },
+            @{ Nome = 'classe Net';          Muda = @{ Class = 'Net' } },
+            @{ Nome = 'fornecedor AMD';      Muda = @{ Provider = 'AMD' } },
+            @{ Nome = 'fornecedor parecido'; Muda = @{ Provider = 'Intel Corporation' } },
+            @{ Nome = 'outro VEN';           Muda = @{ HardwareIds = @('PCI\VEN_1022&DEV_1450') } })) {
+            if ((Test-WinForgeChipsetGroup -Group (& $wfChCom $wfChGrupo $wfChNao.Muda)).Ok) { Write-Host "  [ERRO] Chipset: '$($wfChNao.Nome)' passou no filtro - classe vazia cai em NÃO CLASSIFICADO, jamais em 'é chipset'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem nenhum membro com problema 28, o texto muda (e o ProblemCode continua fora do critério).
+        $wfChSemProb = Test-WinForgeChipsetGroup -Group (& $wfChCom $wfChGrupo @{ ProblemCodes = @(1..47 | ForEach-Object { 0 }) })
+        if (-not $wfChSemProb.Ok) { Write-Host "  [ERRO] Chipset: ProblemCode virou critério - ele é lido só para o texto" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfChSemProb.ProblemCount -ne 0) { Write-Host "  [ERRO] Chipset: ProblemCount=$($wfChSemProb.ProblemCount), esperado 0" -ForegroundColor Red; $wbErrors++ }
+        if ([int](Test-WinForgeChipsetGroup -Group $wfChGrupo).ProblemCount -ne 47) { Write-Host "  [ERRO] Chipset: ProblemCount com 47 membros de problema 28 veio $((Test-WinForgeChipsetGroup -Group $wfChGrupo).ProblemCount)" -ForegroundColor Red; $wbErrors++ }
+        $wfChTexto0 = Get-WinForgeChipsetConfirmText -Group (& $wfChCom $wfChGrupo @{ ProblemCodes = @(1..47 | ForEach-Object { 0 }) })
+        if ($wfChTexto0 -notmatch 'Nenhum dispositivo deste PC está sem nome\. Instalar não traria efeito visível\.') { Write-Host "  [ERRO] Chipset (texto): falta a frase de 'nenhum dispositivo sem nome'" -ForegroundColor Red; $wbErrors++ }
+        $wfChTexto = Get-WinForgeChipsetConfirmText -Group $wfChGrupo
+        foreach ($wfChF in @('passa a mostrar o nome real no Gerenciador de Dispositivos', 'O que não muda: desempenho', 'só informam ao Windows o nome do componente', 'não há como desfazer', 'Reverter Driver')) {
+            if ($wfChTexto -notmatch [regex]::Escape($wfChF)) { Write-Host "  [ERRO] Chipset (texto): falta '$wfChF'" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfChProibida in @('otimiza', 'melhora o desempenho', 'atualiza o chipset', 'driver de chipset')) {
+            if ($wfChTexto -match [regex]::Escape($wfChProibida)) { Write-Host "  [ERRO] Chipset (texto): palavra proibida '$wfChProibida'" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfChFalta in @('cobertura offline', 'versão de pacote', 'Aplicativos e recursos')) {
+            if ($wfChTexto -notmatch [regex]::Escape($wfChFalta)) { Write-Host "  [ERRO] Chipset (texto): a confirmação não diz o que fica de fora ante o pacote da Intel ('$wfChFalta')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O texto com problema 28 DIZ QUANTOS, e o caso é montado com CINCO de propósito: o 47 do
+        # fixture já aparece no texto por outro motivo (o tamanho do lote), então cobrar '47' ficava
+        # verde mesmo com a contagem trocada - medido, com cinco códigos o texto dizia cinco e a trava
+        # não via. A frase inteira, com o número certo, é o que prende.
+        $wfChTexto5 = Get-WinForgeChipsetConfirmText -Group (& $wfChCom $wfChGrupo @{ ProblemCodes = @(@(1..5 | ForEach-Object { 28 }) + @(1..42 | ForEach-Object { 0 })) })
+        if ($wfChTexto5 -notmatch 'O que muda: 5 dispositivo\(s\) deste PC hoje aparecem sem nome') { Write-Host "  [ERRO] Chipset (texto): com 5 códigos de problema a frase não diz 5 ('$($wfChTexto5 -split "`r`n" | Where-Object { $_ -match 'O que muda' })')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChTexto -notmatch 'O que muda: 47 dispositivo\(s\) deste PC hoje aparecem sem nome') { Write-Host "  [ERRO] Chipset (texto): com 47 códigos de problema a frase não diz 47" -ForegroundColor Red; $wbErrors++ }
+        # Checkpoint-Computer é SILENCIOSAMENTE IGNORADO com a Proteção do Sistema desligada ou
+        # dentro da janela de 24 h: a função confere a SEQUÊNCIA antes e depois.
+        $wfChPonto = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 })
+        if ($wfChPonto.Ok) { Write-Host "  [ERRO] Chipset (ponto): sem sequência nova ele respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        # A recusa tem de dizer a CAUSA e o CAMINHO, e as duas metades são cobradas separadamente:
+        # 'Proteção do Sistema' sozinho é satisfeito pelo 'Ligue em Painel de Controle > ... > Proteção
+        # do Sistema' do fim, e o mutante que apagou a explicação da causa passou verde - medido.
+        if ([string]$wfChPonto.Reason -notmatch 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz que a Proteção do Sistema pode estar DESLIGADA ('$($wfChPonto.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto.Reason -notmatch 'Painel de Controle') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz ONDE ligar a Proteção do Sistema ('$($wfChPonto.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # As DUAS causas são separadas, porque mandam o usuário para lugares diferentes: com um ponto
+        # criado agora, a causa é a janela de 24 h e a Proteção está LIGADA - dizer para ligá-la seria
+        # mandar consertar o que não está quebrado. A data que separa as duas já vem na lista lida.
+        # UM Get-Date, guardado: eram três chamadas, e a de baixo formatava um instante DIFERENTE do
+        # que foi para o fixture. Rodando à meia-noite menos duas horas, as duas caem em dias
+        # distintos e a trava fica vermelha sem nada estar quebrado - relógio da máquina é máquina.
+        $wfChRecente = (Get-Date).AddHours(-2)
+        $wfChPonto24 = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10; CreationTime = $wfChRecente }) -After @(@{ SequenceNumber = 10; CreationTime = $wfChRecente })
+        if ($wfChPonto24.Ok) { Write-Host "  [ERRO] Chipset (ponto): com ponto recente e nenhum novo ele respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto24.Reason -notmatch '24 h|24 horas') { Write-Host "  [ERRO] Chipset (ponto): com ponto de 2 h atrás a recusa não menciona a janela de 24 h ('$($wfChPonto24.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfChPonto24.Reason -match 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): com a Proteção LIGADA e um ponto recente a recusa manda ligá-la mesmo assim" -ForegroundColor Red; $wbErrors++ }
+        # O '/' deste formato é o separador de data da CULTURA, e aqui isso não é armadilha: a recusa
+        # é montada com o MESMO 'dd/MM/yyyy' (wf-drivers.ps1, New-WinForgeChipsetRestorePoint), então
+        # os dois lados andam juntos em qualquer idioma. Quem fixasse a barra à mão é que quebraria.
+        if ([string]$wfChPonto24.Reason -notmatch ([regex]::Escape($wfChRecente.ToString('dd/MM/yyyy')))) { Write-Host "  [ERRO] Chipset (ponto): a recusa das 24 h não diz de QUANDO é o ponto que já existe" -ForegroundColor Red; $wbErrors++ }
+        # ...e ponto ANTIGO não vira "espere 24 h": aí a causa é mesmo a Proteção desligada.
+        $wfChPontoVelho = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddDays(-9) }) -After @(@{ SequenceNumber = 10; CreationTime = (Get-Date).AddDays(-9) })
+        if ([string]$wfChPontoVelho.Reason -notmatch 'Proteção do Sistema está desligada') { Write-Host "  [ERRO] Chipset (ponto): com o ponto mais novo de 9 dias atrás a recusa não acusa a Proteção desligada" -ForegroundColor Red; $wbErrors++ }
+        # As duas recusas dizem que dá para criar o ponto à mão: é a saída de quem não quer esperar
+        # 24 h e de quem não pode mexer na Proteção.
+        foreach ($wfChRec in @($wfChPonto, $wfChPonto24, $wfChPontoVelho)) {
+            if ([string]$wfChRec.Reason -notmatch 'à mão') { Write-Host "  [ERRO] Chipset (ponto): a recusa não diz que o usuário pode criar o ponto à mão ('$($wfChRec.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A data chega em três formas, e a do WMI é a que a máquina usa de verdade.
+        #
+        # A [datetime] direta tem de voltar INTEIRA, e a conferência é pelo instante (ticks), nunca
+        # por texto formatado: ':' num formato personalizado é o separador de hora da CULTURA
+        # corrente, e num Windows em outro idioma ele não é ':'. Cobrar '2026-09-10 08:30' passava
+        # aqui e no executor em inglês por sorte - as duas culturas usam ':'.
+        #
+        # O fixture é construído por NÚMEROS, sem passar por texto, e leva milissegundos de
+        # propósito: uma implementação que perdesse o atalho da [datetime] e devolvesse o valor
+        # depois de uma ida e volta por texto acertaria o minuto e perderia os 123 ms.
+        $wfChDireta = [datetime]::new(2026, 9, 10, 8, 30, 45, 123)
+        $wfChLidaD = Get-WinForgeRestorePointTime -Point @{ CreationTime = $wfChDireta }
+        if ($null -eq $wfChLidaD) { Write-Host "  [ERRO] Chipset (data): [datetime] direto não foi lido" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfChLidaD.Ticks -ne $wfChDireta.Ticks) { Write-Host "  [ERRO] Chipset (data): [datetime] direto voltou com $($wfChLidaD.Ticks) ticks, esperado $($wfChDireta.Ticks) - a data não volta inteira" -ForegroundColor Red; $wbErrors++ }
+        # O formato do WMI carrega o PRÓPRIO fuso ('-180' são os minutos de diferença para o UTC), e
+        # o conversor do .NET devolve a data já no fuso de QUEM LÊ. Cobrar '08:30' era cobrar que a
+        # máquina do teste estivesse em UTC-3 - o fuso desta aqui, não o do executor da integração
+        # contínua, onde a mesma conversão dá 11:30 e a trava ficava vermelha com o código certo.
+        # O que não depende de máquina nenhuma é o INSTANTE: 08:30 em UTC-3 são 11:30 em UTC, em
+        # qualquer fuso. O formato de saída também sai sem os separadores ':' e '/', que são
+        # caracteres de CULTURA e mudariam num Windows em outro idioma.
+        #
+        # São DOIS fixtures, com fusos diferentes, e é isso que dá dente à trava em qualquer
+        # máquina: quem ignorasse o fuso e lesse só os 14 primeiros dígitos devolveria o MESMO
+        # instante para os dois, então um dos dois sempre acusa. Com um fixture só, numa máquina
+        # cujo fuso por acaso seja o do fixture, o erro passa despercebido - foi o que aconteceu.
+        foreach ($wfChWmi in @(
+            @('20260910083000.000000-180', '202609101130'),
+            @('20260910083000.000000+060', '202609100730')
+        )) {
+            $wfChLida = Get-WinForgeRestorePointTime -Point @{ CreationTime = [string]$wfChWmi[0] }
+            if ($null -eq $wfChLida) { Write-Host "  [ERRO] Chipset (data): o formato do WMI '$($wfChWmi[0])' não foi lido - é o que Get-ComputerRestorePoint devolve" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfChLida.ToUniversalTime().ToString('yyyyMMddHHmm') -ne [string]$wfChWmi[1]) { Write-Host "  [ERRO] Chipset (data): '$($wfChWmi[0])' virou o instante $($wfChLida.ToUniversalTime().ToString('yyyyMMddHHmm')) em UTC, esperado $($wfChWmi[1]) - o fuso que vem no próprio texto não foi respeitado" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($null -ne (Get-WinForgeRestorePointTime -Point @{ CreationTime = 'nao e data' })) { Write-Host "  [ERRO] Chipset (data): texto ilegível devia dar `$null, e não uma data inventada" -ForegroundColor Red; $wbErrors++ }
+        if ($null -ne (Get-WinForgeRestorePointTime -Point $null)) { Write-Host "  [ERRO] Chipset (data): ponto nulo devia dar `$null" -ForegroundColor Red; $wbErrors++ }
+        $wfChPontoOk = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 }, @{ SequenceNumber = 11 })
+        if (-not $wfChPontoOk.Ok -or [int]$wfChPontoOk.SequenceNumber -ne 11) { Write-Host "  [ERRO] Chipset (ponto): sequência nova não foi reconhecida ($($wfChPontoOk.SequenceNumber))" -ForegroundColor Red; $wbErrors++ }
+        # Com DOIS números novos vale o MAIOR - é o ponto que acabou de ser criado. Com um só, pegar
+        # o primeiro ou o último dá no mesmo, e a trava de cima não observaria a diferença.
+        $wfChPontoDois = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 }, @{ SequenceNumber = 11 }, @{ SequenceNumber = 12 })
+        if ([int]$wfChPontoDois.SequenceNumber -ne 12) { Write-Host "  [ERRO] Chipset (ponto): com dois pontos novos ele devolveu $($wfChPontoDois.SequenceNumber), esperado o maior (12)" -ForegroundColor Red; $wbErrors++ }
+        # Lista vazia dos dois lados é máquina sem ponto nenhum, e não sucesso silencioso.
+        if ((New-WinForgeChipsetRestorePoint -Before @() -After @()).Ok) { Write-Host "  [ERRO] Chipset (ponto): sem ponto nenhum antes e depois ele respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        if (-not (New-WinForgeChipsetRestorePoint -Before @() -After @(@{ SequenceNumber = 1 })).Ok) { Write-Host "  [ERRO] Chipset (ponto): o primeiro ponto de uma máquina sem nenhum não foi reconhecido" -ForegroundColor Red; $wbErrors++ }
+        # O ponto roda UMA VEZ, antes do primeiro membro, e sem ele o LOTE NÃO RODA.
+        $wfChFonteA = [string](Get-Command Invoke-WinForgeWindowsUpdateGroupAction).ScriptBlock
+        if (@([regex]::Matches($wfChFonteA, 'New-WinForgeChipsetRestorePoint')).Count -ne 1) { Write-Host "  [ERRO] Chipset: o ponto de restauração não roda exatamente uma vez" -ForegroundColor Red; $wbErrors++ }
+        $wfChPosPonto = $wfChFonteA.IndexOf('New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
+        # Mesma correção da âncora do laço: com 'foreach' solto, quem casa é o laço do bloco do fim.
+        $wfChPosLaco = $wfChFonteA.IndexOf('foreach ($wfId in $wfIds) {', [StringComparison]::Ordinal)
+        if ($wfChPosPonto -lt 0 -or $wfChPosLaco -lt 0 -or $wfChPosPonto -gt $wfChPosLaco) { Write-Host "  [ERRO] Chipset: o ponto de restauração roda DEPOIS do primeiro membro" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch 'Install-WinForgeWindowsUpdateDriver') { Write-Host "  [ERRO] Chipset: o lote não instala pelo caminho existente" -ForegroundColor Red; $wbErrors++ }
+        # O PORTÃO, por comportamento, nas duas pontas - e sem tocar em Checkpoint-Computer, que é
+        # escrita: com -NoUI a função RELATA o que faria. Grupo que passa no filtro anuncia o ponto
+        # de restauração; grupo que não passa (é a linha do teste da Tarefa 21) segue sem ele, senão
+        # todo lote do Windows Update passaria a depender da Proteção do Sistema.
+        $wfChLinha = Format-WinForgeWindowsUpdateGroupRow -Group $wfChGrupo
+        $wfChRelato = [string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfChLinha -NoUI)
+        if ($wfChRelato -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: o lote de um grupo de chipset não anuncia o ponto de restauração ('$wfChRelato')" -ForegroundColor Red; $wbErrors++ }
+        # O ponto é de TODO lote, e o filtro decide só o TEXTO. Esta trava prendia o contrário até a
+        # decisão mudar: enquanto a rede dependia do reconhecimento, bastava o serviço publicar o
+        # fabricante como 'Intel Corporation' para os 47 arquivos entrarem sem ponto e sem Desfazer.
+        $wfChNaoCh = Format-WinForgeWindowsUpdateGroupRow -Group (& $wfChCom $wfChGrupo @{ HardwareIds = @(1..47 | ForEach-Object { 'PCI\VEN_1022&DEV_1450' }) })
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row $wfChNaoCh -NoUI) -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: um grupo que o filtro NÃO reconhece ficou sem ponto de restauração - o filtro decide o texto, nunca se existe rede de segurança" -ForegroundColor Red; $wbErrors++ }
+        # E o fornecedor por extenso, que é a forma que ninguém mediu ainda, também tem rede.
+        if ([string](Invoke-WinForgeWindowsUpdateGroupAction -Row (Format-WinForgeWindowsUpdateGroupRow -Group (& $wfChCom $wfChGrupo @{ Provider = 'Intel Corporation' })) -NoUI) -notmatch 'ponto de restauração') { Write-Host "  [ERRO] Chipset: lote com o fabricante por extenso ficou sem ponto de restauração" -ForegroundColor Red; $wbErrors++ }
+        # A criação também é incondicional na fonte: o 'if' do reconhecimento não pode voltar a
+        # cercá-la. A âncora é a chamada seguida da conferência, sem nada entre as duas.
+        if ($wfChFonteA -notmatch '(?m)^\s*\$ponto = New-WinForgeChipsetRestorePoint\s*$') { Write-Host "  [ERRO] Chipset: a criação do ponto não está numa linha própria - ela pode ter voltado para dentro de uma condição" -ForegroundColor Red; $wbErrors++ }
+        # Entre a caixa de confirmação e a criação do ponto não pode aparecer o reconhecimento:
+        # é ali que o 'if ($chipset.Ok)' voltaria a cercar a rede de segurança. A adjacência das
+        # duas linhas não serve mais de âncora - o aviso da espera entrou no meio.
+        $wfChPosResp = $wfChFonteA.IndexOf('$resposta = [System.Windows.MessageBox]', [StringComparison]::Ordinal)
+        $wfChEntre = $(if ($wfChPosResp -ge 0 -and $wfChPosPonto -gt $wfChPosResp) { $wfChFonteA.Substring($wfChPosResp, $wfChPosPonto - $wfChPosResp) } else { '' })
+        if ($wfChEntre -match '\$chipset\.Ok') { Write-Host "  [ERRO] Chipset: a criação do ponto voltou a ser condicionada ao reconhecimento" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch '(?s)\$ponto = New-WinForgeChipsetRestorePoint.{0,300}if \(-not \$ponto\.Ok\)') { Write-Host "  [ERRO] Chipset: a conferência do ponto ficou longe da criação" -ForegroundColor Red; $wbErrors++ }
+        # ...e o reconhecimento continua sendo usado para ESCOLHER O TEXTO, que é o que sobrou dele.
+        if ($wfChFonteA -notmatch '\$\(if \(\$chipset\.Ok\) \{ \(Get-WinForgeChipsetConfirmText') { Write-Host "  [ERRO] Chipset: o reconhecimento deixou de escolher a pergunta da confirmação" -ForegroundColor Red; $wbErrors++ }
+        # ...e o relato do que seria instalado continua inteiro nos dois casos: o anúncio do ponto é
+        # acréscimo, não troca.
+        if ($wfChRelato -notmatch 'instalaria 47 de 47') { Write-Host "  [ERRO] Chipset: o anúncio do ponto comeu o relato do lote ('$wfChRelato')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch 'Test-WinForgeChipsetGroup') { Write-Host "  [ERRO] Chipset: o lote não pergunta ao filtro - o ponto de restauração viraria obrigatório para todo grupo" -ForegroundColor Red; $wbErrors++ }
+        # A confirmação do chipset entra na caixa ENTRE PARÊNTESES. Sem eles o '+ "..."' vira
+        # argumento posicional da função e o sufixo some EM SILÊNCIO - medido, sem erro nenhum. Este
+        # caminho é de caixa e o -SelfTest não passa por ele: a forma é o que sobra para prender.
+        if ($wfChFonteA -notmatch '\(Get-WinForgeChipsetConfirmText -Group \$Row\.Group\) \+') { Write-Host "  [ERRO] Chipset (texto): a confirmação não é montada com a chamada entre parênteses - o sufixo da pergunta seria engolido" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -notmatch '\$Row\.Group') { Write-Host "  [ERRO] Chipset: o filtro é consultado com a LINHA, e não com o grupo cru que ela carrega - Class e HardwareIds não sobrevivem à formatação" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteA -match 'Checkpoint-Computer') { Write-Host "  [ERRO] Chipset: Checkpoint-Computer é chamado direto aqui - ele mora em New-WinForgeChipsetRestorePoint, que é quem confere a sequência" -ForegroundColor Red; $wbErrors++ }
+        # Ponto que não deu certo PARA o lote, e nenhum membro é tocado. É a razão de o ponto vir
+        # antes de tudo: sem rede, a ação que não tem Desfazer não acontece. O caminho é de caixa e o
+        # -SelfTest não passa por ele - a forma com o argumento é o que sobra para prender.
+        if ($wfChFonteA -notmatch '(?s)if \(-not \$ponto\.Ok\) \{.{0,900}return \[string\]\$ponto\.Reason') { Write-Host "  [ERRO] Chipset: falha do ponto de restauração não interrompe o lote" -ForegroundColor Red; $wbErrors++ }
+        $wfChPosPontoCham = $wfChFonteA.IndexOf('$ponto = New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
+        $wfChPosMarca = $wfChFonteA.IndexOf("Set-WinForgeWindowsUpdateRowState -UpdateId ([string]@(`$faltam)[0]) -State 'instalando'", [StringComparison]::Ordinal)
+        # O aviso da espera mexe no TEXTO da linha e não no estado dela: 'instalando' antes de o
+        # ponto existir seria a tela dizendo que começou o que ainda não pode começar.
+        if ($wfChFonteA -match "-State 'instalando' -Text 'criando ponto") { Write-Host "  [ERRO] Lote (aviso): o aviso marca o membro como 'instalando' antes de o ponto de restauração existir" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChPosPontoCham -lt 0 -or $wfChPosMarca -lt 0 -or $wfChPosPontoCham -gt $wfChPosMarca) { Write-Host "  [ERRO] Chipset: o ponto de restauração é criado DEPOIS de o primeiro membro já ter sido marcado" -ForegroundColor Red; $wbErrors++ }
+        # Falha de LEITURA da lista de pontos é resposta própria, e não "não foi criado": medido nesta
+        # máquina, sem elevação Get-ComputerRestorePoint responde 'Acesso negado'. E ela é cobrada nas
+        # DUAS pontas: com a lista de ANTES vazia por erro, um ponto ANTIGO conta como novo e a função
+        # responde sucesso sem nada ter sido criado - o caso mais provável de todos, porque o Windows
+        # não cria um segundo ponto dentro de 24 h. As duas âncoras são a forma da chamada com o
+        # tratamento, e não o nome solto.
+        $wfChFonteP = [string]${function:New-WinForgeChipsetRestorePoint}
+        if ($wfChFonteP -notmatch 'A lista de pontos de restauração não pôde ser lida') { Write-Host "  [ERRO] Chipset (ponto): falha ao LER a lista cai na mesma frase de 'não foi criado'" -ForegroundColor Red; $wbErrors++ }
+        if (@([regex]::Matches($wfChFonteP, 'try \{ \$(Before|After) = @\(Get-ComputerRestorePoint -ErrorAction Stop\) \} catch \{\r?\n\s*return @\{ Ok = \$false; Reason = \$wfRecusaLeitura')).Count -ne 2) { Write-Host "  [ERRO] Chipset (ponto): uma das duas leituras da lista não recusa no catch - erro de leitura viraria lista vazia e um ponto velho contaria como novo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChFonteP -match 'catch \{ \$Before = @\(\) \}') { Write-Host "  [ERRO] Chipset (ponto): a leitura de ANTES voltou a virar lista vazia no erro" -ForegroundColor Red; $wbErrors++ }
+        # E a criação do ponto é escrita: em SelfTest ela tem de ser recusada pelo guarda, não pela
+        # sorte de o teste sempre passar -Before/-After.
+        if ([string]${function:New-WinForgeChipsetRestorePoint} -notmatch 'Assert-WinForgeNotSelfTest -Name ''New-WinForgeChipsetRestorePoint''') { Write-Host "  [ERRO] Chipset (ponto): o caminho que cria o ponto não tem o guarda de SelfTest" -ForegroundColor Red; $wbErrors++ }
+        # Nada deste caminho baixa ou executa instalador de terceiro.
+        foreach ($wfChProibido in @('SetupChipset', 'chocolatey', 'choco ', 'Invoke-WebRequest', 'Start-BitsTransfer')) {
+            if ($wfChFonteA -match [regex]::Escape($wfChProibido)) { Write-Host "  [ERRO] Chipset: '$wfChProibido' aparece no caminho do lote" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Chipset: filtro por classe System + Intel + PCI\VEN_8086, cinco recusas, ponto de restauração conferido pela sequência e texto sem palavra proibida"
         Write-Host "  Windows Update (uma linha por dispositivo): $($wfWuVerCasos.Count) título(s) lidos | 5 ofertas -> $($wfWuMantidos.Count) dispositivo(s) e $($wfWuOcultos.Count) versão(ões) antiga(s) fora da tabela"
     } catch {
         Write-Host "  [ERRO] Windows Update (uma linha por dispositivo): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
@@ -4323,7 +7631,7 @@ if ($SelfTest) {
         # anterior. O que se prova aqui é a ESCOLHA - só 'nvidia-*.exe', nunca o recém-aberto,
         # nunca um arquivo que o WinForge não pôs ali - primeiro em simulação e depois apagando de
         # verdade, numa pasta de teste com arquivos criados aqui mesmo.
-        $wfLimpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza'
+        $wfLimpDir = Join-Path $wbSelfTestRaiz 'limpeza'
         New-Item -ItemType Directory -Path $wfLimpDir -Force | Out-Null
         $wfLimpNovo = Join-Path $wfLimpDir 'nvidia-616.92.exe'
         $wfLimpVelho = Join-Path $wfLimpDir 'nvidia-566.36.exe'
@@ -4366,7 +7674,7 @@ if ($SelfTest) {
         }
         # Assinatura: arquivo sem assinatura nenhuma é recusado, e o nome da organização é comparado
         # por igualdade EXATA - 'NVIDIA Corporation Ltd' não é 'NVIDIA Corporation'.
-        $wfAcTmpDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura'
+        $wfAcTmpDir = Join-Path $wbSelfTestRaiz 'assinatura'
         New-Item -ItemType Directory -Path $wfAcTmpDir -Force | Out-Null
         $wfAcTmpExe = Join-Path $wfAcTmpDir 'sem-assinatura.exe'
         Set-Content -LiteralPath $wfAcTmpExe -Value 'MZ este arquivo nao e um executavel assinado' -Encoding Ascii
@@ -4408,7 +7716,7 @@ if ($SelfTest) {
         # Pasta de downloads: as MESMAS regras da pasta de backup padrão, e sem o afrouxamento de
         # -ExplicitRoot. O instalador baixado é aberto com a elevação do WinForge - uma pasta que um
         # processo de integridade média escreve trocaria o arquivo entre a conferência e a abertura.
-        $wfAcRaizAberta = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto'
+        $wfAcRaizAberta = Join-Path $wbSelfTestRaiz 'downloads-aberto'
         New-Item -ItemType Directory -Path $wfAcRaizAberta -Force | Out-Null
         $wfAcAclAberta = Get-Acl -LiteralPath $wfAcRaizAberta
         $wfAcAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
@@ -4426,7 +7734,7 @@ if ($SelfTest) {
         if ($wfAcEu.Value -eq $wfAcSystemSid.Value -or $wfAcEu.Value -eq $wfAcAdminSid.Value) {
             Write-Host "  Pasta de downloads (dono): teste pulado - este build roda como SYSTEM ou como o próprio grupo Administradores"
         } else {
-            $wfAcRaizDono = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono'
+            $wfAcRaizDono = Join-Path $wbSelfTestRaiz 'downloads-dono'
             New-Item -ItemType Directory -Path $wfAcRaizDono -Force | Out-Null
             $wfAcAclDono = New-Object System.Security.AccessControl.DirectorySecurity
             $wfAcAclDono.SetAccessRuleProtection($true, $false)
@@ -4449,10 +7757,1355 @@ if ($SelfTest) {
     } catch {
         Write-Host "  [ERRO] ações de driver: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     } finally {
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\assinatura') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\limpeza') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path (Join-Path $wbSelfTestTemp 'WinForge-SelfTest\downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'assinatura') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'limpeza') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'downloads-aberto') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $wbSelfTestRaiz 'downloads-dono') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # ---------------------------------------------------------------- Rede: rádio, sondas e bloqueios
+    # "Conectado certinho" prova que o rádio associou e autenticou: driver quebrado não associa. O
+    # sintoma é DHCP/APIPA, DNS, rota, proxy ou filtro de software, nessa ordem.
+    try {
+        # O rádio é achado por mídia física, e não por nome: separa o rádio Intel dos sete
+        # adaptadores virtuais de VPN desta máquina, e vale igual num Windows em inglês.
+        #
+        # A quarta linha é o Wi-Fi Direct, que TODO Windows com rádio tem: ele declara a MESMA
+        # mídia física do rádio de verdade e é virtual. Sem ele no gabarito a coluna 'Virtual' seria
+        # enfeite e a exclusão ficaria sem prova - e é justamente ele que uma escolha por "primeiro
+        # da lista" ou por "menor ifIndex" pegaria no lugar do rádio.
+        $wfNetLista = @(
+            [pscustomobject]@{ Name = 'VPN da empresa'; ifIndex = 3;  Status = 'Up';           Virtual = $true;  PhysicalMediaType = 'Unspecified'; DriverProvider = 'Terceiro' },
+            [pscustomobject]@{ Name = 'Wi-Fi';          ifIndex = 12; Status = 'Up';           Virtual = $false; PhysicalMediaType = 'Native 802.11'; DriverProvider = 'Intel' },
+            [pscustomobject]@{ Name = 'Ethernet';       ifIndex = 7;  Status = 'Disconnected'; Virtual = $false; PhysicalMediaType = '802.3';        DriverProvider = 'Realtek' },
+            [pscustomobject]@{ Name = 'Wi-Fi Direct';   ifIndex = 5;  Status = 'Up';           Virtual = $true;  PhysicalMediaType = 'Native 802.11'; DriverProvider = 'Microsoft' }
+        )
+        $wfNetRadio = Get-WinForgeWifiAdapter -Adapters $wfNetLista
+        if (-not $wfNetRadio.Ok) { Write-Host "  [ERRO] Rede (rádio): não achou o adaptador sem fio ('$($wfNetRadio.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        elseif ([int]$wfNetRadio.ifIndex -ne 12) { Write-Host "  [ERRO] Rede (rádio): escolheu ifIndex $($wfNetRadio.ifIndex), esperado 12" -ForegroundColor Red; $wbErrors++ }
+        $wfNetSemRadio = Get-WinForgeWifiAdapter -Adapters @($wfNetLista[0], $wfNetLista[2])
+        if ($wfNetSemRadio.Ok) { Write-Host "  [ERRO] Rede (rádio): achou rádio numa lista sem nenhum" -ForegroundColor Red; $wbErrors++ }
+        # O virtual sozinho não é rádio: ele não tem driver próprio para trocar.
+        $wfNetSoVirtual = Get-WinForgeWifiAdapter -Adapters @($wfNetLista[3])
+        if ($wfNetSoVirtual.Ok) { Write-Host "  [ERRO] Rede (rádio): tomou o adaptador virtual de Wi-Fi Direct por rádio" -ForegroundColor Red; $wbErrors++ }
+        # O virtual NA FRENTE e com ifIndex menor: mata a escolha por "primeiro da lista" e a por
+        # "menor ifIndex" de uma vez, que passariam pelo gabarito na ordem de cima.
+        $wfNetVirtualPrimeiro = Get-WinForgeWifiAdapter -Adapters @($wfNetLista[3], $wfNetLista[1])
+        if (-not $wfNetVirtualPrimeiro.Ok) { Write-Host "  [ERRO] Rede (rádio): com o virtual na frente não achou mais o rádio" -ForegroundColor Red; $wbErrors++ }
+        elseif ([int]$wfNetVirtualPrimeiro.ifIndex -ne 12) { Write-Host "  [ERRO] Rede (rádio): com o virtual na frente escolheu ifIndex $($wfNetVirtualPrimeiro.ifIndex), esperado 12" -ForegroundColor Red; $wbErrors++ }
+        # Dois rádios de VERDADE (o de dentro do notebook mais um dongle USB): ganha o que está
+        # CONECTADO, e não o de menor ifIndex - arrancar o driver do dongle desligado não conserta
+        # o Wi-Fi de ninguém. Sem esta linha, a ordenação por Status seria enfeite.
+        $wfNetDongle = [pscustomobject]@{ Name = 'Wi-Fi 2'; ifIndex = 4; Status = 'Disconnected'; Virtual = $false; PhysicalMediaType = 'Native 802.11'; DriverProvider = 'Realtek' }
+        $wfNetDois = Get-WinForgeWifiAdapter -Adapters @($wfNetDongle, $wfNetLista[1])
+        if (-not $wfNetDois.Ok) { Write-Host "  [ERRO] Rede (rádio): com dois rádios não achou nenhum" -ForegroundColor Red; $wbErrors++ }
+        elseif ([int]$wfNetDois.ifIndex -ne 12) { Write-Host "  [ERRO] Rede (rádio): entre dois rádios escolheu o ifIndex $($wfNetDois.ifIndex), esperado o conectado (12)" -ForegroundColor Red; $wbErrors++ }
+        # O caso que derruba o filtro por nome, e ele é de verdade: um adaptador de CABO que alguém
+        # renomeou para "Wi-Fi de casa" em "Renomear adaptador". Pelo nome ele é o rádio; pela
+        # mídia física, não é. Sem esta linha o filtro por nome passaria em tudo o que está acima,
+        # porque no gabarito o rádio de verdade também se chama 'Wi-Fi'.
+        $wfNetApelido = [pscustomobject]@{ Name = 'Wi-Fi de casa'; ifIndex = 6; Status = 'Up'; Virtual = $false; PhysicalMediaType = '802.3'; DriverProvider = 'Realtek' }
+        if ((Get-WinForgeWifiAdapter -Adapters @($wfNetApelido)).Ok) { Write-Host "  [ERRO] Rede (rádio): adaptador de CABO chamado 'Wi-Fi de casa' foi tomado por rádio" -ForegroundColor Red; $wbErrors++ }
+        $wfNetFonteA = [string](Get-Command Get-WinForgeWifiAdapter).ScriptBlock
+        # A trava pega a FORMA DA CHAMADA com o argumento junto, e não o número solto: '802.11'
+        # aparece no bloco de ajuda da função, que faz parte do corpo do scriptblock, então procurar
+        # só por ele ficaria verde com o filtro trocado por nome.
+        if ($wfNetFonteA -notmatch "PhysicalMediaType[^\r\n]*-like[^\r\n]*'\*802\.11\*'") { Write-Host "  [ERRO] Rede (rádio): o filtro não é PhysicalMediaType -like '*802.11*'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteA -match "Name\s*-like\s*'\*Wi-Fi\*'") { Write-Host "  [ERRO] Rede (rádio): filtro por NOME é dependente de idioma" -ForegroundColor Red; $wbErrors++ }
+        # Sonda de TCP: nada de Test-NetConnection -Port (medido: 5.443 ms por chamada).
+        $wfNetFonteS = [string](Get-Command Test-WinForgeTcpProbe).ScriptBlock
+        if ($wfNetFonteS -match 'Test-NetConnection\s+[^|]*-Port') { Write-Host "  [ERRO] Rede (sonda): Test-NetConnection -Port leva 5,4 s por chamada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteS -notmatch 'BeginConnect|InformationLevel') { Write-Host "  [ERRO] Rede (sonda): a sonda não usa TcpClient/BeginConnect nem -InformationLevel Quiet" -ForegroundColor Red; $wbErrors++ }
+        # Duas travas de FORMA DA CHAMADA, com o argumento junto, e elas existem porque medição de
+        # laço local NÃO dá limite inferior estável: a MESMA porta fechada (127.0.0.1:9) levou
+        # 498 ms fora do build e perto de 0 ms dentro dele, nesta máquina, no mesmo dia. Qualquer
+        # assertiva de "demorou pelo menos X" seria um teste instável. Sem estas duas linhas, dois
+        # mutantes ficavam VERDES na campanha: 'WaitOne(5000)' no lugar do tempo limite recebido, e
+        # 'Ms = 0' no lugar do cronômetro. Nenhuma das duas formas aparece no bloco de ajuda.
+        if ($wfNetFonteS -notmatch 'WaitOne\(\s*\$TimeoutMs') { Write-Host "  [ERRO] Rede (sonda): o tempo limite recebido não chega ao WaitOne" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteS -notmatch 'Ms\s*=\s*\[int\]\$\w+\.ElapsedMilliseconds') { Write-Host "  [ERRO] Rede (sonda): o Ms não sai de um cronômetro" -ForegroundColor Red; $wbErrors++ }
+        $wfNetSonda = Test-WinForgeTcpProbe -TargetHost '127.0.0.1' -Port 9 -TimeoutMs 500
+        if ([int]$wfNetSonda.Ms -gt 3000) { Write-Host "  [ERRO] Rede (sonda): $($wfNetSonda.Ms)ms com tempo limite de 500ms" -ForegroundColor Red; $wbErrors++ }
+        # O relógio sozinho é trava vazia: uma sonda que devolvesse sempre @{ Ok = $false; Ms = 0 }
+        # passaria na linha de cima. As DUAS respostas são cobradas contra um ouvinte de laço local
+        # em porta efêmera - ele nasce e morre dentro deste processo, não toca em adaptador, driver,
+        # pilha nem configuração, e é o único jeito de provar o Ok = $true sem depender de internet.
+        if ($wfNetSonda.Ok) { Write-Host "  [ERRO] Rede (sonda): porta fechada (127.0.0.1:9) respondeu Ok" -ForegroundColor Red; $wbErrors++ }
+        $wfNetOuvinte = $null
+        try {
+            $wfNetOuvinte = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $wfNetOuvinte.Start()
+            $wfNetPorta = [int]([System.Net.IPEndPoint]$wfNetOuvinte.LocalEndpoint).Port
+            $wfNetAberta = Test-WinForgeTcpProbe -TargetHost '127.0.0.1' -Port $wfNetPorta -TimeoutMs 500
+            if (-not $wfNetAberta.Ok) { Write-Host "  [ERRO] Rede (sonda): porta aberta (127.0.0.1:$wfNetPorta) respondeu Ok = `$false" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            if ($null -ne $wfNetOuvinte) { try { $wfNetOuvinte.Stop() } catch { } }
+        }
+        # $env:SESSIONNAME veio VAZIA numa sessão de console legítima (Win11 26200): o teste
+        # '-ne Console', conselho mais repetido da internet, bloquearia o botão para toda gente.
+        $wfNetFonteRem = [string](Get-Command Test-WinForgeRemoteSession).ScriptBlock
+        if ($wfNetFonteRem -match 'SESSIONNAME') { Write-Host "  [ERRO] Rede (sessão): o código usa `$env:SESSIONNAME - ele vem vazio em console legítimo" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetFonteRem -notmatch 'GetSystemMetrics') { Write-Host "  [ERRO] Rede (sessão): falta GetSystemMetrics(0x1000)" -ForegroundColor Red; $wbErrors++ }
+        # Os nove bloqueios, um a um, com fatos simulados.
+        $wfNetBase = @{ Remote = $false; Build = 26200; OtherAdapter = $true; Inbox = $true; ExportOk = $true; OnBattery = $false; Virtual = $false; Server = $false; NeedRestart = $false; FreeBytes = 50GB; NeedBytes = 200MB }
+        # '@{} + $base + @{ Chave = <outro valor> }' LANÇA quando a chave já existe ("O item já foi
+        # adicionado"): o + de hashtable não sobrescreve, ele soma chaves. A troca de um fato é por
+        # ATRIBUIÇÃO, que é o que o laço logo abaixo já fazia.
+        $wfNetCom = {
+            param([string]$Chave, $Valor)
+            $wfNetUm = @{} + $wfNetBase
+            $wfNetUm[$Chave] = $Valor
+            return $wfNetUm
+        }
+        foreach ($wfNetCaso in @(
+            @{ Nome = 'sessão remota';        Acao = 'WifiDriverReinstall'; Fato = @{ Remote = $true };        Match = 'de longe|remot' },
+            @{ Nome = 'build 17763';          Acao = 'WifiDriverReinstall'; Fato = @{ Build = 17763 };         Match = '1903|17763|versão do Windows' },
+            @{ Nome = 'sem outra via';        Acao = 'WifiDriverGeneric';   Fato = @{ OtherAdapter = $false }; Match = 'cabo' },
+            @{ Nome = 'sem inbox';            Acao = 'WifiDriverGeneric';   Fato = @{ Inbox = $false };        Match = 'básico' },
+            @{ Nome = 'falha ao exportar';    Acao = 'WifiDriverReinstall'; Fato = @{ ExportOk = $false };     Match = 'cópia' },
+            @{ Nome = 'na bateria';           Acao = 'WifiDriverReinstall'; Fato = @{ OnBattery = $true };     Match = 'bateria' },
+            @{ Nome = 'máquina virtual';      Acao = 'WifiDriverRestore';   Fato = @{ Virtual = $true };       Match = 'virtual' },
+            @{ Nome = 'Windows Server';       Acao = 'WifiDriverRestore';   Fato = @{ Server = $true };        Match = 'Server' },
+            @{ Nome = 'reiniciar antes';      Acao = 'WifiDriverReinstall'; Fato = @{ NeedRestart = $true };   Match = 'Reinicie' },
+            @{ Nome = 'espaço em disco';      Acao = 'WifiDriverReinstall'; Fato = @{ FreeBytes = 10MB };      Match = '\d' })) {
+            $wfNetFatos = @{} + $wfNetBase
+            foreach ($wfNetK in $wfNetCaso.Fato.Keys) { $wfNetFatos[$wfNetK] = $wfNetCaso.Fato[$wfNetK] }
+            $wfNetG = Test-WinForgeNetworkGuard -Action ([string]$wfNetCaso.Acao) -Facts $wfNetFatos
+            if ($wfNetG.Ok) { Write-Host "  [ERRO] Rede (bloqueio): '$($wfNetCaso.Nome)' não bloqueou '$($wfNetCaso.Acao)'" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfNetG.Reason -notmatch [string]$wfNetCaso.Match) { Write-Host "  [ERRO] Rede (bloqueio): '$($wfNetCaso.Nome)' explicou com '$($wfNetG.Reason)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfNetG.Reason -match 'continuar mesmo assim') { Write-Host "  [ERRO] Rede (bloqueio): '$($wfNetCaso.Nome)' oferece 'continuar mesmo assim'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem inbox, o botão 5 SOME (exceção D3); o 4 só avisa quando não há outra via.
+        if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts (& $wfNetCom 'Inbox' $false)).Hidden) { Write-Host "  [ERRO] Rede (D3): sem driver inbox o botão 5 tem de SUMIR, não ficar desabilitado" -ForegroundColor Red; $wbErrors++ }
+        # ...e o 4 continua de pé no MESMO fato: ele reinstala o driver que já está lá, não o básico.
+        $wfNetInbox4 = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Inbox' $false)
+        if (-not $wfNetInbox4.Ok) { Write-Host "  [ERRO] Rede (D3): o driver inbox é condição do botão 5, não do 4" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetInbox4.Hidden) { Write-Host "  [ERRO] Rede (D3): sem driver básico o botão 4 sumiu junto, e a condição não é dele" -ForegroundColor Red; $wbErrors++ }
+        # DOIS degraus valendo AO MESMO TEMPO, que é onde o buraco estava: esconder é propriedade do
+        # BOTÃO, e não da explicação. Um notebook sem driver básico E na bateria: quem explica é a
+        # bateria, mas o botão 5 tem de continuar SUMINDO. Se ele aparecer desabilitado dizendo
+        # "ligue na tomada", a pessoa vai procurar na internet como habilitá-lo - e o que ela acha é
+        # a opção de forçar, que é o caminho para ficar sem rádio.
+        #
+        # Cada fato testado SOZINHO contra a base saudável nunca pega isto: com um degrau só, o que
+        # interrompe o laço é sempre o mesmo que esconde.
+        foreach ($wfNetJunto in @('OnBattery', 'NeedRestart', 'Virtual', 'Server', 'Remote')) {
+            $wfNetFatosJ = @{} + $wfNetBase
+            $wfNetFatosJ['Inbox'] = $false
+            $wfNetFatosJ[$wfNetJunto] = $true
+            $wfNetGj = Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfNetFatosJ
+            if (-not $wfNetGj.Hidden) { Write-Host "  [ERRO] Rede (esconder): sem driver básico E '$wfNetJunto' ao mesmo tempo, o botão 5 voltou a aparecer" -ForegroundColor Red; $wbErrors++ }
+            # Botão SUMIDO explicado por outro degrau é o que mais confunde: "ligue na tomada" para
+            # um botão que não está na tela não diz nada a ninguém. Quem esconde é quem explica.
+            elseif ([string]$wfNetGj.Reason -notmatch 'básico') { Write-Host "  [ERRO] Rede (esconder): o botão 5 sumiu por falta de driver básico e a explicação fala de outra coisa ('$($wfNetGj.Reason)')" -ForegroundColor Red; $wbErrors++ }
+            elseif (@($wfNetGj.Blocks).Count -ne 1) { Write-Host "  [ERRO] Rede (esconder): Blocks trouxe $(@($wfNetGj.Blocks).Count) item(ns) num botão escondido" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O mesmo pelo outro lado: a sessão remota é o degrau 1 e NÃO esconde; o build baixo é o 2 e
+        # esconde. Com os dois valendo, quem interrompe o laço é o primeiro e o botão tem de sumir
+        # assim mesmo.
+        $wfNetFatosB = @{} + $wfNetBase
+        $wfNetFatosB['Build'] = 17763
+        $wfNetFatosB['Remote'] = $true
+        foreach ($wfNetBtnB in @('WifiDriverReinstall', 'WifiDriverGeneric')) {
+            if (-not (Test-WinForgeNetworkGuard -Action $wfNetBtnB -Facts $wfNetFatosB).Hidden) { Write-Host "  [ERRO] Rede (esconder): build 17763 com sessão remota junto, '$wfNetBtnB' voltou a aparecer" -ForegroundColor Red; $wbErrors++ }
+        }
+        $wfNetAviso = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'OtherAdapter' $false)
+        if (-not $wfNetAviso.Ok) { Write-Host "  [ERRO] Rede (bloqueio): 'nenhuma outra via' é ABSOLUTO no 5 e só AVISO no 4" -ForegroundColor Red; $wbErrors++ }
+        # '@($null).Count' é 1: contar sozinho deixaria passar Blocks = $null. O aviso tem de estar
+        # LÁ dentro, e tem de ser o da outra via.
+        if (@($wfNetAviso.Blocks).Count -ne 1) { Write-Host "  [ERRO] Rede (bloqueio): o aviso do botão 4 não foi registrado em Blocks (veio $(@($wfNetAviso.Blocks).Count))" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfNetAviso.Blocks)[0] -notmatch 'cabo') { Write-Host "  [ERRO] Rede (bloqueio): o aviso do botão 4 não fala da outra via ('$(@($wfNetAviso.Blocks)[0])')" -ForegroundColor Red; $wbErrors++ }
+        # Build baixo tira os botões 4 e 5 da tela: '/remove-device' e '/scan-devices' só existem a
+        # partir do 1903, e o README declara suporte a Windows 10 (inclui 1809/LTSC 2019).
+        foreach ($wfNetBtn in @('WifiDriverReinstall', 'WifiDriverGeneric')) {
+            if (-not (Test-WinForgeNetworkGuard -Action $wfNetBtn -Facts (& $wfNetCom 'Build' 17763)).Hidden) { Write-Host "  [ERRO] Rede (build): '$wfNetBtn' tem de sumir no build 17763" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ((Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom 'Build' 17763)).Hidden) { Write-Host "  [ERRO] Rede (build): o botão 3 não depende do 1903" -ForegroundColor Red; $wbErrors++ }
+        # O piso é o 1903 = build 18362, e os dois lados dele são cobrados: só 17763 contra 26200
+        # deixaria passar qualquer corte no meio (o 1909, o 2004...), que é regra diferente.
+        if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Build' 18362)).Ok) { Write-Host "  [ERRO] Rede (build): o 1903 (build 18362) é o piso e tem de PASSAR" -ForegroundColor Red; $wbErrors++ }
+        if ((Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'Build' 18361)).Ok) { Write-Host "  [ERRO] Rede (build): a build 18361 é anterior ao 1903 e tem de bloquear" -ForegroundColor Red; $wbErrors++ }
+        # Espaço: a conta é contra o NeedBytes dos fatos, e não contra um número escrito no código.
+        # 150 MB é o valor do meio - passa em qualquer corte menor que 200 MB e só morre na conta certa.
+        if ((Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts (& $wfNetCom 'FreeBytes' 150MB)).Ok) { Write-Host "  [ERRO] Rede (espaço): 150 MB livres não chegam aos 200 MB pedidos e mesmo assim passou" -ForegroundColor Red; $wbErrors++ }
+        # A ORDEM da escada, que é desenho e não acaso: quem está de longe não precisa ouvir sobre
+        # espaço em disco. Com dois fatos ruins ao mesmo tempo, quem explica é o primeiro degrau - e
+        # a escada PARA nele, então Blocks tem um item só.
+        $wfNetDuplo = @{} + $wfNetBase
+        $wfNetDuplo['Remote'] = $true
+        $wfNetDuplo['FreeBytes'] = 10MB
+        $wfNetOrdem = Test-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -Facts $wfNetDuplo
+        if ([string]$wfNetOrdem.Reason -notmatch 'de longe') { Write-Host "  [ERRO] Rede (ordem): com sessão remota E disco cheio, a explicação foi '$($wfNetOrdem.Reason)'" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfNetOrdem.Blocks).Count -ne 1) { Write-Host "  [ERRO] Rede (ordem): a escada não parou no primeiro degrau (Blocks = $(@($wfNetOrdem.Blocks).Count))" -ForegroundColor Red; $wbErrors++ }
+        $wfNetSaudavel = Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts $wfNetBase
+        if ($wfNetSaudavel.Ok -ne $true) { Write-Host "  [ERRO] Rede (bloqueio): máquina saudável bloqueou o botão 3" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfNetSaudavel.Blocks).Count -ne 0) { Write-Host "  [ERRO] Rede (bloqueio): máquina saudável rendeu $(@($wfNetSaudavel.Blocks).Count) aviso(s) no botão 3" -ForegroundColor Red; $wbErrors++ }
+        # O botão 3 é o degrau barato e reversível da escada: renovar endereço e limpar o cache de
+        # nomes não troca driver nenhum, então nada que existe para proteger DRIVER pode derrubá-lo.
+        foreach ($wfNetSo in @('Virtual', 'Server', 'OnBattery', 'NeedRestart')) {
+            if (-not (Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom $wfNetSo $true)).Ok) { Write-Host "  [ERRO] Rede (bloqueio): '$wfNetSo' derrubou o botão 3, que não mexe em driver" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A sessão remota é a exceção e derruba a escada INTEIRA, o botão 3 junto: liberar e renovar
+        # o endereço corta a própria conexão que está trazendo o usuário até a janela.
+        if ((Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom 'Remote' $true)).Ok) { Write-Host "  [ERRO] Rede (bloqueio): de longe até o botão 3 tem de recusar - ele derruba a conexão remota" -ForegroundColor Red; $wbErrors++ }
+        # O guarda é ESTRUTURAL, e não consultivo. O precedente está neste repositório:
+        # Assert-WinForgeNotSelfTest existe porque o mecanismo consultivo já falhou aqui - um helper
+        # sem param() engoliu o -DryRun e instalador rodou de verdade na máquina de um usuário. Uma
+        # função que devolve @{ Ok = $false } depende de alguém lembrar de olhar; uma que LANÇA, não.
+        $wfNetAsErro = $null
+        try { $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -ExportOk $false -Facts $wfNetBase } catch { $wfNetAsErro = [string]$_.Exception.Message }
+        if ($null -eq $wfNetAsErro) { Write-Host "  [ERRO] Rede (asserção): a cópia de segurança falhada NÃO fez a asserção lançar" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfNetAsErro -notmatch 'cópia') { Write-Host "  [ERRO] Rede (asserção): a recusa não diz por quê ('$wfNetAsErro')" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfNetAsErro -notmatch 'WifiDriverReinstall') { Write-Host "  [ERRO] Rede (asserção): a recusa não diz QUAL ação foi recusada ('$wfNetAsErro')" -ForegroundColor Red; $wbErrors++ }
+        # ...e passa na MESMA base quando a cópia deu certo: o que mudou foi só o argumento.
+        $wfNetAsOk = $null
+        try { $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverReinstall' -ExportOk $true -Facts $wfNetBase } catch { $wfNetAsOk = [string]$_.Exception.Message }
+        if ($null -ne $wfNetAsOk) { Write-Host "  [ERRO] Rede (asserção): máquina saudável foi recusada ('$wfNetAsOk')" -ForegroundColor Red; $wbErrors++ }
+        # O argumento OBRIGATÓRIO é a metade que importa: sem ele, a exportação voltaria a depender
+        # de alguém lembrar de passá-la. A conferência é sobre os METADADOS do parâmetro - chamar
+        # sem o argumento faria o PowerShell PERGUNTAR no console e penduraria o build.
+        foreach ($wfNetPar in @('Action', 'ExportOk')) {
+            $wfNetMand = @((Get-Command Assert-WinForgeNetworkGuard).Parameters[$wfNetPar].Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] -and $_.Mandatory })
+            if (-not $wfNetMand.Count) { Write-Host "  [ERRO] Rede (asserção): '$wfNetPar' não é parâmetro obrigatório" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o argumento MANDA sobre a hashtable: uma tabela de fatos dizendo que a cópia deu certo
+        # não pode desfazer o que quem executa acabou de medir.
+        $wfNetAsMand = $null
+        try { $null = Assert-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -ExportOk $false -Facts (& $wfNetCom 'ExportOk' $true) } catch { $wfNetAsMand = [string]$_.Exception.Message }
+        if ($null -eq $wfNetAsMand) { Write-Host "  [ERRO] Rede (asserção): o argumento obrigatório perdeu para a hashtable de fatos" -ForegroundColor Red; $wbErrors++ }
+        # 'SemPerfil' é degrau, e não porta de saída: sem o perfil não dá para saber se a máquina é
+        # virtual ou um servidor, e responder "não é" seria inventar. Ele recusa os três botões de
+        # driver e NÃO recusa o 3, que não depende de nada disso.
+        $wfNetSemPerfil = @{} + $wfNetBase
+        $wfNetSemPerfil['SemPerfil'] = $true
+        foreach ($wfNetBtnP in @('WifiDriverReinstall', 'WifiDriverGeneric', 'WifiDriverRestore')) {
+            $wfNetGp = Test-WinForgeNetworkGuard -Action $wfNetBtnP -Facts $wfNetSemPerfil
+            if ($wfNetGp.Ok) { Write-Host "  [ERRO] Rede (perfil): '$wfNetBtnP' rodou sem o diagnóstico ter terminado" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfNetGp.Reason -notmatch 'diagnóstico') { Write-Host "  [ERRO] Rede (perfil): a recusa de '$wfNetBtnP' não fala do diagnóstico ('$($wfNetGp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        if (-not (Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts $wfNetSemPerfil).Ok) { Write-Host "  [ERRO] Rede (perfil): o botão 3 não depende do perfil e foi recusado" -ForegroundColor Red; $wbErrors++ }
+        # O levantamento na máquina, que até aqui não tinha trava nenhuma. Para o botão 3 ele é
+        # barato e seguro: só a API da sessão e o número do build, nada de adaptador nem de driver.
+        $wfNetLev = Get-WinForgeNetworkFacts -Action 'NetDnsRenew'
+        foreach ($wfNetChave in @('Remote', 'Build', 'OtherAdapter', 'Inbox', 'ExportOk', 'OnBattery', 'Virtual', 'Server', 'NeedRestart', 'FreeBytes', 'NeedBytes')) {
+            if (-not $wfNetLev.ContainsKey($wfNetChave)) { Write-Host "  [ERRO] Rede (levantamento): a chave '$wfNetChave' não foi levantada" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ([int]$wfNetLev.Build -ne [int][Environment]::OSVersion.Version.Build) { Write-Host "  [ERRO] Rede (levantamento): build $($wfNetLev.Build), esperado $([Environment]::OSVersion.Version.Build)" -ForegroundColor Red; $wbErrors++ }
+        if ($wfNetLev.Remote -isnot [bool]) { Write-Host "  [ERRO] Rede (levantamento): 'Remote' veio '$($wfNetLev.Remote)', que não é booleano - a API da sessão não foi chamada" -ForegroundColor Red; $wbErrors++ }
+        if ([long]$wfNetLev.NeedBytes -le 0) { Write-Host "  [ERRO] Rede (levantamento): 'NeedBytes' veio $($wfNetLev.NeedBytes)" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (bloqueios): rádio por mídia física, sonda sem Test-NetConnection -Port, sessão remota por GetSystemMetrics, dez recusas sem 'continuar mesmo assim'"
+        Write-Host "  Rede (guarda): esconder avaliado sobre a escada inteira, asserção que LANÇA com ação e exportação obrigatórias, levantamento com as onze chaves"
+    } catch {
+        Write-Host "  [ERRO] Rede (bloqueios): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Rede: diagnóstico e veredito
+    # O veredito é o texto mais lido do recurso, e sai de LISTA FECHADA: cinco frases, nenhuma
+    # inventada na hora.
+    #
+    # Lista canônica das linhas de rede, no mesmo espírito de $wfRepNomes e $wfAclNomes: é ela que a
+    # trava dos botões na tela usa lá embaixo, para uma linha nova entrar na conferência sozinha.
+    $wfNetNomes = @('NetDiagFull', 'NetDnsRenew', 'WifiDriverReinstall', 'WifiDriverRestore', 'WifiDriverGeneric')
+    try {
+        $wfVerFrases = @{
+            APIPA  = 'O computador não pegou endereço do roteador (está em 169.254.x.x). Comece por "Limpar cache de DNS e pegar endereço novo".'
+            DNS    = 'O endereço está certo, mas o servidor de nomes configurado não responde e o 1.1.1.1 responde. O problema é o servidor de nomes, não o Wi-Fi.'
+            Limpo  = 'Não encontrei nada errado na rede deste computador.'
+            Fora   = 'O roteador entrega endereço e nome, mas nada sai para fora. O problema está no roteador ou no provedor, não neste computador.'
+        }
+        $wfVerBase = @{ Apipa = $false; DnsOk = $true; DnsPublicoOk = $true; SaidaOk = $true; Lsp = @() }
+        # O '+' de hashtable SOMA chaves e LANÇA quando a chave se repete ("O item já foi
+        # adicionado"): trocar um fato é por ATRIBUIÇÃO. Mesma armadilha do bloco da Tarefa 14.
+        $wfVerCom = {
+            param([hashtable]$Troca)
+            $wfVerUm = @{} + $wfVerBase
+            foreach ($wfVerK in $Troca.Keys) { $wfVerUm[$wfVerK] = $Troca[$wfVerK] }
+            return $wfVerUm
+        }
+        if ((Get-WinForgeNetworkVerdict -Facts $wfVerBase) -ne $wfVerFrases.Limpo) { Write-Host "  [ERRO] Rede (veredito): máquina saudável deu '$(Get-WinForgeNetworkVerdict -Facts $wfVerBase)'" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Apipa = $true })) -ne $wfVerFrases.APIPA) { Write-Host "  [ERRO] Rede (veredito): 169.254 não deu a frase do APIPA" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ DnsOk = $false })) -ne $wfVerFrases.DNS) { Write-Host "  [ERRO] Rede (veredito): DNS do sistema mudo com o 1.1.1.1 respondendo não deu a frase do servidor de nomes" -ForegroundColor Red; $wbErrors++ }
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ SaidaOk = $false })) -ne $wfVerFrases.Fora) { Write-Host "  [ERRO] Rede (veredito): sem saída não deu a frase do roteador/provedor" -ForegroundColor Red; $wbErrors++ }
+        # A frase do servidor de nomes AFIRMA que o 1.1.1.1 responde: com os dois mudos ela seria
+        # mentira, e quem explica é a de saída. Sem esta linha, largar o '-and DnsPublicoOk' passaria.
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ DnsOk = $false; DnsPublicoOk = $false; SaidaOk = $false })) -ne $wfVerFrases.Fora) { Write-Host "  [ERRO] Rede (veredito): com o DNS do sistema E o 1.1.1.1 mudos a frase não pode ser a do servidor de nomes" -ForegroundColor Red; $wbErrors++ }
+        # O filtro só vira VEREDITO quando há sintoma de falha. Numa máquina saudável ele sai como
+        # OBSERVAÇÃO, nomeando o produto, sem ser apontado como causa - senão o diagnóstico de toda
+        # máquina corporativa com filtro de VPN acusa o filtro, a frase de "nada errado" nunca
+        # aparece, e o relatório deixa de ser confiável justamente onde precisa ser. Medido: esta
+        # máquina, com internet perfeita, apontava o FortiClient como causa.
+        $wfVerFiltro = @(@{ Name = 'Norton Security'; Path = 'C:\Program Files\Norton\nlsp.dll'; Menu = 'Configurações → Firewall → Proteção da Rede' })
+        $wfVerLsp = Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Lsp = $wfVerFiltro; SaidaOk = $false })
+        if ($wfVerLsp -notmatch 'Há um filtro do Norton Security preso em todos os adaptadores') { Write-Host "  [ERRO] Rede (veredito): o filtro de terceiro não é nomeado ('$wfVerLsp')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLsp -notmatch 'Configurações → Firewall → Proteção da Rede') { Write-Host "  [ERRO] Rede (veredito): o caminho de menu não aparece" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLsp -notmatch 'antes de mexer em driver') { Write-Host "  [ERRO] Rede (veredito): falta a ordem de testar antes de mexer em driver" -ForegroundColor Red; $wbErrors++ }
+        # A máquina saudável COM filtro instalado: veredito limpo, produto nomeado, e nenhuma ordem
+        # de desligar coisa nenhuma.
+        $wfVerLimpoFiltro = Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Lsp = $wfVerFiltro })
+        if (-not $wfVerLimpoFiltro.StartsWith($wfVerFrases.Limpo, [StringComparison]::Ordinal)) { Write-Host "  [ERRO] Rede (veredito): máquina saudável com filtro não deu veredito limpo ('$wfVerLimpoFiltro')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLimpoFiltro -notmatch 'Norton Security') { Write-Host "  [ERRO] Rede (veredito): a observação não nomeia o produto ('$wfVerLimpoFiltro')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerLimpoFiltro -match 'Desligue-o|antes de mexer em driver') { Write-Host "  [ERRO] Rede (veredito): máquina saudável mandou desligar o filtro ('$wfVerLimpoFiltro')" -ForegroundColor Red; $wbErrors++ }
+        # E cada um dos três sintomas, sozinho, faz o filtro voltar a ser a causa: um só deles
+        # testado deixaria os outros dois sem prova.
+        foreach ($wfVerSint in @(@{ Apipa = $true }, @{ DnsOk = $false }, @{ SaidaOk = $false })) {
+            $wfVerFatosS = @{} + $wfVerBase
+            $wfVerFatosS['Lsp'] = $wfVerFiltro
+            foreach ($wfVerKs in $wfVerSint.Keys) { $wfVerFatosS[$wfVerKs] = $wfVerSint[$wfVerKs] }
+            if ((Get-WinForgeNetworkVerdict -Facts $wfVerFatosS) -notmatch 'Há um filtro do Norton Security') { Write-Host "  [ERRO] Rede (veredito): com o sintoma '$($wfVerSint.Keys)' o filtro deixou de ser a causa" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O filtro vem ANTES de tudo: com APIPA junto, quem explica continua sendo o filtro. Sem esta
+        # linha, a ordem dos dois primeiros degraus seria acaso.
+        if ((Get-WinForgeNetworkVerdict -Facts (& $wfVerCom @{ Apipa = $true; Lsp = @(@{ Name = 'Norton Security'; Path = 'C:\x.dll'; Menu = 'Configurações' }) })) -notmatch 'Norton Security') { Write-Host "  [ERRO] Rede (veredito): com filtro E APIPA juntos, quem explica tem de ser o filtro" -ForegroundColor Red; $wbErrors++ }
+        # A ordem da escada: APIPA antes de DNS, DNS antes de saída, filtro antes de tudo que mexe
+        # em driver. E o filtro NUNCA vira botão.
+        $wfVerFonteD = [string](Get-Command Invoke-WinForgeNetworkDiagnostic).ScriptBlock
+        if ($wfVerFonteD -match 'pnputil') { Write-Host "  [ERRO] Rede (diagnóstico): o botão 1 é de LEITURA e não chama o pnputil" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfVerProibido in @('Remove-Item', 'netsh winsock reset', 'delete-driver', 'remove-device')) {
+            if ($wfVerFonteD -match [regex]::Escape($wfVerProibido)) { Write-Host "  [ERRO] Rede (diagnóstico): o botão 1 escreve ('$wfVerProibido')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Catálogo Winsock: a base medida é 28 entradas, todas mswsock.dll sob %SystemRoot%. Outro
+        # caminho, ou Protocol Chain Length > 1, é LSP de terceiro.
+        $wfVerCat = Test-WinForgeWinsockCatalog -Entries @(
+            @{ Name = 'MSAFD Tcpip [TCP/IP]'; Path = (Join-Path $env:SystemRoot 'system32\mswsock.dll'); ChainLength = 1 },
+            @{ Name = 'Norton LSP';           Path = 'C:\Program Files\Norton\nlsp.dll';                 ChainLength = 3 }
+        )
+        if ($wfVerCat.Ok) { Write-Host "  [ERRO] Rede (Winsock): um LSP de terceiro passou como catálogo limpo" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfVerCat.Third).Count -ne 1) { Write-Host "  [ERRO] Rede (Winsock): $(@($wfVerCat.Third).Count) filtro(s) de terceiro, esperado 1" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]@($wfVerCat.Third)[0].Name -ne 'Norton LSP') { Write-Host "  [ERRO] Rede (Winsock): o acusado foi '$(@($wfVerCat.Third)[0].Name)', e o de terceiro é o 'Norton LSP'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfVerCat.Count -ne 2) { Write-Host "  [ERRO] Rede (Winsock): Count veio $($wfVerCat.Count), esperado 2 (o catálogo INTEIRO, não só os de terceiro)" -ForegroundColor Red; $wbErrors++ }
+        if (-not (Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'MSAFD'; Path = (Join-Path $env:SystemRoot 'system32\mswsock.dll'); ChainLength = 1 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): catálogo limpo foi acusado" -ForegroundColor Red; $wbErrors++ }
+        # Os DOIS sinais, um de cada vez: a entrada do brief acusa pelos dois juntos, e quem checasse
+        # só um dos dois passaria por ela. O primeiro é o LSP moderno, que se enfia na cadeia sem
+        # sair da pasta do Windows; o segundo é o instalado em Program Files com cadeia de um elo.
+        if ((Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'Encadeado'; Path = (Join-Path $env:SystemRoot 'system32\mswsock.dll'); ChainLength = 3 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): cadeia de 3 elos dentro da pasta do Windows passou" -ForegroundColor Red; $wbErrors++ }
+        if ((Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'Fora'; Path = 'C:\Program Files\Coisa\lsp.dll'; ChainLength = 1 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): caminho fora da pasta do Windows com cadeia de 1 elo passou" -ForegroundColor Red; $wbErrors++ }
+        # A pasta do Windows vem escrita de jeitos diferentes em máquinas diferentes ('C:\WINDOWS'
+        # numa, 'C:\Windows' noutra), e o registro guarda o que o instalador escreveu. Comparar
+        # respeitando maiúsculas acusaria o catálogo inteiro de uma máquina inteira.
+        if (-not (Test-WinForgeWinsockCatalog -Entries @(@{ Name = 'Caixa baixa'; Path = ([string][Environment]::GetFolderPath('Windows')).ToLowerInvariant() + '\system32\mswsock.dll'; ChainLength = 1 })).Ok) { Write-Host "  [ERRO] Rede (Winsock): a mesma pasta escrita em caixa baixa foi acusada" -ForegroundColor Red; $wbErrors++ }
+        # CONTRA A MÁQUINA DE VERDADE, e não contra entrada sintética: o catálogo tem DUAS subchaves,
+        # uma por arquitetura, e ler só uma perde metade dos provedores - um filtro de terceiro
+        # registrado só na outra passaria despercebido e o relatório afirmaria um número menor que o
+        # real. A contagem esperada é somada aqui, do registro, então a trava vale em qualquer
+        # máquina; nesta ela dá 14 + 14 = 28, que é o número da especificação.
+        $wfVerSubTotal = 0
+        foreach ($wfVerSub in @('Catalog_Entries', 'Catalog_Entries64')) {
+            $wfVerSubTotal += @(Get-ChildItem -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters\Protocol_Catalog9\$wfVerSub" -ErrorAction SilentlyContinue).Count
+        }
+        # A contagem sozinha aceitaria ler a MESMA subchave duas vezes; a forma pega as duas pelo nome.
+        $wfVerFonteCat = [string](Get-Command Get-WinForgeWinsockEntries).ScriptBlock
+        if ($wfVerFonteCat -notmatch "'Catalog_Entries'\s*,\s*'Catalog_Entries64'") { Write-Host "  [ERRO] Rede (Winsock): a leitura não percorre as duas subchaves de arquitetura pelo nome" -ForegroundColor Red; $wbErrors++ }
+        if ($wfVerSubTotal -lt 2) { Write-Host "  [ERRO] Rede (Winsock): o próprio teste não achou as duas subchaves do catálogo ($wfVerSubTotal) - a conferência abaixo seria vazia" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfVerCatReal = Test-WinForgeWinsockCatalog
+            if ([int]$wfVerCatReal.Count -ne $wfVerSubTotal) { Write-Host "  [ERRO] Rede (Winsock): leu $($wfVerCatReal.Count) provedor(es) de $wfVerSubTotal - uma das duas subchaves de arquitetura ficou de fora" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O botão roda INTEIRO nesta máquina e devolve uma das cinco frases.
+        $wfVerSaida = [string](Invoke-WinForgeNetworkDiagnostic)
+        if ([string]::IsNullOrWhiteSpace($wfVerSaida)) { Write-Host "  [ERRO] Rede (diagnóstico): a saída veio vazia" -ForegroundColor Red; $wbErrors++ }
+        # A ÚLTIMA linha, e não "aparece em algum lugar": o veredito é a frase que fecha o relatório,
+        # e uma das cinco citada no meio de um parágrafo não é veredito nenhum.
+        $wfVerLinhas = @([string]$wfVerSaida -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $wfVerUltima = if ($wfVerLinhas.Count) { ([string]$wfVerLinhas[-1]).Trim() } else { '' }
+        if (-not @(@($wfVerFrases.Values) + 'Há um filtro do' | Where-Object { $wfVerUltima -match [regex]::Escape([string]$_) }).Count) { Write-Host "  [ERRO] Rede (diagnóstico): a saída não TERMINA com uma das cinco frases ('$wfVerUltima')" -ForegroundColor Red; $wbErrors++ }
+        # Quem lê isto clicou porque a internet parou. Índice numérico cru não diz nada a essa
+        # pessoa, e uma parede de 169.254 iguais (nove nesta máquina, dos adaptadores virtuais de
+        # VPN) esconde a única linha que interessa.
+        if ($wfVerSaida -match '(?m)ifIndex \d+, roteador') { Write-Host "  [ERRO] Rede (relatório): a rota mostra índice numérico cru em vez do nome do adaptador" -ForegroundColor Red; $wbErrors++ }
+        $wfVerQtd169 = ([regex]::Matches($wfVerSaida, '169\.254\.\d')).Count
+        if ($wfVerQtd169 -gt 3) { Write-Host "  [ERRO] Rede (relatório): $wfVerQtd169 linhas de 169.254 despejadas sem resumo" -ForegroundColor Red; $wbErrors++ }
+        $wfVerCmd = Get-WinForgeRepairCommand -Name 'NetDiagFull'
+        if ([string]$wfVerCmd.Kind -ne 'read') { Write-Host "  [ERRO] Rede (diagnóstico): a linha é '$($wfVerCmd.Kind)', esperado 'read'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfVerCmd.Title -ne 'Rede — Diagnóstico completo') { Write-Host "  [ERRO] Rede (diagnóstico): título '$($wfVerCmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not $wfVerCmd.Stream) { Write-Host "  [ERRO] Rede (diagnóstico): a linha não declara Stream - o relatório demora e a janela tem de encher ao vivo" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfVerCmd.Steps).Count -ne 1 -or [string]@($wfVerCmd.Steps)[0].Function -ne 'Invoke-WinForgeNetworkDiagnostic') { Write-Host "  [ERRO] Rede (diagnóstico): os passos da linha não são um Function = 'Invoke-WinForgeNetworkDiagnostic'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepNetDiagFull.Description)) { Write-Host "  [ERRO] Rede (diagnóstico): WPFWFRepNetDiagFull sem Description" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepNetDiagFull.Content -ne [string]$wfVerCmd.Title) { Write-Host "  [ERRO] Rede (diagnóstico): o Content da config ('$($sync.configs.feature.WPFWFRepNetDiagFull.Content)') não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        # A simulação passa pela linha sem rodar o relatório de novo, e o despacho não sai no SelfTest.
+        $wfVerSeco = @(Start-WinForgeStreamedCommand -Name 'NetDiagFull' -Spec $wfVerCmd -DryRun)
+        if ($wfVerSeco.Count -ne 1 -or [string]$wfVerSeco[0] -notmatch 'Invoke-WinForgeNetworkDiagnostic') { Write-Host "  [ERRO] Rede (diagnóstico): a simulação devolveu '$($wfVerSeco -join ' | ')'" -ForegroundColor Red; $wbErrors++ }
+        if ((Invoke-WinForgeRepairCommand -Name 'NetDiagFull' -NoUI).Dispatched) { Write-Host "  [ERRO] Rede (diagnóstico): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (diagnóstico): cinco frases fechadas, filtro de terceiro nomeado com caminho de menu, catálogo Winsock conferido, botão roda inteiro"
+    } catch {
+        Write-Host "  [ERRO] Rede (diagnóstico): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Rede: DNS e endereço novo
+    try {
+        $wfDnsCmd = Get-WinForgeRepairCommand -Name 'NetDnsRenew'
+        if ([string]$wfDnsCmd.Title -ne 'Rede — Limpar cache de DNS e pegar endereço novo') { Write-Host "  [ERRO] Rede (DNS): título '$($wfDnsCmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfDnsCmd.Kind -ne 'repair') { Write-Host "  [ERRO] Rede (DNS): a linha é '$($wfDnsCmd.Kind)', esperado 'repair'" -ForegroundColor Red; $wbErrors++ }
+        if ([int]$wfDnsCmd.ExpectMinutes -ne 2) { Write-Host "  [ERRO] Rede (DNS): ExpectMinutes $($wfDnsCmd.ExpectMinutes), esperado 2" -ForegroundColor Red; $wbErrors++ }
+        $wfDnsPassos = @($wfDnsCmd.Steps)
+        if ($wfDnsPassos.Count -ne 4) { Write-Host "  [ERRO] Rede (DNS): $($wfDnsPassos.Count) passo(s), esperado 4 (flushdns, release, renew, nbtstat -R)" -ForegroundColor Red; $wbErrors++ }
+        $wfDnsLinha = @($wfDnsPassos | ForEach-Object { "$($_.FilePath) $(@($_.Arguments) -join ' ')" }) -join ' | '
+        foreach ($wfDnsExig in @('/flushdns', '/release', '/renew', '-R')) {
+            if ($wfDnsLinha -notmatch [regex]::Escape($wfDnsExig)) { Write-Host "  [ERRO] Rede (DNS): falta '$wfDnsExig' nos passos ('$wfDnsLinha')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A ORDEM é a do conserto, e não acaso: esvaziar o cache de nomes, devolver o endereço e só
+        # então pedir outro. Devolver depois de pedir jogaria fora o endereço que acabou de chegar.
+        if ($wfDnsPassos.Count -eq 4) {
+            $wfDnsOrdem = @($wfDnsPassos | ForEach-Object { [string]@($_.Arguments)[0] })
+            if (($wfDnsOrdem -join ',') -ne '/flushdns,/release,/renew,-R') { Write-Host "  [ERRO] Rede (DNS): a ordem dos passos é '$($wfDnsOrdem -join ',')'" -ForegroundColor Red; $wbErrors++ }
+        }
+        foreach ($wfDnsP in $wfDnsPassos) {
+            if (-not ([System.IO.Path]::IsPathRooted([string]$wfDnsP.FilePath))) { Write-Host "  [ERRO] Rede (DNS): '$($wfDnsP.FilePath)' não é caminho absoluto do System32" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfDnsP.FilePath -notlike ([string][Environment]::SystemDirectory + '*')) { Write-Host "  [ERRO] Rede (DNS): '$($wfDnsP.FilePath)' está fora de [Environment]::SystemDirectory" -ForegroundColor Red; $wbErrors++ }
+            # netsh e ipconfig escrevem UTF-8 quando a saída é um cano (medido em wf-commands.ps1):
+            # lidos como OEM, os acentos chegam embaralhados à janela que a pessoa está olhando.
+            if ([string]$wfDnsP.Encoding -ne 'utf8') { Write-Host "  [ERRO] Rede (DNS): o passo '$(@($wfDnsP.Arguments) -join ' ')' declara Encoding '$($wfDnsP.Encoding)', esperado 'utf8'" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfDnsA in @($wfDnsP.Arguments)) {
+                if ([string]$wfDnsA -match '\$|\+') { Write-Host "  [ERRO] Rede (DNS): argumento montado por concatenação ('$wfDnsA')" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # A simulação passa por ele sem redefinir a rede de quem compila, e o despacho recusa no SelfTest.
+        $wfDnsSeco = @(Start-WinForgeStreamedCommand -Name 'NetDnsRenew' -Spec $wfDnsCmd -DryRun)
+        if ($wfDnsSeco.Count -ne 4) { Write-Host "  [ERRO] Rede (DNS): a simulação devolveu $($wfDnsSeco.Count) linha(s)" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfDnsSeco | Where-Object { ([string]$_).StartsWith('[simulação] ') }).Count) { Write-Host "  [ERRO] Rede (DNS): a simulação não é prefixada" -ForegroundColor Red; $wbErrors++ }
+        if ((Invoke-WinForgeRepairCommand -Name 'NetDnsRenew' -NoUI).Dispatched) { Write-Host "  [ERRO] Rede (DNS): a linha foi despachada no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        # O guarda de rede é ESTRUTURAL nesta linha: ela declara a ação, e o despacho passa pela
+        # asserção que LANÇA antes de qualquer coisa rodar. A trava pega a FORMA DA CHAMADA com o
+        # argumento junto - o nome solto apareceria no comentário que explica a regra.
+        if ([string]$wfDnsCmd.NetworkGuard -ne 'NetDnsRenew') { Write-Host "  [ERRO] Rede (DNS): a linha não declara NetworkGuard (veio '$($wfDnsCmd.NetworkGuard)')" -ForegroundColor Red; $wbErrors++ }
+        $wfDnsFonte = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        # A CHAMADA COMPLETA numa só expressão: nome da função e os DOIS argumentos juntos. Cobrar
+        # '-ExportOk' em separado é trava vazia - o comentário que explica a passagem fica três
+        # linhas acima da chamada e satisfaz a busca sozinho. Medido pelo revisor: com o argumento
+        # REMOVIDO da chamada de verdade, a trava separada ficava verde, e a asserção de
+        # comportamento também, porque a falha do parâmetro obrigatório cai no mesmo tratamento de
+        # erro e o resultado observado não muda. O botão nunca funcionaria, com o build verde.
+        if ($wfDnsFonte -notmatch 'Assert-WinForgeNetworkGuard\s+-Action\s+\$\w+\s+-ExportOk\s+\$\w+') { Write-Host "  [ERRO] Rede (DNS): o despacho não chama a asserção de rede com -Action E -ExportOk na mesma chamada" -ForegroundColor Red; $wbErrors++ }
+        # A asserção vem ANTES da caixa de confirmação: perguntar primeiro e recusar depois faz o
+        # usuário ler o aviso inteiro, decidir e só então descobrir que o clique não valia nada. É a
+        # mesma regra que as duas travas de "já tem coisa rodando" seguem nesta função.
+        # As DUAS pontas ancoram na FORMA DA CHAMADA com o argumento junto, e não no nome solto: o
+        # bloco de ajuda desta mesma função cita 'Get-WinForgeRepairConfirmText' em prosa, LOGO NO
+        # COMEÇO, e o nome solto media a posição do comentário em vez da do código. A trava ficou
+        # vermelha com a ordem certa até esta linha ser corrigida.
+        $wfDnsPosG = $wfDnsFonte.IndexOf('Assert-WinForgeNetworkGuard -Action', [StringComparison]::Ordinal)
+        $wfDnsPosC = $wfDnsFonte.IndexOf('Get-WinForgeRepairConfirmText -Name', [StringComparison]::Ordinal)
+        if ($wfDnsPosG -lt 0 -or $wfDnsPosC -lt 0 -or $wfDnsPosG -gt $wfDnsPosC) { Write-Host "  [ERRO] Rede (DNS): a asserção de rede roda DEPOIS da caixa de confirmação" -ForegroundColor Red; $wbErrors++ }
+        # O botão 2 (Redefinir, que já existe) ganha o texto do que NÃO faz.
+        $wfDnsAchou = $false
+        $wfDnsRedef = [string]$sync.configs.feature.WPFFixesNetwork.Description
+        foreach ($wfDnsF in @('não reinstala driver', 'não troca o driver')) {
+            if ($wfDnsRedef -match [regex]::Escape($wfDnsF)) { $wfDnsAchou = $true }
+        }
+        if (-not $wfDnsAchou) { Write-Host "  [ERRO] Rede (Redefinir): a descrição não diz o que ele NÃO faz ('$wfDnsRedef')" -ForegroundColor Red; $wbErrors++ }
+        # 'antivírus' sozinho é trava vazia: a descrição antiga já citava a palavra ("depois de um
+        # antivírus ou VPN mal desinstalado"). O que se cobra é a NEGAÇÃO, com as duas juntas.
+        if ($wfDnsRedef -notmatch 'não mexe em antivírus') { Write-Host "  [ERRO] Rede (Redefinir): a descrição não avisa que ele não mexe em antivírus" -ForegroundColor Red; $wbErrors++ }
+        # O mesmo texto na RESERVA da tabela: é ela que monta a caixa quando a entrada da config
+        # some, e um texto que envelhece pela metade é o defeito que a reserva existe para evitar.
+        $wfDnsRedefCmd = [string](Get-WinForgeRepairCommand -Name 'NetworkReset').Confirm
+        if ($wfDnsRedefCmd -notmatch 'driver') { Write-Host "  [ERRO] Rede (Redefinir): a reserva da tabela não diz que ele não mexe em driver" -ForegroundColor Red; $wbErrors++ }
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Description)) { Write-Host "  [ERRO] Rede (DNS): WPFWFRepNetDnsRenew sem Description" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Content -ne [string]$wfDnsCmd.Title) { Write-Host "  [ERRO] Rede (DNS): o Content da config ('$($sync.configs.feature.WPFWFRepNetDnsRenew.Content)') não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        # O texto tem de dizer o que o CÓDIGO faz. O degrau da sessão remota recusa, mas não
+        # esconde: o botão aparece e explica no clique, porque quem está de longe TEM como
+        # destravá-lo - basta ir até a máquina -, e botão que some faz a pessoa achar que o recurso
+        # não existe. A descrição prometia que ele sumia.
+        if ((Test-WinForgeNetworkGuard -Action 'NetDnsRenew' -Facts (& $wfNetCom 'Remote' $true)).Hidden) { Write-Host "  [ERRO] Rede (DNS): a sessão remota passou a ESCONDER o botão 3; o texto e a escada têm de concordar" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepNetDnsRenew.Description -match 'nem aparece') { Write-Host "  [ERRO] Rede (DNS): a descrição promete que o botão some de longe, e o código só recusa no clique" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (DNS): quatro passos por caminho absoluto, nenhum argumento concatenado, simulação sem efeito e o Redefinir dizendo o que não faz"
+    } catch {
+        Write-Host "  [ERRO] Rede (DNS): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Rede: pnputil
+    # A saída do pnputil é LOCALIZADA: os rótulos não servem de âncora, os valores sim. Dentro de
+    # cada bloco, o primeiro valor terminado em '.inf' é o nome PUBLICADO; casa '^oem\d+\.inf$' ->
+    # é de terceiro, não casa -> é inbox. Medido: o bloco do inbox tem UMA só linha '.inf', os OEM
+    # têm duas ("Nome Original:" é a segunda, e confundi-la com um inbox some com o botão 5).
+    try {
+        # O autoteste pode ser chamado de qualquer pasta, e o motor gerado mora em <repo>\dist\engine:
+        # sem a segunda tentativa, rodar o -SelfTest de fora da raiz do repositório acusaria amostra
+        # faltando em vez de conferir o que ela existe para conferir.
+        $wfPnpRaiz = Join-Path (Get-Location) 'tests\samples'
+        if (-not (Test-Path -LiteralPath $wfPnpRaiz)) {
+            $wfPnpAlt = Join-Path (Split-Path -Parent (Split-Path -Parent ([string]$sync.ScriptRoot))) 'tests\samples'
+            if (Test-Path -LiteralPath $wfPnpAlt) { $wfPnpRaiz = $wfPnpAlt }
+        }
+        $wfPnpAmostra = Join-Path $wfPnpRaiz 'pnputil-enum-drivers-ptbr.txt'
+        if (-not (Test-Path -LiteralPath $wfPnpAmostra)) { Write-Host "  [ERRO] Rede (pnputil): falta a amostra real em '$wfPnpAmostra'" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfPnpTexto = [string](Get-Content -LiteralPath $wfPnpAmostra -Raw -Encoding UTF8)
+            $wfPnpEnt = @(Get-WinForgeDriverStoreEntry -Text $wfPnpTexto)
+            if ($wfPnpEnt.Count -lt 2) { Write-Host "  [ERRO] Rede (pnputil): a amostra rendeu $($wfPnpEnt.Count) entrada(s)" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfPnpEnt | Where-Object { [string]$_.Published -eq 'oem22.inf' }).Count) { Write-Host "  [ERRO] Rede (pnputil): 'oem22.inf' não foi encontrado na amostra" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfPnpE in $wfPnpEnt) {
+                if ([string]$wfPnpE.Published -notmatch '\.inf$') { Write-Host "  [ERRO] Rede (pnputil): entrada sem nome publicado ('$($wfPnpE.Published)')" -ForegroundColor Red; $wbErrors++ }
+                if (([string]$wfPnpE.Published -match '^oem\d+\.inf$') -ne [bool]$wfPnpE.IsOem) { Write-Host "  [ERRO] Rede (pnputil): IsOem errado para '$($wfPnpE.Published)'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # O bloco do oem22 é captura REAL desta máquina, e os quatro campos dele são cobrados um
+            # a um: sem isto, um parser que só preenchesse Published/IsOem passaria inteiro.
+            $wfPnp22 = @($wfPnpEnt | Where-Object { [string]$_.Published -eq 'oem22.inf' })[0]
+            if ($wfPnp22) {
+                foreach ($wfPnpCampo in @(@('Original', 'netwbw02.inf'), @('Provider', 'Intel'), @('Class', 'Net'), @('Version', '18.33.17.1'), @('Date', '04/29/2019'))) {
+                    if ([string]$wfPnp22.($wfPnpCampo[0]) -ne [string]$wfPnpCampo[1]) { Write-Host "  [ERRO] Rede (pnputil): '$($wfPnpCampo[0])' do oem22 veio '$($wfPnp22.($wfPnpCampo[0]))', esperado '$($wfPnpCampo[1])'" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+            if (@($wfPnpEnt | Where-Object { -not $_.IsOem }).Count -ne 1) { Write-Host "  [ERRO] Rede (pnputil): $(@($wfPnpEnt | Where-Object { -not $_.IsOem }).Count) inbox na amostra, esperado exatamente 1" -ForegroundColor Red; $wbErrors++ }
+            # A FAMÍLIA DO RÁDIO, e não "todo pacote de rede". Medido nesta máquina: a classe de
+            # rede tem DEZ pacotes, entre eles a placa de cabo Realtek, dois clientes de VPN e uma
+            # placa USB. Exportar-e-remover aquilo apagaria o driver do cabo junto com o do rádio, e
+            # a pessoa que clicou para consertar o Wi-Fi ficaria sem Wi-Fi E sem Ethernet - sem a
+            # via de socorro que o próprio guarda exige existir.
+            #
+            # A amostra tem oem22 (netwbw02.inf, o rádio) e oem49 (ftsvnic.inf, um cliente de VPN):
+            # pedir a família do oem22 tem de trazer UM pacote e deixar o do cliente de VPN de fora.
+            $wfPnpFam = Select-WinForgeWifiDriverPackage -Entries $wfPnpEnt -InfName 'oem22.inf'
+            if ([string]$wfPnpFam.Original -ne 'netwbw02.inf') { Write-Host "  [ERRO] Rede (pnputil): a origem da família veio '$($wfPnpFam.Original)', esperado 'netwbw02.inf'" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfPnpFam.Oem) -notcontains 'oem22.inf') { Write-Host "  [ERRO] Rede (pnputil): a família do rádio não traz o próprio pacote dele" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfPnpFam.Oem) -contains 'oem49.inf') { Write-Host "  [ERRO] Rede (pnputil): o pacote do cliente de VPN entrou na família do rádio - é assim que se apaga o driver do cabo junto" -ForegroundColor Red; $wbErrors++ }
+            # Duas versões do MESMO driver são a mesma família, e as duas têm de sair: é a versão
+            # antiga que assume o dispositivo quando a instalada sai, e deixá-la entregaria um driver
+            # de 2014 mentindo que trocou pelo básico.
+            $wfPnpDuas = @($wfPnpEnt) + @(@{ Published = 'oem18.inf'; Original = 'netwbw02.inf'; Provider = 'Intel'; Class = 'Net'; Date = ''; Version = ''; IsOem = $true })
+            $wfPnpFam2 = Select-WinForgeWifiDriverPackage -Entries $wfPnpDuas -InfName 'oem22.inf'
+            if (@($wfPnpFam2.Oem).Count -ne 2) { Write-Host "  [ERRO] Rede (pnputil): a família com duas versões do mesmo driver deu $(@($wfPnpFam2.Oem).Count) pacote(s), esperado 2" -ForegroundColor Red; $wbErrors++ }
+            # Pacote que não existe na lista: família VAZIA, que é o lado seguro (sem o que exportar,
+            # não há o que remover).
+            if (@((Select-WinForgeWifiDriverPackage -Entries $wfPnpEnt -InfName 'oem404.inf').Oem).Count) { Write-Host "  [ERRO] Rede (pnputil): um pacote inexistente rendeu família não vazia" -ForegroundColor Red; $wbErrors++ }
+            # A lista real desta máquina traz VINTE E QUATRO classes (impressora, vídeo, áudio,
+            # câmera...): sem o filtro de classe, um pacote de outra classe com o mesmo nome de
+            # origem entraria na família.
+            $wfPnpMisto = @($wfPnpEnt) + @(@{ Published = 'oem99.inf'; Original = 'netwbw02.inf'; Provider = 'HP'; Class = 'Printer'; Date = ''; Version = ''; IsOem = $true })
+            if (@((Select-WinForgeWifiDriverPackage -Entries $wfPnpMisto -InfName 'oem22.inf').Oem) -contains 'oem99.inf') { Write-Host "  [ERRO] Rede (pnputil): um pacote de impressora entrou na família do rádio" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A PROVA de que os rótulos não são âncora: o MESMO bloco em inglês tem de dar o mesmo
+        # resultado. Um parser que procure 'Nome Publicado' passa na amostra pt-BR e devolve lista
+        # vazia num Windows em inglês - e lista vazia aqui significa "não há driver embutido", que
+        # some com o botão 5 na máquina inteira.
+        # Montado como LISTA DE LINHAS de propósito: um here-string aqui fecharia o here-string que
+        # carrega este bloco inteiro para dentro do motor gerado - o terminador dele precisa ficar
+        # na coluna 1, e é a mesma coluna do terminador de fora.
+        $wfPnpIngles = @(
+            'Microsoft PnP Utility',
+            '',
+            'Published Name:     oem77.inf',
+            'Original Name:      netwtw10.inf',
+            'Provider Name:      Intel',
+            'Class Name:         Net',
+            'Class GUID:         {4d36e972-e325-11ce-bfc1-08002be10318}',
+            'Driver Version:     07/14/2023 23.20.0.6',
+            'Signer Name:        Microsoft Windows'
+        ) -join "`r`n"
+        $wfPnpEn = @(Get-WinForgeDriverStoreEntry -Text $wfPnpIngles)
+        if ($wfPnpEn.Count -ne 1) { Write-Host "  [ERRO] Rede (pnputil): o bloco em inglês rendeu $($wfPnpEn.Count) entrada(s), esperado 1 - os rótulos viraram âncora" -ForegroundColor Red; $wbErrors++ }
+        else {
+            foreach ($wfPnpCampoEn in @(@('Published', 'oem77.inf'), @('Original', 'netwtw10.inf'), @('Provider', 'Intel'), @('Class', 'Net'))) {
+                if ([string]$wfPnpEn[0].($wfPnpCampoEn[0]) -ne [string]$wfPnpCampoEn[1]) { Write-Host "  [ERRO] Rede (pnputil/en): '$($wfPnpCampoEn[0])' veio '$($wfPnpEn[0].($wfPnpCampoEn[0]))', esperado '$($wfPnpCampoEn[1])'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # (a) '$LASTEXITCODE -gt 0' transformaria -536870340 em SUCESSO, e o código seguiria para o
+        # delete-driver. Só 0 é sucesso.
+        foreach ($wfPnpCod in @(0, 1, -536870340, 3010)) {
+            $wfPnpOk = Test-WinForgePnputilExit -ExitCode $wfPnpCod
+            if ($wfPnpCod -eq 0 -and -not $wfPnpOk) { Write-Host "  [ERRO] Rede (pnputil): código 0 recusado" -ForegroundColor Red; $wbErrors++ }
+            if ($wfPnpCod -ne 0 -and $wfPnpOk) { Write-Host "  [ERRO] Rede (pnputil): código $wfPnpCod aceito como sucesso" -ForegroundColor Red; $wbErrors++ }
+        }
+        # (c) '/enum-devices /class Net /problem' achou dispositivo em falha e SAIU COM CÓDIGO 0:
+        # é obrigatório interpretar a saída.
+        $wfPnpProbArq = Join-Path $wfPnpRaiz 'pnputil-enum-devices-net-problem-ptbr.txt'
+        if (-not (Test-Path -LiteralPath $wfPnpProbArq)) { Write-Host "  [ERRO] Rede (pnputil): falta a amostra real em '$wfPnpProbArq'" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfPnpProb = Test-WinForgePnputilProblem -Text ([string](Get-Content -LiteralPath $wfPnpProbArq -Raw -Encoding UTF8))
+            if (-not $wfPnpProb.Any) { Write-Host "  [ERRO] Rede (pnputil): a amostra tem dispositivo em falha e a leitura disse que não" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfPnpProb.Devices).Count) { Write-Host "  [ERRO] Rede (pnputil): nenhum dispositivo nomeado no relato de falha" -ForegroundColor Red; $wbErrors++ }
+            else {
+                # Contar sem olhar o conteúdo aceitaria um relato de dispositivo sem nome e sem
+                # código, que na tela é uma linha em branco.
+                if ([string]@($wfPnpProb.Devices)[0].Name -notmatch 'Fortinet') { Write-Host "  [ERRO] Rede (pnputil): o dispositivo em falha não foi nomeado ('$(@($wfPnpProb.Devices)[0].Name)')" -ForegroundColor Red; $wbErrors++ }
+                if ([int]@($wfPnpProb.Devices)[0].Problem -ne 10) { Write-Host "  [ERRO] Rede (pnputil): código do problema veio $(@($wfPnpProb.Devices)[0].Problem), esperado 10" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        if ((Test-WinForgePnputilProblem -Text '').Any) { Write-Host "  [ERRO] Rede (pnputil): saída vazia virou dispositivo em falha" -ForegroundColor Red; $wbErrors++ }
+        # (b) decodificação ANSI, não OEM: o pnputil escreve CP1252 quando redirecionado.
+        $wfPnpFonteE = [string](Get-Command Export-WinForgeWifiDriverBackup).ScriptBlock
+        if ($wfPnpFonteE -notmatch "Encoding\s*=\s*'ansi'") { Write-Host "  [ERRO] Rede (pnputil): o passo não leva Encoding = 'ansi'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPnpFonteE -match "Encoding\s*=\s*'oem'") { Write-Host "  [ERRO] Rede (pnputil): 'oem' embaralha o acento da saída do pnputil" -ForegroundColor Red; $wbErrors++ }
+        # '/force' nunca; '/reboot' nunca.
+        foreach ($wfPnpFn in @('Export-WinForgeWifiDriverBackup', 'Get-WinForgeWifiDriverBackupSet')) {
+            $wfPnpF = [string](Get-Command $wfPnpFn).ScriptBlock
+            foreach ($wfPnpProibido in @('/force', '/reboot')) {
+                if ($wfPnpF -match [regex]::Escape($wfPnpProibido)) { Write-Host "  [ERRO] Rede (pnputil): '$wfPnpProibido' aparece em $wfPnpFn - é a diferença entre 'não deu, nada mudou' e 'não deu, e agora não há driver'" -ForegroundColor Red; $wbErrors++ }
+            }
+        }
+        # As QUATRO conferências depois do comando, cada uma pela FORMA DA CHAMADA com o argumento
+        # junto. O nome solto e o '\.inf' cru são satisfeitos pela prosa do bloco de ajuda, que faz
+        # parte do corpo do scriptblock - foi assim que uma trava desta leva ficou verde com o
+        # argumento removido da chamada de verdade.
+        # O código de saída é decidido por quem exporta; o CONTEÚDO da pasta é decidido pela
+        # conferência, que é a MESMA das duas pontas (foi o conserto do achado: com duas
+        # conferências diferentes, a leitura aceitava a pasta parcial que a exportação teria
+        # recusado). Cada uma é cobrada onde mora, e a exportação é cobrada por CHAMAR a outra.
+        $wfPnpFonteC = [string](Get-Command Test-WinForgeWifiDriverBackupFolder).ScriptBlock
+        foreach ($wfPnpConf in @(
+            @{ Nome = 'o código de saída, em quem exporta';      Fonte = $wfPnpFonteE; Forma = 'Test-WinForgePnputilExit\s+-ExitCode\s+\$\w+' },
+            @{ Nome = 'a chamada da conferência, em quem exporta'; Fonte = $wfPnpFonteE; Forma = 'Test-WinForgeWifiDriverBackupFolder\s+-Path\s+\$\w+' },
+            @{ Nome = 'o .inf, na conferência';                  Fonte = $wfPnpFonteC; Forma = "-Filter\s+'\*\.inf'" },
+            @{ Nome = 'o .cat, na conferência';                  Fonte = $wfPnpFonteC; Forma = "-Filter\s+'\*\.cat'" },
+            @{ Nome = 'o total em bytes, na conferência';        Fonte = $wfPnpFonteC; Forma = 'Bytes\s*=\s*\$\w+' })) {
+            if ([string]$wfPnpConf.Fonte -notmatch [string]$wfPnpConf.Forma) { Write-Host "  [ERRO] Rede (exportação): falta a conferência de $($wfPnpConf.Nome)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E a leitura do conjunto usa a MESMA conferência: sem isto, as duas pontas voltam a
+        # divergir e a pasta parcial volta a ser oferecida como cópia boa.
+        if ([string](Get-Command Get-WinForgeWifiDriverBackupSet).ScriptBlock -notmatch 'Test-WinForgeWifiDriverBackupFolder\s+-Path\s+\(') { Write-Host "  [ERRO] Rede (backup): a leitura do conjunto não usa a mesma conferência de quem exporta" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPnpFonteE -match '\$env:TEMP') { Write-Host "  [ERRO] Rede (exportação): o backup de 120 MB não pode ir para o %TEMP%" -ForegroundColor Red; $wbErrors++ }
+        # A raiz padrão é cobrada por COMPORTAMENTO, e não procurando 'CommonApplicationData' na
+        # fonte: a montagem do caminho mora numa função só (para as duas pontas, cópia e leitura,
+        # nunca divergirem), então o nome da API não aparece no corpo de quem exporta. Perguntar ao
+        # -DryRun para onde ele iria é prova mais forte do que qualquer busca de texto.
+        $wfPnpPadrao = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -DryRun
+        $wfPnpProgramData = [string][Environment]::GetFolderPath('CommonApplicationData')
+        if ([string]::IsNullOrWhiteSpace($wfPnpProgramData)) { Write-Host "  [ERRO] Rede (exportação): o próprio teste não resolveu %ProgramData%" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not ([string]$wfPnpPadrao.Path).StartsWith($wfPnpProgramData, [StringComparison]::OrdinalIgnoreCase)) { Write-Host "  [ERRO] Rede (exportação): sem -Root o destino seria '$($wfPnpPadrao.Path)', fora de '$wfPnpProgramData'" -ForegroundColor Red; $wbErrors++ }
+        if (([string]$wfPnpPadrao.Path) -match '(?i)\\Temp\\') { Write-Host "  [ERRO] Rede (exportação): o destino padrão passa por uma pasta temporária ('$($wfPnpPadrao.Path)')" -ForegroundColor Red; $wbErrors++ }
+        # Exportação com destino inexistente aborta SEM TOCAR EM NADA.
+        $wfPnpSeco = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun
+        if ($wfPnpSeco.Ok -and $wfPnpSeco.Files -gt 0) { Write-Host "  [ERRO] Rede (exportação): o -DryRun exportou arquivo" -ForegroundColor Red; $wbErrors++ }
+        if (Test-Path -LiteralPath (Join-Path $wbSelfTestRaiz 'driver-backup')) { Write-Host "  [ERRO] Rede (exportação): o -DryRun criou a pasta de destino" -ForegroundColor Red; $wbErrors++ }
+        # NENHUM nome que não seja 'oem<N>.inf' vira argumento de comando. É a regra de não agir com
+        # dado não conferido: o nome vem de uma leitura de texto, e um '..\..\algo' ali seria um
+        # caminho escolhido por quem escreveu a saída, não por nós.
+        foreach ($wfPnpRuim in @('..\..\evil.inf', 'oem22.inf /force', 'netwtw10.inf', 'oem22.in', 'oem22.inf ', '')) {
+            # A cadeia vazia é recusada pelo próprio PowerShell, na ligação do parâmetro
+            # obrigatório, antes de a função começar: recusa também é recusa, e aqui ela conta.
+            $wfPnpRec = $null
+            try { $wfPnpRec = Export-WinForgeWifiDriverBackup -Published @($wfPnpRuim) -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun } catch { $wfPnpRec = @{ Ok = $false; Reason = [string]$_.Exception.Message } }
+            if ($wfPnpRec.Ok) { Write-Host "  [ERRO] Rede (exportação): o nome '$wfPnpRuim' foi aceito como pacote a exportar" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]::IsNullOrWhiteSpace([string]$wfPnpRec.Reason)) { Write-Host "  [ERRO] Rede (exportação): recusou '$wfPnpRuim' sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o nome BOM continua passando: sem esta linha, uma função que recusasse tudo passaria em
+        # todas as de cima.
+        if (-not (Export-WinForgeWifiDriverBackup -Published @('oem22.inf', 'oem49.inf') -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun).Ok) { Write-Host "  [ERRO] Rede (exportação): nomes de pacote válidos foram recusados" -ForegroundColor Red; $wbErrors++ }
+        # E sem -DryRun ela RECUSA em modo SelfTest: esta é a função que mexe no repositório de
+        # drivers da máquina de quem compila.
+        $wfPnpTrava = $null
+        try { $null = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -Root (Join-Path $wbSelfTestRaiz 'driver-backup') } catch { $wfPnpTrava = [string]$_.Exception.Message }
+        if ($null -eq $wfPnpTrava) { Write-Host "  [ERRO] Rede (exportação): sem -DryRun ela deveria recusar em SelfTest" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPnpTrava -notmatch 'SelfTest') { Write-Host "  [ERRO] Rede (exportação): a recusa não fala em SelfTest ('$wfPnpTrava')" -ForegroundColor Red; $wbErrors++ }
+        # A EXPORTAÇÃO DE VERDADE, e ela cabe aqui: medido, 'pnputil /export-driver' NÃO precisa de
+        # elevação, NÃO mexe no repositório (só COPIA de lá para fora) e o menor pacote de rede
+        # desta máquina saiu em 35 ms com 3 arquivos e 90 KB. Como esta é a única rede de segurança
+        # de quem clica no botão que remove driver, ela é exercitada de verdade em vez de ficar só
+        # em gabarito - dentro da raiz isolada desta rodada.
+        # O pacote é escolhido FORA da família do rádio, e isso é o que limita o custo: o pacote do
+        # rádio desta máquina exporta 10 arquivos e 120 MB (medido), e o escolhido aqui saiu em
+        # 35 ms com 3 arquivos e 90 KB. Sem esse descarte, numa máquina cujo único pacote de rede
+        # fosse o do rádio o autoteste copiaria 120 MB a cada execução. Quando não sobra candidato,
+        # a prova de fogo é pulada em vez de ficar cara.
+        $wfPnpAlvoReal = ''
+        try {
+            $wfPnpLidosR = Get-WinForgeDriverStoreEntry -Text ([string](Invoke-WinForgeNativeCommand -FilePath (Get-WinForgeSystemExe -Name 'pnputil.exe') -Arguments @('/enum-drivers') -Encoding 'ansi').Text)
+            $wfPnpRede = @($wfPnpLidosR | Where-Object { [string]$_.Class -eq 'Net' -and [bool]$_.IsOem })
+            $wfPnpFamReal = @()
+            $wfPnpRadioR = Get-WinForgeWifiAdapter
+            if ($wfPnpRadioR.Ok) {
+                $wfPnpObjR = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { [int]$_.ifIndex -eq [int]$wfPnpRadioR.ifIndex })
+                if ($wfPnpObjR.Count) { $wfPnpFamReal = @((Select-WinForgeWifiDriverPackage -Entries $wfPnpLidosR -InfName (Get-WinForgeWifiDriverInfName -PnpDeviceId ([string]$wfPnpObjR[0].PnPDeviceID))).Oem) }
+            }
+            $wfPnpCand = @($wfPnpRede | Where-Object { $wfPnpFamReal -notcontains [string]$_.Published })
+            if ($wfPnpCand.Count) { $wfPnpAlvoReal = [string]@($wfPnpCand | Sort-Object -Property { [int](([string]$_.Published) -replace '\D', '') } -Descending)[0].Published }
+        } catch { $wfPnpAlvoReal = '' }
+        if ([string]::IsNullOrWhiteSpace($wfPnpAlvoReal)) {
+            Write-Host "  Exportação de driver: nenhum pacote de rede de terceiro nesta máquina - a prova de fogo foi pulada"
+        } else {
+            $wfPnpRaizReal = Join-Path $wbSelfTestRaiz 'driver-export-real'
+            $wfPnpSelfAntes = $sync.SelfTest
+            try {
+                # A função recusa em SelfTest de propósito (é a trava provada acima); para exercitar
+                # o caminho de verdade, a trava é solta por esta chamada e devolvida no finally.
+                $sync.SelfTest = $false
+                $wfPnpReal = Export-WinForgeWifiDriverBackup -Published @($wfPnpAlvoReal) -Root $wfPnpRaizReal -ExplicitRoot
+                if (-not $wfPnpReal.Ok) { Write-Host "  [ERRO] Rede (exportação real): '$wfPnpAlvoReal' falhou ('$($wfPnpReal.Reason)')" -ForegroundColor Red; $wbErrors++ }
+                elseif ([int]$wfPnpReal.Files -lt 2) { Write-Host "  [ERRO] Rede (exportação real): $($wfPnpReal.Files) arquivo(s) copiado(s)" -ForegroundColor Red; $wbErrors++ }
+                elseif ([long]$wfPnpReal.Bytes -le 0) { Write-Host "  [ERRO] Rede (exportação real): 0 byte copiado" -ForegroundColor Red; $wbErrors++ }
+                elseif (-not (Test-WinForgeWifiDriverBackupFolder -Path ([string]$wfPnpReal.Path)).Ok) { Write-Host "  [ERRO] Rede (exportação real): a pasta exportada não passa na própria conferência" -ForegroundColor Red; $wbErrors++ }
+                else {
+                    # ...e a leitura acha o que a exportação acabou de escrever. É o par completo,
+                    # com arquivo de verdade, que é o que o botão que volta vai encontrar.
+                    $wfPnpLido = Get-WinForgeWifiDriverBackupSet -Root $wfPnpRaizReal
+                    if (-not $wfPnpLido.Found) { Write-Host "  [ERRO] Rede (exportação real): a leitura não achou a cópia recém-escrita" -ForegroundColor Red; $wbErrors++ }
+                    elseif ([string]$wfPnpLido.Path -ne [string]$wfPnpReal.Path) { Write-Host "  [ERRO] Rede (exportação real): a leitura apontou '$($wfPnpLido.Path)' e a escrita foi em '$($wfPnpReal.Path)'" -ForegroundColor Red; $wbErrors++ }
+                    else { Write-Host "  Exportação de driver (de verdade): '$wfPnpAlvoReal' -> $($wfPnpReal.Files) arquivo(s), $($wfPnpReal.Bytes) byte(s), conferida e relida" }
+                }
+                # Nome que não existe no repositório: o pnputil recusa, e a pasta parcial NÃO fica.
+                $wfPnpRuimReal = Export-WinForgeWifiDriverBackup -Published @('oem99999.inf') -Root $wfPnpRaizReal -ExplicitRoot
+                if ($wfPnpRuimReal.Ok) { Write-Host "  [ERRO] Rede (exportação real): um pacote inexistente foi dado como copiado" -ForegroundColor Red; $wbErrors++ }
+                elseif (Test-Path -LiteralPath ([string]$wfPnpRuimReal.Path)) { Write-Host "  [ERRO] Rede (exportação real): a pasta parcial de uma exportação falhada ficou no disco" -ForegroundColor Red; $wbErrors++ }
+            } catch {
+                Write-Host "  [ERRO] Rede (exportação real): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+            } finally {
+                $sync.SelfTest = $wfPnpSelfAntes
+                Remove-Item -LiteralPath $wfPnpRaizReal -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        # Sem pasta de backup, o botão 6 não tem o que restaurar.
+        if ((Get-WinForgeWifiDriverBackupSet -Root (Join-Path $wbSelfTestRaiz 'driver-backup-vazio')).Found) { Write-Host "  [ERRO] Rede (backup): achou cópia numa pasta que não existe" -ForegroundColor Red; $wbErrors++ }
+        # ...e COM cópia guardada ele acha, com carimbo, contagem e tamanho. Só a metade negativa
+        # seria trava vazia: uma função que devolvesse 'Found = $false' sempre passaria nela, e o
+        # botão que restaura nunca enxergaria backup nenhum. O fixture nasce e morre dentro da raiz
+        # isolada desta rodada.
+        # O manifesto do conjunto é escrito AQUI, pelo teste, e não pela função que exporta: quem
+        # julga a cópia tem de julgar um manifesto escrito por outro, que é a situação de verdade -
+        # a leitura acontece numa máquina, o manifesto foi escrito noutro momento, e o que amarra os
+        # dois é o hash e mais nada.
+        $wfPnpEscreveMan = {
+            param([string]$Raiz, [string]$Conj)
+            $wfPnpItens = @()
+            foreach ($wfPnpA in @(Get-ChildItem -LiteralPath $Conj -File -Recurse)) {
+                $wfPnpItens += @{ Name = ([string]$wfPnpA.FullName).Substring(([string]$Conj).TrimEnd('\').Length).TrimStart('\'); Bytes = [long]$wfPnpA.Length; Sha256 = [string](Get-FileHash -LiteralPath ([string]$wfPnpA.FullName) -Algorithm SHA256).Hash }
+            }
+            @{ Set = [System.IO.Path]::GetFileName($Conj); Created = (Get-Date).ToString('s'); Files = @($wfPnpItens) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Get-WinForgeWifiDriverManifestPath -Root $Raiz -SetName ([System.IO.Path]::GetFileName($Conj))) -Encoding UTF8
+        }
+        $wfPnpCheio = Join-Path $wbSelfTestRaiz 'driver-backup-cheio'
+        try {
+            # DOIS conjuntos, com PREFIXOS DIFERENTES de propósito: ordenar por NOME inverte a
+            # resposta, e os dois casos foram medidos. 'oem22-20260912' vence 'oem2-20260913'
+            # porque o prefixo é maior, e 'oem9' vence 'oem10' pelo mesmo motivo. Com prefixos
+            # iguais, o fixture nunca observa isso. O cenário real é o botão que reinstala ter
+            # exportado ontem e o do driver básico ter exportado hoje: a restauração automática
+            # ofereceria a cópia de ONTEM, do pacote errado.
+            $wfPnpVelho = Join-Path $wfPnpCheio 'oem22-20260912-235959'
+            New-Item -ItemType Directory -Path $wfPnpVelho -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfPnpVelho 'antigo.inf') -Value 'abcdefghij' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $wfPnpVelho 'antigo.cat') -Value 'abcdefghij' -Encoding Ascii
+            & $wfPnpEscreveMan $wfPnpCheio $wfPnpVelho
+            $wfPnpConj = Join-Path $wfPnpCheio 'oem2-20260913-010203'
+            New-Item -ItemType Directory -Path $wfPnpConj -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfPnpConj 'netwbw02.inf') -Value 'abc' -Encoding Ascii
+            Set-Content -LiteralPath (Join-Path $wfPnpConj 'netwbw02.cat') -Value 'abc' -Encoding Ascii
+            & $wfPnpEscreveMan $wfPnpCheio $wfPnpConj
+            $wfPnpSet = Get-WinForgeWifiDriverBackupSet -Root $wfPnpCheio
+            if (-not $wfPnpSet.Found) { Write-Host "  [ERRO] Rede (backup): não achou a cópia guardada" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfPnpSet.Stamp -ne '20260913-010203') { Write-Host "  [ERRO] Rede (backup): carimbo '$($wfPnpSet.Stamp)', esperado '20260913-010203' - a escolha foi por NOME e não por data" -ForegroundColor Red; $wbErrors++ }
+            elseif ([int]$wfPnpSet.Files -ne 2) { Write-Host "  [ERRO] Rede (backup): $($wfPnpSet.Files) arquivo(s), esperado 2" -ForegroundColor Red; $wbErrors++ }
+            elseif ([long]$wfPnpSet.Bytes -le 0) { Write-Host "  [ERRO] Rede (backup): tamanho $($wfPnpSet.Bytes)" -ForegroundColor Red; $wbErrors++ }
+            # A pasta PARCIAL que uma exportação interrompida deixa para trás tem nome de conjunto e
+            # não serve para nada: ela não pode ser oferecida como cópia guardada. A conferência é a
+            # MESMA das duas pontas, e o conjunto bom continua sendo achado por baixo dela.
+            $wfPnpParcial = Join-Path $wfPnpCheio 'oem77-20270101-000000'
+            New-Item -ItemType Directory -Path $wfPnpParcial -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfPnpParcial 'so-o-inf.inf') -Value 'abc' -Encoding Ascii
+            $wfPnpDepois = Get-WinForgeWifiDriverBackupSet -Root $wfPnpCheio
+            if ([string]$wfPnpDepois.Stamp -eq '20270101-000000') { Write-Host "  [ERRO] Rede (backup): a pasta parcial (sem .cat) foi oferecida como cópia conferida" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfPnpDepois.Stamp -ne '20260913-010203') { Write-Host "  [ERRO] Rede (backup): com uma parcial no meio, o conjunto bom deixou de ser achado ('$($wfPnpDepois.Stamp)')" -ForegroundColor Red; $wbErrors++ }
+            # ...e a pasta com o CATÁLOGO e sem o .inf, que é a outra metade da conferência. Sem
+            # ela, dispensar o '.inf' passava batido: a parcial de cima não tem o .cat, então quem
+            # a reprova é sempre a mesma linha.
+            $wfPnpSoCat = Join-Path $wfPnpCheio 'oem88-20270202-000000'
+            New-Item -ItemType Directory -Path $wfPnpSoCat -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $wfPnpSoCat 'so-o-cat.cat') -Value 'abc' -Encoding Ascii
+            # A conferência, direta, nas quatro formas de dar errado e na boa.
+            foreach ($wfPnpCf in @(@($wfPnpConj, $true), @($wfPnpParcial, $false), @($wfPnpSoCat, $false), @((Join-Path $wfPnpCheio 'nao-existe'), $false))) {
+                if ((Test-WinForgeWifiDriverBackupFolder -Path ([string]$wfPnpCf[0])).Ok -ne [bool]$wfPnpCf[1]) { Write-Host "  [ERRO] Rede (backup): a conferência de '$([System.IO.Path]::GetFileName([string]$wfPnpCf[0]))' deu o contrário de '$($wfPnpCf[1])'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Pasta que EXISTE e não tem conjunto de carimbo nenhum também é "não há o que
+            # restaurar": só a inexistente seria fácil demais.
+            $wfPnpSemConj = Join-Path $wbSelfTestRaiz 'driver-backup-sem-conjunto'
+            New-Item -ItemType Directory -Path (Join-Path $wfPnpSemConj 'pasta-qualquer') -Force | Out-Null
+            if ((Get-WinForgeWifiDriverBackupSet -Root $wfPnpSemConj).Found) { Write-Host "  [ERRO] Rede (backup): uma pasta sem conjunto de carimbo virou cópia guardada" -ForegroundColor Red; $wbErrors++ }
+            Remove-Item -LiteralPath $wfPnpSemConj -Recurse -Force -ErrorAction SilentlyContinue
+        } finally {
+            Remove-Item -LiteralPath $wfPnpCheio -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # ---- A pasta das cópias de driver é PASTA PROTEGIDA, e cada conjunto é conferido por
+        # manifesto. O cenário que a revisão final montou: um processo de integridade média da mesma
+        # conta planta um conjunto com um .inf e um .cat dentro e carimbo no FUTURO. Ele vence a
+        # ordenação por carimbo, e o socorro automático - que não pergunta nada - instalaria aquilo
+        # com privilégio. Cada trava daqui fecha um pedaço desse caminho.
+        $wfPnpRaizAberta = Join-Path $wbSelfTestRaiz 'driver-backup-aberto'
+        New-Item -ItemType Directory -Path $wfPnpRaizAberta -Force | Out-Null
+        $wfPnpAclAberta = Get-Acl -LiteralPath $wfPnpRaizAberta
+        $wfPnpAclAberta.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule (New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        Set-Acl -LiteralPath $wfPnpRaizAberta -AclObject $wfPnpAclAberta
+        $wfPnpConfAberta = Confirm-WinForgeWifiDriverBackupRoot -Root $wfPnpRaizAberta
+        if ($wfPnpConfAberta.Ok) { Write-Host "  [ERRO] Rede (pasta de cópias): uma pasta com escrita para 'Todos' foi aceita como raiz das cópias de driver" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]::IsNullOrWhiteSpace([string]$wfPnpConfAberta.Reason)) { Write-Host "  [ERRO] Rede (pasta de cópias): a raiz foi recusada sem dizer por quê" -ForegroundColor Red; $wbErrors++ }
+        # E a exportação PARA nessa recusa, sem criar conjunto nenhum. A trava roda com a simulação
+        # solta, porque o -DryRun devolve antes de chegar à pasta - e é justamente o caminho que grava
+        # que precisa ser provado aqui.
+        $wfPnpSelfAberta = $sync.SelfTest
+        $wfPnpExpAberta = @{ Ok = $true; Reason = '' }
+        try {
+            $sync.SelfTest = $false
+            $wfPnpExpAberta = Export-WinForgeWifiDriverBackup -Published @('oem22.inf') -Root $wfPnpRaizAberta
+        } catch { $wfPnpExpAberta = @{ Ok = $false; Reason = [string]$_.Exception.Message } } finally { $sync.SelfTest = $wfPnpSelfAberta }
+        if ($wfPnpExpAberta.Ok) { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação gravou numa pasta que qualquer processo da conta reescreve" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfPnpExpAberta.Reason -notmatch 'confiável|dono') { Write-Host "  [ERRO] Rede (pasta de cópias): a recusa da exportação não é a da pasta ('$($wfPnpExpAberta.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        if (@(Get-ChildItem -LiteralPath $wfPnpRaizAberta -Directory -ErrorAction SilentlyContinue).Count) { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação recusou a raiz e mesmo assim criou conjunto" -ForegroundColor Red; $wbErrors++ }
+        Remove-Item -LiteralPath $wfPnpRaizAberta -Recurse -Force -ErrorAction SilentlyContinue
+        # ---- O manifesto, nas quatro formas de a cópia não valer mais, e na boa.
+        $wfPnpRaizMan = Join-Path $wbSelfTestRaiz 'driver-backup-manifesto'
+        try {
+            $wfPnpNovoConj = {
+                param([string]$Raiz, [string]$Nome, [switch]$SemManifesto)
+                $wfPnpP = Join-Path $Raiz $Nome
+                New-Item -ItemType Directory -Path $wfPnpP -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $wfPnpP 'radio.inf') -Value 'conteudo do inf' -Encoding Ascii
+                Set-Content -LiteralPath (Join-Path $wfPnpP 'radio.cat') -Value 'conteudo do cat' -Encoding Ascii
+                if (-not $SemManifesto) { & $wfPnpEscreveMan $Raiz $wfPnpP }
+                return $wfPnpP
+            }
+            $null = & $wfPnpNovoConj $wfPnpRaizMan 'oem5-20260101-000000'
+            $wfPnpLeitura = Get-WinForgeWifiDriverBackupSet -Root $wfPnpRaizMan
+            if (-not $wfPnpLeitura.Found) { Write-Host "  [ERRO] Rede (manifesto): um conjunto com manifesto correto foi recusado ('$(@($wfPnpLeitura.Rejected | ForEach-Object { [string]$_.Reason }) -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            # Cada caso entra com carimbo MAIOR que o do conjunto bom, para ser o escolhido se passar.
+            # A asserção é dupla: a recusa tem de dizer a causa, e o bom tem de continuar sendo achado
+            # por baixo dela - recusar tudo também esconderia o defeito.
+            $wfPnpFuturo = 'oem9-' + (Get-Date).AddDays(2).ToString('yyyyMMdd-HHmmss')
+            foreach ($wfPnpCaso in @(
+                @{ Nome = 'oem6-20260102-000000'; Como = 'sem-manifesto'; Diz = 'manifesto' },
+                @{ Nome = 'oem7-20260103-000000'; Como = 'adulterado';    Diz = 'hash' },
+                @{ Nome = 'oem8-20260104-000000'; Como = 'arquivo-extra'; Diz = 'não no manifesto' },
+                @{ Nome = $wfPnpFuturo;           Como = 'futuro';        Diz = 'FUTURO' })) {
+                $wfPnpAlvo = $(if ([string]$wfPnpCaso.Como -eq 'sem-manifesto') { & $wfPnpNovoConj $wfPnpRaizMan ([string]$wfPnpCaso.Nome) -SemManifesto } else { & $wfPnpNovoConj $wfPnpRaizMan ([string]$wfPnpCaso.Nome) })
+                # O adulterado troca o conteúdo MANTENDO o tamanho: com um byte a mais, quem reprovaria
+                # seria a conferência de tamanho, e o hash ficaria sem prova nenhuma.
+        if ([string]$wfPnpCaso.Como -eq 'adulterado') { Set-Content -LiteralPath (Join-Path $wfPnpAlvo 'radio.inf') -Value 'CONTEUDO DO INF' -Encoding Ascii }
+                if ([string]$wfPnpCaso.Como -eq 'arquivo-extra') { Set-Content -LiteralPath (Join-Path $wfPnpAlvo 'plantado.inf') -Value 'pacote que ninguem copiou' -Encoding Ascii }
+                $wfPnpDepoisCaso = Get-WinForgeWifiDriverBackupSet -Root $wfPnpRaizMan
+                if ([string]$wfPnpDepoisCaso.Stamp -ne '20260101-000000') { Write-Host "  [ERRO] Rede (manifesto): o conjunto '$($wfPnpCaso.Como)' virou a cópia escolhida (carimbo '$($wfPnpDepoisCaso.Stamp)')" -ForegroundColor Red; $wbErrors++ }
+                if (-not @($wfPnpDepoisCaso.Rejected | Where-Object { [string]$_.Reason -match [regex]::Escape([string]$wfPnpCaso.Diz) }).Count) { Write-Host "  [ERRO] Rede (manifesto): a recusa de '$($wfPnpCaso.Como)' não diz '$($wfPnpCaso.Diz)' ('$(@($wfPnpDepoisCaso.Rejected | ForEach-Object { [string]$_.Reason }) -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+                Remove-Item -LiteralPath $wfPnpAlvo -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (Get-WinForgeWifiDriverManifestPath -Root $wfPnpRaizMan -SetName ([string]$wfPnpCaso.Nome)) -Force -ErrorAction SilentlyContinue
+            }
+            # E o caminho de VERDADE, com -Trusted: a pasta de %TEMP% pertence à identidade atual, então
+            # nem o conjunto bom passa. É a prova de que o switch não é enfeite.
+            if ((Get-WinForgeWifiDriverBackupSet -Root $wfPnpRaizMan -Trusted).Found) { Write-Host "  [ERRO] Rede (manifesto): com -Trusted uma cópia em %TEMP%, de dono comum, foi aceita para virar argumento de instalação" -ForegroundColor Red; $wbErrors++ }
+        } finally {
+            Remove-Item -LiteralPath $wfPnpRaizMan -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # ---- E as travas de fonte das duas pontas.
+        $wfPnpFonteExp = [string](Get-Command Export-WinForgeWifiDriverBackup).ScriptBlock
+        $wfPnpOndeConf = $wfPnpFonteExp.IndexOf('Confirm-WinForgeWifiDriverBackupRoot -Root', [StringComparison]::Ordinal)
+        $wfPnpOndeDir = $wfPnpFonteExp.IndexOf('New-Item -ItemType Directory -Path $destino', [StringComparison]::Ordinal)
+        if ($wfPnpOndeConf -lt 0) { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação não confere a raiz" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfPnpOndeDir -lt 0 -or $wfPnpOndeConf -gt $wfPnpOndeDir) { Write-Host "  [ERRO] Rede (pasta de cópias): a raiz é conferida DEPOIS de a pasta do conjunto ser criada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPnpFonteExp -notmatch 'Protect-WinForgeSnapshotFile\s+-Path\s+\(') { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação não endurece os arquivos que copiou" -ForegroundColor Red; $wbErrors++ }
+        if ($wfPnpFonteExp -notmatch 'New-WinForgeWifiDriverManifest\s+-Path\s+\$\w+\s+-Root\s+\$\w+') { Write-Host "  [ERRO] Rede (pasta de cópias): a exportação não escreve o manifesto com hash" -ForegroundColor Red; $wbErrors++ }
+        # O fato que ACENDE o botão 6 e a conferência que a ação faz são a MESMA pergunta: sem
+        # '-Trusted' no levantamento, o degrau contaria uma cópia que a ação vai recusar, e o botão
+        # aceso só saberia dizer não.
+        if ([string](Get-Command Get-WinForgeNetworkFacts).ScriptBlock -notmatch 'Get-WinForgeWifiDriverBackupSet\s+-Trusted') { Write-Host "  [ERRO] Rede (botão 6): o levantamento conta cópia sem conferir dono, DACL e manifesto - o botão acende para uma cópia que a ação recusa" -ForegroundColor Red; $wbErrors++ }
+        $wfPnpFonteVolta = [string](Get-Command Invoke-WinForgeWifiDriverRestore).ScriptBlock
+        foreach ($wfPnpForma in @('Get-WinForgeWifiDriverBackupSet -Trusted', 'Get-WinForgeWifiDriverBackupSet -Root $raizCopias -Trusted')) {
+            if ($wfPnpFonteVolta.IndexOf($wfPnpForma, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Rede (botão 6): a leitura do conjunto sem '$wfPnpForma' - a cópia seria instalada sem ser conferida" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O afrouxamento da pasta de teste não pode migrar para o produto num copiar e colar.
+        foreach ($wfPnpBotao in @('Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric', 'Invoke-WinForgeWifiDriverRestore')) {
+            if ([string](Get-Command $wfPnpBotao).ScriptBlock -match 'ExplicitRoot') { Write-Host "  [ERRO] Rede (pasta de cópias): '$wfPnpBotao' passa o afrouxamento da pasta de teste" -ForegroundColor Red; $wbErrors++ }
+        }
+        Write-Host "  Rede (cópias de driver): raiz protegida conferida antes de gravar, manifesto com hash, carimbo no futuro recusado e a recusa DITA no relato"
+        Write-Host "  Rede (pnputil): amostra pt-BR com oem22.inf e exatamente 1 inbox, só código 0 é sucesso, saída interpretada, decodificação ansi, sem /force e sem /reboot"
+    } catch {
+        Write-Host "  [ERRO] Rede (pnputil): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Rede: botões 4 e 6
+    try {
+        $wfW46Base = @{ Remote = $false; Build = 26200; OtherAdapter = $true; Inbox = $true; ExportOk = $true; OnBattery = $false; Virtual = $false; Server = $false; NeedRestart = $false; FreeBytes = 50GB; NeedBytes = 200MB }
+        $wfW46Com = {
+            param([hashtable]$Troca)
+            $wfW46U = @{} + $wfW46Base
+            foreach ($wfW46K in $Troca.Keys) { $wfW46U[$wfW46K] = $Troca[$wfW46K] }
+            return $wfW46U
+        }
+        foreach ($wfW46 in @(
+            @{ Nome = 'WifiDriverReinstall'; Titulo = 'Rede sem fio — Reinstalar o driver que já está instalado' },
+            @{ Nome = 'WifiDriverRestore';   Titulo = 'Rede sem fio — Voltar para o driver que estava antes' })) {
+            $wfW46Cmd = Get-WinForgeRepairCommand -Name ([string]$wfW46.Nome)
+            if ([string]$wfW46Cmd.Title -ne [string]$wfW46.Titulo) { Write-Host "  [ERRO] Rede (botões 4/6): título de '$($wfW46.Nome)' é '$($wfW46Cmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfW46Cmd.Kind -ne 'repair') { Write-Host "  [ERRO] Rede (botões 4/6): '$($wfW46.Nome)' é '$($wfW46Cmd.Kind)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfW46Cmd.Requires -ne (Get-WinForgeSystemExe -Name 'pnputil.exe')) { Write-Host "  [ERRO] Rede (botões 4/6): '$($wfW46.Nome)' não exige o pnputil do System32" -ForegroundColor Red; $wbErrors++ }
+            if ((Invoke-WinForgeRepairCommand -Name ([string]$wfW46.Nome) -NoUI).Dispatched) { Write-Host "  [ERRO] Rede (botões 4/6): '$($wfW46.Nome)' foi despachado no SelfTest" -ForegroundColor Red; $wbErrors++ }
+            if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature."WPFWFRep$($wfW46.Nome)".Description)) { Write-Host "  [ERRO] Rede (botões 4/6): WPFWFRep$($wfW46.Nome) sem Description" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.configs.feature."WPFWFRep$($wfW46.Nome)".Content -ne [string]$wfW46Cmd.Title) { Write-Host "  [ERRO] Rede (botões 4/6): o Content de WPFWFRep$($wfW46.Nome) não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfW46Cmd.NetworkGuard -ne [string]$wfW46.Nome) { Write-Host "  [ERRO] Rede (botões 4/6): '$($wfW46.Nome)' não declara NetworkGuard" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Os três desfechos da verificação. Sem o fornecedor não se distingue "o básico entrou" de
+        # "outro OEM venceu".
+        $wfW46Ok = Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $true; Status = 'Disconnected'; Problem = 'CM_PROB_NONE'; DriverProvider = 'Microsoft'; Name = 'Wi-Fi' })
+        if ([string]$wfW46Ok.Outcome -ne 'ok') { Write-Host "  [ERRO] Rede (desfecho): adaptador são deu '$($wfW46Ok.Outcome)'" -ForegroundColor Red; $wbErrors++ }
+        $wfW46Prob = Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $true; Status = 'Disconnected'; Problem = 'CM_PROB_FAILED_INSTALL'; DriverProvider = 'Microsoft'; Name = 'Wi-Fi' })
+        if ([string]$wfW46Prob.Outcome -ne 'restaurar') { Write-Host "  [ERRO] Rede (desfecho): CM_PROB_FAILED_INSTALL deu '$($wfW46Prob.Outcome)' - o usuário não tem como julgar esse código" -ForegroundColor Red; $wbErrors++ }
+        $wfW46Sumiu = Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $false; Reason = 'nenhum adaptador sem fio' })
+        if ([string]$wfW46Sumiu.Outcome -ne 'sumiu') { Write-Host "  [ERRO] Rede (desfecho): adaptador ausente deu '$($wfW46Sumiu.Outcome)'" -ForegroundColor Red; $wbErrors++ }
+        # O Status FORA da lista boa também manda restaurar: com 'Up' e 'Disconnected' só, a lista
+        # nunca é exercida pelo lado de fora e um 'Status' ignorado passaria.
+        foreach ($wfW46St in @('Not Present', 'Disabled', '')) {
+            $wfW46R = Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $true; Status = $wfW46St; Problem = 'CM_PROB_NONE'; DriverProvider = 'Intel'; Name = 'Wi-Fi' })
+            if ([string]$wfW46R.Outcome -ne 'restaurar') { Write-Host "  [ERRO] Rede (desfecho): Status '$wfW46St' deu '$($wfW46R.Outcome)', esperado 'restaurar'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O CÓDIGO NUMÉRICO, que é o que a máquina de verdade devolve. Get-WinForgeWifiAdapter lê
+        # 'ConfigManagerErrorCode' e entrega um INTEIRO (0 = sem problema); só o gabarito escreve
+        # 'CM_PROB_NONE' por extenso. Sem estas quatro linhas, um rádio impecável era julgado
+        # quebrado e disparava restauração automática do driver, sem perguntar, com o autoteste
+        # inteiro verde - medido contra o adaptador Intel desta máquina.
+        foreach ($wfW46Num in @(@(0, 'ok'), @('0', 'ok'), @(43, 'restaurar'), @(22, 'restaurar'))) {
+            $wfW46Rn = Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $true; Status = 'Up'; Problem = $wfW46Num[0]; DriverProvider = 'Intel'; Name = 'Wi-Fi' })
+            if ([string]$wfW46Rn.Outcome -ne [string]$wfW46Num[1]) { Write-Host "  [ERRO] Rede (desfecho): Problem numérico $($wfW46Num[0]) deu '$($wfW46Rn.Outcome)', esperado '$($wfW46Num[1])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E o adaptador REAL desta máquina, que é de onde o defeito acima saiu: se ele está são, o
+        # desfecho tem de ser 'ok'. Um rádio com problema de verdade na máquina de quem compila faz
+        # esta linha falar, e é isso mesmo que se quer.
+        $wfW46Real = Get-WinForgeWifiAdapter
+        if ($wfW46Real.Ok -and [int]$wfW46Real.Problem -eq 0 -and ([string]$wfW46Real.Status -in @('Up', 'Disconnected'))) {
+            if ([string](Test-WinForgeWifiOutcome -Adapter $wfW46Real).Outcome -ne 'ok') { Write-Host "  [ERRO] Rede (desfecho): o rádio REAL desta máquina está são e foi julgado '$((Test-WinForgeWifiOutcome -Adapter $wfW46Real).Outcome)'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Todo desfecho tem TEXTO, e o do SUCESSO nomeia o adaptador. "Não está vazio" é trava
+        # vaga: um FRAGMENTO não é vazio. Um mutante que trocou esta frase por um pedaço começando
+        # com espaço sobreviveu à suíte e foi parar num commit - a trava passou a cobrar o nome.
+        foreach ($wfW46T in @($wfW46Ok, $wfW46Prob, $wfW46Sumiu)) {
+            if ([string]::IsNullOrWhiteSpace([string]$wfW46T.Text)) { Write-Host "  [ERRO] Rede (desfecho): o desfecho '$($wfW46T.Outcome)' veio sem texto" -ForegroundColor Red; $wbErrors++ }
+            elseif ([string]$wfW46T.Text -ne ([string]$wfW46T.Text).Trim()) { Write-Host "  [ERRO] Rede (desfecho): o texto de '$($wfW46T.Outcome)' começa ou termina com espaço ('$($wfW46T.Text)')" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ([string]$wfW46Ok.Text -notmatch 'Wi-Fi') { Write-Host "  [ERRO] Rede (desfecho): a frase de sucesso não nomeia o adaptador ('$($wfW46Ok.Text)')" -ForegroundColor Red; $wbErrors++ }
+        # A ESPERA pelo Plug and Play, que é o que separa "sumiu" de "ainda está instalando". As
+        # duas chamadas do pnputil retornam antes de a instalação terminar, e julgar na hora
+        # dispara a restauração automática DURANTE ela.
+        $wfW46Tics = 0
+        $wfW46Sonda = {
+            $script:wfW46Tics++
+            if ($script:wfW46Tics -lt 3) { return @{ Ok = $false; Reason = 'ainda instalando' } }
+            return @{ Ok = $true; Status = 'Up'; Problem = 0; DriverProvider = 'Intel'; Name = 'Wi-Fi' }
+        }
+        $wfW46Esperou = Wait-WinForgeWifiAdapterSettle -TimeoutSeconds 10 -IntervalMs 1 -Probe $wfW46Sonda
+        if (-not $wfW46Esperou.Ok) { Write-Host "  [ERRO] Rede (espera): desistiu antes de o adaptador voltar" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Tics -lt 3) { Write-Host "  [ERRO] Rede (espera): leu $wfW46Tics vez(es) e o adaptador só voltou na terceira - não esperou" -ForegroundColor Red; $wbErrors++ }
+        # ...e o TETO existe: com o adaptador nunca voltando, ela desiste e devolve a última leitura.
+        $wfW46Nunca = 0
+        $wfW46Relogio = [System.Diagnostics.Stopwatch]::StartNew()
+        $wfW46Fim = Wait-WinForgeWifiAdapterSettle -TimeoutSeconds 1 -IntervalMs 1 -Probe { $script:wfW46Nunca++; return @{ Ok = $false; Reason = 'sumiu de vez' } }
+        $wfW46Relogio.Stop()
+        if ($wfW46Fim.Ok) { Write-Host "  [ERRO] Rede (espera): inventou um adaptador que a sonda nunca devolveu" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Relogio.Elapsed.TotalSeconds -gt 8) { Write-Host "  [ERRO] Rede (espera): o teto de 1 s levou $([math]::Round($wfW46Relogio.Elapsed.TotalSeconds, 1)) s" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Nunca -lt 2) { Write-Host "  [ERRO] Rede (espera): tentou $wfW46Nunca vez(es) antes de desistir" -ForegroundColor Red; $wbErrors++ }
+        # E um adaptador que volta COM PROBLEMA não conta como assentado: sem isto, a espera
+        # devolveria o rádio quebrado na primeira leitura e o julgamento seguiria em frente.
+        $wfW46Quebrado = 0
+        $null = Wait-WinForgeWifiAdapterSettle -TimeoutSeconds 1 -IntervalMs 1 -Probe { $script:wfW46Quebrado++; return @{ Ok = $true; Status = 'Up'; Problem = 43; DriverProvider = 'Intel'; Name = 'Wi-Fi' } }
+        if ($wfW46Quebrado -lt 2) { Write-Host "  [ERRO] Rede (espera): aceitou como assentado um adaptador com código de problema 43" -ForegroundColor Red; $wbErrors++ }
+        # As duas ações JULGAM depois de esperar, e a âncora é a chamada com argumento em cada uma.
+        foreach ($wfW46Fn in @('Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric')) {
+            $wfW46Src = [string](Get-Command $wfW46Fn).ScriptBlock
+            $wfW46PosW = $wfW46Src.IndexOf('Wait-WinForgeWifiAdapterSettle', [StringComparison]::Ordinal)
+            $wfW46PosJ = $wfW46Src.IndexOf('Test-WinForgeWifiOutcome -Adapter $assentado', [StringComparison]::Ordinal)
+            if ($wfW46PosW -lt 0) { Write-Host "  [ERRO] Rede (espera): '$wfW46Fn' julga sem esperar o Plug and Play" -ForegroundColor Red; $wbErrors++ }
+            elseif ($wfW46PosJ -lt 0 -or $wfW46PosW -gt $wfW46PosJ) { Write-Host "  [ERRO] Rede (espera): '$wfW46Fn' julga ANTES de esperar" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A exigência de 'DriverProvider = Microsoft' é cobrada POR COMPORTAMENTO, e não por um
+        # '-match "Microsoft"' na fonte - que casaria com o próprio comentário que a explica. Mesmo
+        # adaptador, duas respostas, e o que muda é só o fornecedor.
+        $wfW46Intel = [pscustomobject]@{ Ok = $true; Status = 'Up'; Problem = 'CM_PROB_NONE'; DriverProvider = 'Intel'; Name = 'Wi-Fi' }
+        if ([string](Test-WinForgeWifiOutcome -Adapter $wfW46Intel).Outcome -ne 'ok') { Write-Host "  [ERRO] Rede (desfecho): sem -Generic, um rádio são com driver Intel tem de dar 'ok' (é o caso do botão 4)" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Test-WinForgeWifiOutcome -Adapter $wfW46Intel -Generic).Outcome -eq 'ok') { Write-Host "  [ERRO] Rede (desfecho): com -Generic, driver 'Intel' foi aceito como sucesso - não se distingue 'o básico entrou' de 'outro OEM venceu'" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $true; Status = 'Up'; Problem = 'CM_PROB_NONE'; DriverProvider = 'Microsoft'; Name = 'Wi-Fi' }) -Generic).Outcome -ne 'ok') { Write-Host "  [ERRO] Rede (desfecho): com -Generic, o driver da Microsoft foi recusado" -ForegroundColor Red; $wbErrors++ }
+        # E as duas funções são CHAMADAS, não só lidas: em simulação, com fatos que bloqueiam,
+        # elas têm de recusar e dizer por quê.
+        $wfW46Seco4 = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts (& $wfW46Com @{ OnBattery = $true }))
+        if (-not @($wfW46Seco4 | Where-Object { [string]$_ -match 'bateria' }).Count) { Write-Host "  [ERRO] Rede (botão 4): a simulação na bateria não recusou dizendo por quê ('$($wfW46Seco4 -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW46Seco4 | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): a simulação bloqueada ainda listou o '/remove-device'" -ForegroundColor Red; $wbErrors++ }
+        # A cópia de segurança é a ÚNICA coisa entre o usuário e um notebook sem Wi-Fi: falha dela
+        # BLOQUEIA a ação, não avisa.
+        $wfW46SecoExp = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts (& $wfW46Com @{ ExportOk = $false }))
+        if (-not @($wfW46SecoExp | Where-Object { [string]$_ -match 'cópia' }).Count) { Write-Host "  [ERRO] Rede (botão 4): falha na cópia de segurança não bloqueou ('$($wfW46SecoExp -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW46SecoExp | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): sem cópia conferida ele ainda listou o '/remove-device'" -ForegroundColor Red; $wbErrors++ }
+        # ...e a máquina saudável NÃO é bloqueada: sem esta linha, uma função que recusasse sempre
+        # passaria nas duas de cima.
+        $wfW46SecoOk = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts $wfW46Base)
+        if (-not @($wfW46SecoOk | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): a simulação de uma máquina saudável não descreve o que faria ('$($wfW46SecoOk -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # Família VAZIA não pode virar "copiaria 0 pacote(s) e tiraria o rádio da lista": isso
+        # descreve uma remoção sem rede de segurança nenhuma. E a recusa amigável tem de ser
+        # ALCANÇÁVEL - com parâmetro obrigatório comum, o PowerShell recusa a coleção vazia antes do
+        # corpo e o usuário recebe erro bruto de ligação de parâmetro.
+        $wfW46Vazia = Export-WinForgeWifiDriverBackup -Published @() -Root (Join-Path $wbSelfTestRaiz 'driver-backup') -DryRun
+        if ($wfW46Vazia.Ok) { Write-Host "  [ERRO] Rede (exportação): lista vazia foi aceita" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfW46Vazia.Reason -notmatch 'Nenhum pacote') { Write-Host "  [ERRO] Rede (exportação): a recusa da lista vazia não é a frase amigável ('$($wfW46Vazia.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        $wfW46FamVazia = Select-WinForgeWifiDriverPackage -Entries @() -InfName ''
+        if (@($wfW46FamVazia.Oem).Count) { Write-Host "  [ERRO] Rede (família): lista vazia rendeu família não vazia" -ForegroundColor Red; $wbErrors++ }
+        # E a recusa dentro do botão, por COMPORTAMENTO: numa máquina com rádio esta linha nunca
+        # seria alcançada sem a porta de fatos, e "copiaria 0 pacote(s) e tiraria o rádio da lista"
+        # descreve uma remoção sem rede de segurança nenhuma.
+        $wfW46SemPac = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts (& $wfW46Com @{ Packages = @() }))
+        if (-not @($wfW46SemPac | Where-Object { [string]$_ -match 'Sem cópia de segurança não há o que remover' }).Count) { Write-Host "  [ERRO] Rede (botão 4): família vazia não recusou ('$($wfW46SemPac -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW46SemPac | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): família vazia e mesmo assim ele descreveu a remoção" -ForegroundColor Red; $wbErrors++ }
+        # ...e com pacote na lista ele volta a descrever: senão, uma função que recusasse sempre passaria.
+        $wfW46ComPac = @(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts (& $wfW46Com @{ Packages = @('oem22.inf') }))
+        if (-not @($wfW46ComPac | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (botão 4): com pacote na família ele deixou de descrever a remoção" -ForegroundColor Red; $wbErrors++ }
+        # O GABARITO MANDA ATÉ O FIM, e não só no bloqueio. Este bloco existe porque o autoteste
+        # ficou verde por dias e depois vermelho na MESMA máquina, sem uma linha de código mudar: o
+        # rádio dela deixou de ser um Intel (família de dois pacotes, com embutido) e passou a ser um
+        # MediaTek MT7922 (um pacote, sem embutido reconhecido). As duas ações respeitavam o gabarito
+        # no bloqueio e iam ler a máquina logo depois - ou seja, o teste media o hardware de quem
+        # compilava, não o código.
+        #
+        # A prova de que a máquina NÃO é lida é o nome que aparece no relato: 'Wi-Fi do gabarito' não
+        # existe em computador nenhum. Se alguém voltar a ler a máquina aqui, o nome muda e esta
+        # linha fica vermelha em qualquer lugar.
+        foreach ($wfW46Sim in @(
+            @{ Fn = 'Invoke-WinForgeWifiDriverReinstall'; Marca = 'remove-device' },
+            @{ Fn = 'Invoke-WinForgeWifiDriverGeneric';   Marca = 'delete-driver' })) {
+            $wfW46Rel = @(& ([string]$wfW46Sim.Fn) -DryRun -Facts $wfW46Base)
+            if (-not @($wfW46Rel | Where-Object { [string]$_ -match 'Wi-Fi do gabarito' }).Count) { Write-Host "  [ERRO] Rede (gabarito): '$($wfW46Sim.Fn)' foi ler o adaptador da MÁQUINA em vez de usar o gabarito ('$($wfW46Rel -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfW46Rel | Where-Object { [string]$_ -match [regex]::Escape([string]$wfW46Sim.Marca) }).Count) { Write-Host "  [ERRO] Rede (gabarito): a simulação de máquina saudável de '$($wfW46Sim.Fn)' não descreve o que faria ('$($wfW46Rel -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Gabarito SEM driver embutido: o botão 5 recusa pela reconfirmação, e o 4 - que não depende
+        # dela - continua descrevendo. O 'Inbox' aqui é a MESMA chave que o guarda usa, para o fato
+        # não ser lido de duas fontes diferentes.
+        $wfW46SemInbox = & $wfW46Com @{ Inbox = $false }
+        $wfW46Gen5 = @(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts $wfW46SemInbox)
+        if (-not @($wfW46Gen5 | Where-Object { [string]$_ -match 'básico' }).Count) { Write-Host "  [ERRO] Rede (gabarito): sem driver embutido o botão 5 não recusou ('$($wfW46Gen5 -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW46Gen5 | Where-Object { [string]$_ -match 'delete-driver' }).Count) { Write-Host "  [ERRO] Rede (gabarito): sem driver embutido o botão 5 ainda descreveu o apagamento" -ForegroundColor Red; $wbErrors++ }
+        if (-not @(@(Invoke-WinForgeWifiDriverReinstall -DryRun -Facts $wfW46SemInbox) | Where-Object { [string]$_ -match 'remove-device' }).Count) { Write-Host "  [ERRO] Rede (gabarito): o botão 4 parou de funcionar por falta de driver embutido, que não é condição dele" -ForegroundColor Red; $wbErrors++ }
+        # Gabarito SEM rádio: as duas dizem isso e nenhuma descreve o que faria. É o caso que o
+        # gêmeo do botão 5 quebrava numa máquina sem rádio nenhum.
+        $wfW46SemRadio = & $wfW46Com @{ Adapter = @{ Ok = $false; Reason = 'nenhum adaptador sem fio (gabarito)' } }
+        foreach ($wfW46Sim2 in @(
+            @{ Fn = 'Invoke-WinForgeWifiDriverReinstall'; Marca = 'remove-device' },
+            @{ Fn = 'Invoke-WinForgeWifiDriverGeneric';   Marca = 'delete-driver' })) {
+            $wfW46Rel2 = @(& ([string]$wfW46Sim2.Fn) -DryRun -Facts $wfW46SemRadio)
+            if (-not @($wfW46Rel2 | Where-Object { [string]$_ -match 'nenhum adaptador sem fio \(gabarito\)' }).Count) { Write-Host "  [ERRO] Rede (gabarito): '$($wfW46Sim2.Fn)' não relatou a falta de rádio do gabarito ('$($wfW46Rel2 -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+            if (@($wfW46Rel2 | Where-Object { [string]$_ -match [regex]::Escape([string]$wfW46Sim2.Marca) }).Count) { Write-Host "  [ERRO] Rede (gabarito): '$($wfW46Sim2.Fn)' descreveu o que faria sem rádio nenhum" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E a prova por TEMPO de que a máquina não é tocada: ler adaptador, identificador de
+        # hardware, varredura de INF e repositório de drivers custa perto de um segundo e meio nesta
+        # máquina; o caminho do gabarito é aritmética. Meio segundo é um teto com margem de vinte
+        # vezes, e ele pega uma leitura de máquina que volte a entrar por descuido.
+        $wfW46Crono = [System.Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-WinForgeWifiDriverGeneric -DryRun -Facts $wfW46Base
+        $null = Invoke-WinForgeWifiDriverReinstall -DryRun -Facts $wfW46Base
+        $wfW46Crono.Stop()
+        if ($wfW46Crono.ElapsedMilliseconds -gt 500) { Write-Host "  [ERRO] Rede (gabarito): as duas simulações levaram $($wfW46Crono.ElapsedMilliseconds)ms - alguma foi à máquina" -ForegroundColor Red; $wbErrors++ }
+        # O resolvedor, direto: com gabarito ele NUNCA lê a máquina, e sem gabarito lê.
+        $wfW46Ctx = Get-WinForgeWifiActionContext -Facts $wfW46Base
+        if ([string]$wfW46Ctx.Adapter.Name -ne 'Wi-Fi do gabarito') { Write-Host "  [ERRO] Rede (contexto): com gabarito o adaptador veio '$($wfW46Ctx.Adapter.Name)'" -ForegroundColor Red; $wbErrors++ }
+        if (-not [bool]$wfW46Ctx.Inbox) { Write-Host "  [ERRO] Rede (contexto): 'Inbox' do gabarito não foi respeitado" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfW46Ctx.Packages).Count) { Write-Host "  [ERRO] Rede (contexto): o gabarito rendeu família vazia sem pedir isso" -ForegroundColor Red; $wbErrors++ }
+        if ([bool](Get-WinForgeWifiActionContext -Facts $wfW46SemInbox).Inbox) { Write-Host "  [ERRO] Rede (contexto): 'Inbox = `$false' do gabarito foi ignorado" -ForegroundColor Red; $wbErrors++ }
+        # E SEM gabarito o resolvedor vai à MÁQUINA. Esta linha existe porque a primeira versão deste
+        # conserto entregava ao resolvedor a tabela de fatos do GUARDA, que no produto nunca é nula:
+        # o caminho de gabarito passaria a valer em máquina de verdade, e os botões agiriam sobre um
+        # identificador e um pacote sintéticos. A asserção não depende do que esta máquina tem - ela
+        # só exige que o resultado NÃO seja o sintético, o que vale até quando a leitura falha.
+        $wfW46CtxReal = Get-WinForgeWifiActionContext
+        if ([string]$wfW46CtxReal.Adapter.Name -eq 'Wi-Fi do gabarito' -or [string]$wfW46CtxReal.PnpDeviceId -eq 'GABARITO\NET\0000' -or @($wfW46CtxReal.Packages) -contains 'oem00.inf') { Write-Host "  [ERRO] Rede (contexto): sem gabarito o resolvedor devolveu o SINTÉTICO ('$($wfW46CtxReal.Adapter.Name)' / '$($wfW46CtxReal.PnpDeviceId)') - o produto agiria sobre dado de teste" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW46Par in 'Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric') {
+            if ([string](Get-Command $wfW46Par).ScriptBlock -notmatch 'Get-WinForgeWifiActionContext\s+-Facts\s+\$Facts\b') { Write-Host "  [ERRO] Rede (contexto): '$wfW46Par' não entrega ao resolvedor o PARÂMETRO -Facts - com a tabela do guarda, que nunca é nula, o gabarito valeria na máquina de verdade" -ForegroundColor Red; $wbErrors++ }
+        }
+        # O botão 4 tem a MESMA restauração automática do 5.
+        $wfW46Fonte4 = [string](Get-Command Invoke-WinForgeWifiDriverReinstall).ScriptBlock
+        if ($wfW46Fonte4 -notmatch 'Invoke-WinForgeWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 4): sem restauração automática no desfecho ruim" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Fonte4 -notmatch 'Export-WinForgeWifiDriverBackup') { Write-Host "  [ERRO] Rede (botão 4): não exporta antes de remover" -ForegroundColor Red; $wbErrors++ }
+        # O valor MEDIDO da exportação é o que vai para a asserção, e a âncora é a chamada inteira:
+        # '-ExportOk' solto seria satisfeito pelo comentário que explica a regra, três linhas acima.
+        if ($wfW46Fonte4 -notmatch "Assert-WinForgeNetworkGuard\s+-Action\s+'WifiDriverReinstall'\s+-ExportOk\s+\(\[bool\]\`$\w+\.Ok\)") { Write-Host "  [ERRO] Rede (botão 4): a asserção não recebe o resultado MEDIDO da exportação" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW46Passo in @('/remove-device', '/scan-devices')) {
+            if ($wfW46Fonte4 -notmatch [regex]::Escape($wfW46Passo)) { Write-Host "  [ERRO] Rede (botão 4): falta '$wfW46Passo'" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfW46Fonte4 -match 'delete-driver') { Write-Host "  [ERRO] Rede (botão 4): ele NÃO apaga pacote - isso é o botão 5" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW46Proib in @('/force', '/reboot')) {
+            if ($wfW46Fonte4 -match [regex]::Escape($wfW46Proib)) { Write-Host "  [ERRO] Rede (botão 4): '$wfW46Proib' aparece na reinstalação" -ForegroundColor Red; $wbErrors++ }
+        }
+        # '/install' PROPÕE, não impõe: o texto do 6 não pode afirmar 'driver restaurado'.
+        $wfW46Fonte6 = [string](Get-Command Invoke-WinForgeWifiDriverRestore).ScriptBlock
+        if ($wfW46Fonte6 -match '[Dd]river restaurado') { Write-Host "  [ERRO] Rede (botão 6): o texto afirma 'driver restaurado' - o '/install' apenas propõe" -ForegroundColor Red; $wbErrors++ }
+        # A DÉCIMA TERCEIRA âncora oca da leva: 'Get-WinForgeWifiAdapter' aparece no bloco de ajuda
+        # desta mesma função (é o padrão do -Probe da espera), então a trava antiga media o
+        # comentário. A forma cobrada agora é a CHAMADA com argumento, e ela também é a prova do
+        # conserto: julgar antes de o Plug and Play terminar faz o relato mandar buscar driver por
+        # pen drive enquanto a instalação está em curso - e este é o caminho do socorro automático.
+        if ($wfW46Fonte6 -notmatch 'Wait-WinForgeWifiAdapterSettle\s+-TimeoutSeconds\s+\d+') { Write-Host "  [ERRO] Rede (botão 6): não espera o Plug and Play assentar antes de julgar o adaptador" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW46F in @('cabo de rede', 'pen drive')) {
+            if ($wfW46Fonte6 -notmatch [regex]::Escape($wfW46F)) { Write-Host "  [ERRO] Rede (botão 6): sem rádio no fim, o texto não manda '$wfW46F'" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wfW46Fonte6 -notmatch 'add-driver') { Write-Host "  [ERRO] Rede (botão 6): falta o '/add-driver … /install'" -ForegroundColor Red; $wbErrors++ }
+        # O guarda roda no botão 6 como nas irmãs (defesa em profundidade), e o SOCORRO é a exceção
+        # EXPLÍCITA. Sem o parâmetro, correr a escada durante o socorro recusaria justamente o
+        # socorro: 'não há outra via de rede' e 'o rádio sumiu' podem ter virado verdadeiros por
+        # causa do ato que acabou de acontecer.
+        $wfW46Volta = @(Invoke-WinForgeWifiDriverRestore -DryRun -Facts (& $wfW46Com @{ OnBattery = $true; BackupRoot = (Join-Path $wbSelfTestRaiz 'driver-backup-vazio') }))
+        if (-not @($wfW46Volta | Where-Object { [string]$_ -match 'bateria' }).Count) { Write-Host "  [ERRO] Rede (botão 6): sem -Rescue ele não passa pela escada ('$($wfW46Volta -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        $wfW46Socorro = @(Invoke-WinForgeWifiDriverRestore -DryRun -Rescue -Facts (& $wfW46Com @{ OnBattery = $true; BackupRoot = (Join-Path $wbSelfTestRaiz 'driver-backup-vazio') }))
+        if (@($wfW46Socorro | Where-Object { [string]$_ -match 'bateria' }).Count) { Write-Host "  [ERRO] Rede (socorro): com -Rescue a escada ainda recusou - o socorro seria barrado pelo que ele existe para consertar" -ForegroundColor Red; $wbErrors++ }
+        if (-not @($wfW46Socorro | Where-Object { [string]$_ -match 'Socorro automático' }).Count) { Write-Host "  [ERRO] Rede (socorro): o relato não DIZ que pulou a escada ('$($wfW46Socorro -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # E as duas ações que podem precisar de socorro chamam a volta COM o parâmetro: sem ele, a
+        # volta automática seria recusada exatamente na máquina que acabou de ficar sem rádio.
+        foreach ($wfW46Fn2 in @('Invoke-WinForgeWifiDriverReinstall', 'Invoke-WinForgeWifiDriverGeneric')) {
+            if ([string](Get-Command $wfW46Fn2).ScriptBlock -notmatch 'Invoke-WinForgeWifiDriverRestore\s+-Rescue') { Write-Host "  [ERRO] Rede (socorro): '$wfW46Fn2' chama a volta sem declarar que é socorro" -ForegroundColor Red; $wbErrors++ }
+        }
+        # Sem cópia conferida em disco, o botão 6 fica DESABILITADO (não some: a exceção D3 vale só
+        # para o botão 5) e a dica diz por quê.
+        $wfW46Seco = @(Invoke-WinForgeWifiDriverRestore -DryRun -Facts @{ BackupRoot = (Join-Path $wbSelfTestRaiz 'driver-backup-vazio') })
+        if (-not @($wfW46Seco | Where-Object { [string]$_ -match 'nenhuma cópia' }).Count) { Write-Host "  [ERRO] Rede (botão 6): sem cópia em disco ele não diz isso ('$($wfW46Seco -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        $wfW46Guarda = Test-WinForgeNetworkGuard -Action 'WifiDriverRestore' -Facts (& $wfW46Com @{ BackupFound = $false })
+        if ($wfW46Guarda.Hidden) { Write-Host "  [ERRO] Rede (botão 6): ele SOME sem cópia - a exceção de interface vale só para o botão 5" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46Guarda.Ok) { Write-Host "  [ERRO] Rede (botão 6): sem cópia conferida ele continua habilitado" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfW46Guarda.Reason -notmatch 'cópia') { Write-Host "  [ERRO] Rede (botão 6): a recusa não fala da cópia ('$($wfW46Guarda.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # ...e COM cópia ele volta a ficar habilitado, e o fato não derruba os outros dois botões:
+        # só o 6 depende de haver o que restaurar.
+        if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverRestore' -Facts (& $wfW46Com @{ BackupFound = $true })).Ok) { Write-Host "  [ERRO] Rede (botão 6): com cópia guardada ele continua recusando" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW46Outro in @('WifiDriverReinstall', 'NetDnsRenew')) {
+            if (-not (Test-WinForgeNetworkGuard -Action $wfW46Outro -Facts (& $wfW46Com @{ BackupFound = $false })).Ok) { Write-Host "  [ERRO] Rede (botão 6): a falta de cópia derrubou '$wfW46Outro', que não depende dela" -ForegroundColor Red; $wbErrors++ }
+        }
+        # E quem NÃO levanta o fato não pode ser recusado por ele: uma hashtable sem a chave é
+        # "não perguntei", e não "não achou". $wfW46Base não tem 'BackupFound' de propósito - é
+        # a forma de todo chamador anterior a este degrau.
+        if ($wfW46Base.ContainsKey('BackupFound')) { Write-Host "  [ERRO] Rede (botão 6): o próprio gabarito já traz 'BackupFound' - a conferência abaixo seria vazia" -ForegroundColor Red; $wbErrors++ }
+        elseif (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverRestore' -Facts $wfW46Base).Ok) { Write-Host "  [ERRO] Rede (botão 6): fatos SEM a chave da cópia recusaram o botão - ausência de pergunta virou ausência de cópia" -ForegroundColor Red; $wbErrors++ }
+        # A ressalva de AnyDesk/TeamViewer entra na confirmação do botão 4 (a do 5 é cobrada pelo
+        # teste da Tarefa 19, junto da linha que a cria).
+        $wfW46C = [string](Get-WinForgeRepairCommand -Name 'WifiDriverReinstall').Confirm
+        if ($wfW46C -notmatch 'AnyDesk') { Write-Host "  [ERRO] Rede (botão 4): a confirmação não avisa que AnyDesk e TeamViewer não são detectados" -ForegroundColor Red; $wbErrors++ }
+        # O gancho de abertura habilita/desabilita o botão 6 na thread da janela.
+        $wfW46FonteUI = [string](Get-Command Update-WinForgeNetworkButtons).ScriptBlock
+        if ($wfW46FonteUI -notmatch 'WPFWFRepWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 6): nada habilita ou desabilita o botão 6 na abertura" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46FonteUI -notmatch 'IsEnabled') { Write-Host "  [ERRO] Rede (botão 6): o gancho não mexe em IsEnabled" -ForegroundColor Red; $wbErrors++ }
+        $wfW46FonteJob = [string](Get-Command Start-WinForgeProfileJob).ScriptBlock
+        # O corpo do job roda NUMA RUNSPACE DO POOL, e scriptblock criado lá e executado pelo
+        # Dispatcher trava na primeira pipeline: a thread da janela pede a runspace de origem, que
+        # está parada esperando o Dispatcher terminar. Por isso a trava não cobra o NOME da função
+        # (que apareceria num comentário), e sim que o job mande o bloco guardado em $sync - e que
+        # não exista bloco literal nenhum indo daqui para a thread da janela.
+        if ($wfW46FonteJob -notmatch 'Invoke-WPFUIThread\s+\$sync\.WinForgeNetworkButtonsCallback') { Write-Host "  [ERRO] Rede (botões): o gancho de abertura não manda o retorno de chamada de escopo de arquivo para a thread da janela" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW46FonteJob -match 'Invoke-WPFUIThread\s*\{') { Write-Host "  [ERRO] Rede (botões): o corpo do job cria o bloco ali mesmo - ele nasce na runspace do pool e trava a janela na primeira pipeline" -ForegroundColor Red; $wbErrors++ }
+        if ($sync.WinForgeNetworkButtonsCallback -isnot [scriptblock]) { Write-Host "  [ERRO] Rede (botões): não há retorno de chamada em escopo de arquivo para a repintura" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$sync.WinForgeNetworkButtonsCallback -notmatch 'Update-WinForgeNetworkButtons') { Write-Host "  [ERRO] Rede (botões): o retorno de chamada não repinta os botões de rede" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (botões 4 e 6): exportar antes de remover, três desfechos, restauração automática também no 4, '/install' que propõe e botão 6 desabilitado sem cópia"
+    } catch {
+        Write-Host "  [ERRO] Rede (botões 4/6): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- Rede: botão 5
+    # Medido: o rádio tem MAIS DE UM candidato no repositório e a classificação menor vence. Apagar
+    # só o instalado entregaria a versão antiga e MENTIRIA sobre o que fez - por isso apaga a
+    # FAMÍLIA inteira do rádio. Família, e não "todo pacote de rede": nesta máquina isso é a
+    # diferença entre 2 e 10 pacotes, e os 8 de fora incluem o driver do cabo.
+    try {
+        $wfW5Cmd = Get-WinForgeRepairCommand -Name 'WifiDriverGeneric'
+        if ([string]$wfW5Cmd.Title -ne 'Rede sem fio — Trocar pelo driver básico do Windows (pode ficar sem Wi-Fi)') { Write-Host "  [ERRO] Rede (botão 5): título '$($wfW5Cmd.Title)'" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfW5Cmd.Kind -ne 'repair') { Write-Host "  [ERRO] Rede (botão 5): a linha é '$($wfW5Cmd.Kind)'" -ForegroundColor Red; $wbErrors++ }
+        if ((Invoke-WinForgeRepairCommand -Name 'WifiDriverGeneric' -NoUI).Dispatched) { Write-Host "  [ERRO] Rede (botão 5): foi despachado no SelfTest" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfW5Cmd.NetworkGuard -ne 'WifiDriverGeneric') { Write-Host "  [ERRO] Rede (botão 5): a linha não declara NetworkGuard" -ForegroundColor Red; $wbErrors++ }
+        $wfW5Conf = Get-WinForgeWifiGenericConfirmText
+        if ([string]$wfW5Conf.Typed -ne 'VOLTAR AO GENERICO') { Write-Host "  [ERRO] Rede (botão 5): a confirmação por digitação é '$($wfW5Conf.Typed)'" -ForegroundColor Red; $wbErrors++ }
+        foreach ($wfW5F in @('Se o driver básico não funcionar com este Wi-Fi, o computador fica sem rede sem fio até você trazer o driver por cabo ou pen drive', 'Tenha um cabo de rede à mão antes de continuar')) {
+            if ([string]$wfW5Conf.Text -notmatch [regex]::Escape($wfW5F)) { Write-Host "  [ERRO] Rede (botão 5): falta '$wfW5F' na confirmação" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A palavra digitada aparece no TEXTO: uma caixa que pede para digitar sem dizer o quê é uma
+        # caixa que ninguém passa.
+        if ([string]$wfW5Conf.Text -notmatch [regex]::Escape([string]$wfW5Conf.Typed)) { Write-Host "  [ERRO] Rede (botão 5): o texto não diz o que digitar" -ForegroundColor Red; $wbErrors++ }
+        # E o texto é CHAMADO por alguém: até aqui ele existia e o botão caía numa caixa de Sim/Não
+        # comum, que é fraca demais para a ação que pode deixar a máquina sem conexão nenhuma.
+        if ([string]$wfW5Cmd.TypedPhrase -ne [string]$wfW5Conf.Typed) { Write-Host "  [ERRO] Rede (botão 5): a linha declara a palavra '$($wfW5Cmd.TypedPhrase)' e a confirmação pede '$($wfW5Conf.Typed)'" -ForegroundColor Red; $wbErrors++ }
+        $wfW5FonteDesp = [string](Get-Command Invoke-WinForgeRepairCommand).ScriptBlock
+        if ($wfW5FonteDesp -notmatch 'Show-WinForgeTypedConfirm\s+-Title[^\r\n]*-Phrase\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): o despacho não usa a caixa de palavra digitada" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteDesp -notmatch 'Get-WinForgeWifiGenericConfirmText') { Write-Host "  [ERRO] Rede (botão 5): o despacho não usa o texto escrito para este botão" -ForegroundColor Red; $wbErrors++ }
+        # A DECISÃO é de uma função pura, e não de um 'if' solto dentro do despacho: o caminho do
+        # despacho abre janela e por isso não roda aqui, e uma condição que só vive lá dentro seria
+        # conferida só por leitura de fonte - um 'if ($false)' em volta dela passaria batido.
+        if ($wfW5FonteDesp -notmatch "Get-WinForgeRepairConfirmKind\s+-Name\s+\$\w+") { Write-Host "  [ERRO] Rede (botão 5): o despacho não pergunta o tipo de confirmação" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteDesp -notmatch "if\s*\(\s*\`$\w+\s+-eq\s+'typed'\s*\)") { Write-Host "  [ERRO] Rede (botão 5): o despacho não decide pelo resultado da pergunta" -ForegroundColor Red; $wbErrors++ }
+        # ...e a regra em si, por COMPORTAMENTO, linha por linha.
+        foreach ($wfW5Tipo in @(@('WifiDriverGeneric', 'typed'), @('WifiDriverReinstall', 'yesno'), @('WifiDriverRestore', 'yesno'), @('NetDnsRenew', 'yesno'), @('NetDiagFull', 'none'), @('AclVerify', 'none'), @('AclRestore', 'yesno'))) {
+            $wfW5TipoReal = [string](Get-WinForgeRepairConfirmKind -Name ([string]$wfW5Tipo[0]))
+            if ($wfW5TipoReal -ne [string]$wfW5Tipo[1]) { Write-Host "  [ERRO] Rede (confirmação): '$($wfW5Tipo[0])' pede '$wfW5TipoReal', esperado '$($wfW5Tipo[1])'" -ForegroundColor Red; $wbErrors++ }
+        }
+        # A caixa genérica, exercitada sem abrir nada: o botão de confirmar NASCE DESABILITADO e só
+        # liga com a palavra certa. Com ele sempre ligado, a digitação seria enfeite.
+        $wfW5Janela = Show-WinForgeTypedConfirm -Title 'x' -Text ([string]$wfW5Conf.Text) -Phrase ([string]$wfW5Conf.Typed) -NoShow
+        if ($wfW5Janela -isnot [System.Windows.Window]) { Write-Host "  [ERRO] Rede (botão 5): a caixa de digitação não devolveu uma janela" -ForegroundColor Red; $wbErrors++ }
+        else {
+            $wfW5BtnOk = $wfW5Janela.FindName('WFTypedConfirmOk')
+            $wfW5Caixa = $wfW5Janela.FindName('WFTypedConfirmPhrase')
+            $wfW5Texto = $wfW5Janela.FindName('WFTypedConfirmText')
+            if ($null -eq $wfW5BtnOk -or $null -eq $wfW5Caixa -or $null -eq $wfW5Texto) { Write-Host "  [ERRO] Rede (botão 5): a caixa não registrou os controles pelo nome" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ($wfW5BtnOk.IsEnabled) { Write-Host "  [ERRO] Rede (botão 5): o botão de confirmar nasceu HABILITADO" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfW5Texto.Text -notmatch 'cabo de rede') { Write-Host "  [ERRO] Rede (botão 5): a caixa não mostra o aviso do cabo" -ForegroundColor Red; $wbErrors++ }
+                foreach ($wfW5Dig in @(@('', $false), @('sim', $false), @('VOLTAR AO GENERIC', $false), @('VOLTAR AO GENERICO EXTRA', $false), @('  voltar ao generico  ', $true), @('VOLTAR AO GENERICO', $true))) {
+                    $wfW5Caixa.Text = [string]$wfW5Dig[0]
+                    if ($wfW5BtnOk.IsEnabled -ne [bool]$wfW5Dig[1]) { Write-Host "  [ERRO] Rede (botão 5): com '$($wfW5Dig[0])' digitado o botão ficou '$($wfW5BtnOk.IsEnabled)', esperado '$($wfW5Dig[1])'" -ForegroundColor Red; $wbErrors++ }
+                }
+            }
+        }
+        $wfW5Fonte = [string](Get-Command Invoke-WinForgeWifiDriverGeneric).ScriptBlock
+        if ($wfW5Fonte -notmatch 'delete-driver') { Write-Host "  [ERRO] Rede (botão 5): falta o '/delete-driver /uninstall'" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -match '/force') { Write-Host "  [ERRO] Rede (botão 5): '/force' apaga o pacote em uso e é o caminho para ficar sem rádio" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -match '/reboot') { Write-Host "  [ERRO] Rede (botão 5): '/reboot' tira a decisão de reiniciar do usuário" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5Fonte -notmatch 'Invoke-WinForgeWifiDriverRestore') { Write-Host "  [ERRO] Rede (botão 5): sem restauração automática no desfecho ruim" -ForegroundColor Red; $wbErrors++ }
+        # Exporta TODOS os OEM antes de apagar qualquer um.
+        # As DUAS pontas pela FORMA DA CHAMADA com argumento: 'delete-driver' solto aparece antes,
+        # no texto da simulação que diz o que o botão faria, e a trava mediria a posição da FRASE em
+        # vez da do comando. Nona aparição desta família na leva.
+        $wfW5PosExport = $wfW5Fonte.IndexOf('Export-WinForgeWifiDriverBackup -Published', [StringComparison]::Ordinal)
+        $wfW5PosDelete = $wfW5Fonte.IndexOf("@('/delete-driver'", [StringComparison]::Ordinal)
+        if ($wfW5PosExport -lt 0 -or $wfW5PosDelete -lt 0 -or $wfW5PosExport -gt $wfW5PosDelete) { Write-Host "  [ERRO] Rede (botão 5): o apagamento vem antes da exportação (export em $wfW5PosExport, apagamento em $wfW5PosDelete)" -ForegroundColor Red; $wbErrors++ }
+        # A FAMÍLIA do rádio, e não a classe de rede inteira. Cobrado pela chamada completa: 'Oem'
+        # solto casaria com o comentário que explica a regra, e a diferença aqui é apagar 2 pacotes
+        # ou 10, sendo que entre os 10 está o driver do cabo - a via de socorro deste botão.
+        # A família e o embutido saem do RESOLVEDOR, que é o único lugar que decide entre gabarito e
+        # máquina. As travas seguem os dois: o botão tem de usar o resolvedor, e o resolvedor tem de
+        # restringir à família e conferir o embutido pela varredura de INF.
+        if ($wfW5Fonte -notmatch 'Get-WinForgeWifiActionContext\s+-Facts\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): não usa o resolvedor - o gabarito pararia no bloqueio e o resto viria da máquina" -ForegroundColor Red; $wbErrors++ }
+        $wfW5FonteCtx = [string](Get-Command Get-WinForgeWifiActionContext).ScriptBlock
+        if ($wfW5FonteCtx -notmatch 'Select-WinForgeWifiDriverPackage\s+-Entries\s+\$\w+\s+-InfName\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): o resolvedor não restringe à família do rádio - apagaria o driver do cabo junto" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteCtx -match 'Where-Object\s*\{[^}]*Class[^}]*-eq\s*''Net''') { Write-Host "  [ERRO] Rede (botão 5): o resolvedor monta a lista pela CLASSE de rede, que é o defeito consertado na Tarefa 17" -ForegroundColor Red; $wbErrors++ }
+        # O embutido é conferido pela MESMA varredura de INF que alimenta o guarda: a função que
+        # consulta a ferramenta de drivers responde "não há embutido" em toda máquina real, e usá-la
+        # aqui esconderia o botão em qualquer computador.
+        if ($wfW5FonteCtx -notmatch 'Test-WinForgeInboxWifiDriver\s+-PnpDeviceId\s+\$\w+') { Write-Host "  [ERRO] Rede (botão 5): o resolvedor não confere o driver embutido pela varredura de INF" -ForegroundColor Red; $wbErrors++ }
+        if ($wfW5FonteCtx -match 'Select-WinForgeWifiInboxDriver') { Write-Host "  [ERRO] Rede (botão 5): usa a consulta à ferramenta de drivers para saber do embutido - ela responde 'não há' em toda máquina real" -ForegroundColor Red; $wbErrors++ }
+        # E o botão RECUSA quando o embutido não está lá, seja qual for a fonte do fato.
+        if ($wfW5Fonte -notmatch 'if \(-not \[bool\]\$contexto\.Inbox\)') { Write-Host "  [ERRO] Rede (botão 5): não reconfirma o driver embutido antes de apagar" -ForegroundColor Red; $wbErrors++ }
+        # A verificação de sucesso exige DriverProvider = Microsoft - cobrada POR COMPORTAMENTO, e
+        # não por '-match "Microsoft"' na fonte, que casaria com o comentário que explica a regra.
+        if ($wfW5Fonte -notmatch 'Test-WinForgeWifiOutcome[^\r\n]*-Generic') { Write-Host "  [ERRO] Rede (botão 5): a verificação não passa '-Generic' - sem ele não se distingue 'o básico entrou' de 'outro OEM venceu'" -ForegroundColor Red; $wbErrors++ }
+        if ([string](Test-WinForgeWifiOutcome -Adapter ([pscustomobject]@{ Ok = $true; Status = 'Up'; Problem = 'CM_PROB_NONE'; DriverProvider = 'Intel'; Name = 'Wi-Fi' }) -Generic).Outcome -eq 'ok') { Write-Host "  [ERRO] Rede (botão 5): um driver Intel passou como 'o básico entrou'" -ForegroundColor Red; $wbErrors++ }
+        # E a ressalva de AnyDesk/TeamViewer, que a Tarefa 18 deixou para cá junto com esta linha.
+        if ([string]$wfW5Cmd.Confirm -notmatch 'AnyDesk') { Write-Host "  [ERRO] Rede (botão 5): a confirmação não avisa que AnyDesk e TeamViewer não são detectados" -ForegroundColor Red; $wbErrors++ }
+        # A função é CHAMADA, não só lida: bloqueada, ela recusa dizendo por quê e não lista o que
+        # apagaria.
+        $wfW5SecoBloq = @(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts (& $wfW46Com @{ Inbox = $false }))
+        if (-not @($wfW5SecoBloq | Where-Object { [string]$_ -match 'básico' }).Count) { Write-Host "  [ERRO] Rede (botão 5): sem driver embutido ele não recusou dizendo por quê ('$($wfW5SecoBloq -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        if (@($wfW5SecoBloq | Where-Object { [string]$_ -match 'delete-driver' }).Count) { Write-Host "  [ERRO] Rede (botão 5): bloqueado, ele ainda listou o apagamento" -ForegroundColor Red; $wbErrors++ }
+        $wfW5SecoExp = @(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts (& $wfW46Com @{ ExportOk = $false }))
+        if (-not @($wfW5SecoExp | Where-Object { [string]$_ -match 'cópia' }).Count) { Write-Host "  [ERRO] Rede (botão 5): falha na cópia de segurança não bloqueou ('$($wfW5SecoExp -join ' | ')')" -ForegroundColor Red; $wbErrors++ }
+        # ...e a máquina saudável não é bloqueada: sem isto, uma função que recusasse sempre passaria.
+        if (-not @(@(Invoke-WinForgeWifiDriverGeneric -DryRun -Facts $wfW46Base) | Where-Object { [string]$_ -match 'delete-driver|apagaria' }).Count) { Write-Host "  [ERRO] Rede (botão 5): a simulação de uma máquina saudável não descreve o que faria" -ForegroundColor Red; $wbErrors++ }
+        # Exceção D3: SEM inbox o botão SOME. Botão desabilitado convida a procurar como habilitá-lo,
+        # e o que se acha na internet é "use /force".
+        $wfW5FonteUI = [string](Get-Command Update-WinForgeNetworkButtons).ScriptBlock
+        if ($wfW5FonteUI -notmatch 'WPFWFRepWifiDriverGeneric') { Write-Host "  [ERRO] Rede (D3): nada esconde o botão 5" -ForegroundColor Red; $wbErrors++ }
+        # A FORMA DA ATRIBUIÇÃO, e não a palavra: 'Collapsed' aparece na documentação da função,
+        # que explica a exceção, e o nome solto ficava verde com a linha que esconde REMOVIDA.
+        # Décima aparição desta família na leva, e a segunda contra uma trava minha.
+        if ($wfW5FonteUI -notmatch "Visibility\s*=\s*'Collapsed'") { Write-Host "  [ERRO] Rede (D3): o botão 5 é desabilitado em vez de escondido" -ForegroundColor Red; $wbErrors++ }
+        # ...e SÓ ele some: os outros dois continuam sendo desabilitados, que é a regra do projeto.
+        if ($wfW5FonteUI -match "WPFWFRepWifiDriverRestore[^\r\n]*Collapsed") { Write-Host "  [ERRO] Rede (D3): a exceção de esconder vazou para o botão 6" -ForegroundColor Red; $wbErrors++ }
+        # O guarda é quem decide, e ele esconde por DOIS motivos: sem embutido e build antigo.
+        foreach ($wfW5Esc in @(@{ Inbox = $false }, @{ Build = 17763 })) {
+            if (-not (Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts (& $wfW46Com $wfW5Esc)).Hidden) { Write-Host "  [ERRO] Rede (D3): '$($wfW5Esc.Keys)' não escondeu o botão 5" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ((Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfW46Base).Hidden) { Write-Host "  [ERRO] Rede (D3): máquina saudável escondeu o botão 5" -ForegroundColor Red; $wbErrors++ }
+        # SEM PERFIL nada foi verificado, então esconder o botão dizendo que não há driver básico
+        # seria afirmar o que não se sabe. Quem recusa é o degrau do diagnóstico, que diz a verdade
+        # e NÃO esconde - o botão volta sozinho quando o diagnóstico termina.
+        # 'Inbox = $false' junto, porque é o que o levantamento REAL produz: sem perfil ele para
+        # antes de medir o embutido e o fato fica no padrão seguro. Com 'Inbox = $true' no gabarito,
+        # o degrau do embutido não dispararia de qualquer jeito e a conferência seria vazia.
+        $wfW5SemPerfil = @{} + $wfW46Base
+        $wfW5SemPerfil['SemPerfil'] = $true
+        $wfW5SemPerfil['Inbox'] = $false
+        $wfW5Gsp = Test-WinForgeNetworkGuard -Action 'WifiDriverGeneric' -Facts $wfW5SemPerfil
+        if ($wfW5Gsp.Hidden) { Write-Host "  [ERRO] Rede (D3): sem perfil o botão 5 SUMIU, e nada tinha sido verificado" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$wfW5Gsp.Reason -match 'driver básico') { Write-Host "  [ERRO] Rede (D3): sem perfil a recusa culpa o driver básico, que não foi verificado ('$($wfW5Gsp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        elseif ([string]$wfW5Gsp.Reason -notmatch 'diagnóstico') { Write-Host "  [ERRO] Rede (D3): sem perfil a recusa não fala do diagnóstico ('$($wfW5Gsp.Reason)')" -ForegroundColor Red; $wbErrors++ }
+        # A entrada de config CONTINUA existindo (a trava é 63): quem some é o controle na tela.
+        if ([string]::IsNullOrWhiteSpace([string]$sync.configs.feature.WPFWFRepWifiDriverGeneric.Description)) { Write-Host "  [ERRO] Rede (botão 5): WPFWFRepWifiDriverGeneric sem Description" -ForegroundColor Red; $wbErrors++ }
+        if ([string]$sync.configs.feature.WPFWFRepWifiDriverGeneric.Content -ne [string]$wfW5Cmd.Title) { Write-Host "  [ERRO] Rede (botão 5): o Content da config não é o título da tabela" -ForegroundColor Red; $wbErrors++ }
+        # A DECISÃO DE PRODUTO fica registrada na documentação da função, e não só no plano: a
+        # ausência do botão é escolha de quem pediu o recurso, não limitação técnica.
+        if ($wfW5FonteUI -notmatch 'decisão de produto') { Write-Host "  [ERRO] Rede (D3): a documentação não registra que esconder é decisão de produto" -ForegroundColor Red; $wbErrors++ }
+        Write-Host "  Rede (botão 5): confirmação por digitação, exporta todos os OEM antes de apagar, sem /force, sucesso só com DriverProvider Microsoft e o botão some sem inbox"
+    } catch {
+        Write-Host "  [ERRO] Rede (botão 5): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+    }
+    # ---------------------------------------------------------------- versão e documentação
+    # Prende quatro coisas que só existem fora do motor: o número da versão, a seção desta versão no
+    # changelog, os rótulos de botão que o README documenta e o roteiro manual.
+    #
+    # Três cuidados, cada um contra uma armadilha que esta leva já viu:
+    #   1. O tema do changelog é procurado SÓ dentro da seção desta versão. Procurá-lo no arquivo
+    #      inteiro seria satisfeito pela seção da 1.7.0, que também fala de permissões e de Windows
+    #      Update - a trava passaria sem ninguém escrever uma linha nova.
+    #   2. Os rótulos NÃO são literais escritos aqui: saem de '$sync.configs.feature'. Renomear o
+    #      botão e esquecer o README reprova, e é o caso real desta leva - a spec chama o botão
+    #      principal de 'Devolver ao padrão do Windows', nome que a janela nunca mostrou, e uma
+    #      trava escrita contra o literal da spec teria cobrado do README a mentira em vez do fato.
+    #   3. O rótulo tem de estar no README COMO rótulo (linha de tabela ou em negrito), e cada item
+    #      do roteiro tem de estar dentro de um teste que diga o que fazer se der errado. Citação no
+    #      meio de um parágrafo não é documentação de botão, e item solto não é teste.
+    try {
+        # Guardado aqui para a linha de sucesso lá embaixo só sair quando este bloco inteiro passar:
+        # "no lugar" impresso logo abaixo de sete [ERRO] é ruído que treina a gente a não ler.
+        $wfDocErrosAntes = $wbErrors
+        # O autoteste pode ser chamado de qualquer pasta, e o motor gerado mora em <repo>\dist\engine.
+        $wfDocRaiz = (Get-Location).Path
+        if (-not (Test-Path -LiteralPath (Join-Path $wfDocRaiz 'version.props'))) {
+            $wfDocAlt = Split-Path -Parent (Split-Path -Parent ([string]$sync.ScriptRoot))
+            if (Test-Path -LiteralPath (Join-Path $wfDocAlt 'version.props')) { $wfDocRaiz = $wfDocAlt }
+        }
+        # A versão é literal de propósito: subir de versão tem de passar por esta linha, e não
+        # deslizar junto com o version.props.
+        if ([string]$sync.version -ne '1.8.0') { Write-Host "  [ERRO] Versão: `$sync.version = '$($sync.version)', esperado '1.8.0'" -ForegroundColor Red; $wbErrors++ }
+        # ---- changelog: a seção desta versão, no topo, com os quatro temas da leva em subtítulo.
+        $wfDocChangeArq = Join-Path $wfDocRaiz 'docs\changelog.md'
+        $wfDocChange = [string](Get-Content -LiteralPath $wfDocChangeArq -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $wfDocCab = [regex]::Match($wfDocChange, ('(?m)^## ' + [regex]::Escape([string]$sync.version) + ' \(\d{4}-\d{2}-\d{2}\)\s*$'))
+        if (-not $wfDocCab.Success) {
+            Write-Host "  [ERRO] Changelog: falta a seção '## $($sync.version) (<data>)'" -ForegroundColor Red; $wbErrors++
+        } else {
+            if (@([regex]::Matches($wfDocChange.Substring(0, $wfDocCab.Index), '(?m)^## ')).Count -ne 0) {
+                Write-Host "  [ERRO] Changelog: a seção $($sync.version) não é a do topo" -ForegroundColor Red; $wbErrors++
+            }
+            $wfDocResto = $wfDocChange.Substring($wfDocCab.Index + $wfDocCab.Length)
+            $wfDocFim = [regex]::Match($wfDocResto, '(?m)^## ')
+            $wfDocSecao = if ($wfDocFim.Success) { $wfDocResto.Substring(0, $wfDocFim.Index) } else { $wfDocResto }
+            foreach ($wfDocTema in @('Permissões', 'Parar', 'Windows Update', 'Rede sem fio')) {
+                if ($wfDocSecao -notmatch ('(?m)^### .*' + [regex]::Escape($wfDocTema))) { Write-Host "  [ERRO] Changelog: a seção $($sync.version) não tem subtítulo sobre '$wfDocTema'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # Os limites conhecidos são a parte que ninguém escreve por vontade própria: uma versão
+            # que mexe em permissão, driver de rede e driver em lote sem ter rodado numa máquina com
+            # o problema precisa dizer isso onde o usuário lê.
+            $wfDocLim = [regex]::Match($wfDocSecao, '(?ms)^### [^\r\n]*[Ll]imites conhecidos.*$')
+            if (-not $wfDocLim.Success) {
+                Write-Host "  [ERRO] Changelog: a seção $($sync.version) não declara os limites conhecidos" -ForegroundColor Red; $wbErrors++
+            } elseif (@([regex]::Matches($wfDocLim.Value, '(?m)^- ')).Count -lt 4) {
+                Write-Host "  [ERRO] Changelog: os limites conhecidos têm $(@([regex]::Matches($wfDocLim.Value, '(?m)^- ')).Count) item(ns); esperado ao menos 4" -ForegroundColor Red; $wbErrors++
+            }
+        }
+        # ---- README: cada botão novo desta leva, com o rótulo LIDO DA CONFIG.
+        $wfDocReadme = [string](Get-Content -LiteralPath (Join-Path $wfDocRaiz 'README.md') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $wfDocLinhas = @($wfDocReadme -split "`r?`n")
+        foreach ($wfDocId in @('WPFWFRepAclRestore', 'WPFWFRepAclUndo', 'WPFWFRepAclCleanup', 'WPFWFRepNetDiagFull', 'WPFWFRepNetDnsRenew', 'WPFWFRepWifiDriverReinstall', 'WPFWFRepWifiDriverRestore', 'WPFWFRepWifiDriverGeneric')) {
+            $wfDocEnt = $sync.configs.feature.PSObject.Properties[$wfDocId]
+            if ($null -eq $wfDocEnt) { Write-Host "  [ERRO] README: a entrada de config '$wfDocId' não existe" -ForegroundColor Red; $wbErrors++; continue }
+            $wfDocRot = [string]$wfDocEnt.Value.Content
+            # O núcleo do rótulo: sem o prefixo do grupo e sem o parêntese de aviso do fim, que são
+            # contexto da tela e não do texto corrido. O resto tem de aparecer LETRA POR LETRA.
+            $wfDocNucleo = (($wfDocRot -replace '^Permissões do disco C: - ', '') -replace '\s*\([^)]*\)\s*$', '').Trim()
+            $wfDocEsc = [regex]::Escape($wfDocNucleo)
+            $wfDocAchou = $false
+            foreach ($wfDocLinha in $wfDocLinhas) {
+                if ($wfDocLinha -notmatch $wfDocEsc) { continue }
+                if ($wfDocLinha -match '^\s*\|' -or $wfDocLinha -match ('\*\*' + $wfDocEsc + '\*\*')) { $wfDocAchou = $true; break }
+            }
+            if (-not $wfDocAchou) { Write-Host "  [ERRO] README: o botão '$wfDocRot' não está documentado como rótulo (procurei por '$wfDocNucleo' em linha de tabela ou em negrito)" -ForegroundColor Red; $wbErrors++ }
+        }
+        # ---- roteiro manual: o que nada desta versão mediu, escrito antes do PR.
+        $wfDocRotArq = Join-Path $wfDocRaiz ('docs\roteiro-manual-' + [string]$sync.version + '.md')
+        $wfDocRoteiro = [string](Get-Content -LiteralPath $wfDocRotArq -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+        if ([string]::IsNullOrWhiteSpace($wfDocRoteiro)) {
+            Write-Host "  [ERRO] Roteiro: '$wfDocRotArq' não existe - nada desta versão foi visto rodando numa máquina quebrada de verdade" -ForegroundColor Red; $wbErrors++
+        } else {
+            $wfDocCortes = @([regex]::Matches($wfDocRoteiro, '(?m)^## '))
+            $wfDocSecoes = @()
+            for ($wfDocI = 0; $wfDocI -lt $wfDocCortes.Count; $wfDocI++) {
+                $wfDocIni = $wfDocCortes[$wfDocI].Index
+                $wfDocAte = if ($wfDocI + 1 -lt $wfDocCortes.Count) { $wfDocCortes[$wfDocI + 1].Index } else { $wfDocRoteiro.Length }
+                $wfDocSecoes += , $wfDocRoteiro.Substring($wfDocIni, $wfDocAte - $wfDocIni)
+            }
+            # Teste = seção NUMERADA que diz o que fazer se der errado. É essa a unidade que os itens
+            # abaixo têm de habitar: item citado na abertura ou na lista do que não foi coberto não
+            # é teste, e era assim que uma trava por frase se autoaprovava.
+            $wfDocTestes = @($wfDocSecoes | Where-Object { $_ -match '(?m)^## \d+\.' -and $_ -match 'Se der errado' })
+            if ($wfDocTestes.Count -lt 8) { Write-Host "  [ERRO] Roteiro: $($wfDocTestes.Count) teste(s) numerado(s) com saída de erro escrita; esperado ao menos 8" -ForegroundColor Red; $wbErrors++ }
+            foreach ($wfDocItem in @('remove-device', 'add-driver', 'inbox', 'KILL_ON_JOB_CLOSE', 'perfil grande')) {
+                if (-not @($wfDocTestes | Where-Object { $_ -match [regex]::Escape($wfDocItem) }).Count) { Write-Host "  [ERRO] Roteiro: o item '$wfDocItem' não está dentro de um teste" -ForegroundColor Red; $wbErrors++ }
+            }
+            if (@($wfDocTestes | Where-Object { $_ -match 'ELEVAÇÃO' }).Count -lt 5) { Write-Host "  [ERRO] Roteiro: menos de 5 testes marcam a exigência de elevação" -ForegroundColor Red; $wbErrors++ }
+            if (-not @($wfDocTestes | Where-Object { $_ -match 'PODE FICAR SEM REDE' -and $_ -match 'cabo de rede' }).Count) { Write-Host "  [ERRO] Roteiro: nenhum teste avisa que pode ficar sem rede com o cabo à mão" -ForegroundColor Red; $wbErrors++ }
+        }
+        if ($wbErrors -eq $wfDocErrosAntes) { Write-Host "  $($sync.version): versão, changelog, README e roteiro manual no lugar" }
+    } catch {
+        Write-Host "  [ERRO] Versão e documentação: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     # ---------------------------------------------------------------- o cache do catálogo é de TELA
     # O cache do catálogo da NVIDIA mora no perfil do usuário, e o perfil do usuário é gravável por
@@ -4496,7 +9149,7 @@ if ($SelfTest) {
             }
         }
     }
-    $wfCatRaiz = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\catalogo'
+    $wfCatRaiz = Join-Path $wbSelfTestRaiz 'catalogo'
     try {
         $wfCatVeneno = 'https://us.download.nvidia.com/Windows/999.99/veneno.exe'
         $wfCatVersaoViva = '616.92'
@@ -4634,7 +9287,7 @@ if ($SelfTest) {
     # Então: a cadeia inteira nasce protegida (New-WinForgeSnapshotRoot) e a cadeia inteira é
     # conferida (Test-WinForgeSnapshotRootTrusted), de %ProgramData%/%TEMP% (exclusive) até a última
     # pasta (inclusive).
-    $wfCadBase = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\seg'
+    $wfCadBase = Join-Path $wbSelfTestRaiz 'seg'
     try {
         Remove-Item -Path $wfCadBase -Recurse -Force -ErrorAction SilentlyContinue
         $wfCadMeio = Join-Path $wfCadBase 'WinForge'
@@ -4795,7 +9448,7 @@ if ($SelfTest) {
         if ($wfPinRenomeou) { try { [System.IO.File]::Move($wfPinOutro, $Path) } catch { } }
         return (-not $wfPinRenomeou)
     }
-    $wfPinDir = Join-Path $wbSelfTestTemp 'WinForge-SelfTest\pino'
+    $wfPinDir = Join-Path $wbSelfTestRaiz 'pino'
     try {
         New-Item -ItemType Directory -Path $wfPinDir -Force | Out-Null
         $wfPinArq = Join-Path $wfPinDir 'instalador.exe'
@@ -4983,9 +9636,9 @@ if ($SelfTest) {
         # trava é sobre o controle na janela, não sobre a config: uma entrada com categoria ou painel
         # errado continuaria na config e nunca apareceria na tela.
         try {
-            # $wfAclNomes traz as duas linhas de permissões que rodam com fluxo ao vivo: elas não têm
+            # $wfAclNomes traz as linhas de permissões que rodam com fluxo ao vivo: elas não têm
             # 'Command' e por isso ficam fora de $wfRepNomes, mas o botão delas está na mesma aba.
-            $wfRepChaves = @(@($wfRepNomes + $wfAclNomes) | Sort-Object -Unique | ForEach-Object { "WPFWFRep$_" })
+            $wfRepChaves = @(@($wfRepNomes + $wfAclNomes + $wfNetNomes) | Sort-Object -Unique | ForEach-Object { "WPFWFRep$_" })
             $wfRepFaltando = @($wfRepChaves | Where-Object { $sync[$_] -isnot [System.Windows.Controls.Button] })
             if ($wfRepFaltando.Count) { Write-Host "  [ERRO] aba Config (reparo): botão(ões) ausentes: $($wfRepFaltando -join ', ')" -ForegroundColor Red; $wbErrors++ }
             else { Write-Host "  Aba Config (reparo): $($wfRepChaves.Count) botão(ões) na tela" }
@@ -5367,6 +10020,138 @@ if ($SelfTest) {
             ${function:Test-WinForgeRepairElevated} = $wfWuEstElevSalvo
             $sync.DiagWUState = $(if ($null -eq $wfWuEstMapa) { @{} } else { $wfWuEstMapa })
             $sync.DiagWUResults = $wfWuEstAntes
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+        }
+        # A linha de grupo NA TABELA: o caminho inteiro, da oferta crua até a linha montada. O bloco
+        # de cima prova as funções; este prova que a tabela as usa - é a diferença entre a função
+        # certa e a função chamada.
+        $wfLgGrAntes = $sync.DiagWUResults
+        $wfLgGrMapa  = $sync.DiagWUState
+        $wfLgGrElev  = ${function:Test-WinForgeRepairElevated}
+        try {
+            ${function:Test-WinForgeRepairElevated} = { return $true }
+            $sync.DiagWUState = @{}
+            # O fixture lê as CONSTANTES da Tarefa 20: nenhum valor de critério é escrito à mão aqui.
+            $wfLgGrMaxB = [int]$script:WinForgeNullDriverMaxBytes
+            $wfLgGrMinG = [int]$script:WinForgeNullDriverMinGroup
+            $wfLgGrCls  = [string]@(@($script:WinForgeNullDriverClasses) | Where-Object { $_ -ne '' })[0]
+            $wfLgGrLote = @(1..$wfLgGrMinG | ForEach-Object { [pscustomobject]@{ Title = "INTEL - $wfLgGrCls - $_"; Driver = ''; Provider = 'INTEL'; Class = $wfLgGrCls; Version = $null; Date = '2016-07-05'; UpdateId = "lote-$_"; SizeBytes = [int]($wfLgGrMaxB / 8); HardwareId = 'PCI\VEN_8086&DEV_8D44'; ProblemCode = 28 } })
+            $wfLgGrSolta = [pscustomobject]@{ Title = 'Realtek - Display - 1.2.3'; Driver = 'Realtek'; Provider = 'Realtek'; Class = 'Display'; Version = '1.2.3'; Date = '2026-09-10'; UpdateId = 'solta-1'; SizeBytes = 5000; HardwareId = 'PCI\VEN_10EC&DEV_8168'; ProblemCode = 0 }
+            $sync.DiagWUResults = @($wfLgGrLote) + @($wfLgGrSolta)
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrLinhas = @($sync.WPFDiagWU.ItemsSource)
+            if ($wfLgGrLinhas.Count -ne 2) { Write-Host "  [ERRO] Grupo (tabela): $($wfLgGrLinhas.Count) linha(s) na tela, esperado 2 (o lote dobrado + a solta)" -ForegroundColor Red; $wbErrors++ }
+            $wfLgGrLinha = @($wfLgGrLinhas | Where-Object { [bool]$_.IsGroup })[0]
+            $wfLgGrOutra = @($wfLgGrLinhas | Where-Object { -not [bool]$_.IsGroup })[0]
+            if ($null -eq $wfLgGrLinha) { Write-Host "  [ERRO] Grupo (tabela): a tabela não montou linha de grupo nenhuma" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ([string]$wfLgGrLinha.UpdateId -notlike 'grupo:*') { Write-Host "  [ERRO] Grupo (tabela): o id da linha de grupo é '$($wfLgGrLinha.UpdateId)'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrLinha.ActionLabel -ne "Instalar todos ($wfLgGrMinG)") { Write-Host "  [ERRO] Grupo (tabela): o botão do lote diz '$($wfLgGrLinha.ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrLinha.DetailsVisible -ne 'Visible') { Write-Host "  [ERRO] Grupo (tabela): o botão 'Ver lista' não aparece na linha de grupo" -ForegroundColor Red; $wbErrors++ }
+                # A data de 2016 é REAL e tem de passar; é a de 1980 que vira frase. Sem este caso, o
+                # teste da frase sozinho ficaria verde com a coluna sempre em 'sem data confiável'.
+                if ([string]$wfLgGrLinha.Date -ne '2016-07-05') { Write-Host "  [ERRO] Grupo (tabela): a data de 2016 virou '$($wfLgGrLinha.Date)' - só a anterior a 1990 é que não é confiável" -ForegroundColor Red; $wbErrors++ }
+                if (-not [bool]$wfLgGrLinha.ActionEnabled) { Write-Host "  [ERRO] Grupo (tabela): com elevação o botão do lote nasceu desabilitado" -ForegroundColor Red; $wbErrors++ }
+            }
+            if ($null -eq $wfLgGrOutra) { Write-Host "  [ERRO] Grupo (tabela): a linha solta sumiu da tabela" -ForegroundColor Red; $wbErrors++ }
+            else {
+                if ([string]$wfLgGrOutra.ActionLabel -ne 'Instalar') { Write-Host "  [ERRO] Grupo (tabela): a linha solta veio com o rótulo '$($wfLgGrOutra.ActionLabel)' - a coluna liga no ActionLabel de TODAS as linhas" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrOutra.DetailsVisible -ne 'Collapsed') { Write-Host "  [ERRO] Grupo (tabela): o botão 'Ver lista' apareceu numa linha solta" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A dívida que a Tarefa 20 deixou: o número é publicado a CADA remontagem.
+            if ([int]$sync.DiagWUGrouped -ne $wfLgGrMinG) { Write-Host "  [ERRO] Grupo (contagem): `$sync.DiagWUGrouped = $($sync.DiagWUGrouped), esperado $wfLgGrMinG" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.WPFDiagWULabel.Text -notmatch "$wfLgGrMinG item\(ns\) reunido\(s\)") { Write-Host "  [ERRO] Grupo (rótulo da aba): não diz quantos itens foram reunidos ('$($sync.WPFDiagWULabel.Text)')" -ForegroundColor Red; $wbErrors++ }
+            # ...e ZERADO quando a busca seguinte não tem lote. Sem isto o relatório HTML, que só
+            # repete este número, passaria a citar a contagem da busca anterior.
+            $sync.DiagWUResults = @($wfLgGrSolta)
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            if ([int]$sync.DiagWUGrouped -ne 0) { Write-Host "  [ERRO] Grupo (contagem): sem lote nenhum, `$sync.DiagWUGrouped ficou em $($sync.DiagWUGrouped) - o número da busca anterior sobreviveu" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$sync.WPFDiagWULabel.Text -match 'reunido') { Write-Host "  [ERRO] Grupo (rótulo da aba): sem lote nenhum ele ainda fala em itens reunidos ('$($sync.WPFDiagWULabel.Text)')" -ForegroundColor Red; $wbErrors++ }
+            # O id sintético NÃO é chave de estado - o estado é guardado por membro, e o da linha sai
+            # derivado deles. O que se cobra aqui é que ele seja ESTÁVEL entre duas remontagens: id
+            # que muda a cada repintura troca a identidade da linha, e com ela a seleção e o clique.
+            $sync.DiagWUResults = @($wfLgGrLote) + @($wfLgGrSolta)
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'lote-1' -State 'instalado' -Text 'instalado'
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrDepois = @(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]
+            if ([string]$wfLgGrDepois.StatusText -ne "1 de $wfLgGrMinG instalados, $($wfLgGrMinG - 1) pendentes") { Write-Host "  [ERRO] Grupo (tabela): depois de instalar um membro a linha diz '$($wfLgGrDepois.StatusText)'" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfLgGrDepois.ActionLabel -ne "Instalar os $($wfLgGrMinG - 1) que faltam") { Write-Host "  [ERRO] Grupo (tabela): o botão não passou a oferecer só o que falta ('$($wfLgGrDepois.ActionLabel)')" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfLgGrDepois.UpdateId -ne [string]$wfLgGrLinha.UpdateId) { Write-Host "  [ERRO] Grupo (tabela): o id do lote mudou entre duas remontagens ('$($wfLgGrLinha.UpdateId)' -> '$($wfLgGrDepois.UpdateId)') - o estado por id não sobreviveria" -ForegroundColor Red; $wbErrors++ }
+            $sync.DiagWUState = @{}
+            # Sem elevação o botão do lote fica apagado com a dica da elevação, como a linha solta.
+            ${function:Test-WinForgeRepairElevated} = { return $false }
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrSemElev = @(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]
+            if ([bool]$wfLgGrSemElev.ActionEnabled) { Write-Host "  [ERRO] Grupo (elevação): sem elevação o botão do lote continua clicável" -ForegroundColor Red; $wbErrors++ }
+            if ([string]$wfLgGrSemElev.ActionTip -ne [string]$WinForgeElevationTip) { Write-Host "  [ERRO] Grupo (elevação): a dica do botão do lote não é a da elevação ('$($wfLgGrSemElev.ActionTip)')" -ForegroundColor Red; $wbErrors++ }
+            ${function:Test-WinForgeRepairElevated} = { return $true }
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            # O botão "Ver lista" abre a janela de saída com um título por linha - e ela é MONTADA,
+            # não só descrita: é a única forma de saber que os 5 títulos chegaram lá.
+            $wfLgGrJanela = Show-WinForgeWindowsUpdateGroupList -Row (@(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]) -NoShow
+            $wfLgGrTexto = [string]$wfLgGrJanela.FindName('WFOutputText').Text
+            foreach ($wfLgGrTit in @("INTEL - $wfLgGrCls - 1", "INTEL - $wfLgGrCls - $wfLgGrMinG")) {
+                if ($wfLgGrTexto.IndexOf($wfLgGrTit, [StringComparison]::Ordinal) -lt 0) { Write-Host "  [ERRO] Grupo (Ver lista): a janela não traz o título '$wfLgGrTit'" -ForegroundColor Red; $wbErrors++ }
+            }
+            if (@($wfLgGrTexto -split "`r`n").Count -ne $wfLgGrMinG) { Write-Host "  [ERRO] Grupo (Ver lista): a janela tem $(@($wfLgGrTexto -split "`r`n").Count) linha(s), esperado $wfLgGrMinG" -ForegroundColor Red; $wbErrors++ }
+            # ...e cada linha leva o ESTADO do membro. Sem isso, depois de um lote com falhas a linha
+            # diz que 2 falharam e esta janela - o único lugar que poderia dizer QUAIS - não dizia.
+            $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'lote-2' -State 'falhou' -Text 'falhou (código 5)'
+            $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'lote-3' -State 'instalado' -Text 'instalado (reinicie)'
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            $wfLgGrTexto2 = [string](Show-WinForgeWindowsUpdateGroupList -Row (@(@($sync.WPFDiagWU.ItemsSource) | Where-Object { [bool]$_.IsGroup })[0]) -NoShow).FindName('WFOutputText').Text
+            foreach ($wfLgGrPar in @(@("INTEL - $wfLgGrCls - 2", 'falhou (código 5)'), @("INTEL - $wfLgGrCls - 3", 'instalado (reinicie)'))) {
+                if ($wfLgGrTexto2 -notmatch ([regex]::Escape($wfLgGrPar[0]) + '[^\r\n]*' + [regex]::Escape($wfLgGrPar[1]))) { Write-Host "  [ERRO] Grupo (Ver lista): '$($wfLgGrPar[0])' saiu sem '$($wfLgGrPar[1])' na mesma linha" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E o membro sem estado continua saindo só com o título, sem sujeira de separador.
+            if ($wfLgGrTexto2 -match ([regex]::Escape("INTEL - $wfLgGrCls - 1") + '[^\r\n]*->')) { Write-Host "  [ERRO] Grupo (Ver lista): membro sem estado ganhou separador à toa" -ForegroundColor Red; $wbErrors++ }
+            $sync.DiagWUState = @{}
+            Update-WinForgeDiagnosticsWindowsUpdateGrid
+            # O fundo da linha de grupo: gatilho próprio, ANTES dos dois de desfecho - em WPF vence o
+            # último que casa, e a linha que terminou instalada tem de ficar verde, não neutra.
+            $wfLgGrEstilo = $sync.WPFDiagWU.RowStyle
+            $wfLgGrGat = @(@($wfLgGrEstilo.Triggers) | Where-Object { $_ -is [System.Windows.DataTrigger] -and [string]$_.Binding.Path.Path -eq 'IsGroup' })[0]
+            if ($null -eq $wfLgGrGat) { Write-Host "  [ERRO] Grupo (fundo): o estilo da linha não tem gatilho para IsGroup" -ForegroundColor Red; $wbErrors++ }
+            else {
+                $wfLgGrSet = @(@($wfLgGrGat.Setters) | Where-Object { $_.Property -eq [System.Windows.Controls.Control]::BackgroundProperty })[0]
+                if ([string]$wfLgGrSet.Value.ResourceKey -ne 'RowGroupBackgroundColor') { Write-Host "  [ERRO] Grupo (fundo): o gatilho de IsGroup usa '$($wfLgGrSet.Value.ResourceKey)'" -ForegroundColor Red; $wbErrors++ }
+                if ($sync.Form -and $sync.Form.TryFindResource('RowGroupBackgroundColor') -isnot [System.Windows.Media.SolidColorBrush]) { Write-Host "  [ERRO] Grupo (fundo): 'RowGroupBackgroundColor' não chegou ao dicionário da janela como pincel" -ForegroundColor Red; $wbErrors++ }
+                $wfLgGrPosG = @($wfLgGrEstilo.Triggers).IndexOf($wfLgGrGat)
+                $wfLgGrPosE = @($wfLgGrEstilo.Triggers).IndexOf(@(@($wfLgGrEstilo.Triggers) | Where-Object { $_ -is [System.Windows.DataTrigger] -and [string]$_.Binding.Path.Path -eq 'State' -and [string]$_.Value -eq 'instalado' })[0])
+                if ($wfLgGrPosE -lt 0 -or $wfLgGrPosG -lt 0 -or $wfLgGrPosG -gt $wfLgGrPosE) { Write-Host "  [ERRO] Grupo (fundo): o gatilho de IsGroup vem DEPOIS do de 'instalado' e venceria o verde do desfecho" -ForegroundColor Red; $wbErrors++ }
+            }
+            # A coluna "Instalar" liga o Content ao ActionLabel - cobrado no objeto carregado, e não
+            # pela distância entre duas palavras no texto do XAML.
+            $wfLgGrColI = @($sync.WPFDiagWU.Columns | Where-Object { [string]$_.Header -eq 'Instalar' })[0]
+            $wfLgGrColD = @($sync.WPFDiagWU.Columns | Where-Object { [string]$_.Header -eq 'Detalhes' })[0]
+            if ($null -eq $wfLgGrColI -or $null -eq $wfLgGrColD) { Write-Host "  [ERRO] Grupo (colunas): falta a coluna 'Instalar' ou a 'Detalhes' na tabela" -ForegroundColor Red; $wbErrors++ }
+            else {
+                $wfLgGrBtnI = $wfLgGrColI.CellTemplate.LoadContent()
+                $wfLgGrLigI = [System.Windows.Data.BindingOperations]::GetBinding($wfLgGrBtnI, [System.Windows.Controls.ContentControl]::ContentProperty)
+                if ([string]$wfLgGrLigI.Path.Path -ne 'ActionLabel') { Write-Host "  [ERRO] Grupo (colunas): o botão de 'Instalar' liga o Content a '$($wfLgGrLigI.Path.Path)', esperado 'ActionLabel'" -ForegroundColor Red; $wbErrors++ }
+                $wfLgGrBtnD = $wfLgGrColD.CellTemplate.LoadContent()
+                if ([string]$wfLgGrBtnD.Uid -ne 'WFWUGroupDetails') { Write-Host "  [ERRO] Grupo (colunas): o botão de 'Detalhes' veio com Uid '$($wfLgGrBtnD.Uid)' - é por ele que o clique separa os dois botões" -ForegroundColor Red; $wbErrors++ }
+                if ([string]$wfLgGrBtnD.Content -ne 'Ver lista') { Write-Host "  [ERRO] Grupo (colunas): o botão de 'Detalhes' diz '$($wfLgGrBtnD.Content)'" -ForegroundColor Red; $wbErrors++ }
+            }
+            # E o clique separa os TRÊS caminhos. Âncora na forma da chamada com o argumento: o nome
+            # solto apareceria no comentário que explica a regra.
+            $wfLgGrFonteH = [string](Get-Command Initialize-WinForgeDiagnosticsTab).ScriptBlock
+            foreach ($wfLgGrCaminho in @(
+                'if \(\[string\]\$wfBotao\.Uid -eq ''WFWUGroupDetails''\)',
+                'Show-WinForgeWindowsUpdateGroupList -Row \$wfLinha',
+                'Invoke-WinForgeWindowsUpdateGroupAction -Row \$wfLinha',
+                'Invoke-WinForgeWindowsUpdateAction -Row \$wfLinha'
+            )) {
+                if ($wfLgGrFonteH -notmatch $wfLgGrCaminho) { Write-Host "  [ERRO] Grupo (clique): o handler da tabela não tem '$wfLgGrCaminho'" -ForegroundColor Red; $wbErrors++ }
+            }
+            Write-Host "  Grupo na tabela: $wfLgGrMinG ofertas viram 1 linha + 1 solta, contagem publicada e ZERADA, id estável entre remontagens, elevação, fundo próprio e 'Ver lista' com $wfLgGrMinG títulos"
+        } catch {
+            Write-Host "  [ERRO] Grupo (tabela): $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
+        } finally {
+            ${function:Test-WinForgeRepairElevated} = $wfLgGrElev
+            $sync.DiagWUState = $(if ($null -eq $wfLgGrMapa) { @{} } else { $wfLgGrMapa })
+            $sync.DiagWUResults = $wfLgGrAntes
             Update-WinForgeDiagnosticsWindowsUpdateGrid
         }
         # Checklist das recomendações + contador na tela. Uma linha por recomendação, e caixa de
@@ -5866,7 +10651,12 @@ if ($SelfTest) {
         Write-Host "  [ERRO] XAML: $($_.Exception.Message)" -ForegroundColor Red; $wbErrors++
     }
     Write-Host "== SelfTest concluído: $wbErrors erro(s) =="
-    Stop-Transcript | Out-Null
+    } finally {
+        # Roda dê no que der - inclusive quando um bloco estoura fora de um try/catch e o
+        # '== SelfTest concluído ==' acima nem chega a ser escrito.
+        Remove-Item -LiteralPath $wbSelfTestRaiz -Recurse -Force -ErrorAction SilentlyContinue
+        Stop-Transcript | Out-Null
+    }
     exit $wbErrors
 }
 
@@ -5943,6 +10733,22 @@ $sync["Form"].Add_Closing({
         if ($wfFechResp -ne [System.Windows.MessageBoxResult]::Yes) {
             if ($null -ne $wfFechArgs) { $wfFechArgs.Cancel = $true }
             return
+        }
+        # "Sim" passa a CANCELAR de verdade, e não só a desgrudar do pool. Desgrudar abandona a
+        # thread onde ela estiver: o icacls elevado continuava vivo, órfão, reescrevendo permissão
+        # de pasta do sistema sem janela nenhuma para mostrar o que estava acontecendo.
+        #
+        # A espera é curta e tem teto: o pedido mata o processo da vez e impede os seguintes, e o
+        # que sobra é a etapa atual terminando. Dez segundos é o bastante para um icacls de uma
+        # pasta; passou disso, o fechamento segue - segurar a janela de quem mandou fechar seria
+        # trocar um problema por outro. A janela protegida da Fase 4 é justamente o caso em que
+        # esses segundos existem, e o teto é o que impede a espera de virar travamento.
+        $wfFechCaminho = [string]$sync.WinForgeStreamPath
+        if (-not [string]::IsNullOrWhiteSpace($wfFechCaminho)) {
+            $null = Request-WinForgeStreamCancel -Path $wfFechCaminho
+            $wfFechRelogio = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $sync.WinForgeStreamDone[$wfFechCaminho] -and $wfFechRelogio.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 200 }
+            $wfFechRelogio.Stop()
         }
     }
 

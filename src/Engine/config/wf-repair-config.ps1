@@ -131,7 +131,55 @@ $sync.configs.wfrepair = @'
   },
   "WPFWFRepAclUndo": {
     "Content": "Permissões do disco C: - Desfazer (restaurar backup)",
-    "Description": "ALTERA O SISTEMA. Reaplica as listas de permissão que o botão de restaurar padrões guardou antes de mexer no disco, a partir do conjunto mais recente. A lista de cada pasta volta pelo SDDL guardado no índice, e junto com ela vai uma tentativa de devolver o dono; o conteúdo da sua pasta de usuário volta por icacls /restore, com /L para o restauro não sair do perfil pelas junções de compatibilidade. Só aceita índice e arquivo que estejam diretamente na pasta protegida %ProgramData%\\WinForge\\acl-backup e cujo dono seja o SYSTEM ou o grupo Administradores; qualquer outro é recusado sem nem ser lido. Dois limites: devolver a posse ao TrustedInstaller exige um privilégio que nem todo administrador tem, e quando falha o botão diz em qual pasta; e fora do seu perfil volta a lista da pasta, não a de cada arquivo dentro dela. Sem nenhum backup gravado o botão apenas diz isso e não toca em nada. Exige o WinForge aberto como administrador.",
+    "Description": "ALTERA O SISTEMA. Reaplica as listas de permissão que o botão de restaurar padrões guardou antes de mexer no disco, a partir do conjunto mais antigo que ainda não foi usado, que é o que preserva o backup bom quando a restauração rodou mais de uma vez. A lista de cada pasta volta pelo SDDL guardado no índice, e junto com ela vai uma tentativa de devolver o dono; o conteúdo da sua pasta de usuário volta por icacls /restore, com /L para o restauro não sair do perfil pelas junções de compatibilidade. Só aceita índice e arquivo que estejam diretamente na pasta protegida %ProgramData%\\WinForge\\acl-backup e cujo dono seja o SYSTEM ou o grupo Administradores; qualquer outro é recusado sem nem ser lido. Dois limites: devolver a posse ao TrustedInstaller exige um privilégio que nem todo administrador tem, e quando falha o botão diz em qual pasta; e fora do seu perfil volta a lista da pasta, não a de cada arquivo dentro dela. Sem nenhum backup gravado o botão apenas diz isso e não toca em nada. Exige o WinForge aberto como administrador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepAclCleanup": {
+    "Content": "Permissões do disco C: - Limpar backups antigos",
+    "Description": "Lista os arquivos de backup de permissões guardados pelo WinForge com tamanho e data, marca os que nenhum índice usa e apaga só os marcados, sob confirmação.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepNetDiagFull": {
+    "Content": "Rede — Diagnóstico completo",
+    "Description": "Só lê, sem alterar nada. Levanta doze pontos da rede deste computador: o rádio sem fio, o perfil da rede ativa, o endereço IP e o 169.254 que aparece quando o roteador não responde, a rota padrão, o servidor de nomes comparado com o 1.1.1.1, três sondas de saída para a internet, o proxy do usuário e o do WinHTTP, os filtros de terceiro presos aos adaptadores, o catálogo de protocolos do Winsock, o tamanho máximo de pacote, o IPv6 e o código de problema do dispositivo. Termina com uma frase de veredito, escolhida de uma lista fechada de cinco, dizendo por onde começar. Quando acha filtro de antivírus, firewall ou VPN ligado em todos os adaptadores físicos, ele nomeia o filtro e escreve o caminho de menu do próprio Windows para você desligá-lo à mão: este programa não desliga, não reconfigura e não desinstala produto de segurança de terceiro. Nenhum driver é tocado aqui.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepNetDnsRenew": {
+    "Content": "Rede — Limpar cache de DNS e pegar endereço novo",
+    "Description": "ALTERA O SISTEMA. Esvazia o cache de nomes do Windows, devolve ao roteador o endereço que esta máquina está usando, pede outro no lugar e limpa também o cache de nomes NetBIOS, nessa ordem. É o primeiro conserto a tentar quando o diagnóstico aponta endereço 169.254 ou servidor de nomes mudo, e é reversível por natureza: o roteador entrega outro endereço em segundos. A rede cai durante a troca; por isso, se você estiver usando este computador de longe, por Área de Trabalho Remota, o botão recusa no clique e explica: a sua própria conexão cairia junto e não haveria como desfazer de longe. Não toca em driver, em antivírus nem na pilha de rede: para essas coisas há outros botões, e o diagnóstico diz qual.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepWifiDriverReinstall": {
+    "Content": "Rede sem fio — Reinstalar o driver que já está instalado",
+    "Description": "ALTERA O SISTEMA. É o degrau mais conservador dos que mexem em driver: nenhum pacote é apagado do repositório, então o Windows repõe exatamente o mesmo driver que já estava. Serve para quando o driver é o certo e a instalação dele é que azedou. Antes de qualquer coisa ele guarda uma cópia conferida do driver atual em %ProgramData%\\WinForge\\driver-backup e confere arquivo por arquivo; se a cópia falhar, a ação para ali e nada é alterado, porque sem ela não existe caminho de volta. Depois tira o rádio da lista de dispositivos e manda o Windows procurar de novo. Se o rádio voltar com problema, sumido ou em situação estranha, o driver guardado é devolvido NA HORA, sem perguntar - num notebook sem porta de rede, mandar você clicar noutro botão para voltar seria mandar clicar sem rede. A detecção de acesso remoto cobre a Área de Trabalho Remota do Windows e não enxerga AnyDesk, TeamViewer ou RustDesk.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepWifiDriverRestore": {
+    "Content": "Rede sem fio — Voltar para o driver que estava antes",
+    "Description": "ALTERA O SISTEMA. Pega o pacote de driver guardado na última cópia de segurança e o PROPÕE ao Windows: quem decide qual pacote assume o dispositivo é o mecanismo de classificação do próprio Windows, que pode escolher outro, e por isso o relatório conta o que o adaptador virou em vez de afirmar que a volta aconteceu. É a rede de segurança dos outros dois botões de driver, e existe antes deles de propósito: sem volta, não se oferece a ida. Aparece habilitado depois que 'Reinstalar' ou 'Trocar pelo driver básico' guardarem uma cópia conferida em disco; sem cópia nenhuma ele fica desabilitado e a dica diz isso. Se nem assim o rádio voltar, o texto manda trazer o driver do fabricante por cabo ou pen drive, de outro computador.",
+    "category": "WinForge - Reparo de componentes",
+    "panel": "1",
+    "Type": "Button",
+    "ButtonWidth": "350"
+  },
+  "WPFWFRepWifiDriverGeneric": {
+    "Content": "Rede sem fio — Trocar pelo driver básico do Windows (pode ficar sem Wi-Fi)",
+    "Description": "ALTERA O SISTEMA E PODE DEIXAR A MÁQUINA SEM WI-FI. É o último degrau da escada de rede e o único que APAGA pacote de driver. Guarda uma cópia conferida, apaga do repositório os pacotes da família do rádio - só a família dele, identificada pelo arquivo de origem que o dispositivo realmente usa, e nunca os das outras placas - e deixa o Windows instalar o driver básico. Apaga a família inteira, e não só o pacote em uso, porque quando o instalado sai é a versão antiga que assume o dispositivo: apagar um só entregaria um driver de anos atrás e mentiria sobre o que o botão fez. Nunca usa a opção que força a remoção de pacote em uso. Pede uma palavra digitada em vez de um Sim, porque um Sim é clicado por reflexo. No fim, só conta como sucesso se quem assumiu o rádio for mesmo o driver básico da Microsoft; qualquer outro desfecho devolve o driver guardado na hora, sem perguntar. Este botão não aparece em computadores para os quais o Windows não tem driver básico, que é o caso comum em MediaTek, Realtek recentes e Intel novos.",
     "category": "WinForge - Reparo de componentes",
     "panel": "1",
     "Type": "Button",

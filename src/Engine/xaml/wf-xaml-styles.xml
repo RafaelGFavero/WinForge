@@ -323,6 +323,12 @@
              linha instalada continua verde quando o mouse passa por cima. -->
         <Style x:Key="WFWindowsUpdateRow" TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
             <Style.Triggers>
+                <!-- A linha de grupo PRIMEIRO, e os dois desfechos depois: em WPF, entre gatilhos que
+                     casam ao mesmo tempo vence o ÚLTIMO. Terminado o lote, o verde ou o vermelho tem
+                     de vencer o fundo neutro - o desfecho vale mais que a origem da linha. -->
+                <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource RowGroupBackgroundColor}"/>
+                </DataTrigger>
                 <DataTrigger Binding="{Binding State}" Value="instalado">
                     <Setter Property="Background" Value="{DynamicResource RowSuccessBackgroundColor}"/>
                 </DataTrigger>

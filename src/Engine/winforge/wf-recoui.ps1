@@ -298,6 +298,33 @@ function Start-WinForgeProfileJob {
             # para, quatro segundos mais tarde, apagar o texto de outro trabalho que tivesse começado
             $null = Set-WinForgeProfileProgress -Label $wfDone -Percent 100
             Write-WinForgeLog -Component "Profile" -Message $wfDone
+
+            # A varredura da pasta de backup de permissões vem ENCADEADA aqui, e não no gancho da
+            # abertura da janela, porque a barra é a MESMA. Pendurada lá, ela escrevia o aviso e o
+            # "Coletando informações do sistema..." deste job o cobria em milissegundos: quem tinha
+            # trezentos gigabytes presos numa pasta que só SYSTEM e Administradores apagam não via
+            # nada, e o aviso ia só para o arquivo de log. Aqui ela é a ÚLTIMA a escrever.
+            # Só relata - quem apaga é o botão, com a lista na tela e sob confirmação.
+            $null = Show-WinForgeAclBackupSizeWarning
+            # E o marcador de posse pendente, no mesmo gancho e DEPOIS da varredura: ele é mais
+            # grave (uma pasta do Windows pode estar com o dono errado agora) e a barra guarda a
+            # ÚLTIMA mensagem escrita. Só relata - devolver posse de pasta de sistema sozinho, na
+            # abertura, sem ninguém olhando, é o oposto do que estes botões prometem.
+            $null = Show-WinForgeAclOwnerPending
+
+            # Os botões que mexem no driver de rede dependem do PERFIL (é ele que diz se a máquina
+            # é virtual ou um servidor), então eles só podem ser pintados DEPOIS dele. As decisões
+            # são tomadas AQUI, no job: levantar os fatos custa perto de meio segundo por botão
+            # (adaptadores, identificadores de hardware e a varredura de INF), e meio segundo na
+            # thread da janela é travamento visível. Para lá vai só o resultado.
+            $wfNetDecisoes = @{}
+            foreach ($wfNetAcao in @('WifiDriverReinstall', 'WifiDriverRestore', 'WifiDriverGeneric')) {
+                try { $wfNetDecisoes[$wfNetAcao] = Test-WinForgeNetworkGuard -Action $wfNetAcao } catch { }
+            }
+            $sync.WinForgeNetworkGuards = $wfNetDecisoes
+            # O bloco vem de $sync, escrito em escopo de arquivo: criado aqui dentro, ele nasceria
+            # na runspace do pool e travaria a janela na primeira pipeline que rodasse nele.
+            if (-not $sync.WinForgeClosing) { Invoke-WPFUIThread $sync.WinForgeNetworkButtonsCallback }
         } catch {
             # a barra fica visível com o erro: o usuário precisa saber que não há recomendação nenhuma
             $null = Set-WinForgeProfileProgress -Label "Diagnóstico falhou: $($_.Exception.Message)" -Percent 0

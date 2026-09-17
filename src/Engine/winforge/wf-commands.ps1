@@ -142,28 +142,58 @@ function Test-WinForgeCommandRequirement {
     return [bool](Get-Command $Requires -ErrorAction SilentlyContinue)
 }
 
-function Get-WinForgeCommandOutputPath {
+function Get-WinForgeCommandOutputRoot {
     <#
     .SYNOPSIS
-        Caminho do arquivo de saída de um comando: <prefixo>-<Nome>-<aaaaMMdd-HHmmss>.txt na pasta de logs.
+        A pasta onde vivem os arquivos de saída de comando. Cria se não existir.
     .DESCRIPTION
-        A pasta é a mesma da sessão ($sync.logPath): quem for pedir ajuda já sabe olhar lá, e não
-        aparece uma segunda pasta só para isso. Com os segundos no nome, dois cliques seguidos não se
-        sobrescrevem.
+        A mesma da sessão ($sync.logPath): quem for pedir ajuda já sabe olhar lá, e não aparece uma
+        segunda pasta só para isso.
 
-        O prefixo é de quem chama ('server', 'repair'): assim os arquivos de abas diferentes convivem
-        na mesma pasta sem se confundirem, e uma listagem por prefixo continua trazendo só os de uma.
+        Mora numa função própria porque tem DOIS donos - quem prepara um caminho novo e quem faz a
+        retenção -, e a segunda não pode chamar a primeira: a primeira dispara a retenção, e as duas
+        se chamariam em círculo.
+    .OUTPUTS
+        O caminho da pasta.
     #>
-    param(
-        [Parameter(Mandatory)][string]$Name,
-        [string]$Prefix = 'command'
-    )
+    param()
 
     $dir = $null
     if ($null -ne $sync -and $sync.logPath) { $dir = Split-Path -Parent $sync.logPath }
     # Get-WinForgeUserDataRoot, e não $env:LocalAppData: a mesma regra das outras pastas do motor.
     if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Join-Path (Get-WinForgeUserDataRoot) 'WinForge\logs' }
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    return [string]$dir
+}
+
+function Get-WinForgeCommandOutputPath {
+    <#
+    .SYNOPSIS
+        Prepara e devolve o caminho do arquivo de saída de um comando:
+        <prefixo>-<Nome>-<aaaaMMdd-HHmmss>.txt na pasta de logs.
+    .DESCRIPTION
+        Com os segundos no nome, dois cliques seguidos não se sobrescrevem.
+
+        O prefixo é de quem chama ('server', 'repair', 'command'): assim os arquivos de abas
+        diferentes convivem na mesma pasta sem se confundirem, e uma listagem por prefixo continua
+        trazendo só os de uma.
+
+        PREPARA, e não só calcula: além de criar a pasta, é AQUI que a retenção do prefixo roda. Este
+        é o único ponto por onde todo arquivo de saída passa - a aba Servidor, os botões de leitura e
+        o fluxo ao vivo do reparo -, e pendurar a limpeza em quem CRIA o arquivo deixava de fora
+        todos menos um: era só 'repair' que encolhia, e 'server' e 'command' cresciam para sempre.
+
+        A limpeza roda ANTES de o arquivo desta execução existir, e é por isso que ela vai com
+        '-Incoming': o teto é do que a pasta fica DEPOIS. Sem a chave, ela deixava 20 e o de agora
+        fechava 21 - um a mais do que a especificação diz.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Prefix = 'command'
+    )
+
+    $dir = Get-WinForgeCommandOutputRoot
+    [void](Remove-WinForgeOldCommandOutput -Prefix $Prefix -Root $dir -Incoming)
     return (Join-Path $dir ("{0}-{1}-{2}.txt" -f $Prefix, $Name, (Get-Date -Format 'yyyyMMdd-HHmmss')))
 }
 
@@ -277,15 +307,76 @@ function Format-WinForgeProcessArguments {
     return ($partes -join ' ')
 }
 
+function Open-WinForgeStreamWriter {
+    <#
+    .SYNOPSIS
+        O escritor PERSISTENTE do arquivo que a janela de saída acompanha. Um por caminho.
+    .DESCRIPTION
+        Era um StreamWriter novo POR LINHA - abrir, escrever, fechar. Numa fase 5 com 338 pastas,
+        cada uma com o cabeçalho '> icacls ...' e a resposta do icacls, isso é abrir e fechar o
+        mesmo arquivo milhares de vezes: medido, duas ordens de grandeza mais lento do que escrever
+        pelo escritor que já está aberto.
+
+        UM escritor por caminho, e é por isso que Invoke-WinForgeStreamedProcess também pega o dele
+        AQUI em vez de abrir o seu: dois StreamWriter em ACRÉSCIMO sobre o mesmo arquivo não se
+        somam. Cada FileStream guarda a própria posição, e o segundo escreve por cima do que o
+        primeiro escreveu - e, antes disso, o próprio Windows recusa a segunda abertura, porque o
+        compartilhamento padrão do StreamWriter(path, append) é FileShare.Read.
+
+        O compartilhamento é ReadWrite|Delete de propósito: a janela lê o arquivo de meio em meio
+        segundo enquanto ele é escrito (Invoke-WinForgeFollowTick abre com os mesmos três) e o
+        -SelfTest apaga arquivos de prova com o escritor ainda aberto. Quem NÃO lê assim é
+        '[System.IO.File]::ReadAllText', que pede FileShare.Read e recusa um arquivo com escritor
+        aberto - MEDIDO; 'Get-Content' lê.
+
+        AutoFlush ligado: sem o flush, a janela leria um arquivo vazio até o buffer de 4 KB encher,
+        que num sfc é o comando inteiro. O BOM só é escrito quando o arquivo está VAZIO - o
+        StreamWriter olha a posição do fluxo, e num acréscimo a um arquivo que já tem cabeçalho ela
+        nasce maior que zero.
+
+        Quem fecha é Close-WinForgeStreamWriter, no 'finally' do corpo da runspace. Até lá o
+        escritor fica no cache e todo mundo que escreve neste caminho usa o mesmo.
+    .OUTPUTS
+        [System.IO.StreamWriter].
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $existente = $sync.WinForgeStreamWriters[$Path]
+    if ($null -ne $existente) { return $existente }
+    $fluxo = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    $escritor = New-Object System.IO.StreamWriter($fluxo, (New-Object System.Text.UTF8Encoding $true))
+    $escritor.AutoFlush = $true
+    $sync.WinForgeStreamWriters[$Path] = $escritor
+    return $escritor
+}
+
+function Close-WinForgeStreamWriter {
+    <#
+    .SYNOPSIS
+        Fecha o escritor persistente de um caminho e o tira do cache.
+    .DESCRIPTION
+        Sai do cache ANTES de ser fechado: um Dispose que estoure (o flush final num disco cheio)
+        não pode deixar para trás um escritor morto que a próxima escrita neste caminho
+        reutilizaria. Caminho sem escritor é silêncio, e não erro - o 'finally' do corpo da runspace
+        chama esta função mesmo quando nenhum passo chegou a escrever coisa alguma.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $escritor = $sync.WinForgeStreamWriters[$Path]
+    if ($null -eq $escritor) { return }
+    [void]$sync.WinForgeStreamWriters.Remove($Path)
+    try { $escritor.Dispose() } catch { }
+}
+
 function Write-WinForgeStreamLine {
     <#
     .SYNOPSIS
         Acrescenta uma linha ao arquivo que a janela de saída está acompanhando.
     .DESCRIPTION
         Existe para o cabeçalho de cada passo ('> netsh.exe winsock reset') e para as frases finais
-        chegarem ao arquivo pelo MESMO caminho que a saída dos executáveis - mesma codificação, mesma
-        forma de abrir o arquivo. O compartilhamento é ReadWrite porque a janela lê o arquivo de meio
-        em meio segundo enquanto ele é escrito.
+        chegarem ao arquivo pelo MESMO caminho que a saída dos executáveis - mesmo escritor, mesma
+        codificação, mesma forma de abrir o arquivo. O escritor é o persistente de
+        Open-WinForgeStreamWriter, e é lá que está o porquê de ser um só por arquivo.
 
         Falha de escrita não derruba o comando: o passo seguinte importa mais do que uma linha de
         cabeçalho, e a saída de verdade continua indo para o mesmo arquivo.
@@ -295,10 +386,216 @@ function Write-WinForgeStreamLine {
         [string]$Text = ''
     )
 
+    try { (Open-WinForgeStreamWriter -Path $Path).WriteLine([string]$Text) } catch { }
+}
+
+function Enter-WinForgeStreamProtected {
+    <#
+    .SYNOPSIS
+        Abre a janela em que o cancelamento NÃO vale para este arquivo de saída.
+    .DESCRIPTION
+        Existe para o trecho que não pode ser interrompido no meio. O caso que a define: entre
+        "posse da pasta para os Administradores" e "posse de volta ao dono padrão", parar deixa uma
+        pasta do sistema pertencendo aos Administradores - aberta a qualquer processo elevado, que é
+        um estrago pior do que o reparo não terminar.
+
+        Dentro dela o pedido do usuário continua sendo GUARDADO: ele não some, só não vence. Quando
+        a janela fecha, ele passa a valer no passo seguinte. Quem chama é a Tarefa 12.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $sync.WinForgeStreamProtected[$Path] = $true
+}
+
+function Exit-WinForgeStreamProtected {
+    <#
+    .SYNOPSIS
+        Fecha a janela protegida deste arquivo de saída. O pedido guardado volta a valer.
+    .DESCRIPTION
+        Sai do dicionário em vez de virar $false: chave ausente e chave falsa respondem a mesma coisa
+        em Test-WinForgeStreamCancelled, e uma a menos é uma a menos para limpar no fim.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    [void]$sync.WinForgeStreamProtected.Remove($Path)
+}
+
+function Test-WinForgeStreamCancelled {
+    <#
+    .SYNOPSIS
+        Diz se o comando deste arquivo de saída foi cancelado. Só lê.
+    .DESCRIPTION
+        Responde $false enquanto a janela protegida estiver aberta, mesmo com o pedido levantado: é
+        assim que o pedido fica GUARDADO em vez de vencer no meio de uma troca de posse. Quem
+        pergunta é o laço dos passos, entre um passo e o seguinte.
+
+        Falha de leitura responde $false. Um dicionário que não pôde ser lido não é motivo para
+        interromper um reparo pela metade - o lado seguro aqui é continuar.
+    .OUTPUTS
+        [bool].
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
     try {
-        $escritor = New-Object System.IO.StreamWriter($Path, $true, (New-Object System.Text.UTF8Encoding $true))
-        try { $escritor.WriteLine([string]$Text) } finally { $escritor.Dispose() }
-    } catch { }
+        if ([bool]$sync.WinForgeStreamProtected[$Path]) { return $false }
+        return [bool]$sync.WinForgeStreamCancel[$Path]
+    } catch { return $false }
+}
+
+function Get-WinForgeStreamStopPhase {
+    <#
+    .SYNOPSIS
+        Qual dos três textos do Parar vale para o comando que está rodando. Função pura.
+    .DESCRIPTION
+        A confirmação do Parar fala sobre o que o usuário perde ao parar, e só UM comando desta base
+        tem backup e Desfazer: a restauração de permissões. Decidir isso pelo TIPO da linha
+        ('repair') era o defeito, e ele terminava em dano real - o reparo do sistema, o reparo de
+        imagem, a redefinição de rede, o Windows Update, o WinGet e o servidor de horário são todos
+        do mesmo tipo. Parar qualquer um deles mostrava "algumas pastas já foram alteradas; use o
+        Desfazer", e quem acreditasse clicaria no Desfazer - que, havendo conjunto pendente (o
+        estado NORMAL logo depois de uma restauração bem-sucedida), reverteria justamente a
+        restauração que a pessoa queria manter. A frase falsa levava o usuário a destruir o
+        resultado que ele tinha acabado de obter.
+
+        Agora a escolha é pelo NOME do comando, e só a restauração de permissões tem os dois
+        primeiros textos:
+
+        - 'leitura': a restauração ainda está no chkdsk ou no backup (fases 1 e 2). Nada foi
+          alterado, e parar é de graça.
+        - 'escrita': a restauração passou para a fase 3, que é onde a escrita começa de verdade.
+          O disco mudou, e o backup da fase 2 cobre o que mudou.
+        - 'indefinida': qualquer outro comando. Eles ALTERAM o sistema e não têm backup nenhum -
+          afirmar "nada foi alterado" seria mentira, e prometer Desfazer seria a mesma mentira do
+          outro lado. O texto neutro diz o que é verdade: o que já foi feito continua feito.
+
+        A chave '-Writing' vem de '$sync.WinForgeStreamWriting', ligada em UM lugar (o começo da
+        fase 3) e apagada em UM lugar (o 'finally' do corpo da runspace). Foi por isso que ela
+        passou a valer a pena: a alternativa medida - decidir pelo tipo - custa o backup do usuário.
+    .PARAMETER Command
+        O nome da linha ($sync.WinForgeStreamCommand), como 'AclRestore'.
+    .PARAMETER Writing
+        Se a restauração já passou da fase 2. Ignorado nos outros comandos.
+    .OUTPUTS
+        'leitura', 'escrita' ou 'indefinida'.
+    #>
+    param(
+        [string]$Command = '',
+        [switch]$Writing
+    )
+
+    if ([string]$Command -eq 'AclRestore') { return $(if ($Writing) { 'escrita' } else { 'leitura' }) }
+    return 'indefinida'
+}
+
+function Get-WinForgeStreamStopText {
+    <#
+    .SYNOPSIS
+        O texto da confirmação do botão Parar, conforme o comando já tenha ALTERADO o disco ou não.
+        Função pura.
+    .DESCRIPTION
+        Duas frases, e a diferença entre elas é a única coisa que a pessoa na frente da tela precisa
+        decidir: ela perde alguma coisa parando agora?
+
+        - 'leitura': nada foi alterado até aqui (chkdsk, verificação, backup). Parar é de graça.
+        - 'escrita': o disco já mudou. A frase NÃO promete que está tudo bem; ela diz o que existe -
+          o backup da Fase 2 cobre o que foi alterado, e o Desfazer usa exatamente esse backup.
+
+        Dizer "nada foi alterado" numa parada durante a escrita seria a pior mentira que este botão
+        pode contar: o usuário fecharia o programa achando que o disco está como estava.
+
+        Ser pura é o que permite cobrar as duas frases, literais, sem abrir janela nenhuma.
+    .OUTPUTS
+        O texto da caixa de confirmação.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('leitura', 'escrita', 'indefinida')][string]$Phase)
+
+    if ($Phase -eq 'escrita') {
+        return "Parar agora?`r`n`r`nAlgumas pastas já foram alteradas; o Desfazer cobre todas elas - o backup foi gravado antes de a primeira mudança acontecer.`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam. Depois, use 'Permissões do disco C: - Desfazer (restaurar backup)' se quiser voltar tudo ao que era."
+    }
+    if ($Phase -eq 'indefinida') {
+        # Não afirma nem nega escrita, e não promete Desfazer. É o texto dos cinco botões de
+        # correção, que alteram o sistema e não têm backup: entre afirmar errado dos dois lados e
+        # não afirmar, não afirmar é o único honesto.
+        return "Parar agora?`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam. O que já foi feito continua feito.`r`n`r`nO arquivo de saída registra tudo o que rodou até aqui - abra-o pelo botão 'Abrir arquivo' se quiser conferir o que foi alterado antes de decidir o que fazer em seguida."
+    }
+    return "Parar agora?`r`n`r`nNada foi alterado até agora: esta etapa só lê o disco. Parar aqui não deixa nada pela metade e não precisa de Desfazer.`r`n`r`nA etapa que estiver rodando termina antes de o comando parar; as seguintes não começam."
+}
+
+function Write-WinForgeStreamCancelNote {
+    <#
+    .SYNOPSIS
+        Escreve, UMA vez por arquivo, a linha que diz que o resto não foi iniciado.
+    .DESCRIPTION
+        Depois do Parar, TODO passo seguinte passa pela recusa - e numa fase 5 de perfil são
+        centenas deles. Uma linha por recusa seria o próximo despejo a encher a janela, e diria
+        sempre a mesma coisa. A marca de "já avisei" mora em '$sync.WinForgeStreamCancelNoted', pela
+        mesma chave e com o mesmo tempo de vida do escritor.
+
+        Dois chamadores, e é por isso que ela é função: quem recusa o processo
+        (Invoke-WinForgeStreamedProcess) e quem recusa o passo antes de escrever o cabeçalho
+        (Invoke-WinForgeAclStreamStep). A contagem tem de ser a mesma para os dois.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        if ([bool]$sync.WinForgeStreamCancelNoted[$Path]) { return }
+        $sync.WinForgeStreamCancelNoted[$Path] = $true
+    } catch { return }
+    Write-WinForgeStreamLine -Path $Path -Text ''
+    Write-WinForgeStreamLine -Path $Path -Text '== Parado a pedido: os passos seguintes não foram iniciados. =='
+}
+
+function Request-WinForgeStreamCancel {
+    <#
+    .SYNOPSIS
+        Pede o cancelamento do comando deste arquivo de saída: levanta a marca e mata a árvore de
+        processos.
+    .DESCRIPTION
+        Duas metades, e as duas fazem falta:
+
+        1. A MARCA, que o laço dos passos lê entre um passo e o seguinte. Sozinha ela só impede o
+           PRÓXIMO passo de começar - um sfc que já está rodando levaria meia hora para terminar.
+        2. O JOB OBJECT, que mata o processo que está rodando AGORA e toda a árvore dele de uma vez.
+           Medido: 'Stop-Process -Force' sobre o powershell.exe deixa vivo o filho iniciado com
+           UseShellExecute=$false, e era assim que fechar o WinForge deixava um icacls.exe elevado
+           reescrevendo permissões do sistema sem ninguém olhando.
+
+        Dentro da janela protegida ele NÃO mata nada: a marca fica guardada e vale a partir do passo
+        seguinte. É o que separa "parar" de "parar no pior instante possível".
+
+        RESSALVA do '-NoElevate': ali o WinForge roda sem elevação e os processos filhos também, mas
+        um comando que já tenha sido lançado elevado por outro caminho fica fora do alcance - MEDIDO,
+        OpenProcess sobre processo elevado, a partir de pai não elevado, devolve handle 0 e erro 5.
+        O Parar promete o que ele alcança, e num processo não elevado esse alcance é o próprio job.
+    .OUTPUTS
+        @{ Ok = <bool>; Reason = <string> }. 'Ok' é a marca levantada, e não a morte do processo:
+        um comando entre passos não tem processo nenhum para matar, e isso é sucesso.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try { $sync.WinForgeStreamCancel[$Path] = $true } catch { return @{ Ok = $false; Reason = 'o pedido de cancelamento não pôde ser registrado' } }
+    $protegido = $false
+    try { $protegido = [bool]$sync.WinForgeStreamProtected[$Path] } catch { $protegido = $false }
+    if ($protegido) {
+        return @{ Ok = $true; Reason = 'a etapa atual não pode ser interrompida no meio; o pedido foi guardado e vale a partir do próximo passo' }
+    }
+    $trabalho = [IntPtr]::Zero
+    try { if ($null -ne $sync.WinForgeStreamJob[$Path]) { $trabalho = [IntPtr]$sync.WinForgeStreamJob[$Path] } } catch { $trabalho = [IntPtr]::Zero }
+    if ($trabalho -eq [IntPtr]::Zero -or -not ('WfJob' -as [type])) {
+        return @{ Ok = $true; Reason = 'nenhum processo em andamento; o comando para no próximo passo' }
+    }
+    # O retorno NÃO é descartado: com um handle inválido (fechado entre a leitura do dicionário e
+    # esta linha, por exemplo) a chamada responde falso, e devolver 'Ok' com motivo vazio ali seria
+    # o Parar prometendo uma morte que não aconteceu. A marca continua levantada de qualquer jeito -
+    # o comando para no próximo passo -, e é isso que o motivo diz.
+    $encerrou = $false
+    try { $encerrou = [bool][WfJob]::TerminateJobObject($trabalho, 1) } catch { return @{ Ok = $true; Reason = "a marca foi levantada, mas a árvore de processos não pôde ser encerrada ($($_.Exception.Message))" } }
+    if (-not $encerrou) {
+        $erroJob = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "TerminateJobObject respondeu falso (erro $erroJob): o processo em andamento continua até terminar sozinho."
+        return @{ Ok = $true; Reason = "a marca foi levantada, mas o processo em andamento não pôde ser encerrado (erro $erroJob); ele termina sozinho e o comando para no passo seguinte" }
+    }
+    return @{ Ok = $true; Reason = '' }
 }
 
 function Invoke-WinForgeStreamedProcess {
@@ -310,18 +607,43 @@ function Invoke-WinForgeStreamedProcess {
         com o outro caminho: não troca a code page do processo, não pega o mutex e não usa
         $LASTEXITCODE. Ver a documentação de -StreamTo para o porquê de cada uma dessas três.
 
-        O arquivo é aberto em ACRÉSCIMO e fechado no fim do processo, com AutoFlush ligado: sem o
-        flush, a janela leria um arquivo vazio até o buffer de 4 KB encher - que num sfc é o comando
-        inteiro. O StreamWriter só escreve o BOM quando o arquivo está vazio, então um arquivo que já
-        tem o cabeçalho não ganha três bytes no meio.
+        O escritor vem de Open-WinForgeStreamWriter (persistente, um por arquivo) e NÃO é fechado
+        aqui: quem fecha é o 'finally' do corpo da runspace, quando o comando inteiro termina. Ele é
+        pedido ANTES do Start(), e não depois: se o arquivo não puder ser aberto (a pasta sumiu, o
+        disco encheu, um antivírus segurou o identificador), a falha acontece com o processo ainda
+        parado, em vez de deixar um sfc de meia hora rodando sem ninguém para ler a saída dele - e
+        sem ninguém para pará-lo, porque quem chama já terá recebido a exceção.
+
+        OS DOIS FLUXOS SÃO LIDOS JUNTOS, linha a linha, com ReadLineAsync e Task.WaitAny na thread
+        de quem chama. São três defeitos num desenho só, e cada peça responde por um:
+
+        1. O ReadToEndAsync do fluxo de erro juntava o erro INTEIRO na memória até o processo
+           terminar. Num icacls de perfil o erro É o volume, e era ele que a fase 5 empilhava.
+        2. Ler a saída até o fim e SÓ ENTÃO olhar o erro trava os dois lados: o cano tem 4 KB, e um
+           processo que enche o buffer de erro para de escrever enquanto nós esperamos a saída que
+           ele não vai mandar. Esperar os dois juntos é o que impede isso.
+        3. E o pump do erro NÃO pode ser uma Task do .NET rodando um scriptblock convertido em
+           delegate: MEDIDO nesta máquina, no PowerShell 5.1, ele morre com "Não há Runspace
+           disponível para executar scripts neste thread", a Task fica 'Faulted' e ninguém lê o
+           fluxo de erro - o defeito 2 de volta, agora calado. É a mesma regra que já proíbe
+           manipulador de evento aqui, e é por isso que a leitura assíncrona é de .NET puro: quem
+           espera é esta thread, que tem runspace.
+
+        Com uma thread só escrevendo no arquivo, não há duas linhas se intercalando no meio de um
+        caractere - e nenhuma trava é necessária para garantir isso.
+    .PARAMETER NoCapture
+        Não junta o texto para devolver: 'Text' volta vazio. É para quem só quer o código de saída -
+        as fases 3 a 5 das permissões -, porque acumular centenas de MB num StringBuilder para
+        descartá-los no fim é exatamente o consumo de memória que o fluxo ao vivo existe para tirar.
     .OUTPUTS
-        @{ Text = <string>; ExitCode = <int> }.
+        @{ Text = <string>; ExitCode = <int> }. Com -NoCapture, Text = ''.
     #>
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$Arguments = @(),
         [Parameter(Mandatory)][string]$StreamTo,
-        [Parameter(Mandatory)][System.Text.Encoding]$Encoding
+        [Parameter(Mandatory)][System.Text.Encoding]$Encoding,
+        [switch]$NoCapture
     )
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -336,35 +658,140 @@ function Invoke-WinForgeStreamedProcess {
 
     $processo = New-Object System.Diagnostics.Process
     $processo.StartInfo = $psi
-    $acumulado = New-Object System.Text.StringBuilder
+    $acumulado = if ($NoCapture) { $null } else { New-Object System.Text.StringBuilder }
     $codigo = $null
-    $escritor = $null
     try {
-        # O escritor nasce ANTES do Start(), e não depois: se o arquivo não puder ser aberto (a pasta
-        # sumiu, o disco encheu, um antivírus segurou o identificador), a falha acontece com o
-        # processo ainda parado, em vez de deixar um sfc de meia hora rodando sem ninguém para ler a
-        # saída dele - e sem ninguém para pará-lo, porque quem chama já terá recebido a exceção.
-        $escritor = New-Object System.IO.StreamWriter($StreamTo, $true, (New-Object System.Text.UTF8Encoding $true))
-        $escritor.AutoFlush = $true
+        $escritor = Open-WinForgeStreamWriter -Path $StreamTo
+        # O Job Object nasce ANTES do processo, e a atribuição acontece na linha seguinte ao Start():
+        # não há como atribuir um processo que ainda não existe, e este é o instante mais cedo
+        # possível. KILL_ON_JOB_CLOSE fecha o outro buraco: morto o WinForge pelo Gerenciador de
+        # Tarefas, o handle do job morre com ele e o Windows derruba a árvore - é o que impede um
+        # icacls.exe elevado de continuar reescrevendo permissão sem ninguém olhando.
+        #
+        # A janela PROTEGIDA fica de fora de propósito: processo que não está em job nenhum não é
+        # morto por TerminateJobObject, e é assim que a troca de posse da Fase 4 não pode ser
+        # interrompida no meio nem por engano.
+        #
+        # Sem o tipo (chamada fora do corpo da runspace, como no -SelfTest) o comando roda igual,
+        # só sem Parar: o job é um extra, não um pré-requisito.
+        # O PARAR, conferido AQUI e não só entre passos. A restauração de permissões inteira é UM
+        # passo para o motor, e as fases 3 a 5 disparam um processo atrás do outro: matar o processo
+        # da vez não adiantava nada, porque o laço lançava o seguinte, com um job novo, até o fim -
+        # a janela dizia "Parando" enquanto o reparo terminava inteiro.
+        #
+        # Esta é a conferência de PONTO ÚNICO: todo laço fica coberto sem ninguém precisar lembrar de
+        # checar em cada um, porque todo processo do fluxo ao vivo passa por aqui. 1223 é
+        # ERROR_CANCELLED, e não um código que algum icacls possa devolver por conta própria.
+        if (Test-WinForgeStreamCancelled -Path $StreamTo) {
+            Write-WinForgeStreamCancelNote -Path $StreamTo
+            return @{ Text = ''; ExitCode = 1223 }
+        }
+        $trabalho = [IntPtr]::Zero
+        $protegido = $false
+        try { $protegido = [bool]$sync.WinForgeStreamProtected[$StreamTo] } catch { $protegido = $false }
+        if (-not $protegido -and ('WfJob' -as [type])) {
+            try {
+                $trabalho = [WfJob]::CreateJobObject([IntPtr]::Zero, $null)
+                if ($trabalho -ne [IntPtr]::Zero) {
+                    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION: 144 bytes em 64 bits, 112 em 32. O campo
+                    # LimitFlags está em 16 nos dois, e 0x2000 é JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+                    $tamanho = $(if ([IntPtr]::Size -eq 8) { 144 } else { 112 })
+                    $info = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($tamanho)
+                    try {
+                        for ($z = 0; $z -lt $tamanho; $z += 4) { [System.Runtime.InteropServices.Marshal]::WriteInt32($info, $z, 0) }
+                        [System.Runtime.InteropServices.Marshal]::WriteInt32($info, 16, 0x2000)
+                        # As duas chamadas devolvem booleano, e ele NÃO é para ser jogado fora.
+                        # Aqui, falso (com tamanho errado o Windows responde erro 24) custa só a
+                        # morte automática da árvore quando o WinForge é encerrado por fora: o
+                        # botão Parar continua funcionando. É aviso, não recusa.
+                        if (-not [WfJob]::SetInformationJobObject($trabalho, 9, $info, [uint32]$tamanho)) {
+                            Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "O job do comando não aceitou KILL_ON_JOB_CLOSE (erro $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())): o botão Parar continua valendo, mas fechar o WinForge à força pode deixar o processo filho vivo."
+                        }
+                    } finally { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($info) }
+                    $sync.WinForgeStreamJob[$StreamTo] = $trabalho
+                }
+            } catch { $trabalho = [IntPtr]::Zero }
+        }
+        # O teto do ARQUIVO desta execução, já estourado por um passo anterior ou não. Passado o
+        # teto, as linhas continuam sendo LIDAS (parar de ler enche o cano de 4 KB e trava os dois
+        # lados) e deixam de ser escritas.
+        $estourou = $false
+        try { $estourou = [bool]$sync.WinForgeStreamCapped[$StreamTo] } catch { $estourou = $false }
+        # De 2000 em 2000 linhas, e não a cada linha: o teto existe para pegar um arquivo que cresce
+        # sem parar, e um Get-Item por linha seria um acesso a disco por linha.
+        $desdeAConta = 0
         [void]$processo.Start()
-        $tarefaErro = $processo.StandardError.ReadToEndAsync()
-        while ($null -ne ($linha = $processo.StandardOutput.ReadLine())) {
-            $escritor.WriteLine($linha)
-            [void]$acumulado.AppendLine($linha)
+        # Falhar AQUI é pior do que falhar no KILL_ON_JOB_CLOSE: o job fica vazio, o pedido de
+        # encerramento não mata nada e o Parar vira um botão que não para. O handle sai do
+        # dicionário junto com o aviso, para Request-WinForgeStreamCancel não prometer uma morte
+        # que não vai acontecer e dizer, em vez disso, que o comando para no próximo passo.
+        if ($trabalho -ne [IntPtr]::Zero) {
+            $atribuiu = $false
+            try { $atribuiu = [bool][WfJob]::AssignProcessToJobObject($trabalho, $processo.Handle) } catch { $atribuiu = $false }
+            if (-not $atribuiu) {
+                Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "O processo não pôde ser atribuído ao job (erro $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())): o botão Parar não vai encerrar este processo, só impedir os passos seguintes."
+                [void]$sync.WinForgeStreamJob.Remove($StreamTo)
+            }
+        }
+        $tSaida = $processo.StandardOutput.ReadLineAsync()
+        $tErro = $processo.StandardError.ReadLineAsync()
+        while ($null -ne $tSaida -or $null -ne $tErro) {
+            if ($null -eq $tErro) { $tSaida.Wait() }
+            elseif ($null -eq $tSaida) { $tErro.Wait() }
+            else { [void][System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($tSaida, $tErro)) }
+            if ($null -ne $tSaida -and $tSaida.IsCompleted) {
+                $linha = $tSaida.Result
+                if ($null -eq $linha) {
+                    $tSaida = $null
+                } else {
+                    if (-not $estourou) {
+                        $escritor.WriteLine($linha)
+                        if ($null -ne $acumulado) { [void]$acumulado.AppendLine($linha) }
+                        $desdeAConta++
+                    }
+                    $tSaida = $processo.StandardOutput.ReadLineAsync()
+                }
+            }
+            if ($null -ne $tErro -and $tErro.IsCompleted) {
+                $linha = $tErro.Result
+                if ($null -eq $linha) {
+                    $tErro = $null
+                } else {
+                    if (-not $estourou) {
+                        $escritor.WriteLine("[erro] $linha")
+                        if ($null -ne $acumulado) { [void]$acumulado.AppendLine("[erro] $linha") }
+                        $desdeAConta++
+                    }
+                    $tErro = $processo.StandardError.ReadLineAsync()
+                }
+            }
+            if ($desdeAConta -ge 2000) {
+                $desdeAConta = 0
+                $teto = Test-WinForgeStreamFileCap -Path $StreamTo
+                if ($teto.Over) {
+                    $estourou = $true
+                    # UMA linha por arquivo, e não por processo: numa fase 5 de 338 pastas são 338
+                    # chamadas de processo sobre o MESMO arquivo, e o aviso repetido seria o próximo
+                    # despejo a encher o disco.
+                    $escritor.WriteLine([string]$teto.Text)
+                    $sync.WinForgeStreamCapped[$StreamTo] = $true
+                }
+            }
         }
         $processo.WaitForExit()
         $codigo = $processo.ExitCode
-        foreach ($linha in @([string]$tarefaErro.Result -split "`r`n|`n|`r")) {
-            if ([string]::IsNullOrWhiteSpace($linha)) { continue }
-            $escritor.WriteLine("[erro] $linha")
-            [void]$acumulado.AppendLine("[erro] $linha")
-        }
     } finally {
-        if ($null -ne $escritor) { try { $escritor.Dispose() } catch { } }
+        # O handle sai do dicionário ANTES de ser fechado: um Parar que chegasse entre as duas
+        # linhas encontraria um handle já morto. E o fechamento é o que dispara KILL_ON_JOB_CLOSE -
+        # aqui o processo já terminou, e no caminho de exceção é exatamente o que se quer.
+        if ($trabalho -ne [IntPtr]::Zero) {
+            [void]$sync.WinForgeStreamJob.Remove($StreamTo)
+            try { [void][WfJob]::CloseHandle($trabalho) } catch { }
+        }
         try { $processo.Dispose() } catch { }
     }
 
-    return @{ Text = $acumulado.ToString(); ExitCode = $codigo }
+    return @{ Text = $(if ($null -ne $acumulado) { $acumulado.ToString() } else { '' }); ExitCode = $codigo }
 }
 
 function Invoke-WinForgeNativeCommand {
@@ -419,22 +846,27 @@ function Invoke-WinForgeNativeCommand {
         quem decodifica é o próprio Process, pelo StandardOutputEncoding, que vale só para ele. Como
         efeito colateral bom, dois comandos com fluxo ao vivo não disputam nada entre si.
 
-        O fluxo de erro é lido por uma tarefa do .NET (ReadToEndAsync) e não por um manipulador de
-        evento em PowerShell: manipulador criado dentro de uma runspace do pool volta a chamar o
-        PowerShell de uma thread do pool de threads, que é a receita de travamento desta base de
-        código. Sem leitura paralela nenhuma, um comando falante no fluxo de erro encheria o buffer
-        do cano (4 KB) e ficaria parado esperando alguém esvaziá-lo enquanto nós esperamos o fluxo de
-        saída - travamento dos dois lados. As linhas de erro entram no arquivo com o prefixo '[erro]',
-        depois da saída normal.
+        O fluxo de erro é lido linha a linha, de forma assíncrona e de .NET puro, ao mesmo tempo que
+        o da saída - e não por um manipulador de evento em PowerShell nem por um scriptblock numa
+        thread do pool de threads: os dois voltam a chamar o PowerShell de fora da runspace, que é a
+        receita de travamento desta base de código. Sem leitura paralela nenhuma, um comando falante
+        no fluxo de erro encheria o buffer do cano (4 KB) e ficaria parado esperando alguém
+        esvaziá-lo enquanto nós esperamos o fluxo de saída - travamento dos dois lados. As linhas de
+        erro entram no arquivo com o prefixo '[erro]', na ordem em que chegam.
+    .PARAMETER NoCapture
+        Só com -StreamTo: descarta o texto em vez de acumulá-lo, e 'Text' volta vazio. Para quem só
+        precisa do código de saída - guardar centenas de MB num StringBuilder para jogar fora no fim
+        é o consumo de memória que o fluxo ao vivo existe para tirar do caminho.
     .OUTPUTS
-        @{ Text = <string>; ExitCode = <int> }.
+        @{ Text = <string>; ExitCode = <int> }. Com -NoCapture, Text = ''.
     #>
     param(
         [string]$Command,
         [string]$FilePath,
         [string[]]$Arguments = @(),
         [string]$StreamTo,
-        [string]$Encoding = 'oem'
+        [string]$Encoding = 'oem',
+        [switch]$NoCapture
     )
 
     if ([string]::IsNullOrWhiteSpace($Command) -and [string]::IsNullOrWhiteSpace($FilePath)) {
@@ -446,9 +878,14 @@ function Invoke-WinForgeNativeCommand {
     if (-not [string]::IsNullOrWhiteSpace($StreamTo) -and [string]::IsNullOrWhiteSpace($FilePath)) {
         throw "Invoke-WinForgeNativeCommand -StreamTo só vale com -FilePath: pipeline de cmdlet não tem fluxo para acompanhar."
     }
+    # -NoCapture sem -StreamTo seria descartar a saída sem tê-la mandado para lugar nenhum: o
+    # chamador ficaria com o código de saída e com mais nada. É engano de quem chama, não opção.
+    if ($NoCapture -and [string]::IsNullOrWhiteSpace($StreamTo)) {
+        throw "Invoke-WinForgeNativeCommand -NoCapture só vale com -StreamTo: sem fluxo ao vivo, descartar o texto é descartar o resultado."
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($StreamTo)) {
-        return Invoke-WinForgeStreamedProcess -FilePath $FilePath -Arguments $Arguments -StreamTo $StreamTo -Encoding (Get-WinForgeOutputEncoding -Name $Encoding)
+        return Invoke-WinForgeStreamedProcess -FilePath $FilePath -Arguments $Arguments -StreamTo $StreamTo -Encoding (Get-WinForgeOutputEncoding -Name $Encoding) -NoCapture:$NoCapture
     }
 
     $encodingAnterior = $null
@@ -633,6 +1070,10 @@ function Show-WinForgeOutputWindow {
         Meio segundo é o intervalo porque é o que separa "ao vivo" de "piscando": um DISM escreve
         dezenas de linhas de progresso por segundo, e um relógio de 100 ms faria a caixa de texto
         rolar mais do que ler.
+    .PARAMETER ExpectMinutes
+        Quanto a linha que está rodando costuma levar, em minutos. Vai para a Tag e é o que deixa o
+        cabeçalho ficar âmbar a 1,5x e urgente a 3x (Get-WinForgeFollowHeader). Zero desliga o aviso:
+        sem estimativa não há atraso a acusar.
     .PARAMETER NoShow
         Monta e devolve a janela sem mostrá-la, e NÃO liga o relógio do -FollowPath. É o que o
         -SelfTest usa: abrir janela durante o build deixaria um build sem ninguém na frente exibindo
@@ -646,6 +1087,7 @@ function Show-WinForgeOutputWindow {
         [string]$Text = '',
         [string]$Path,
         [string]$FollowPath,
+        [int]$ExpectMinutes = 0,
         [string]$Component = 'Command',
         [switch]$NoShow
     )
@@ -768,6 +1210,43 @@ function Show-WinForgeOutputWindow {
     }.GetNewClosure())
     $barra.Children.Add($btnArquivo) | Out-Null
 
+    # O PARAR, e só numa janela que ACOMPANHA um arquivo: numa saída pronta não há o que parar, e um
+    # botão que não faz nada é pior do que botão nenhum. Fica à esquerda do Fechar porque é a ação
+    # menos comum das duas - e porque ninguém deve acertar o Parar mirando no Fechar.
+    $btnParar = $null
+    if (-not [string]::IsNullOrWhiteSpace($FollowPath)) {
+        $btnParar = & $novoBotao 'Parar'
+        $caminhoSeguido = [string]$FollowPath
+        # O clique é um scriptblock de ESCOPO DE ARQUIVO fechado sobre o caminho, como os outros três
+        # desta janela: ele roda na thread da interface e nunca nasce dentro de uma runspace do pool.
+        # Quem cancela é Request-WinForgeStreamCancel; quem obedece é o laço dos passos e a recusa
+        # de ponto único antes de cada processo.
+        $btnParar.Add_Click({
+            # A fase decide o TEXTO, e o texto é a única coisa que a pessoa tem para decidir se
+            # perde algo parando agora. Ela sai do NOME do comando e da chave da escrita - ver
+            # Get-WinForgeStreamStopPhase, que tem o porquê de não sair do TIPO: pelo tipo, oito
+            # comandos ofereciam um Desfazer que só um deles tem, e clicar nele destruiria o backup
+            # da restauração anterior.
+            $faseParada = [string](Get-WinForgeStreamStopPhase -Command ([string]$sync.WinForgeStreamCommand) -Writing:([bool]$sync.WinForgeStreamWriting))
+            $respostaParada = [System.Windows.MessageBox]::Show($janela, (Get-WinForgeStreamStopText -Phase $faseParada), 'WinForge',
+                [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)
+            if ($respostaParada -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            # O MOTIVO não é descartado: quando o processo em andamento não pôde ser encerrado, é
+            # ele que diz que o comando ainda vai até o fim da etapa atual. Vai para o arquivo, que
+            # é onde a pessoa já está olhando, e para o log.
+            $pedidoParada = Request-WinForgeStreamCancel -Path $caminhoSeguido
+            if (-not [string]::IsNullOrWhiteSpace([string]$pedidoParada.Reason)) {
+                Write-WinForgeStreamLine -Path $caminhoSeguido -Text ("== Parar: {0} ==" -f [string]$pedidoParada.Reason)
+                Write-WinForgeLog -Component $componenteLog -Level "WARN" -Message "Parar pedido em '$caminhoSeguido': $([string]$pedidoParada.Reason)"
+            }
+            # O rótulo e o estado saem do TIQUE, e não daqui: ele já olha as mesmas chaves de meio em
+            # meio segundo, e dois donos do mesmo botão é como um deles acaba dizendo 'Parando…'
+            # depois de o comando ter terminado.
+            Invoke-WinForgeFollowTick -Window $janela
+        }.GetNewClosure())
+        $barra.Children.Add($btnParar) | Out-Null
+    }
+
     $btnFechar = & $novoBotao 'Fechar'
     $btnFechar.Add_Click({ $janela.Close() }.GetNewClosure())
     $barra.Children.Add($btnFechar) | Out-Null
@@ -776,20 +1255,45 @@ function Show-WinForgeOutputWindow {
     [System.Windows.NameScope]::SetNameScope($janela, (New-Object System.Windows.NameScope))
     $janela.RegisterName('WFOutputText', $caixa)
     $janela.RegisterName('WFOutputHeader', $cabecalho)
+    if ($null -ne $btnParar) { $janela.RegisterName('WFOutputStop', $btnParar) }
 
     if (-not [string]::IsNullOrWhiteSpace($FollowPath)) {
         $cabecalho.Visibility = [System.Windows.Visibility]::Visible
+        # As cores dos três níveis do cabeçalho, resolvidas UMA vez e guardadas na Tag: o tique bate
+        # de meio em meio segundo, e perguntar ao dicionário de recursos a cada batida é trabalho sem
+        # resposta nova. A reserva segue a mesma regra do fundo e do texto lá em cima - o -SelfTest
+        # monta esta janela antes de a janela principal existir, e sem ela o cabeçalho ficaria sem
+        # pincel nenhum justamente no teste que confere a troca de cor.
+        $aviso = $null
+        $urgente = $null
+        if ($null -ne $sync -and $null -ne $sync.Form) {
+            try { $aviso = $sync.Form.Resources['HeaderWarningColor'] } catch { $aviso = $null }
+            try { $urgente = $sync.Form.Resources['HeaderUrgentColor'] } catch { $urgente = $null }
+        }
+        if ($null -eq $aviso) { $aviso = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(245, 158, 11)) }
+        if ($null -eq $urgente) { $urgente = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(239, 68, 68)) }
         # Todo o estado do acompanhamento mora na Tag, e não em variáveis fechadas dentro de um
         # scriptblock: é o que deixa Invoke-WinForgeFollowTick ser uma função de arquivo, chamável
         # tanto pelo relógio quanto pelo -SelfTest, sem um scriptblock por janela.
         $janela.Tag = @{
-            Path   = $FollowPath
-            Offset = [long]0
-            Start  = (Get-Date)
-            Title  = $Title
-            Box    = $caixa
-            Header = $cabecalho
-            Timer  = $null
+            Path          = $FollowPath
+            Offset        = [long]0
+            Start         = (Get-Date)
+            Title         = $Title
+            Box           = $caixa
+            Header        = $cabecalho
+            Timer         = $null
+            # Quanto esta linha costuma levar. É daqui que sai o âmbar de 1,5x e o urgente de 3x.
+            ExpectMinutes = [int]$ExpectMinutes
+            Pinceis       = @{ normal = $frente; ambar = $aviso; urgente = $urgente }
+            # Quantos caracteres a caixa tem, contados por nós. Ler '$caixa.Text' MATERIALIZA a
+            # string inteira - até 4 MB -, e perguntar o tamanho a cada meio segundo seria copiar
+            # 4 MB por tique só para descobrir que não precisa cortar nada. Com o contador, a caixa
+            # só é lida no tique em que o corte acontece.
+            Chars         = [int]([string]$caixa.Text).Length
+            # O botão Parar mora na Tag pela mesma razão do resto: o tique é função de ARQUIVO e não
+            # teria outro jeito de alcançá-lo. É ele quem liga, desliga e renomeia o botão.
+            Stop          = $btnParar
         }
         # Primeira leitura antes de mostrar: a janela abre já com o que o arquivo tem, e não em
         # branco por meio segundo.
@@ -812,6 +1316,232 @@ function Show-WinForgeOutputWindow {
     # acima) garante que ela continua por cima da janela principal e fecha com ela.
     if (-not $NoShow) { $janela.Show() }
     return $janela
+}
+
+function Limit-WinForgeStreamText {
+    <#
+    .SYNOPSIS
+        O anel da caixa de texto: acima de 4 MB, volta para os últimos 2 MB, com uma marca no topo.
+    .DESCRIPTION
+        HISTERESE, e não corte por tique. Cortar sempre que passa de 2 MB faz a caixa copiar 2 MB a
+        cada 512 KB que chegam - foi assim que o pico bateu 971 MB. Cortando só acima de 4 MB e
+        voltando para 2 MB, a cópia acontece uma vez a cada 2 MB de saída: 274 MB de pico, medido.
+
+        O corte cai na primeira quebra de linha a partir do ponto de 2 MB, e não no meio de uma
+        linha: metade de um caminho de pasta no topo da caixa é ruído, não informação. Sem quebra de
+        linha nenhuma no trecho (uma linha só, gigante), corta no ponto exato - é o único jeito de o
+        teto valer para saída que não tem linha.
+
+        Quem fica é o FIM do texto. A janela acompanha um comando em andamento: o que interessa é o
+        que está acontecendo agora, e o começo continua inteiro no arquivo - é o que a marca diz.
+    .OUTPUTS
+        O texto, cortado ou não.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [int]$MaxChars = 4194304,
+        [int]$KeepChars = 2097152
+    )
+
+    if ($Text.Length -le $MaxChars) { return $Text }
+    $corte = $Text.IndexOf("`n", $Text.Length - $KeepChars)
+    $inicio = if ($corte -lt 0) { $Text.Length - $KeepChars } else { $corte + 1 }
+    return "… (o começo desta parte ficou só no arquivo)`r`n" + $Text.Substring($inicio)
+}
+
+function Get-WinForgeFollowReadWindow {
+    <#
+    .SYNOPSIS
+        Quanto do arquivo um tique lê: o pedaço inteiro, ou só a cauda quando ele cresceu demais.
+        Função pura.
+    .DESCRIPTION
+        O tique lê de '$Offset' até o fim do arquivo. Isso vale enquanto o arquivo cresce meio
+        segundo por vez; não vale quando a janela fica minimizada ou a thread da interface fica presa
+        e o arquivo ganha dezenas de MB entre dois tiques - aí a leitura aloca um byte[] do tamanho
+        do salto, decodifica tudo e joga quase tudo fora no teto do bloco. O pico vem dessa alocação,
+        e não do que aparece na tela.
+
+        Acima de 'MaxGrowth' (8 MB) o tique lê só o último 'TailBytes' (1 MB) e diz quanto pulou -
+        quem quer o meio tem o arquivo, que continua completo. Abaixo disso não recorta nada: o caso
+        normal é de alguns KB por tique, e recortar ali seria perder linha à toa.
+
+        Ser pura é o que permite provar os dois lados com números, sem arquivo nenhum e sem janela.
+    .OUTPUTS
+        @{ Start = <long>; Count = <int>; Skipped = <long> }. 'Skipped' é 0 quando nada foi pulado.
+    #>
+    param(
+        [Parameter(Mandatory)][long]$Offset,
+        [Parameter(Mandatory)][long]$Length,
+        [long]$MaxGrowth = 8388608,
+        [long]$TailBytes = 1048576
+    )
+
+    $inicio = [long]$Offset
+    if ($inicio -lt 0) { $inicio = 0 }
+    if ($Length -le $inicio) { return @{ Start = $inicio; Count = 0; Skipped = [long]0 } }
+    $cresceu = [long]($Length - $inicio)
+    if ($cresceu -le $MaxGrowth) { return @{ Start = $inicio; Count = [int]$cresceu; Skipped = [long]0 } }
+    $novoInicio = [long]($Length - $TailBytes)
+    return @{ Start = $novoInicio; Count = [int]$TailBytes; Skipped = [long]($novoInicio - $inicio) }
+}
+
+function Test-WinForgeStreamFileCap {
+    <#
+    .SYNOPSIS
+        Diz se o arquivo de saída desta execução passou do teto, e com que linha avisar. Só lê.
+    .DESCRIPTION
+        O teto é do ARQUIVO, e é a última rede: o anel da caixa protege a memória da janela, e este
+        protege o disco de quem clicou. Um reparo de permissões num perfil grande, ou um DISM que
+        entra em laço de erro, escreve sem parar enquanto o usuário está fora da frente da máquina -
+        e foi disco cheio, não só memória, o que o usuário relatou.
+
+        256 MB é folgado de propósito: nenhuma execução legítima chega perto, e o que chega lá não
+        está mais dizendo nada de novo. O que passa disso vira UMA linha e silêncio - e a linha diz
+        que os detalhes foram descartados, porque um arquivo que simplesmente para de crescer é
+        indistinguível de um comando que travou.
+
+        Arquivo que não existe, ou que não pode ser medido, responde 'não passou': o teto não é lugar
+        de derrubar um comando por não conseguir ler um tamanho.
+    .OUTPUTS
+        @{ Over = <bool>; Bytes = <long>; Text = <string> }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [long]$MaxBytes = 268435456
+    )
+
+    $bytes = [long]0
+    try { $bytes = [long](Get-Item -LiteralPath $Path -ErrorAction Stop).Length } catch { return @{ Over = $false; Bytes = [long]0; Text = '' } }
+    if ($bytes -le $MaxBytes) { return @{ Over = $false; Bytes = $bytes; Text = '' } }
+    return @{
+        Over  = $true
+        Bytes = $bytes
+        Text  = ("== Teto de {0} MB alcançado: os detalhes daqui em diante foram descartados. O comando continua rodando, e o fim dele ainda aparece nesta janela. ==" -f [int]($MaxBytes / 1MB))
+    }
+}
+
+function Remove-WinForgeOldCommandOutput {
+    <#
+    .SYNOPSIS
+        Retenção dos arquivos de saída de um prefixo: 30 dias e 20 arquivos. Apaga o excedente.
+    .DESCRIPTION
+        Os arquivos de saída nunca eram apagados. Um DISM de 40 MB por clique, numa máquina que usa o
+        botão toda semana, é a pasta de logs crescendo para sempre - e a queixa que abriu esta leva
+        começou com disco cheio.
+
+        POR PREFIXO, e as duas regras somam: sai o que tem mais de 30 dias, e depois sai o que
+        sobrar além dos 20 mais novos. O prefixo é o que mantém 'server' e 'repair' independentes -
+        vinte diagnósticos de servidor não podem empurrar para fora os reparos, que são o histórico
+        que alguém vai querer ler depois de uma restauração de permissões dar errado.
+
+        A ordem é do mais NOVO para o mais velho, e o corte é no fim da fila: apagar do começo seria
+        apagar exatamente o arquivo que o usuário acabou de gerar.
+
+        Falha de remoção não é erro: o arquivo pode estar aberto na janela de outra execução. Ele
+        fica, e a limpeza da execução seguinte tenta de novo.
+    .PARAMETER Root
+        A pasta. Vazio, é a mesma de Get-WinForgeCommandOutputPath.
+    .PARAMETER Incoming
+        Um arquivo novo vai nascer logo depois desta limpeza, e ele conta no teto. Com a chave, a
+        fila é cortada em 'MaxFiles - 1' para que a pasta fique com MaxFiles DEPOIS de o novo
+        aparecer. Sem ela a limpeza deixava 20 e o de agora fechava 21, que não é o que a
+        especificação diz.
+    .OUTPUTS
+        @{ Removed = @(<string>) } com os nomes apagados.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Prefix,
+        [int]$MaxAgeDays = 30,
+        [int]$MaxFiles = 20,
+        [string]$Root = '',
+        [switch]$Incoming
+    )
+
+    # Get-WinForgeCommandOutputRoot, e NÃO Get-WinForgeCommandOutputPath: aquela dispara esta
+    # função, e as duas se chamariam em círculo até a pilha acabar.
+    $dir = $Root
+    if ([string]::IsNullOrWhiteSpace($dir)) { $dir = Get-WinForgeCommandOutputRoot }
+    $apagados = @()
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return @{ Removed = @() } }
+    $arquivos = @(Get-ChildItem -LiteralPath $dir -File -Filter ("{0}-*.txt" -f $Prefix) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    $limite = (Get-Date).AddDays(-[math]::Abs($MaxAgeDays))
+    $teto = $(if ($Incoming) { $MaxFiles - 1 } else { $MaxFiles })
+    if ($teto -lt 0) { $teto = 0 }
+    $n = 0
+    foreach ($f in $arquivos) {
+        $n++
+        if ($n -le $teto -and [datetime]$f.LastWriteTime -ge $limite) { continue }
+        Remove-Item -LiteralPath ([string]$f.FullName) -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath ([string]$f.FullName))) { $apagados += [string]$f.Name }
+    }
+    return @{ Removed = @($apagados) }
+}
+
+function Get-WinForgeFollowHeader {
+    <#
+    .SYNOPSIS
+        O texto e o nível do cabeçalho da janela que acompanha um comando. Só conta: função pura.
+    .DESCRIPTION
+        O caso que deu origem a isto: 404 minutos olhando um contador subir, sem nada na tela dizendo
+        se aquilo era normal. Um cronômetro sozinho não informa - ele só mede. O que informa é a
+        comparação com o que AQUELA linha costuma levar.
+
+        Os cortes são 1,5x e 3x do ESPERADO, e não um número fixo de minutos: um DISM de vinte
+        minutos e um Desfazer de dez não têm o mesmo "está demorando". Sem 'ExpectMinutes' o nível é
+        sempre 'normal' - comando sem estimativa não pode acusar atraso que ninguém sabe medir, e
+        inventar um teto fixo faria o botão mais lento da tabela viver em âmbar.
+
+        'Cancelado em mm:ss' vem ANTES de 'Concluído': quem apertou Parar sabe que parou, e ver
+        "Concluído" depois disso é o programa dizendo que fez o que não fez.
+
+        Tempo NEGATIVO existe de verdade aqui: 'Servidor NTP - Ativar' roda 'w32tm /resync' com esta
+        janela aberta, e a hora do sistema pode recuar no meio. Sem a guarda, o cabeçalho mostraria
+        '-1:59'. O relógio volta para 00:00 e segue - a alternativa seria guardar um contador
+        monotônico por janela para um caso que dura um tique.
+
+        Ser pura é o que permite provar os três níveis e os dois cortes com números, sem janela.
+    .PARAMETER ExpectMinutes
+        Quanto esta linha costuma levar, em minutos. Zero (ou ausente) desliga o âmbar.
+    .PARAMETER ExitCode
+        O código de saída, só com -Done. Nulo vira 'n/d': a runspace pode ter morrido antes de gravar
+        um, e 'código ' sozinho é pior do que dizer que não se sabe.
+    .OUTPUTS
+        @{ Text = <string>; Level = 'normal'|'ambar'|'urgente' }.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title,
+        [Parameter(Mandatory)][timespan]$Elapsed,
+        [int]$ExpectMinutes = 0,
+        [switch]$Done,
+        $ExitCode = $null,
+        [switch]$Cancelled,
+        [switch]$Stopping
+    )
+
+    $minutos = [double]$Elapsed.TotalMinutes
+    $segundos = [int]$Elapsed.Seconds
+    if ($minutos -lt 0) { $minutos = 0; $segundos = 0 }
+    $mmss = '{0:00}:{1:00}' -f [int][math]::Floor($minutos), $segundos
+    if ($Cancelled) { return @{ Text = "Cancelado em $mmss"; Level = 'normal' } }
+    if ($Done) { return @{ Text = "Concluído em $mmss (código $(if ($null -ne $ExitCode) { $ExitCode } else { 'n/d' }))"; Level = 'normal' } }
+    # Pedido feito e comando ainda andando. Vem DEPOIS de -Done de propósito: pedir para parar a um
+    # comando que já terminou não muda o que aconteceu, e 'Parando' ali seria o programa fingindo
+    # trabalho. E não há aviso de demora junto - quem pediu para parar já sabe que está demorando.
+    if ($Stopping) { return @{ Text = "Parando: $Title ($mmss)"; Level = 'normal' } }
+
+    $andamento = "Em andamento: $Title ($mmss)"
+    if ($ExpectMinutes -le 0) { return @{ Text = $andamento; Level = 'normal' } }
+    $vezes = $minutos / $ExpectMinutes
+    # A frase diz as três coisas que a pessoa na frente da tela precisa saber, nesta ordem: que está
+    # fora do normal, que mesmo assim continua andando, e o que fazer se quiser sair. Sem a segunda,
+    # o aviso vira "travou"; sem a terceira, vira "e agora?".
+    if ($vezes -ge 3) {
+        return @{ Text = "$andamento - Está demorando MUITO mais que o normal (o comum são $ExpectMinutes minutos, e já passou do triplo disso). Continua rodando: isto não é travamento. Não feche esta janela; se quiser interromper agora, use o botão Parar."; Level = 'urgente' }
+    }
+    if ($vezes -ge 1.5) {
+        return @{ Text = "$andamento - Está demorando mais que o normal (o comum são $ExpectMinutes minutos). Continua rodando: isto não é travamento. Não feche esta janela; para interromper, use o botão Parar."; Level = 'ambar' }
+    }
+    return @{ Text = $andamento; Level = 'normal' }
 }
 
 function Invoke-WinForgeFollowTick {
@@ -840,6 +1570,15 @@ function Invoke-WinForgeFollowTick {
            AppendText desse tamanho congela a thread da interface por muito tempo. O deslocamento
            avança sobre o bloco inteiro de qualquer jeito: o arquivo continua completo, e é ele o
            resultado. A caixa recebe a última parte, precedida de um aviso.
+        5. E são TRÊS tetos, não um, porque são três consumos diferentes:
+           - o do byte[] LIDO (Get-WinForgeFollowReadWindow, 8 MB de crescimento / 1 MB de cauda):
+             a janela minimizada ou a thread presa deixam o arquivo crescer dezenas de MB entre dois
+             tiques, e alocar esse salto inteiro para descartá-lo no teto do bloco é o pico que não
+             aparece na tela;
+           - o do BLOCO por tique (512 KB, item 4), que é o custo do AppendText;
+           - o da CAIXA (Limit-WinForgeStreamText, 4 MB com volta para 2 MB), que é o que fica na
+             memória depois. O teto do bloco sozinho não segura este: 512 KB por tique, meia hora de
+             DISM, é a caixa com centenas de MB dentro.
     #>
     param([Parameter(Mandatory)]$Window)
 
@@ -853,11 +1592,30 @@ function Invoke-WinForgeFollowTick {
         $arquivo = [System.IO.File]::Open([string]$estado.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
         try {
             if ($arquivo.Length -gt [long]$estado.Offset) {
-                [void]$arquivo.Seek([long]$estado.Offset, [System.IO.SeekOrigin]::Begin)
-                $bytes = New-Object byte[] ([int]($arquivo.Length - [long]$estado.Offset))
+                # Quanto ler, e de onde: acima de 8 MB de crescimento o tique pega só a cauda de
+                # 1 MB e pula o resto - o arquivo continua completo, e quem quer o meio tem ele.
+                $janelaLeitura = Get-WinForgeFollowReadWindow -Offset ([long]$estado.Offset) -Length ([long]$arquivo.Length)
+                $pulou = [long]$janelaLeitura.Skipped
+                [void]$arquivo.Seek([long]$janelaLeitura.Start, [System.IO.SeekOrigin]::Begin)
+                $bytes = New-Object byte[] ([int]$janelaLeitura.Count)
                 $lidos = $arquivo.Read($bytes, 0, $bytes.Length)
                 $inicio = 0
-                if ([long]$estado.Offset -eq 0 -and $lidos -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $inicio = 3 }
+                if ([long]$janelaLeitura.Start -eq 0 -and $lidos -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $inicio = 3 }
+                # O começo da CAUDA cai num byte qualquer, e ele pode ser a continuação de um
+                # caractere de vários bytes. Um byte de continuação solto vira U+FFFD, que tem TRÊS
+                # bytes em UTF-8: o GetByteCount lá embaixo contaria 3 onde 1 foi consumido, e o
+                # deslocamento sairia do lugar - para sempre, porque ele é cumulativo. MEDIDO antes
+                # deste laço: deslocamento 8686019 num arquivo de 8686017 bytes, dois bytes além do
+                # fim, e a linha seguinte chegando à janela com as primeiras letras comidas.
+                #
+                # É o mesmo cuidado que o corte na última quebra de linha já tem com o FIM da
+                # janela. E o laço é INCONDICIONAL: havia aqui uma guarda de "só quando houve salto",
+                # com a justificativa de que no começo do arquivo pular bytes comeria texto de
+                # verdade. Era o contrário - num arquivo que começasse por byte de continuação, a
+                # guarda PRESERVARIA o desvio em vez de evitá-lo. Sem ela o começo do arquivo não
+                # muda (o motor sempre escreve cabeçalho com BOM, e depois dele vem byte inicial de
+                # caractere), e o caso impossível fica tratado de graça.
+                while ($inicio -lt $lidos -and ($bytes[$inicio] -band 0xC0) -eq 0x80) { $inicio++ }
                 $texto = [System.Text.Encoding]::UTF8.GetString($bytes, $inicio, $lidos - $inicio)
                 if (-not $concluido) {
                     $corte = $texto.LastIndexOf("`n")
@@ -871,11 +1629,22 @@ function Invoke-WinForgeFollowTick {
                     $corteTeto = $texto.IndexOf("`n", $texto.Length - 524288)
                     $texto = "… (o começo desta parte ficou só no arquivo)`r`n" + $texto.Substring($(if ($corteTeto -lt 0) { $texto.Length - 524288 } else { $corteTeto + 1 }))
                 }
+                if ($pulou -gt 0) { $texto = ("… ({0} MB desta parte ficaram só no arquivo)`r`n" -f [int][math]::Ceiling($pulou / 1MB)) + $texto }
                 if ($texto.Length -gt 0) {
                     $estado.Box.AppendText($texto)
+                    $estado.Chars = [int]$estado.Chars + $texto.Length
+                    # O ANEL, e só depois do acréscimo: o teto do bloco acima limita o que ENTRA por
+                    # tique, e este limita o que FICA. A caixa só é LIDA no tique em que o corte
+                    # acontece - ler '.Text' materializa a string inteira, e fazer isso a cada meio
+                    # segundo seria copiar 4 MB por tique para descobrir que não há o que cortar.
+                    if ([int]$estado.Chars -gt 4194304) {
+                        $cortado = Limit-WinForgeStreamText -Text ([string]$estado.Box.Text)
+                        $estado.Box.Text = $cortado
+                        $estado.Chars = $cortado.Length
+                    }
                     $estado.Box.ScrollToEnd()
                 }
-                $estado.Offset = [long]$estado.Offset + $avanco
+                $estado.Offset = [long]$janelaLeitura.Start + $avanco
             }
         } finally { $arquivo.Dispose() }
     } catch {
@@ -883,16 +1652,37 @@ function Invoke-WinForgeFollowTick {
         # pega a mesma coisa meio segundo depois. Uma exceção aqui mataria o relógio.
     }
 
-    $decorrido = (Get-Date) - [datetime]$estado.Start
-    $mmss = '{0:00}:{1:00}' -f [int][math]::Floor($decorrido.TotalMinutes), $decorrido.Seconds
-    if ($concluido) {
-        $codigo = $null
-        try { $codigo = $sync.WinForgeStreamExit[[string]$estado.Path] } catch { $codigo = $null }
-        $estado.Header.Text = "Concluído em $mmss (código $(if ($null -ne $codigo) { $codigo } else { 'n/d' }))"
-        if ($null -ne $estado.Timer) { try { $estado.Timer.Stop() } catch { } }
-    } else {
-        $estado.Header.Text = "Em andamento: $($estado.Title) ($mmss)"
+    # O tique só PINTA: quem decide o texto e o nível é Get-WinForgeFollowHeader, que é pura e cabe
+    # num teste sem janela. Os três pincéis foram resolvidos uma vez, na montagem - perguntar ao
+    # dicionário de recursos de meio em meio segundo é trabalho sem resposta nova.
+    $codigo = $null
+    if ($concluido) { try { $codigo = $sync.WinForgeStreamExit[[string]$estado.Path] } catch { $codigo = $null } }
+    # Pedido de parada feito e comando ainda andando: o cabeçalho diz 'Parando: ', que é a resposta
+    # ao clique. Sem ele o cabeçalho continuaria em 'Em andamento' e o botão pareceria não ter feito
+    # nada - a etapa atual ainda termina, e são esses segundos que a frase explica.
+    $parando = $false
+    if (-not $concluido) { try { $parando = [bool]$sync.WinForgeStreamCancel[[string]$estado.Path] } catch { $parando = $false } }
+    # E o desfecho: terminou porque acabou, ou terminou porque pararam? 'Concluído' depois de uma
+    # interrupção é o programa dizendo que fez o que foi mandado parar - e, na fase do backup, ele
+    # dizia isso com código 0 e ainda mandava reiniciar o computador.
+    $parou = $false
+    if ($concluido) { try { $parou = [bool]$sync.WinForgeStreamStopped[[string]$estado.Path] } catch { $parou = $false } }
+    $cabecalho = Get-WinForgeFollowHeader -Title ([string]$estado.Title) -Elapsed ((Get-Date) - [datetime]$estado.Start) -ExpectMinutes ([int]$estado.ExpectMinutes) -Done:$concluido -ExitCode $codigo -Stopping:$parando -Cancelled:$parou
+    $estado.Header.Text = [string]$cabecalho.Text
+    $pincel = $estado.Pinceis[[string]$cabecalho.Level]
+    if ($null -ne $pincel) { $estado.Header.Foreground = $pincel }
+    # O BOTÃO PARAR, que é do tique e de mais ninguém: um comando terminado não tem o que parar, um
+    # pedido já feito não se faz duas vezes, e na janela protegida da Fase 4 a parada não é imediata
+    # - a troca de posse termina antes, e o rótulo diz isso em vez de deixar a pessoa clicando.
+    $botaoParar = $null
+    try { $botaoParar = $estado.Stop } catch { $botaoParar = $null }
+    if ($null -ne $botaoParar) {
+        $protegido = $false
+        try { $protegido = [bool]$sync.WinForgeStreamProtected[[string]$estado.Path] } catch { $protegido = $false }
+        $botaoParar.Content = $(if ($parando) { 'Parando…' } elseif ($protegido) { 'Parar (aguarde alguns segundos)' } else { 'Parar' })
+        $botaoParar.IsEnabled = (-not $concluido -and -not $parando)
     }
+    if ($concluido -and $null -ne $estado.Timer) { try { $estado.Timer.Stop() } catch { } }
 }
 
 # Saída pendente de janela: um slot POR CHAMADA, com chave própria, e não um único global. O slot
@@ -908,6 +1698,52 @@ $sync.CommandOutputQueue = [System.Collections.Queue]::Synchronized((New-Object 
 # arquivos diferentes não se confundem.
 $sync.WinForgeStreamDone = [System.Collections.Hashtable]::Synchronized(@{})
 $sync.WinForgeStreamExit = [System.Collections.Hashtable]::Synchronized(@{})
+
+# O escritor persistente de cada arquivo com fluxo ao vivo, pela mesma chave dos dois de cima. Um
+# por caminho, e não um por chamador: dois StreamWriter em acréscimo sobre o mesmo arquivo escrevem
+# por cima um do outro, quando o Windows não recusa a segunda abertura antes disso. Quem abre é
+# Open-WinForgeStreamWriter, quem fecha é o 'finally' do corpo da runspace.
+$sync.WinForgeStreamWriters = [System.Collections.Hashtable]::Synchronized(@{})
+
+# O encanamento do Parar, pela mesma chave e com o mesmo tempo de vida dos dois de cima:
+#
+# - 'Cancel' é o pedido do usuário. Quem levanta é a thread da janela; quem lê é a runspace do pool.
+# - 'Job' é o handle do Job Object do processo que está rodando agora. Medido: 'powershell.exe'
+#   morto com Stop-Process -Force DEIXA VIVO o filho iniciado com UseShellExecute=$false - fechar o
+#   WinForge deixava um icacls.exe ELEVADO reescrevendo ACL de pasta do sistema, sem ninguém olhando.
+#   Um handle de job mata a árvore inteira de uma vez, e é a única forma que faz isso.
+# - 'Protected' é a janela em que o cancelamento NÃO vale. Ela existe para o trecho entre "posse aos
+#   Administradores" e "posse de volta ao dono padrão": parar ali deixa a pasta do sistema aberta a
+#   qualquer processo elevado, que é pior do que não parar. Quem a usa é a Tarefa 12; aqui ela nasce.
+#
+# Sincronizadas porque são exatamente isso - variáveis atravessando duas threads.
+$sync.WinForgeStreamCancel = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.WinForgeStreamJob = [System.Collections.Hashtable]::Synchronized(@{})
+$sync.WinForgeStreamProtected = [System.Collections.Hashtable]::Synchronized(@{})
+
+# Quais arquivos já passaram do teto de tamanho desta execução. Mora ao lado do escritor porque é a
+# mesma chave e o mesmo tempo de vida: o aviso de "os detalhes daqui em diante foram descartados"
+# sai UMA vez por arquivo, e não uma por chamada de processo - a fase 5 de um perfil são centenas
+# de chamadas sobre o mesmo arquivo.
+$sync.WinForgeStreamCapped = [System.Collections.Hashtable]::Synchronized(@{})
+
+# Em quais arquivos a linha "Parado a pedido" já foi escrita. Mesma chave e mesmo tempo de vida dos
+# de cima, e existe pelo mesmo motivo do teto: depois do Parar, todo passo seguinte passa pela
+# recusa, e uma linha por recusa seriam centenas delas numa fase 5 de perfil. A frase sai UMA vez.
+$sync.WinForgeStreamCancelNoted = [System.Collections.Hashtable]::Synchronized(@{})
+
+# Quais comandos terminaram INTERROMPIDOS. Vive ao lado de WinForgeStreamDone/Exit, e com o mesmo
+# tempo de vida: a janela precisa dele DEPOIS do fim, para o cabeçalho dizer 'Cancelado' em vez de
+# 'Concluído'. Gravado antes da conclusão, no 'finally' do corpo da runspace.
+$sync.WinForgeStreamStopped = [System.Collections.Hashtable]::Synchronized(@{})
+
+# O arquivo que o comando com fluxo ao vivo está escrevendo AGORA. É como um passo do tipo
+# 'Function' - que roda com todos os fluxos redirecionados para o arquivo, sem receber argumento
+# nenhum - descobre para onde escrever quando ele próprio quer mandar a saída de um executável
+# direto para lá, sem passar pelo Write-Host: é o caso das fases 3 a 5 de Invoke-WinForgeAclRestore,
+# onde o texto do icacls chega a centenas de MB. Escrito e apagado no corpo da runspace, junto com o
+# nome e o tipo do que está rodando.
+$sync.WinForgeStreamPath = ''
 
 # O ícone da barra de tarefas é objeto da JANELA: escrever nele de uma runspace do pool morre com
 # "outra thread é dona deste objeto". As funções da base que rodam dentro dos passos
@@ -1125,7 +1961,10 @@ function Invoke-WinForgeStreamStep {
 
     Write-WinForgeStreamLine -Path $Path -Text ""
     Write-WinForgeStreamLine -Path $Path -Text "> $($Step.FilePath) $(@($Step.Arguments) -join ' ')"
-    $res = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Encoding ([string]$Step.Encoding)
+    # -NoCapture: as duas linhas abaixo só leem o código de saída, e o texto já foi para o arquivo
+    # linha a linha. Sem ele, um DISM ou um sfc é acumulado inteiro num StringBuilder para ser
+    # descartado no retorno - o mesmo desperdício que as fases das permissões tinham.
+    $res = Invoke-WinForgeNativeCommand -FilePath ([string]$Step.FilePath) -Arguments @($Step.Arguments) -StreamTo $Path -Encoding ([string]$Step.Encoding) -NoCapture
     if ($null -eq $res.ExitCode) { return 0 }
     return [int]$res.ExitCode
 }
@@ -1163,16 +2002,45 @@ function Invoke-WinForgeStreamedSteps {
     $codigo = 0
     $falhou = ''
     $n = 0
+    $concluidos = 0
+    $cancelado = $false
     foreach ($passo in @($Steps)) {
+        # ENTRE passos, e não dentro de um: o processo que já está rodando é morto pelo job (ver
+        # Request-WinForgeStreamCancel), e o que esta pergunta decide é se o PRÓXIMO começa. Parar
+        # antes de começar é a única interrupção que não deixa nada pela metade.
+        if (Test-WinForgeStreamCancelled -Path $Path) { $cancelado = $true; break }
         $n++
         $titulo = if ($passo.Function) { [string]$passo.Function } else { [string](Split-Path -Leaf ([string]$passo.FilePath)) }
         $passoCodigo = [int](Invoke-WinForgeStreamStep -Path $Path -Step $passo)
+        # E DEPOIS do passo, porque a marca pode ter sido levantada NO MEIO dele: a restauração de
+        # permissões inteira é UM passo, e o Desfazer e a Limpeza também são. Sem esta conferência,
+        # parar durante a fase 2 escrevia '== Passo 1: ... código 0 ==' e, logo abaixo,
+        # '== Concluído ==' com a frase final mandando reiniciar o computador - o programa dizendo
+        # que fez o que foi mandado parar.
+        if (Test-WinForgeStreamCancelled -Path $Path) {
+            Write-WinForgeStreamLine -Path $Path -Text ("== Passo {0}: {1} — interrompido a pedido ==" -f $n, $titulo)
+            $cancelado = $true
+            break
+        }
         Write-WinForgeStreamLine -Path $Path -Text ("== Passo {0}: {1} — código {2} ==" -f $n, $titulo, $passoCodigo)
+        $concluidos++
         if ($codigo -eq 0 -and $passoCodigo -ne 0) { $codigo = $passoCodigo; $falhou = "$n ($titulo)" }
     }
     Write-WinForgeStreamLine -Path $Path -Text ""
+    if ($cancelado) {
+        # A frase de fechamento ($Final) NÃO sai aqui, pelo mesmo motivo que não sai num comando que
+        # falhou: ela está no presente do indicativo ("Configuração de rede redefinida."), e
+        # imprimi-la depois de uma interrupção é dizer que fez o que não fez.
+        #
+        # A conta é de passos CONCLUÍDOS, e não de passos iniciados: o passo em que o Parar pegou
+        # não terminou, e contá-lo seria a mesma mentira em tamanho menor.
+        Write-WinForgeStreamLine -Path $Path -Text ("== Interrompido a pedido depois de {0} passo(s) concluído(s): o resto não rodou. ==" -f $concluidos)
+        Write-WinForgeStreamLine -Path $Path -Text ""
+        Write-WinForgeStreamLine -Path $Path -Text "O que já tinha sido feito continua feito; o que faltava não foi começado."
+        return $codigo
+    }
     if ($codigo -eq 0) {
-        Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $n)
+        Write-WinForgeStreamLine -Path $Path -Text ("== Concluído: {0} passo(s), todos com código 0 ==" -f $concluidos)
         if (-not [string]::IsNullOrWhiteSpace($Final)) {
             Write-WinForgeStreamLine -Path $Path -Text ""
             Write-WinForgeStreamLine -Path $Path -Text ([string]$Final)
@@ -1197,6 +2065,35 @@ $sync.WinForgeStreamBody = {
     param($wfArgs)
     $wfCaminho = [string]$wfArgs.Path
     $wfCodigo = 0
+    # Para onde um passo do tipo 'Function' manda a saída de um executável sem passar pelo Write-Host.
+    # É o que as fases 3 a 5 das permissões consultam - ver $sync.WinForgeStreamPath.
+    $sync.WinForgeStreamPath = $wfCaminho
+    # O tipo do Job Object nasce AQUI, dentro da runspace do POOL, e não na principal: MEDIDO, um
+    # tipo criado por Add-Type na runspace principal NÃO é visto nas runspaces do pool, e um segundo
+    # Add-Type do mesmo nome falha com "o tipo já existe". A guarda resolve as duas pontas - o
+    # primeiro comando cria, os seguintes encontram.
+    #
+    # O NOME da guarda e o NOME do tipo têm de ser o mesmo: com -Namespace preenchido o tipo nasceria
+    # 'Espaco.WfJob', a guarda nunca o encontraria e o segundo Add-Type é que estouraria.
+    try {
+        if (-not ('WfJob' -as [type])) {
+            # 'SetLastError = true' em TODAS: sem ele o GetLastWin32Error que os avisos imprimem é
+            # LIXO - o .NET só guarda o código do Windows quando a importação pede. Três mensagens
+            # desta base citam esse número, e sem a chave elas citariam o erro de outra chamada
+            # qualquer, feita antes, por outro código.
+            Add-Type -Namespace '' -Name 'WfJob' -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr CreateJobObject(IntPtr a, string lpName);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr h);
+'@
+        }
+    } catch {
+        # Sem o tipo o comando roda igual, só sem Parar. Derrubar um reparo porque o P/Invoke não
+        # compilou seria trocar um problema pequeno por um grande.
+        Write-WinForgeLog -Component "Repair" -Level "WARN" -Message "O cancelamento por Job Object não pôde ser preparado: $($_.Exception.Message)"
+    }
     try {
         $wfCodigo = [int](Invoke-WinForgeStreamedSteps -Path $wfCaminho -Steps @($wfArgs.Steps) -Final ([string]$wfArgs.Final))
     } catch {
@@ -1204,6 +2101,28 @@ $sync.WinForgeStreamBody = {
         Write-WinForgeStreamLine -Path $wfCaminho -Text "[erro] $($_.Exception.Message)"
         Write-WinForgeLog -Component "Repair" -Level "ERROR" -Message "$($wfArgs.Name) falhou: $($_.Exception.Message)"
     } finally {
+        # O escritor persistente fecha AQUI, e antes de a janela ser avisada do fim: ela lê o arquivo
+        # de meio em meio segundo e o último tique tem de encontrar tudo o que foi escrito. É também
+        # a única saída - um passo que estoure passa por este 'finally', e sem ele o identificador
+        # do arquivo ficaria aberto até o programa fechar.
+        # INTERROMPIDO é um desfecho, e não um "concluído com código estranho". Ele é lido ANTES das
+        # remoções abaixo e gravado ANTES de a conclusão ser ligada: o tique lê os dois no mesmo
+        # instante, e na ordem contrária o cabeçalho final saía como 'Concluído (código 1223)' - ou,
+        # pior, como 'Concluído (código 0)' com um convite a reiniciar o computador, quando o
+        # comando tinha sido interrompido na fase do backup.
+        $wfParou = $false
+        try { $wfParou = [bool]$sync.WinForgeStreamCancel[$wfCaminho] } catch { $wfParou = $false }
+        $sync.WinForgeStreamStopped[$wfCaminho] = $wfParou
+        Close-WinForgeStreamWriter -Path $wfCaminho
+        [void]$sync.WinForgeStreamCapped.Remove($wfCaminho)
+        [void]$sync.WinForgeStreamCancelNoted.Remove($wfCaminho)
+        # O encanamento do Parar sai junto: pedido, handle de job e janela protegida são deste
+        # comando e de mais nenhum. Deixá-los para trás faria o comando SEGUINTE, com outro arquivo,
+        # conviver com lixo - e um pedido esquecido no dicionário é um Parar que ninguém pediu.
+        [void]$sync.WinForgeStreamCancel.Remove($wfCaminho)
+        [void]$sync.WinForgeStreamJob.Remove($wfCaminho)
+        [void]$sync.WinForgeStreamProtected.Remove($wfCaminho)
+        $sync.WinForgeStreamPath = ''
         $sync.WinForgeStreamExit[$wfCaminho] = $wfCodigo
         $sync.WinForgeStreamDone[$wfCaminho] = $true
         $sync.CommandRunning = $false
@@ -1213,6 +2132,10 @@ $sync.WinForgeStreamBody = {
         # aparecer num fechamento em que não há mais nada em andamento.
         $sync.WinForgeStreamName = ''
         $sync.WinForgeStreamKind = ''
+        # O nome e a chave da escrita saem no mesmo lugar: são deste comando e de mais nenhum, e uma
+        # chave de escrita esquecida ligada faria o comando SEGUINTE oferecer um Desfazer que não é dele.
+        $sync.WinForgeStreamCommand = ''
+        $sync.WinForgeStreamWriting = $false
         # Os dois botões da aba Diagnóstico ("Aplicar marcados", "Desfazer marcados") são
         # habilitados por $sync.ProcessRunning, e quem os repinta é Update-WinForgeDiagActionButtons
         # - que até aqui só rodava no contador de marcações. Sem esta chamada eles ficavam
@@ -1310,6 +2233,11 @@ function Start-WinForgeStreamedCommand {
     # direto, como já fazia para o diagnóstico e a busca de drivers.
     $sync.WinForgeStreamName = [string]$Spec.Title
     $sync.WinForgeStreamKind = [string]$Spec.Kind
+    # O NOME da linha, que é o que separa a restauração de permissões dos outros seis comandos do
+    # mesmo tipo - e a chave da escrita, que só a restauração liga, no começo da fase 3. Ver
+    # Get-WinForgeStreamStopPhase para o dano que decidir isso pelo TIPO causava.
+    $sync.WinForgeStreamCommand = [string]$Name
+    $sync.WinForgeStreamWriting = $false
     # Os botões da aba Diagnóstico desabilitam na hora, e não no próximo clique numa caixa de
     # marcação (esta função já roda na thread da janela: é o handler do botão).
     try { Update-WinForgeDiagActionButtons } catch { }
@@ -1321,7 +2249,9 @@ function Start-WinForgeStreamedCommand {
         $sync.WinForgeStreamDone[$caminho] = $false
         $sync.WinForgeStreamExit[$caminho] = $null
 
-        Show-WinForgeOutputWindow -Title $Spec.Title -FollowPath $caminho -Component 'Repair' | Out-Null
+        # A estimativa vem da LINHA, e é ela que deixa o cabeçalho ficar âmbar a 1,5x e urgente a 3x.
+        # Linha sem 'ExpectMinutes' vira zero, e zero desliga o aviso em vez de inventar um teto.
+        Show-WinForgeOutputWindow -Title $Spec.Title -FollowPath $caminho -ExpectMinutes ([int]$Spec.ExpectMinutes) -Component 'Repair' | Out-Null
 
         Write-WinForgeLog -Component "Repair" -Message "$Name iniciado: $($passos.Count) passo(s), saída ao vivo em $caminho"
         Invoke-WPFRunspace -ScriptBlock $sync.WinForgeStreamBody -ArgumentList @{ Name = $Name; Path = $caminho; Steps = $passos; Final = $Spec.Final } | Out-Null
