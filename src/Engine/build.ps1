@@ -7107,6 +7107,11 @@ if ($SelfTest) {
         $null = Set-WinForgeWindowsUpdateRowState -UpdateId 'g-13' -State 'falhou' -Text 'falhou'
         if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText -ne '12 de 47 instalados, 1 falhou, 34 pendentes') { Write-Host "  [ERRO] Grupo (estado): parcial deu '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).StatusText)'" -ForegroundColor Red; $wbErrors++ }
         if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).State -ne 'pendente') { Write-Host "  [ERRO] Grupo (estado): lote parado no meio veio State '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).State)', esperado 'pendente' - vermelho ali diria que o lote acabou mal" -ForegroundColor Red; $wbErrors++ }
+        # Faltando UM, o rótulo é no singular. 'Instalar os 1 que faltam' é o tipo de coisa que passa
+        # despercebida em revisão e salta aos olhos na tela do usuário.
+        $sync.DiagWUState = @{}
+        foreach ($wfLgId in @($wfLgMembros | Select-Object -SkipLast 1)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
+        if ([string](Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).ActionLabel -ne 'Instalar o 1 que falta') { Write-Host "  [ERRO] Grupo (rótulo): faltando um, o botão diz '$((Get-WinForgeWindowsUpdateGroupState -Members $wfLgMembros).ActionLabel)'" -ForegroundColor Red; $wbErrors++ }
         $sync.DiagWUState = @{}
         # Rótulos da linha. A palavra "chipset" NÃO entra: o rótulo nasce de Provider e classe, mais
         # frouxos que o filtro de §4, e dizer "chipset" ali afirmaria o que §4 proíbe afirmar.
@@ -7146,9 +7151,21 @@ if ($SelfTest) {
         # confirmação do chipset (MessageBoxImage::Warning) a esta mesma função, e contar todas
         # deixaria este teste vermelho no dia em que aquela tarefa entrasse.
         if (@([regex]::Matches($wfLgFonteI, 'MessageBoxImage\]::Information')).Count -ne 1) { Write-Host "  [ERRO] Grupo (instalação): $(@([regex]::Matches($wfLgFonteI, 'MessageBoxImage\]::Information')).Count) caixas de reinício, esperado UMA no fim" -ForegroundColor Red; $wbErrors++ }
-        $wfLgPosLaco = $wfLgFonteI.IndexOf('foreach', [StringComparison]::Ordinal)
+        # A âncora do laço é a forma COMPLETA, com a variável: 'foreach' solto acha primeiro o laço do
+        # bloco do fim (o que devolve a pendente quem não chegou a ser instalado), e não o dos membros.
+        # E a cobrança mudou de forma junto com o código: a caixa mora no bloco do FIM, que desde a
+        # trava de travamento nasce ANTES do corpo - posição de texto deixou de significar ordem de
+        # execução. O que prende a intenção ("uma caixa, depois de tudo") são duas coisas:
+        #   1. a caixa NÃO está dentro do corpo que roda no pool - se estivesse, sairia por membro E
+        #      viria de uma thread que não é a da janela;
+        #   2. o bloco do fim é invocado DEPOIS do laço dos membros, de dentro do finally.
+        $wfLgPosLaco = $wfLgFonteI.IndexOf('foreach ($wfId in $wfIds) {', [StringComparison]::Ordinal)
         $wfLgPosCaixa = $wfLgFonteI.IndexOf('MessageBoxImage]::Information', [StringComparison]::Ordinal)
-        if ($wfLgPosCaixa -lt 0 -or $wfLgPosLaco -lt 0 -or $wfLgPosCaixa -lt $wfLgPosLaco) { Write-Host "  [ERRO] Grupo (instalação): a caixa de reinício aparece antes do laço - uma por membro é justamente o que ela existe para evitar" -ForegroundColor Red; $wbErrors++ }
+        $wfLgPosCorpoAbre = $wfLgFonteI.IndexOf('$corpo = {', [StringComparison]::Ordinal)
+        if ($wfLgPosCaixa -lt 0 -or $wfLgPosLaco -lt 0 -or $wfLgPosCorpoAbre -lt 0) { Write-Host "  [ERRO] Grupo (instalação): não achei a caixa de reinício, o laço dos membros ou a abertura do corpo" -ForegroundColor Red; $wbErrors++ }
+        elseif ($wfLgPosCaixa -gt $wfLgPosCorpoAbre) { Write-Host "  [ERRO] Grupo (instalação): a caixa de reinício está DENTRO do corpo que roda no pool - sairia uma por membro, e de uma thread que não é a da janela" -ForegroundColor Red; $wbErrors++ }
+        $wfLgPosFimCham = $wfLgFonteI.IndexOf('Invoke-WPFUIThread $sync.WinForgeWUGroupDoneCallback', [StringComparison]::Ordinal)
+        if ($wfLgPosFimCham -lt 0 -or $wfLgPosFimCham -lt $wfLgPosLaco) { Write-Host "  [ERRO] Grupo (instalação): o bloco do fim é chamado antes do laço dos membros - a caixa de reinício sairia antes de instalar" -ForegroundColor Red; $wbErrors++ }
         foreach ($wfLgId in @($wfLgMembros | Select-Object -First 40)) { $null = Set-WinForgeWindowsUpdateRowState -UpdateId $wfLgId -State 'instalado' -Text 'instalado' }
         $wfLgSeco = Invoke-WinForgeWindowsUpdateGroupAction -Row $wfLgLinha -NoUI
         if ($wfLgSeco -notmatch '7') { Write-Host "  [ERRO] Grupo (instalação): o segundo clique diria '$wfLgSeco', esperado só os 7 que faltam" -ForegroundColor Red; $wbErrors++ }
@@ -7276,9 +7293,13 @@ if ($SelfTest) {
         foreach ($wfChFalta in @('cobertura offline', 'versão de pacote', 'Aplicativos e recursos')) {
             if ($wfChTexto -notmatch [regex]::Escape($wfChFalta)) { Write-Host "  [ERRO] Chipset (texto): a confirmação não diz o que fica de fora ante o pacote da Intel ('$wfChFalta')" -ForegroundColor Red; $wbErrors++ }
         }
-        # O texto com problema 28 DIZ QUANTOS: sem isso as duas versões seriam a mesma frase menos uma
-        # linha, e a que informa o tamanho do estrago some sem ninguém notar.
-        if ($wfChTexto -notmatch '47') { Write-Host "  [ERRO] Chipset (texto): a confirmação não diz quantos dispositivos estão sem nome" -ForegroundColor Red; $wbErrors++ }
+        # O texto com problema 28 DIZ QUANTOS, e o caso é montado com CINCO de propósito: o 47 do
+        # fixture já aparece no texto por outro motivo (o tamanho do lote), então cobrar '47' ficava
+        # verde mesmo com a contagem trocada - medido, com cinco códigos o texto dizia cinco e a trava
+        # não via. A frase inteira, com o número certo, é o que prende.
+        $wfChTexto5 = Get-WinForgeChipsetConfirmText -Group (& $wfChCom $wfChGrupo @{ ProblemCodes = @(@(1..5 | ForEach-Object { 28 }) + @(1..42 | ForEach-Object { 0 })) })
+        if ($wfChTexto5 -notmatch 'O que muda: 5 dispositivo\(s\) deste PC hoje aparecem sem nome') { Write-Host "  [ERRO] Chipset (texto): com 5 códigos de problema a frase não diz 5 ('$($wfChTexto5 -split "`r`n" | Where-Object { $_ -match 'O que muda' })')" -ForegroundColor Red; $wbErrors++ }
+        if ($wfChTexto -notmatch 'O que muda: 47 dispositivo\(s\) deste PC hoje aparecem sem nome') { Write-Host "  [ERRO] Chipset (texto): com 47 códigos de problema a frase não diz 47" -ForegroundColor Red; $wbErrors++ }
         # Checkpoint-Computer é SILENCIOSAMENTE IGNORADO com a Proteção do Sistema desligada ou
         # dentro da janela de 24 h: a função confere a SEQUÊNCIA antes e depois.
         $wfChPonto = New-WinForgeChipsetRestorePoint -Before @(@{ SequenceNumber = 10 }) -After @(@{ SequenceNumber = 10 })
@@ -7322,7 +7343,8 @@ if ($SelfTest) {
         $wfChFonteA = [string](Get-Command Invoke-WinForgeWindowsUpdateGroupAction).ScriptBlock
         if (@([regex]::Matches($wfChFonteA, 'New-WinForgeChipsetRestorePoint')).Count -ne 1) { Write-Host "  [ERRO] Chipset: o ponto de restauração não roda exatamente uma vez" -ForegroundColor Red; $wbErrors++ }
         $wfChPosPonto = $wfChFonteA.IndexOf('New-WinForgeChipsetRestorePoint', [StringComparison]::Ordinal)
-        $wfChPosLaco = $wfChFonteA.IndexOf('foreach', [StringComparison]::Ordinal)
+        # Mesma correção da âncora do laço: com 'foreach' solto, quem casa é o laço do bloco do fim.
+        $wfChPosLaco = $wfChFonteA.IndexOf('foreach ($wfId in $wfIds) {', [StringComparison]::Ordinal)
         if ($wfChPosPonto -lt 0 -or $wfChPosLaco -lt 0 -or $wfChPosPonto -gt $wfChPosLaco) { Write-Host "  [ERRO] Chipset: o ponto de restauração roda DEPOIS do primeiro membro" -ForegroundColor Red; $wbErrors++ }
         if ($wfChFonteA -notmatch 'Install-WinForgeWindowsUpdateDriver') { Write-Host "  [ERRO] Chipset: o lote não instala pelo caminho existente" -ForegroundColor Red; $wbErrors++ }
         # O PORTÃO, por comportamento, nas duas pontas - e sem tocar em Checkpoint-Computer, que é

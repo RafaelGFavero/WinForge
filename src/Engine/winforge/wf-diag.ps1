@@ -1123,6 +1123,7 @@ function Get-WinForgeWindowsUpdateGroupState {
     }
 
     $rotulo = $(if ($instalados -eq 0 -and $falharam -eq 0) { "Instalar todos ($total)" }
+                elseif ($faltam -eq 1) { 'Instalar o 1 que falta' }
                 elseif ($faltam -gt 0) { "Instalar os $faltam que faltam" }
                 else { "Instalar todos ($total)" })
     return @{
